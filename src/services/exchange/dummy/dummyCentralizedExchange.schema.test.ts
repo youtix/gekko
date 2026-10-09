@@ -21,6 +21,12 @@ const createConfig = () => ({
 /** The configuration with `value` set at `path` in the marketData entry of BTC/USDT */
 const withMarketData = (path: string[], value: unknown) => set(createConfig(), ['marketData', 0, 'marketData', ...path], value);
 const withTicker = (ticker: Record<string, unknown>) => set(createConfig(), ['initialTicker', 0, 'ticker'], ticker);
+/** The configuration with its `field` list holding its entry, then a copy of it with `value` set at `path` */
+const withRepeatedEntry = (field: 'simulationBalance' | 'marketData' | 'initialTicker', path: string[], value: unknown) => {
+  const config = createConfig();
+  const [entry] = config[field];
+  return { ...config, [field]: [entry, set(cloneDeep(entry), path, value)] };
+};
 
 const feeMessage = (field: string) => `${field} must be a fraction between 0 and 1 (0.001 is a 0.1 % fee)`;
 const precisionMessage = (field: string) => `${field} must be a whole number of decimals of at least 0, not a step (2 for a step of 0.01)`;
@@ -51,6 +57,45 @@ describe('dummyExchangeSchema', () => {
   it('keeps the sync interval bounds shared by every exchange', () => {
     const result = dummyExchangeSchema.safeParse({ ...createConfig(), orderSynchInterval: 0 });
     expect(result.error?.issues).toMatchObject([{ path: ['orderSynchInterval'] }]);
+  });
+
+  it.each`
+    field
+    ${'marketData'}
+    ${'initialTicker'}
+  `('maps the $field entries of two pairs to their symbols', ({ field }) => {
+    const config = createConfig();
+    const [entry] = config[field as 'marketData' | 'initialTicker'];
+    const result = dummyExchangeSchema.parse({ ...config, [field]: [entry, { ...entry, symbol: 'ETH/USDT' }] });
+    expect([...result[field as 'marketData' | 'initialTicker'].keys()]).toEqual(['BTC/USDT', 'ETH/USDT']);
+  });
+
+  // Read into a Map, a list that repeats a key kept its last entry only, without a word: a second BTC/USDT block with a 1 % taker
+  // fee charged that fee on every trade of the backtest, and USDT 1000 then 100 started it with 100 USDT
+  it.each`
+    field                  | config                                                                   | message
+    ${'simulationBalance'} | ${withRepeatedEntry('simulationBalance', ['balance'], 100)}              | ${'simulationBalance must hold one entry per assetName (repeated: USDT)'}
+    ${'marketData'}        | ${withRepeatedEntry('marketData', ['marketData', 'fee', 'taker'], 0.01)} | ${'marketData must hold one entry per symbol (repeated: BTC/USDT)'}
+    ${'initialTicker'}     | ${withRepeatedEntry('initialTicker', ['ticker', 'bid'], 98)}             | ${'initialTicker must hold one entry per symbol (repeated: BTC/USDT)'}
+  `('refuses $field entries that repeat a key with $message', ({ field, config, message }) => {
+    expect(dummyExchangeSchema.safeParse(config).error?.issues).toMatchObject([{ path: [field], message }]);
+  });
+
+  // An initialTicker entry for a malformed symbol was accepted, then never read: the watched pair started without its ticker
+  it.each`
+    field              | symbol
+    ${'initialTicker'} | ${'BTC/'}
+    ${'initialTicker'} | ${' BTC/USDT'}
+    ${'initialTicker'} | ${'btc/usdt'}
+    ${'marketData'}    | ${'BTC/USDT/ETH'}
+  `('refuses the $field symbol $symbol at its entry', ({ field, symbol }) => {
+    const result = dummyExchangeSchema.safeParse(set(createConfig(), [field, 0, 'symbol'], symbol));
+    expect(result.error?.issues).toMatchObject([
+      {
+        path: [field, 0, 'symbol'],
+        message: `Symbol '${symbol}' must be an asset and a currency in upper-case letters and digits, joined by one slash, as in BTC/USDT`,
+      },
+    ]);
   });
 
   // Dropped, a misspelt key would leave its default in place: a misspelt max, for one, would leave the range without a maximum
@@ -195,8 +240,8 @@ describe('dummyExchangeSchema', () => {
     });
   });
 
-  // Zod still runs the configuration's refinement after these issues, with the marketData and initialTicker Maps left
-  // unbuilt: the refinement must neither throw nor add an issue of its own.
+  // Zod still runs the configuration's refinement after these issues, with the Map of the list at fault left unbuilt: the
+  // refinement must neither throw nor add an issue of its own.
   describe('in a backtest configuration', () => {
     const createBacktestConfig = (exchange: object) => ({
       watch: {
@@ -217,13 +262,17 @@ describe('dummyExchangeSchema', () => {
     });
 
     it.each`
-      scenario                         | exchange                                           | path
-      ${'a negative max'}              | ${withMarketData(['price', 'max'], -1)}            | ${['exchange', 'marketData', 0, 'marketData', 'price', 'max']}
-      ${'a min above its max'}         | ${withMarketData(['cost'], { min: 10, max: 5 })}   | ${['exchange', 'marketData', 0, 'marketData', 'cost']}
-      ${'a fee of 150 %'}              | ${withMarketData(['fee', 'taker'], 1.5)}           | ${['exchange', 'marketData', 0, 'marketData', 'fee', 'taker']}
-      ${'a precision given as a step'} | ${withMarketData(['precision', 'price'], 0.01)}    | ${['exchange', 'marketData', 0, 'marketData', 'precision', 'price']}
-      ${'a bid above the ask'}         | ${withTicker({ bid: 101, ask: 100 })}              | ${['exchange', 'initialTicker', 0, 'ticker']}
-      ${'an interval of 0'}            | ${{ ...createConfig(), exchangeSynchInterval: 0 }} | ${['exchange', 'exchangeSynchInterval']}
+      scenario                          | exchange                                                                 | path
+      ${'a negative max'}               | ${withMarketData(['price', 'max'], -1)}                                  | ${['exchange', 'marketData', 0, 'marketData', 'price', 'max']}
+      ${'a min above its max'}          | ${withMarketData(['cost'], { min: 10, max: 5 })}                         | ${['exchange', 'marketData', 0, 'marketData', 'cost']}
+      ${'a fee of 150 %'}               | ${withMarketData(['fee', 'taker'], 1.5)}                                 | ${['exchange', 'marketData', 0, 'marketData', 'fee', 'taker']}
+      ${'a precision given as a step'}  | ${withMarketData(['precision', 'price'], 0.01)}                          | ${['exchange', 'marketData', 0, 'marketData', 'precision', 'price']}
+      ${'a bid above the ask'}          | ${withTicker({ bid: 101, ask: 100 })}                                    | ${['exchange', 'initialTicker', 0, 'ticker']}
+      ${'an interval of 0'}             | ${{ ...createConfig(), exchangeSynchInterval: 0 }}                       | ${['exchange', 'exchangeSynchInterval']}
+      ${'a repeated balance asset'}     | ${withRepeatedEntry('simulationBalance', ['balance'], 100)}              | ${['exchange', 'simulationBalance']}
+      ${'a repeated marketData symbol'} | ${withRepeatedEntry('marketData', ['marketData', 'fee', 'taker'], 0.01)} | ${['exchange', 'marketData']}
+      ${'a repeated ticker symbol'}     | ${withRepeatedEntry('initialTicker', ['ticker', 'bid'], 98)}             | ${['exchange', 'initialTicker']}
+      ${'a malformed ticker symbol'}    | ${set(createConfig(), ['initialTicker', 0, 'symbol'], 'BTC/')}           | ${['exchange', 'initialTicker', 0, 'symbol']}
     `('reports $scenario as the only issue', ({ exchange, path }) => {
       const result = configurationSchema.safeParse(createBacktestConfig(exchange));
       expect(result.error?.issues).toMatchObject([{ path }]);

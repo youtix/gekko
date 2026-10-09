@@ -1,4 +1,5 @@
 import { Asset } from '@models/utility.types';
+import { keepDuplicates } from '@utils/collection/array.utils';
 import z from 'zod';
 
 /** setTimeout and setInterval treat a longer delay (2^31 - 1 ms, about 24.8 days) as an overflow and fire after 1 ms instead */
@@ -24,6 +25,20 @@ export const proxySchema = z
   .regex(/^(https?|socks5):\/\/.+/, 'Proxy must be a valid URL (http://, https://, or socks5://)')
   .optional();
 
+/**
+ * Refuses a list that repeats a key, for a list the schema reads into a Map by that key: the Map kept the last entry of a key and
+ * dropped the others without a word, so a second marketData block for a pair replaced the fees of the first, and a second USDT
+ * balance the first balance.
+ */
+export const refuseRepeatedKeys =
+  <Key extends string>(list: string, key: Key) =>
+  (entries: Record<Key, string>[], ctx: z.RefinementCtx) => {
+    const repeatedKeys = keepDuplicates(entries.map(entry => entry[key]));
+    if (repeatedKeys.length) {
+      ctx.addIssue({ code: 'custom', message: `${list} must hold one entry per ${key} (repeated: ${repeatedKeys.join(', ')})` });
+    }
+  };
+
 export const simulationBalanceSchema = z
   .array(
     z.strictObject({
@@ -32,6 +47,7 @@ export const simulationBalanceSchema = z
     }),
   )
   .min(1)
+  .superRefine(refuseRepeatedKeys('simulationBalance', 'assetName'))
   .transform(balance => new Map<Asset, number>(balance.map(b => [b.assetName, b.balance])));
 
 /** Its strictness carries over to every exchange schema extending it: a misspelt key (sandobx: true) is refused, not dropped */

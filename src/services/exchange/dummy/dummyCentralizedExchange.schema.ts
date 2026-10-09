@@ -1,6 +1,6 @@
 import { symbolSchema } from '@models/schema/pairConfig.schema';
 import { TradingPair } from '@models/utility.types';
-import { exchangeSchema, feeRateSchema, simulationBalanceSchema } from '@services/exchange/exchange.schema';
+import { exchangeSchema, feeRateSchema, refuseRepeatedKeys, simulationBalanceSchema } from '@services/exchange/exchange.schema';
 import z from 'zod';
 import { MarketData, Ticker } from '../exchange.types';
 
@@ -85,6 +85,7 @@ const marketDataSchema = z
       }),
     }),
   )
+  .superRefine(refuseRepeatedKeys('marketData', 'symbol'))
   .default([])
   .transform(marketConstraints => new Map<TradingPair, MarketData>(marketConstraints?.map(mc => [mc.symbol, mc.marketData]) ?? []));
 
@@ -95,6 +96,7 @@ const initialTickerSchema = z
       ticker: tickerSchema,
     }),
   )
+  .superRefine(refuseRepeatedKeys('initialTicker', 'symbol'))
   .default([])
   .transform(balance => new Map<TradingPair, Ticker>(balance.map(b => [b.symbol, b.ticker])));
 

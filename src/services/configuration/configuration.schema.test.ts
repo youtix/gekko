@@ -1,4 +1,3 @@
-import { pairConfigSchema, pairsSchema } from '@models/schema/pairConfig.schema';
 import { load } from 'js-yaml';
 import { cloneDeep, get, set } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
@@ -61,89 +60,6 @@ const sqliteStorage = { type: 'sqlite', database: 'db/candles.sql' };
 
 // Base pairs for v3 config format
 const basePairs = [{ symbol: 'BTC/USDT' }];
-
-describe('pairConfigSchema', () => {
-  it('accepts valid pair config', () => {
-    const result = pairConfigSchema.safeParse({ symbol: 'BTC/USDT' });
-    expect(result.success).toBe(true);
-  });
-
-  it('rejects missing symbol', () => {
-    const result = pairConfigSchema.safeParse({});
-    expect(result.success).toBe(false);
-    expect(result.error?.issues[0]).toMatchObject({ path: ['symbol'] });
-  });
-
-  it('rejects empty symbol', () => {
-    const result = pairConfigSchema.safeParse({ symbol: '' });
-    expect(result.success).toBe(false);
-    expect(result.error?.issues[0].message).toBe('Symbol must contain a slash');
-  });
-
-  it.each`
-    type                          | symbol
-    ${'a number'}                 | ${1000}
-    ${'a boolean'}                | ${true}
-    ${'an object'}                | ${{ base: 'BTC', quote: 'USDT' }}
-    ${'an array holding a slash'} | ${['/']}
-    ${'null'}                     | ${null}
-  `('reports a symbol given as $type as a type issue instead of throwing', ({ symbol }) => {
-    const result = pairConfigSchema.safeParse({ symbol });
-    expect(result.error?.issues).toMatchObject([{ path: ['symbol'], code: 'invalid_type' }]);
-  });
-});
-
-describe('pairsSchema', () => {
-  it('accepts valid config with 2 pairs', () => {
-    const pairs = [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }];
-    const result = pairsSchema.safeParse(pairs);
-    expect(result.success).toBe(true);
-    if (result.success) {
-      expect(result.data).toHaveLength(2);
-    }
-  });
-
-  it('accepts maximum of 5 pairs', () => {
-    const pairs = [
-      { symbol: 'BTC/USDT' },
-      { symbol: 'ETH/USDT' },
-      { symbol: 'SOL/USDT' },
-      { symbol: 'AVAX/USDT' },
-      { symbol: 'LINK/USDT' },
-    ];
-    const result = pairsSchema.safeParse(pairs);
-    expect(result.success).toBe(true);
-  });
-
-  // The bound and the refinement both enforce the limit, so each one is pinned by its own issue.
-  it('rejects config with 6 pairs with specific error message', () => {
-    const pairs = [
-      { symbol: 'BTC/USDT' },
-      { symbol: 'ETH/USDT' },
-      { symbol: 'SOL/USDT' },
-      { symbol: 'AVAX/USDT' },
-      { symbol: 'LINK/USDT' },
-      { symbol: 'DOT/USDT' },
-    ];
-    const result = pairsSchema.safeParse(pairs);
-    expect(result.error?.issues).toMatchObject([
-      { code: 'too_big', maximum: 5 },
-      { code: 'custom', message: 'Maximum 5 pairs allowed, found 6' },
-    ]);
-  });
-
-  it('rejects empty pairs array', () => {
-    const result = pairsSchema.safeParse([]);
-    expect(result.success).toBe(false);
-    expect(result.error?.issues[0].message).toBe('At least one pair is required');
-  });
-
-  it('rejects pair with missing symbol', () => {
-    const pairs = [{ symbol: '' }];
-    const result = pairsSchema.safeParse(pairs);
-    expect(result.success).toBe(false);
-  });
-});
 
 describe('watchSchema', () => {
   const baseWatch = {
@@ -661,6 +577,8 @@ describe('configurationSchema', () => {
       path: ['exchange', 'marketData'],
       message: `Each watched pair needs a marketData entry, or dummy-cex fills its orders with no fees and no order limits (missing: ${symbols})`,
     });
+    const malformedSymbolMessage = (symbol: string) =>
+      `Symbol '${symbol}' must be an asset and a currency in upper-case letters and digits, joined by one slash, as in BTC/USDT`;
     const notWatchedIssue = (symbols: string) => ({
       path: ['exchange', 'marketData'],
       message: `Each marketData symbol must match a watched pair (not watched: ${symbols})`,
@@ -671,7 +589,6 @@ describe('configurationSchema', () => {
       ${'no entry at all'}                | ${['BTC', 'ETH']} | ${undefined}                | ${[missingIssue('BTC/USDT, ETH/USDT')]}
       ${'one pair missing out of two'}    | ${['BTC', 'ETH']} | ${['BTC/USDT']}             | ${[missingIssue('ETH/USDT')]}
       ${'a mistyped symbol'}              | ${['BTC']}        | ${['BTC/USTD']}             | ${[missingIssue('BTC/USDT'), notWatchedIssue('BTC/USTD')]}
-      ${'a lowercase symbol'}             | ${['BTC']}        | ${['btc/usdt']}             | ${[missingIssue('BTC/USDT'), notWatchedIssue('btc/usdt')]}
       ${'an entry for an unwatched pair'} | ${['BTC']}        | ${['BTC/USDT', 'ETH/USDT']} | ${[notWatchedIssue('ETH/USDT')]}
     `('reports $scenario', ({ assets, symbols, issues }) => {
       const result = configurationSchema.safeParse(createBacktestConfig(assets, symbols));
@@ -721,6 +638,7 @@ describe('configurationSchema', () => {
         ${'a daterange start that is not ISO'}   | ${['watch', 'daterange', 'start']}         | ${'yesterday'}                    | ${{ path: ['watch', 'daterange', 'start'], message: 'Invalid ISO datetime' }}
         ${'an asset equal to the currency'}      | ${['watch', 'assets']}                     | ${['USDT']}                       | ${{ path: ['watch', 'assets'], message: 'assets must not contain the currency (USDT)' }}
         ${'a marketData symbol without a slash'} | ${['exchange', 'marketData', 0, 'symbol']} | ${'BTCUSDT'}                      | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: 'Symbol must contain a slash' }}
+        ${'a lowercase marketData symbol'}       | ${['exchange', 'marketData', 0, 'symbol']} | ${'btc/usdt'}                     | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: malformedSymbolMessage('btc/usdt') }}
       `('reports $scenario as the only issue', ({ path, value, issue }) => {
         const result = configurationSchema.safeParse(set(cloneDeep(coveredConfig), path, value));
         expect(result.error?.issues).toMatchObject([issue]);

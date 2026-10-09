@@ -52,9 +52,33 @@ describe('exchangeSchema', () => {
 });
 
 describe('simulationBalanceSchema', () => {
+  const balance = (assetName: string, amount: number) => ({ assetName, balance: amount });
+
   it('refuses an unknown key in an entry instead of dropping it', () => {
     const result = simulationBalanceSchema.safeParse([{ assetName: 'USDT', balance: 1000, locked: 100 }]);
     expect(result.error?.issues).toMatchObject([{ code: 'unrecognized_keys', path: [0], keys: ['locked'] }]);
+  });
+
+  it('maps each asset to its balance', () => {
+    const result = simulationBalanceSchema.parse([balance('BTC', 0.5), balance('USDT', 1000)]);
+    expect(result).toEqual(
+      new Map([
+        ['BTC', 0.5],
+        ['USDT', 1000],
+      ]),
+    );
+  });
+
+  // Read into a Map, a repeated asset kept its last balance only: USDT 1000 then 100 started the run with 100 USDT, without a word
+  it.each`
+    scenario                                               | balances                                                                                | repeated
+    ${'an asset listed twice'}                             | ${[balance('USDT', 1000), balance('USDT', 100)]}                                        | ${'USDT'}
+    ${'an asset listed three times'}                       | ${[balance('USDT', 1000), balance('BTC', 1), balance('USDT', 100), balance('USDT', 5)]} | ${'USDT'}
+    ${'two assets listed twice, in the order they repeat'} | ${[balance('USDT', 1000), balance('BTC', 1), balance('BTC', 2), balance('USDT', 5)]}    | ${'BTC, USDT'}
+  `('refuses $scenario, naming $repeated', ({ balances, repeated }) => {
+    expect(simulationBalanceSchema.safeParse(balances).error?.issues).toMatchObject([
+      { path: [], message: `simulationBalance must hold one entry per assetName (repeated: ${repeated})` },
+    ]);
   });
 });
 
