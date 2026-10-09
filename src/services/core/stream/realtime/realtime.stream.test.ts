@@ -4,6 +4,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { inject } from '@services/injecter/injecter';
 import { debug, warning } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { afterEach, beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { RealtimeStream } from './realtime.stream';
 
@@ -127,6 +128,35 @@ describe('RealtimeStream', () => {
       await vi.advanceTimersByTimeAsync(0);
       expect(fetchOHLCV).toHaveBeenCalledTimes(calls);
     });
+  });
+
+  // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+  // Floored in local time, its minutes came back an hour early: no tick of that hour fetched anything, then one pushed 61 minutes.
+  describe('on a host in Europe/Paris, around the hour repeated when DST ends', () => {
+    let dstStream: RealtimeStream;
+
+    useTimeZone('Europe/Paris');
+
+    afterEach(() => {
+      dstStream?.destroy();
+    });
+
+    // Built just after the boundary of `startMinute`, the minute in progress, which the tick a grace period after its end asks for
+    it.each`
+      startMinute               | nextMinute
+      ${'2026-10-25T00:59:00Z'} | ${'2026-10-25T01:00:00Z'}
+      ${'2026-10-25T01:09:00Z'} | ${'2026-10-25T01:10:00Z'}
+      ${'2026-10-25T01:59:00Z'} | ${'2026-10-25T02:00:00Z'}
+    `(
+      'should ask a grace period after $nextMinute for the minute of $startMinute, the last one closed',
+      async ({ startMinute, nextMinute }) => {
+        stream.destroy();
+        vi.setSystemTime(Date.parse(startMinute) + 500);
+        dstStream = new RealtimeStream('BTC/USDT', Date.parse(startMinute));
+        await vi.advanceTimersByTimeAsync(Date.parse(nextMinute) + REALTIME_GRACE_PERIOD - Date.now());
+        expect(fetchOHLCV).toHaveBeenCalledExactlyOnceWith('BTC/USDT', { from: Date.parse(startMinute), limit: 1 });
+      },
+    );
   });
 
   // The pipeline reads the clock once for every pair: a stream built after a slow start-up still starts with the minute it is given

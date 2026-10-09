@@ -2,6 +2,7 @@ import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';
 import { info, warning } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { toISOString } from '@utils/date/date.utils';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_FIRST_PAGE_RETRIES } from './historicalCandle.const';
@@ -71,6 +72,33 @@ describe('HistoricalCandleStream', () => {
       'stream',
       '[BTC/USDT] Fetching historical data from 2023-01-01T00:00:00.000Z to 2023-01-01T00:00:00.000Z (1 minute)',
     );
+  });
+
+  // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+  // Floored in local time, a range starting in it was fetched from an hour earlier: a warmup got an hour of candles too many.
+  describe('on a host in Europe/Paris, with a range in the hour repeated when DST ends', () => {
+    let starts: number[];
+
+    useTimeZone('Europe/Paris');
+
+    beforeEach(async () => {
+      // Every minute up to the end of that hour, in pages of 10 candles
+      fetchOHLCV.mockImplementation(async (_symbol: TradingPair, { from }: { from: number }) =>
+        Array.from({ length: 10 }, (_, n) => Math.ceil(from / ONE_MINUTE) * ONE_MINUTE + n * ONE_MINUTE)
+          .filter(start => start < Date.UTC(2026, 9, 25, 2))
+          .map(candleAt),
+      );
+      const daterange = { start: Date.UTC(2026, 9, 25, 1, 30, 20), end: Date.UTC(2026, 9, 25, 1, 32, 40) };
+      starts = await readAll(new HistoricalCandleStream({ daterange, tickrate: 0, symbol }));
+    });
+
+    it.each`
+      description                             | actual                                    | expected
+      ${'request the first page from 01:30Z'} | ${() => fetchOHLCV.mock.calls[0][1].from} | ${Date.UTC(2026, 9, 25, 1, 30)}
+      ${'push the minutes 01:30Z to 01:32Z'}  | ${() => starts}                           | ${[30, 31, 32].map(n => Date.UTC(2026, 9, 25, 1, n))}
+    `('should $description', ({ actual, expected }) => {
+      expect(actual()).toEqual(expected);
+    });
   });
 
   describe('when the range spans several pages', () => {

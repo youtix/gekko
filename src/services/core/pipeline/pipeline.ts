@@ -7,8 +7,8 @@ import { config } from '@services/configuration/configuration';
 import { inject } from '@services/injecter/injecter';
 import { debug, warning } from '@services/logger';
 import { keepDuplicates } from '@utils/collection/array.utils';
+import { startOfMinuteUTC } from '@utils/date/date.utils';
 import { toCamelCase } from '@utils/string/string.utils';
-import { startOfMinute } from 'date-fns';
 import { compact, each, filter, flatMap, map, some } from 'lodash-es';
 import { z } from 'zod';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
@@ -158,7 +158,7 @@ export const checkDateRange = async (context: PipelineContext) => {
   if (mode === 'backtest' && daterange) {
     const storage = inject.storage();
     // Same minutes as the backtest reader (splitIntervals): checkInterval expects the starts of the first and last candles
-    const alignedDaterange = { start: startOfMinute(daterange.start).getTime(), end: startOfMinute(daterange.end).getTime() };
+    const alignedDaterange = { start: startOfMinuteUTC(daterange.start), end: startOfMinuteUTC(daterange.end) };
     for (const { symbol } of pairs) {
       const result = storage.checkInterval(symbol, alignedDaterange);
       if (result?.missingCandleCount) {

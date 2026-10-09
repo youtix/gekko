@@ -7,8 +7,7 @@ import { Heart } from '@services/core/heart/heart';
 import { Exchange } from '@services/exchange/exchange.types';
 import { inject } from '@services/injecter/injecter';
 import { debug, warning } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
-import { addMinutes, startOfMinute, subMinutes } from 'date-fns';
+import { startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { sortBy } from 'lodash-es';
 import { Readable } from 'node:stream';
 
@@ -36,7 +35,7 @@ export class RealtimeStream extends Readable {
     super({ objectMode: true });
     this.symbol = symbol;
     this.exchange = inject.exchange();
-    this.lastPushedStart = subMinutes(startMinute, 1).getTime();
+    this.lastPushedStart = startMinute - ONE_MINUTE;
     this.heart = new Heart(ONE_MINUTE, { gracePeriod: REALTIME_GRACE_PERIOD });
     // The heart does not wait for its listeners: a failure would be an unhandled rejection
     this.heart.on('tick', () => this.onTick().catch((error: Error) => this.destroy(error)));
@@ -45,8 +44,9 @@ export class RealtimeStream extends Readable {
   }
 
   private async onTick() {
-    // A minute counts as closed a grace period after its end, including on the first tick, which comes right after pump()
-    const lastClosedMinute = subMinutes(startOfMinute(Date.now() - REALTIME_GRACE_PERIOD), 1).getTime();
+    // A minute counts as closed a grace period after its end, including on the first tick, which comes right after pump(). Floored
+    // in UTC: in local time, the hour repeated when DST ends came back an hour early, and its 60 ticks fetched nothing.
+    const lastClosedMinute = startOfMinuteUTC(Date.now() - REALTIME_GRACE_PERIOD) - ONE_MINUTE;
     if (lastClosedMinute <= this.lastPushedStart) return;
     // A fetch longer than a minute: this tick has nothing to add, the next one asks for every minute still missing
     if (this.isFetching) return this.countTickWithoutCandle(lastClosedMinute);
@@ -66,7 +66,7 @@ export class RealtimeStream extends Readable {
 
   /** Fetches the closed minutes after the last one pushed and pushes them in order. Returns how many were pushed. */
   private async pushClosedCandles(lastClosedMinute: EpochTimeStamp) {
-    const from = addMinutes(this.lastPushedStart, 1).getTime();
+    const from = this.lastPushedStart + ONE_MINUTE;
     const limit = Math.min((lastClosedMinute - this.lastPushedStart) / ONE_MINUTE, REALTIME_MAX_CANDLES_PER_FETCH);
 
     let candles: Candle[];

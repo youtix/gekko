@@ -1,4 +1,5 @@
-import { addMinutes, differenceInMinutes, isBefore, isValid, startOfMinute, subMilliseconds } from 'date-fns';
+import { ONE_MINUTE } from '@constants/time.const';
+import { isBefore, isValid } from 'date-fns';
 import { isNil } from 'lodash-es';
 
 /**
@@ -13,27 +14,29 @@ export const toISOString = (timestamp?: EpochTimeStamp): string => {
 
 export const toTimestamp = (iso8601String?: string): EpochTimeStamp => new Date(iso8601String ?? 0).getTime();
 
+/**
+ * The start of the minute holding `timestamp`, on the UTC calendar. date-fns' startOfMinute floors in local time, where a wall-clock
+ * time of the hour repeated when DST ends resolves to its first pass: every instant of the second pass came back an hour early, and a
+ * live stream pushed nothing for that hour. A UTC minute has no such ambiguity.
+ */
+export const startOfMinuteUTC = (timestamp: EpochTimeStamp): EpochTimeStamp => Math.floor(timestamp / ONE_MINUTE) * ONE_MINUTE;
+
 export const isDaterangeValid = (start: EpochTimeStamp, end: EpochTimeStamp) => {
   return isValid(start) && isValid(end) && isBefore(start, end);
 };
 
+/**
+ * Splits the minutes from the one holding `startDate` to the one holding `endDate`, both included, into chunks of `batchSize`
+ * minutes, the last one with what is left. A chunk runs from the start of its first minute to the last millisecond of its last minute.
+ */
 export const splitIntervals = (startDate: EpochTimeStamp, endDate: EpochTimeStamp, batchSize = 1440) => {
-  const alignedStart = startOfMinute(new Date(startDate));
-  const alignedEnd = subMilliseconds(addMinutes(startOfMinute(new Date(endDate)), 1), 1);
-  const totalMinutes = differenceInMinutes(alignedEnd, alignedStart) + 1;
-
-  const chunkMaxDuration = batchSize;
-  const chunkCount = Math.ceil(totalMinutes / chunkMaxDuration);
-  const remainder = chunkCount === 1 ? totalMinutes : totalMinutes % chunkMaxDuration || chunkMaxDuration;
+  const firstMinute = startOfMinuteUTC(startDate);
+  const totalMinutes = (startOfMinuteUTC(endDate) - firstMinute) / ONE_MINUTE + 1;
+  const chunkCount = Math.ceil(totalMinutes / batchSize);
 
   return Array.from({ length: chunkCount }, (_, i) => {
-    const minutesInChunk = i === chunkCount - 1 ? remainder : chunkMaxDuration;
-    const chunkStart = addMinutes(alignedStart, i * chunkMaxDuration);
-    const chunkEnd = subMilliseconds(addMinutes(chunkStart, minutesInChunk).getTime(), 1);
-
-    return {
-      start: chunkStart.getTime(),
-      end: chunkEnd.getTime(),
-    };
+    const start = firstMinute + i * batchSize * ONE_MINUTE;
+    const minutesInChunk = Math.min(batchSize, totalMinutes - i * batchSize);
+    return { start, end: start + minutesInChunk * ONE_MINUTE - 1 };
   });
 };

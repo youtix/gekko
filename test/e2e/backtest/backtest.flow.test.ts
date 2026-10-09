@@ -15,17 +15,10 @@ import { MockWinston, clearLogs, logStore } from '../mocks/winston.mock';
 const DEFAULT_MOCK_STRATEGY_CONFIG = { name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 4 };
 const DEFAULT_MOCK_STRATEGY_NAME = 'DebugBacktest';
 
-const FAST_MINUTE = 50;
 const TARGET_CANDLES = 10;
 
 // 1. Mock Winston
 mock.module('winston', () => MockWinston);
-
-// 2. Mock Time Constants
-mock.module('@constants/time.const', () => ({
-  ONE_SECOND: 1,
-  ONE_MINUTE: FAST_MINUTE,
-}));
 
 // 3. Mock Fetcher
 const subscriptionResponse = {

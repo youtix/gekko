@@ -10,6 +10,7 @@ import { config } from '@services/configuration/configuration';
 import * as injecter from '@services/injecter/injecter';
 import { warning } from '@services/logger';
 import { CandleDateranges } from '@services/storage/storage.types';
+import { useTimeZone } from '@utils/date/date.mock';
 import { SequentialEventEmitter } from '@utils/event/sequentialEventEmitter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
@@ -447,6 +448,24 @@ describe('Pipeline Service', () => {
       await pipelineModule.checkDateRange([]);
 
       expect(checkInterval).toHaveBeenCalledWith('BTC/USDT', { start: Date.parse(checkedStart), end: Date.parse(checkedEnd) });
+    });
+
+    // On 2025-10-26 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+    // Floored in local time, a bound in it was checked an hour early, and the backtest read the same wrong minutes: nothing told.
+    describe('on a host in Europe/Paris, with bounds in the hour repeated when DST ends', () => {
+      useTimeZone('Europe/Paris');
+
+      it.each`
+        start                     | end                       | checkedStart              | checkedEnd
+        ${'2025-10-26T01:30:20Z'} | ${'2025-10-26T01:45:30Z'} | ${'2025-10-26T01:30:00Z'} | ${'2025-10-26T01:45:00Z'}
+        ${'2025-10-23T01:30:00Z'} | ${'2025-10-26T01:30:00Z'} | ${'2025-10-23T01:30:00Z'} | ${'2025-10-26T01:30:00Z'}
+      `('should check the candles $checkedStart -> $checkedEnd for $start -> $end', async ({ start, end, checkedStart, checkedEnd }) => {
+        vi.mocked(config.getWatch).mockReturnValue(backtestWatch(start, end));
+
+        await pipelineModule.checkDateRange([]);
+
+        expect(checkInterval).toHaveBeenCalledWith('BTC/USDT', { start: Date.parse(checkedStart), end: Date.parse(checkedEnd) });
+      });
     });
 
     it('should report the checked daterange when candles are missing', async () => {

@@ -1,11 +1,11 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
 import { Plugin } from '@plugins/plugin';
 import { config } from '@services/configuration/configuration';
 import { warning } from '@services/logger';
 import { getCandleStart } from '@utils/candle/candle.utils';
-import { toISOString } from '@utils/date/date.utils';
+import { startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { synchronizeStreams } from '@utils/stream/stream.utils';
-import { startOfMinute, subMinutes } from 'date-fns';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { MultiAssetBacktestStream } from '../stream/backtest/multiAssetBacktest.stream';
@@ -21,11 +21,11 @@ const buildRealtimePipeline = async (plugins: Plugin[]) => {
   // The clock is read once: the live stream of every pair starts with the minute in progress and the warmup history ends with the
   // minute before, so that every pair starts on the same minute and the history meets the live candles without a gap or an overlap,
   // however slow start-up is
-  const currentMinute = startOfMinute(Date.now()).getTime();
+  const currentMinute = startOfMinuteUTC(Date.now());
   const liveStream = synchronizeStreams(pairs.map(p => new RealtimeStream(p.symbol, currentMinute)));
   // The warmup history holds `candleCount` whole candles, then the closed minutes of the candle in progress
   const start = getCandleStart(TIMEFRAME_TO_MINUTES[timeframe!], currentMinute, warmup.candleCount); // Timeframe will always defined in thanks to zod super refine
-  const end = subMinutes(currentMinute, 1).getTime();
+  const end = currentMinute - ONE_MINUTE;
   const history = new MultiAssetHistoricalStream({ daterange: { start, end }, tickrate: warmup.tickrate, pairs });
 
   const sink = new PluginsStream(plugins);
@@ -60,8 +60,8 @@ const buildImporterPipeline = async (plugins: Plugin[]) => {
 
   // Closed minutes only: the exchange serves the minute in progress as an unfinished candle, which would stay in the database
   // until another import replaced it
-  const lastClosedMinute = subMinutes(startOfMinute(Date.now()), 1).getTime();
-  const isEndClosed = startOfMinute(daterange.end).getTime() <= lastClosedMinute;
+  const lastClosedMinute = startOfMinuteUTC(Date.now()) - ONE_MINUTE;
+  const isEndClosed = startOfMinuteUTC(daterange.end) <= lastClosedMinute;
   if (!isEndClosed)
     warning(
       'pipeline',

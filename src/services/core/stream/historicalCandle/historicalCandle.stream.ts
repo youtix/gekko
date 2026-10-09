@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';
 import { EMPTY_FIRST_PAGE_RETRIES } from '@services/core/stream/historicalCandle/historicalCandle.const';
@@ -5,9 +6,9 @@ import { HistoricalCandleError } from '@services/core/stream/historicalCandle/hi
 import { Exchange } from '@services/exchange/exchange.types';
 import { inject } from '@services/injecter/injecter';
 import { info, warning } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
+import { startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
-import { addMinutes, formatDuration, Interval, intervalToDuration, isAfter, startOfMinute } from 'date-fns';
+import { formatDuration, Interval, intervalToDuration, isAfter } from 'date-fns';
 import { last } from 'lodash-es';
 import { Readable } from 'stream';
 
@@ -47,8 +48,8 @@ export class HistoricalCandleStream extends Readable {
     this.symbol = symbol;
     this.tickrate = tickrate;
     this.exchange = inject.exchange();
-    this.initialStartDate = startOfMinute(daterange.start).getTime();
-    this.endDate = startOfMinute(daterange.end).getTime();
+    this.initialStartDate = startOfMinuteUTC(daterange.start);
+    this.endDate = startOfMinuteUTC(daterange.end);
     this.nextFrom = this.initialStartDate;
     this.page = [];
     this.cursor = 0;
@@ -67,7 +68,7 @@ export class HistoricalCandleStream extends Readable {
         [
           `[${symbol}] Fetching historical data from ${toISOString(this.initialStartDate)}`,
           `to ${toISOString(this.endDate)}`,
-          `(${formatDuration(intervalToDuration({ start: this.initialStartDate, end: addMinutes(this.endDate, 1) }))})`,
+          `(${formatDuration(intervalToDuration({ start: this.initialStartDate, end: this.endDate + ONE_MINUTE }))})`,
         ].join(' '),
       );
   }

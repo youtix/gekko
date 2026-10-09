@@ -5,8 +5,9 @@ import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { inject } from '@services/injecter/injecter';
 import { warning } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
+import { startOfMinuteUTC } from '@utils/date/date.utils';
 import { synchronizeStreams } from '@utils/stream/stream.utils';
-import { startOfMinute } from 'date-fns';
 import { Readable, Writable } from 'stream';
 import { pipeline } from 'stream/promises';
 import { afterEach, beforeEach, describe, expect, it, Mock, MockInstance, vi } from 'vitest';
@@ -311,6 +312,26 @@ describe('Pipeline Utils', () => {
         },
       );
 
+      // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+      // Floored in local time, a start-up in it began an hour back: every live candle came an hour late until 02:00Z, then 61 at once.
+      describe('on a host in Europe/Paris, started in the hour repeated when DST ends', () => {
+        useTimeZone('Europe/Paris');
+
+        beforeEach(() => {
+          vi.setSystemTime(at('2026-10-25T01:30:30.500Z'));
+        });
+
+        it('should start the live stream with the minute in progress, 01:30Z', async () => {
+          await launchRealtime('1h', 1);
+          expect(vi.mocked(RealtimeStream).mock.calls).toEqual([[symbol, at('2026-10-25T01:30:00.000Z')]]);
+        });
+
+        it('should end the warmup history with the minute before, 01:29Z', async () => {
+          const { end } = await launchRealtime('1h', 1);
+          expect(end).toBe(at('2026-10-25T01:29:00.000Z'));
+        });
+      });
+
       describe('junction between the warmup history and the live stream', () => {
         const fetchOHLCV = vi.fn();
         let ActualRealtimeStream: typeof RealtimeStream;
@@ -318,7 +339,7 @@ describe('Pipeline Utils', () => {
         let uptime: MockInstance;
 
         // Moves the clock just past the next minute boundary
-        const crossMinuteBoundary = () => vi.setSystemTime(startOfMinute(Date.now()).getTime() + ONE_MINUTE + 1);
+        const crossMinuteBoundary = () => vi.setSystemTime(startOfMinuteUTC(Date.now()) + ONE_MINUTE + 1);
 
         beforeEach(async () => {
           ({ RealtimeStream: ActualRealtimeStream } = await vi.importActual<typeof import('../stream/realtime/realtime.stream')>(
@@ -532,6 +553,36 @@ describe('Pipeline Utils', () => {
         });
 
         it('should not warn', () => {
+          expect(warning).not.toHaveBeenCalled();
+        });
+      });
+
+      // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+      // Floored in local time, an import run in it took the minute closed an hour ago for the last one: it stopped an hour early,
+      // and refused a closed minute as one in progress.
+      describe('on a host in Europe/Paris, run in the hour repeated when DST ends', () => {
+        useTimeZone('Europe/Paris');
+
+        beforeEach(() => {
+          vi.setSystemTime(at('2026-10-25T01:30:30.500Z'));
+        });
+
+        it.each`
+          position                              | end                           | importedEnd
+          ${'a closed minute before that hour'} | ${'2026-10-25T00:45:00.000Z'} | ${'2026-10-25T00:45:00.000Z'}
+          ${'the last closed minute'}           | ${'2026-10-25T01:29:00.000Z'} | ${'2026-10-25T01:29:00.000Z'}
+          ${'in the minute in progress'}        | ${'2026-10-25T01:30:10.000Z'} | ${'2026-10-25T01:29:00.000Z'}
+        `('should import up to $importedEnd when daterange.end is $position', async ({ end, importedEnd }) => {
+          await launchImporter(end);
+          expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+            daterange: { start: at(pastStart), end: at(importedEnd) },
+            tickrate,
+            pairs,
+          });
+        });
+
+        it('should not warn when daterange.end is a closed minute before that hour', async () => {
+          await launchImporter('2026-10-25T00:45:00.000Z');
           expect(warning).not.toHaveBeenCalled();
         });
       });
