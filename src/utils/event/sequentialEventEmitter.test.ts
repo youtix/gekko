@@ -58,6 +58,17 @@ const deliverPortfolios = async (count: number, listen: (index: number, payloads
   await broadcastAll(emitter);
 };
 
+/** Queues the payload under 'a', which nobody listens to */
+const queueAlone = (emitter: SequentialEventEmitter, payload: unknown) => emitter.addDeferredEmit('a', payload);
+
+/** Queues a payload under 'a' for a listener, removes it, then queues the payload, nobody listening: both in one group */
+const queueAfterListenedPayload = (emitter: SequentialEventEmitter, payload: unknown) => {
+  emitter.on('a', noop);
+  emitter.addDeferredEmit('a', { value: 1 });
+  emitter.off('a', noop);
+  emitter.addDeferredEmit('a', payload);
+};
+
 /** An emitter whose first listener of 'a' throws, and whose second records the payloads it receives */
 const createEmitterWithFailingListener = () => {
   const emitter = new SequentialEventEmitter('test');
@@ -95,6 +106,43 @@ describe('SequentialEventEmitter', () => {
     it('should resolve when the event has no listener', async () => {
       await expect(new SequentialEventEmitter('test').emit('unknown', 'payload')).resolves.toBeUndefined();
     });
+
+    it('should call a listener added during an emit from the next emit on, not during the emit that added it', async () => {
+      const emitter = new SequentialEventEmitter('test');
+      const calls: string[] = [];
+      emitter.on('test', () => {
+        calls.push('first');
+        if (calls.length > 1) return;
+        emitter.on('test', () => {
+          calls.push('late');
+        });
+      });
+
+      await emitter.emit('test');
+      await emitter.emit('test');
+
+      expect(calls).toEqual(['first', 'first', 'late']);
+    });
+
+    // Not a copy, unlike a deferred event: the final reports and the strategy's error line have one listener each
+    it.each`
+      position    | index
+      ${'first'}  | ${0}
+      ${'second'} | ${1}
+    `('should hand the $position listener the payload itself', async ({ index }) => {
+      const emitter = new SequentialEventEmitter('test');
+      const received: unknown[] = [];
+      for (let count = 0; count < 2; count++) {
+        emitter.on('test', (payload: unknown) => {
+          received.push(payload);
+        });
+      }
+      const payload = { value: 1 };
+
+      await emitter.emit('test', payload);
+
+      expect(received[index]).toBe(payload);
+    });
   });
 
   describe('off', () => {
@@ -128,10 +176,11 @@ describe('SequentialEventEmitter', () => {
     });
 
     it.each`
-      order                                                     | queued                                                  | delivered
-      ${'the payloads of one event together'}                   | ${[['a', 'a1'], ['a', 'a2'], ['a', 'a3']]}              | ${[['a', ['a1', 'a2', 'a3']]]}
-      ${'the payloads queued in a row under an event together'} | ${[['a', 'a1'], ['a', 'a2'], ['b', 'b1']]}              | ${[['a', ['a1', 'a2']], ['b', ['b1']]]}
-      ${'interleaved events in the order they were queued'}     | ${[['a', 'a1'], ['b', 'b1'], ['a', 'a2'], ['b', 'b2']]} | ${[['a', ['a1']], ['b', ['b1']], ['a', ['a2']], ['b', ['b2']]]}
+      order                                                                       | queued                                                  | delivered
+      ${'the payloads of one event together'}                                     | ${[['a', 'a1'], ['a', 'a2'], ['a', 'a3']]}              | ${[['a', ['a1', 'a2', 'a3']]]}
+      ${'the payloads queued in a row under an event together'}                   | ${[['a', 'a1'], ['a', 'a2'], ['b', 'b1']]}              | ${[['a', ['a1', 'a2']], ['b', ['b1']]]}
+      ${'interleaved events in the order they were queued'}                       | ${[['a', 'a1'], ['b', 'b1'], ['a', 'a2'], ['b', 'b2']]} | ${[['a', ['a1']], ['b', ['b1']], ['a', ['a2']], ['b', ['b2']]]}
+      ${'apart the payloads queued on either side of an event nobody listens to'} | ${[['a', 'a1'], ['unheard', 'u1'], ['a', 'a2']]}        | ${[['a', ['a1']], ['a', ['a2']]]}
     `('should deliver $order', async ({ queued, delivered }: { queued: [string, string][]; delivered: Delivery[] }) => {
       const { emitter, deliveries } = createRecordingEmitter(['a', 'b']);
       for (const [event, payload] of queued) emitter.addDeferredEmit(event, payload);
@@ -169,6 +218,93 @@ describe('SequentialEventEmitter', () => {
       await broadcastAll(emitter);
 
       expect(deliveries).toEqual([['a', [{ value: 1 }, { value: 2 }]]]);
+    });
+
+    // The Trader queues its own portfolio, the one it reads again to size its orders
+    it.each`
+      written        | write
+      ${'a balance'} | ${(portfolio: Portfolio) => (portfolio.get('BTC')!.free = 0)}
+      ${'an entry'}  | ${(portfolio: Portfolio) => portfolio.delete('BTC')}
+    `('should deliver a portfolio as it was queued when the emitter then writes to $written of its own', async ({ write }) => {
+      const { emitter, deliveries } = createRecordingEmitter(['portfolioChange']);
+      const portfolio = createPortfolio(1);
+      emitter.addDeferredEmit('portfolioChange', portfolio);
+
+      write(portfolio);
+      await broadcastAll(emitter);
+
+      expect(deliveries).toEqual([['portfolioChange', [createPortfolio(1)]]]);
+    });
+
+    it('should leave the portfolio of the emitter as it was queued when its listener writes to the one it got', async () => {
+      const emitter = new SequentialEventEmitter('test');
+      emitter.on('portfolioChange', ([received]: Portfolio[]) => {
+        received.get('BTC')!.free = 0;
+      });
+      const portfolio = createPortfolio(1);
+      emitter.addDeferredEmit('portfolioChange', portfolio);
+
+      await broadcastAll(emitter);
+
+      expect(portfolio).toEqual(createPortfolio(1));
+    });
+
+    it.each`
+      kind            | payload
+      ${'a function'} | ${{ order: { id: 'order', notify: noop } }}
+      ${'a symbol'}   | ${{ order: { id: 'order', tag: Symbol('tag') } }}
+    `('should refuse a payload holding $kind with a DataCloneError as it queues it, as structuredClone does', ({ payload }) => {
+      const { emitter } = createRecordingEmitter(['a']);
+      expect(() => emitter.addDeferredEmit('a', payload)).toThrow(expect.objectContaining({ name: 'DataCloneError' }));
+    });
+
+    it('should deliver a payload queued for nobody to a listener added before its delivery', async () => {
+      const emitter = new SequentialEventEmitter('test');
+      const received: unknown[][] = [];
+      emitter.addDeferredEmit('a', { value: 1 });
+      emitter.on('a', (payloads: unknown[]) => {
+        received.push(payloads);
+      });
+
+      await broadcastAll(emitter);
+
+      expect(received).toEqual([[{ value: 1 }]]);
+    });
+
+    // Queued for nobody, the payload is the emitter's own object, not a copy: the listener added since gets a copy of its own
+    it.each`
+      queued                                                             | queue
+      ${'alone'}                                                         | ${queueAlone}
+      ${'after a payload queued for a listener since removed, in a row'} | ${queueAfterListenedPayload}
+    `(
+      'should leave a payload queued for nobody $queued as it was when a listener added before its delivery writes to it',
+      async ({ queue }: { queue: (emitter: SequentialEventEmitter, payload: { value: number }) => void }) => {
+        const emitter = new SequentialEventEmitter('test');
+        const payload = { value: 2 };
+        queue(emitter, payload);
+        emitter.on('a', (payloads: { value: number }[]) => {
+          payloads.at(-1)!.value = 0;
+        });
+
+        await broadcastAll(emitter);
+
+        expect(payload).toEqual({ value: 2 });
+      },
+    );
+
+    it('should deliver a listener added once a payload queued for nobody is broadcast only the payloads queued after it', async () => {
+      const emitter = new SequentialEventEmitter('test');
+      const received: unknown[][] = [];
+      emitter.addDeferredEmit('a', 'a1');
+      await broadcastAll(emitter);
+      emitter.on('a', (payloads: unknown[]) => {
+        received.push(payloads);
+      });
+      emitter.addDeferredEmit('a', 'a2');
+
+      await broadcastAll(emitter);
+
+      expect(received).toEqual([['a2']]);
     });
 
     it('should resolve to true for each group it delivers, then to false', async () => {
@@ -249,14 +385,14 @@ describe('SequentialEventEmitter', () => {
         },
       );
 
-      // A backtest at 1m delivers its timeframe candle every minute to its analyzer alone: copied for it too, by structuredClone, it cost
-      // about a sixth of the run
+      // A backtest at 1m queues its timeframe candle every minute for its analyzer alone, which gets the copy made then, by hand. By
+      // structuredClone, that copy cost about a sixth of the run, and as much again when the analyzer got a copy of its own
       it.each`
-        made            | listeners            | count | copies
-        ${'no copy'}    | ${'one listener'}    | ${1}  | ${0}
-        ${'one copy'}   | ${'two listeners'}   | ${2}  | ${1}
-        ${'two copies'} | ${'three listeners'} | ${3}  | ${2}
-      `('should make $made of the payloads to deliver them to $listeners', async ({ count, copies }) => {
+        made              | listeners            | count | copies
+        ${'one copy'}     | ${'one listener'}    | ${1}  | ${1}
+        ${'two copies'}   | ${'two listeners'}   | ${2}  | ${2}
+        ${'three copies'} | ${'three listeners'} | ${3}  | ${3}
+      `('should make $made of a payload to queue it and deliver it to $listeners', async ({ count, copies }) => {
         const emitter = new SequentialEventEmitter('test');
         for (let index = 0; index < count; index++) emitter.on('a', noop);
         emitter.addDeferredEmit('a', { value: 1 });
@@ -264,6 +400,21 @@ describe('SequentialEventEmitter', () => {
         await emitter.broadcastDeferredEmit();
 
         expect(copyPayload).toHaveBeenCalledTimes(copies);
+      });
+
+      // As the equity point of the PortfolioAnalyzer, which nothing listens to: a backtest at 1m copied it every minute as it queued it
+      it.each`
+        copier               | getCopier
+        ${'copyPayload'}     | ${() => copyPayload}
+        ${'structuredClone'} | ${() => globalThis.structuredClone}
+      `('should not call $copier for a payload nobody listens to', async ({ getCopier }) => {
+        vi.spyOn(globalThis, 'structuredClone');
+        const emitter = new SequentialEventEmitter('test');
+        emitter.addDeferredEmit('unheard', { value: 1 });
+
+        await emitter.broadcastDeferredEmit();
+
+        expect(getCopier()).not.toHaveBeenCalled();
       });
 
       it('should call each listener once the one before it is done', async () => {

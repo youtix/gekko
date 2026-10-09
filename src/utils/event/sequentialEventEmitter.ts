@@ -3,11 +3,21 @@ import { copyPayload } from './event.utils';
 
 type Listener<T = unknown> = (payload: T) => Promise<void> | void;
 
-/** Payloads queued in a row under one event name, which its listeners receive together, as one array */
-type DeferredGroup = { name: string; payloads: unknown[] };
+/**
+ * Payloads queued in a row under one event name, which its listeners receive together, as one array. `isCopied`: each was copied as
+ * it was queued. One queued while nobody listened to its event is the emitter's own object (see addDeferredEmit).
+ */
+type DeferredGroup = { name: string; payloads: unknown[]; isCopied: boolean };
+
+const NO_LISTENERS: readonly Listener[] = [];
 
 export class SequentialEventEmitter {
-  private listeners: Map<string, Listener[]>;
+  /**
+   * The listeners of each event. An array stored here is never changed, on and off store a new one: an emit or a delivery goes through
+   * the listeners its event had when it started, whatever they add or remove meanwhile, without copying them each time. on pushed into
+   * the array stored, which emit walked as it grew: a listener added by a listener was called by the emit that added it.
+   */
+  private listeners: Map<string, readonly Listener[]>;
   /**
    * The deferred events in the order they were queued. Only payloads queued in a row under one name are grouped: listeners depend on
    * the order across events too (a cancelation must follow the creation of its order, a fill between two errors makes them not
@@ -23,10 +33,7 @@ export class SequentialEventEmitter {
   }
 
   public on<T = unknown>(event: string, listener: Listener<T>): void {
-    if (!this.listeners.has(event)) {
-      this.listeners.set(event, []);
-    }
-    this.listeners.get(event)?.push(listener as Listener);
+    this.listeners.set(event, [...(this.listeners.get(event) ?? NO_LISTENERS), listener as Listener]);
   }
 
   public off<T = unknown>(event: string, listener: Listener<T>): void {
@@ -39,21 +46,35 @@ export class SequentialEventEmitter {
     }
   }
 
+  /**
+   * Calls the listeners of the event at once, one after the other, each awaited, with the payload itself: unlike a deferred event, it
+   * is not copied, so the listeners share it with each other and with the emitter (the report of the PortfolioAnalyzer holds its own
+   * equity curve). It serves the final reports, sent from processFinalize once the run is over, and the error line of a strategy, a new
+   * object, each with one listener among the plugins: a copy would protect nothing, and would walk a curve of a point per timeframe
+   * candle.
+   */
   public async emit<T = unknown>(event: string, payload?: T): Promise<void> {
-    const eventListeners = this.listeners.get(event);
-    if (eventListeners) {
-      for (const listener of eventListeners) {
-        await listener(payload);
-      }
-    }
+    for (const listener of this.listeners.get(event) ?? NO_LISTENERS) await listener(payload);
   }
 
-  /** Queues a copy of the payload, made now: what the emitter changes in its own object afterwards never reaches the listeners */
+  /**
+   * Queues a copy of the payload, made now: what the emitter changes in its own object afterwards never reaches the listeners, nor what
+   * they change in theirs the emitter (the Trader queues the portfolio it sizes its orders from). The copy throws on what structuredClone
+   * refuses, a function or a symbol (see copyPayload).
+   * An event nobody listens to gets no copy, which a backtest at 1m made every minute for the equity point of the PortfolioAnalyzer:
+   * its payload is queued as it is, grouped as any other, so that the payloads queued under another event on either side of it still
+   * reach their listeners apart. A listener added before its delivery gets a copy made then, which shows what the emitter changed
+   * meanwhile: in a run none is added, the pipeline wiring every listener before the stream starts.
+   */
   public addDeferredEmit<T = unknown>(name: string, payload: T): void {
     debug('event', `[${this.emitterName}] Adding deferred event: ${name}`);
+    const isListened = !!this.listeners.get(name)?.length;
+    const queued = isListened ? copyPayload(payload) : payload;
     const lastGroup = this.deferredGroups.at(-1);
-    if (lastGroup?.name === name) lastGroup.payloads.push(structuredClone(payload));
-    else this.deferredGroups.push({ name, payloads: [structuredClone(payload)] });
+    if (lastGroup?.name === name) {
+      lastGroup.payloads.push(queued);
+      lastGroup.isCopied &&= isListened;
+    } else this.deferredGroups.push({ name, payloads: [queued], isCopied: isListened });
   }
 
   /**
@@ -64,16 +85,18 @@ export class SequentialEventEmitter {
     // Out of the queue before its delivery: a payload a listener queues meanwhile joins a later group, not the array being delivered
     const group = this.deferredGroups.shift();
     if (!group) return false;
-    const { name, payloads } = group;
+    const { name, payloads, isCopied } = group;
     debug('event', `[${this.emitterName}] Broadcasting deferred event: ${name} (${payloads.length} payloads)`);
     // The listeners all got the copy made when the payloads were queued: one that wrote to it changed what the next ones received, and
     // what the others kept (the analyzers keep the latest portfolio). The last listener gets that copy, which nothing else holds any
     // more, and only the others a new one: none for a single listener, as the timeframe candle has in a backtest (its analyzer). The
-    // listeners are those of the event when the delivery starts: one added meanwhile would have shared the copy of the last.
-    const listeners = [...(this.listeners.get(name) ?? [])];
-    for (const [index, listener] of listeners.entries()) {
+    // listeners are those of the event when the delivery starts: one added meanwhile would have shared the copy of the last. A group
+    // holding a payload queued while nobody listened holds the emitter's own object: every listener gets a copy then, the last included.
+    const listeners = this.listeners.get(name) ?? NO_LISTENERS;
+    const newCopies = isCopied ? listeners.length - 1 : listeners.length;
+    for (let index = 0; index < listeners.length; index++) {
       // One after the other, to avoid race conditions
-      await listener(index < listeners.length - 1 ? copyPayload(payloads) : payloads);
+      await listeners[index](index < newCopies ? copyPayload(payloads) : payloads);
     }
     return true;
   }

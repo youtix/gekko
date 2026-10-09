@@ -1,5 +1,17 @@
+import { Candle } from '@models/candle.types';
+import { CandleBucket, EquitySnapshot } from '@models/event.types';
 import { bench, describe } from 'vitest';
 import { SequentialEventEmitter } from './sequentialEventEmitter';
+
+const MINUTE_START = Date.UTC(2024, 0, 1);
+const createCandle = (close: number): Candle => ({
+  start: MINUTE_START,
+  open: close,
+  high: close + 1,
+  low: close - 1,
+  close,
+  volume: 12.345678,
+});
 
 describe('SequentialEventEmitter Performance', () => {
   describe('on', () => {
@@ -67,14 +79,17 @@ describe('SequentialEventEmitter Performance', () => {
     });
   });
 
+  // Listened to: the payload of an event nobody listens to is queued uncopied (see the equity snapshot below)
   describe('addDeferredEmit', () => {
     bench('addDeferredEmit - single event', () => {
       const emitter = new SequentialEventEmitter('bench');
+      emitter.on('test', () => {});
       emitter.addDeferredEmit('test', { data: 42 });
     });
 
     bench('addDeferredEmit - 10 events same name', () => {
       const emitter = new SequentialEventEmitter('bench');
+      emitter.on('test', () => {});
       for (let i = 0; i < 10; i++) {
         emitter.addDeferredEmit('test', { data: i });
       }
@@ -82,6 +97,7 @@ describe('SequentialEventEmitter Performance', () => {
 
     bench('addDeferredEmit - 100 events same name', () => {
       const emitter = new SequentialEventEmitter('bench');
+      emitter.on('test', () => {});
       for (let i = 0; i < 100; i++) {
         emitter.addDeferredEmit('test', { data: i });
       }
@@ -114,6 +130,27 @@ describe('SequentialEventEmitter Performance', () => {
         await emitter.broadcastDeferredEmit();
       });
     }
+
+    // What a backtest at 1m queues every minute: the timeframe candle, which its analyzer alone listens to, and the equity point of the
+    // PortfolioAnalyzer, which nothing listens to
+    const bucket: CandleBucket = new Map([
+      ['BTC/USDT', createCandle(42000)],
+      ['ETH/USDT', createCandle(2300)],
+      ['SOL/USDT', createCandle(95)],
+    ]);
+    bench('broadcastDeferredEmit - timeframe bucket of 3 pairs to 1 listener', async () => {
+      const emitter = new SequentialEventEmitter('bench');
+      emitter.on('timeframeCandle', () => {});
+      emitter.addDeferredEmit('timeframeCandle', bucket);
+      await emitter.broadcastDeferredEmit();
+    });
+
+    const snapshot: EquitySnapshot = { date: MINUTE_START, totalValue: 1000 };
+    bench('broadcastDeferredEmit - equity snapshot to no listener', async () => {
+      const emitter = new SequentialEventEmitter('bench');
+      emitter.addDeferredEmit('equitySnapshot', snapshot);
+      await emitter.broadcastDeferredEmit();
+    });
   });
 
   describe('full workflow', () => {

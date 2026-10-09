@@ -1,3 +1,4 @@
+import { noop } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
 import { copyPayload } from './event.utils';
 
@@ -31,8 +32,9 @@ const createCyclicPayload = () => {
   return payload;
 };
 
-/** A payload as a listener gets it: what structuredClone made of it when it was queued */
-const queue = <T>(payload: T) => structuredClone(payload);
+class Point {
+  x = 1;
+}
 
 describe('copyPayload', () => {
   it.each`
@@ -51,9 +53,26 @@ describe('copyPayload', () => {
     ${'an Error'}                        | ${new Error('boom')}
     ${'a typed array'}                   | ${new Uint8Array([1, 2])}
     ${'an object with an own __proto__'} | ${JSON.parse('{"__proto__": {"polluted": true}, "free": 1}')}
+    ${'a class instance in an object'}   | ${{ at: new Point() }}
+    ${'an object without a prototype'}   | ${Object.assign(Object.create(null), { free: 1 })}
+    ${'an enumerable getter'}            | ${Object.defineProperty({}, 'free', { enumerable: true, get: () => 1 })}
+    ${'a function under a symbol key'}   | ${{ free: 1, [Symbol('hidden')]: noop }}
+    ${'a non-enumerable function'}       | ${Object.defineProperty({ free: 1 }, 'hidden', { value: noop })}
   `('should copy $kind as structuredClone does', ({ payload }) => {
-    const queued = queue(payload);
-    expect(copyPayload(queued)).toStrictEqual(structuredClone(queued));
+    expect(copyPayload(payload)).toStrictEqual(structuredClone(payload));
+  });
+
+  // Queued with structuredClone, such a payload threw: copied by reference, it would have reached the listeners
+  it.each`
+    kind                         | payload
+    ${'a function'}              | ${noop}
+    ${'a symbol'}                | ${Symbol('tag')}
+    ${'a function in an object'} | ${{ order: { id: 'order', notify: noop } }}
+    ${'a symbol in an array'}    | ${[1, Symbol('tag')]}
+    ${'a function in a Map'}     | ${new Map([['notify', noop]])}
+    ${'a symbol keying a Map'}   | ${new Map([[Symbol('tag'), 1]])}
+  `('should refuse $kind with a DataCloneError, as structuredClone does', ({ payload }) => {
+    expect(() => copyPayload(payload)).toThrow(expect.objectContaining({ name: 'DataCloneError' }));
   });
 
   it.each`
@@ -62,10 +81,10 @@ describe('copyPayload', () => {
     ${'an entry of the portfolio'}  | ${(copy: ReturnType<typeof createOrderEvent>) => copy.exchange.portfolio.delete('BTC')}
     ${'a field of the order'}       | ${(copy: ReturnType<typeof createOrderEvent>) => (copy.order.amount = 99)}
   `('should leave the payload as it was when the copy has $written changed', ({ write }) => {
-    const queued = queue(createOrderEvent());
-    write(copyPayload(queued));
+    const payload = createOrderEvent();
+    write(copyPayload(payload));
 
-    expect(queued).toStrictEqual(queue(createOrderEvent()));
+    expect(payload).toStrictEqual(createOrderEvent());
   });
 
   // The copy by hand is the point: one that threw would still be right, by structuredClone, but no faster
@@ -79,34 +98,34 @@ describe('copyPayload', () => {
     ${'a Set'}                       | ${() => new Set([1])}                    | ${'by structuredClone'} | ${1}
     ${'a Date in an order event'}    | ${() => ({ order: { at: new Date() } })} | ${'by structuredClone'} | ${1}
   `('should copy $kind $copier', ({ create, calls }) => {
-    const queued = queue(create());
+    const payload = create();
     const clone = vi.spyOn(globalThis, 'structuredClone');
 
-    copyPayload(queued);
+    copyPayload(payload);
 
     expect(clone).toHaveBeenCalledTimes(calls);
   });
 
   it('should leave the key of a Map as it was when the copy has its key changed', () => {
-    const queued = queue(new Map([[{ pair: 'BTC/USDT' }, 1]]));
-    const [key] = copyPayload(queued).keys();
+    const payload = new Map([[{ pair: 'BTC/USDT' }, 1]]);
+    const [key] = copyPayload(payload).keys();
     key.pair = 'ETH/USDT';
 
-    expect(Array.from(queued.keys())).toEqual([{ pair: 'BTC/USDT' }]);
+    expect(Array.from(payload.keys())).toEqual([{ pair: 'BTC/USDT' }]);
   });
 
   it('should keep two references to one object as one', () => {
-    const copy = copyPayload(queue(createSharingPayload()));
+    const copy = copyPayload(createSharingPayload());
     expect(copy.first).toBe(copy.second);
   });
 
   it('should keep a cycle', () => {
-    const copy = copyPayload(queue(createCyclicPayload()));
+    const copy = copyPayload(createCyclicPayload());
     expect(copy.self).toBe(copy);
   });
 
   it('should keep an own __proto__ as a property, not as the prototype', () => {
-    const copy = copyPayload(queue(JSON.parse('{"__proto__": {"polluted": true}}')));
+    const copy = copyPayload(JSON.parse('{"__proto__": {"polluted": true}}'));
     expect(Object.getPrototypeOf(copy)).toBe(Object.prototype);
   });
 });
