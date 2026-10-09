@@ -3,15 +3,16 @@ import { shallowObjectDiff } from './object.utils';
 
 describe('shallowObjectDiff', () => {
   it.each`
-    description                        | a                  | b                  | expected
-    ${'a value that changed'}          | ${{ x: 1 }}        | ${{ x: 2 }}        | ${{ x: 2 }}
-    ${'a key only in a'}               | ${{ x: 1 }}        | ${{}}              | ${{ x: 1 }}
-    ${'a key only in b'}               | ${{}}              | ${{ y: 'foo' }}    | ${{ y: 'foo' }}
-    ${'an equal value'}                | ${{ x: 1 }}        | ${{ x: 1 }}        | ${{}}
-    ${'NaN on both sides'}             | ${{ n: NaN }}      | ${{ n: NaN }}      | ${{}}
-    ${'-0 against 0'}                  | ${{ z: -0 }}       | ${{ z: 0 }}        | ${{ z: 0 }}
-    ${'equal arrays, two references'}  | ${{ arr: [1, 2] }} | ${{ arr: [1, 2] }} | ${{ arr: [1, 2] }}
-    ${'equal objects, two references'} | ${{ o: { k: 1 } }} | ${{ o: { k: 1 } }} | ${{ o: { k: 1 } }}
+    description                              | a                  | b                  | expected
+    ${'a value that changed'}                | ${{ x: 1 }}        | ${{ x: 2 }}        | ${{ x: 2 }}
+    ${'a key only in a'}                     | ${{ x: 1 }}        | ${{}}              | ${{ x: 1 }}
+    ${'a key only in b'}                     | ${{}}              | ${{ y: 'foo' }}    | ${{ y: 'foo' }}
+    ${'an equal value'}                      | ${{ x: 1 }}        | ${{ x: 1 }}        | ${{}}
+    ${'NaN on both sides'}                   | ${{ n: NaN }}      | ${{ n: NaN }}      | ${{}}
+    ${'-0 against 0'}                        | ${{ z: -0 }}       | ${{ z: 0 }}        | ${{ z: 0 }}
+    ${'equal arrays, two references'}        | ${{ arr: [1, 2] }} | ${{ arr: [1, 2] }} | ${{ arr: [1, 2] }}
+    ${'equal objects, two references'}       | ${{ o: { k: 1 } }} | ${{ o: { k: 1 } }} | ${{ o: { k: 1 } }}
+    ${'a key of Object.prototype only in a'} | ${{ toString: 1 }} | ${{}}              | ${{ toString: 1 }}
   `('should give $expected for $description', ({ a, b, expected }) => {
     expect(shallowObjectDiff(a, b)).toEqual(expected);
   });

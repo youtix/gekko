@@ -9,8 +9,9 @@ export const shallowObjectDiff = <T extends PlainObject, U extends PlainObject>(
 
   keys.forEach(key => {
     if (!Object.is(a[key], b[key])) {
-      // Prefer the value from `b` if present, else from `a`
-      result[key] = key in b ? b[key] : a[key];
+      // The value of `b` when it has the key, else that of `a`. Its own keys only: `in` also found those of Object.prototype, and
+      // { toString: 1 } against {} gave Object.prototype.toString
+      result[key] = Object.hasOwn(b, key) ? b[key] : a[key];
     }
   });
 
