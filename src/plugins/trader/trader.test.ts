@@ -11,13 +11,12 @@ import {
 import { EMPTY_ORDER_SUMMARY } from '@constants/order.const';
 import { AdviceOrder } from '@models/advice.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
+import { config } from '@services/configuration/configuration';
 import { OrderSummary } from '@services/core/order/order.types';
+import * as logger from '@services/logger';
 import { noop } from 'lodash-es';
 import type { Mock } from 'vitest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { config } from '../../services/configuration/configuration';
-import * as logger from '../../services/logger';
-import * as processUtils from '../../utils/process/process.utils';
 import { Trader } from './trader';
 
 vi.mock('@services/logger');
@@ -48,7 +47,7 @@ const cloneWatch = () => ({
 
 type OrderListener = (...args: unknown[]) => unknown;
 
-vi.mock('../../services/configuration/configuration', () => {
+vi.mock('@services/configuration/configuration', () => {
   const getWatch = vi.fn(() => cloneWatch());
   const getStrategy = vi.fn(() => ({}));
   const getExchange = vi.fn(() => ({ name: 'dummy-cex' }));
@@ -179,15 +178,15 @@ function createOrderMock(type: 'STICKY' | 'MARKET' | 'LIMIT', requiresPrice = fa
   return MockOrder as unknown as new (symbol: string, id: string, side: string, amount: number, exchange: unknown) => any;
 }
 
-vi.mock('../../services/core/order/sticky/stickyOrder', () => ({
+vi.mock('@services/core/order/sticky/stickyOrder', () => ({
   StickyOrder: createOrderMock('STICKY'),
 }));
 
-vi.mock('../../services/core/order/market/marketOrder', () => ({
+vi.mock('@services/core/order/market/marketOrder', () => ({
   MarketOrder: createOrderMock('MARKET'),
 }));
 
-vi.mock('../../services/core/order/limit/limitOrder', () => ({
+vi.mock('@services/core/order/limit/limitOrder', () => ({
   LimitOrder: createOrderMock('LIMIT', true),
 }));
 
@@ -196,11 +195,10 @@ describe('Trader', () => {
   let trader: Trader;
   let fakeExchange: {
     getExchangeName: Mock;
-    getIntervals: Mock;
     fetchTicker: Mock;
     fetchTickers: Mock;
     fetchBalance: Mock;
-    getMarketLimits: Mock;
+    getMarketData: Mock;
   };
   const getWatchMock = config.getWatch as unknown as Mock;
   const getExchangeMock = config.getExchange as unknown as Mock;
@@ -248,7 +246,6 @@ describe('Trader', () => {
   });
 
   beforeEach(() => {
-    vi.spyOn(processUtils, 'wait').mockResolvedValue(undefined);
     getWatchMock.mockReturnValue(cloneWatch());
     getExchangeMock.mockReturnValue({ name: 'dummy-cex' });
     getStrategyMock.mockReturnValue({});
@@ -259,7 +256,6 @@ describe('Trader', () => {
 
     fakeExchange = {
       getExchangeName: vi.fn(() => 'MockExchange'),
-      getIntervals: vi.fn(() => ({ exchangeSync: 1, orderSync: 1 })),
       fetchTicker: vi.fn().mockResolvedValue({ bid: 123 }),
       fetchTickers: vi.fn().mockResolvedValue({ 'BTC/USDT': { bid: 123 } }),
       fetchBalance: vi.fn().mockResolvedValue(
@@ -268,7 +264,8 @@ describe('Trader', () => {
           ['USDT', { free: 2, used: 0, total: 2 }],
         ]),
       ),
-      getMarketLimits: vi.fn(() => undefined),
+      // A market without limits, unless a test sets some: no order is capped at its maximum
+      getMarketData: vi.fn(() => ({})),
     };
 
     trader['getExchange'] = vi.fn().mockReturnValue(fakeExchange);
@@ -294,6 +291,17 @@ describe('Trader', () => {
       const orders = getOrdersMap();
       expect(orders).toBeInstanceOf(Map);
       expect(orders.size).toBe(0);
+    });
+
+    // A minified build (bun build --minify) renames classes: named after its class, the Trader logged its events and failures as "GO"
+    it('names itself Trader whatever its class is named', () => {
+      const className = Object.getOwnPropertyDescriptor(Trader, 'name')!;
+      Object.defineProperty(Trader, 'name', { value: 'GO' });
+      try {
+        expect(new Trader().emitterName).toBe('Trader');
+      } finally {
+        Object.defineProperty(Trader, 'name', className);
+      }
     });
   });
 
@@ -1147,6 +1155,125 @@ describe('Trader', () => {
       });
     });
 
+    // LIMIT and STICKY BUYs can build a position larger than one MARKET order can sell (Binance's MARKET_LOT_SIZE: tens of BTC on
+    // BTCUSDT, against 9000 for LOT_SIZE): the SELL of the whole, the strategy's or its trailing stop's, was refused at each signal or
+    // minute until the circuit breaker stopped the bot, the position unsold
+    describe('when an order asks for more than the market takes in one order', () => {
+      // LOT_SIZE (amount) up to 1 BTC, MARKET_LOT_SIZE (market) up to 0.5 BTC; the account holds 3 BTC and 1000 USDT, BTC at 100
+      const marketData = { amount: { min: 0.00001, max: 1 }, market: { min: 0, max: 0.5 } };
+      const order = (side: AdviceOrder['side'], type: AdviceOrder['type'], amount?: number, index = 0) =>
+        buildAdvice({ id: `00000000-0000-4000-8000-00000000003${index}`, side, type, amount, price: type === 'LIMIT' ? 120 : undefined });
+
+      beforeEach(() => {
+        fakeExchange.getMarketData.mockReturnValue(marketData);
+      });
+
+      it.each`
+        description                                       | advice                               | amount
+        ${'a STICKY SELL of 2 BTC'}                       | ${order('SELL', 'STICKY', 2)}        | ${1}
+        ${'a LIMIT SELL of 2 BTC'}                        | ${order('SELL', 'LIMIT', 2)}         | ${1}
+        ${'a MARKET SELL of 2 BTC'}                       | ${order('SELL', 'MARKET', 2)}        | ${0.5}
+        ${'a STICKY SELL of 5 BTC, above the 3 BTC held'} | ${order('SELL', 'STICKY', 5)}        | ${1}
+        ${'an all-in MARKET SELL of the 3 BTC held'}      | ${order('SELL', 'MARKET')}           | ${0.5}
+        ${'an all-in STICKY SELL of the 3 BTC held'}      | ${order('SELL', 'STICKY')}           | ${1}
+        ${'an all-in MARKET BUY of 9.5 BTC'}              | ${order('BUY', 'MARKET')}            | ${0.5}
+        ${'a LIMIT SELL of 0.8 BTC, within its maximum'}  | ${order('SELL', 'LIMIT', 0.8)}       | ${0.8}
+        ${'a MARKET BUY of 2 BTC, as asked'}              | ${order('BUY', 'MARKET', 2)}         | ${2}
+        ${'a SELL of NaN, as asked'}                      | ${order('SELL', 'MARKET', NaN)}      | ${NaN}
+        ${'a SELL of Infinity, as asked'}                 | ${order('SELL', 'MARKET', Infinity)} | ${Infinity}
+      `('places $description for $amount BTC', async ({ advice, amount }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(amount);
+      });
+
+      it('relays 0.5 BTC, the amount sent, as the amount of the order', async () => {
+        const advice = order('SELL', 'MARKET', 2);
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getInitiatedAmount(advice)).toBe(0.5);
+      });
+
+      // What the StrategyManager compares with the amount a trailing stop asked its SELL for, the rest still held
+      it('relays 0.5 BTC, the amount sent, as the amount the SELL executed once it completes', async () => {
+        vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+        const sell = await prepareOrder('creation', order('SELL', 'MARKET', 2));
+        await sell.emitAndSettle(ORDER_COMPLETED_EVENT);
+        expect(getCompletedEvent()?.order.amount).toBe(0.5);
+      });
+
+      it.each`
+        description                                       | advice                        | message
+        ${'a STICKY SELL of 2 BTC'}                       | ${order('SELL', 'STICKY', 2)} | ${'SELL STICKY order of 2 BTC above the maximum amount of a STICKY order on BTC/USDT: 1 BTC sent, the rest stays held'}
+        ${'a STICKY SELL of 5 BTC, above the 3 BTC held'} | ${order('SELL', 'STICKY', 5)} | ${'SELL STICKY order of 5 BTC above the maximum amount of a STICKY order on BTC/USDT: 1 BTC sent, the rest stays held'}
+        ${'an all-in MARKET SELL of the 3 BTC held'}      | ${order('SELL', 'MARKET')}    | ${'All-in SELL MARKET order of 3 BTC above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest stays held'}
+        ${'an all-in MARKET BUY of 9.5 BTC'}              | ${order('BUY', 'MARKET')}     | ${'All-in BUY MARKET order sized from 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+      `('warns once of $description, with the amount asked for, the maximum sent and the rest', async ({ advice, message }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+      });
+
+      it.each`
+        description                                      | advice
+        ${'a LIMIT SELL of 0.8 BTC, within its maximum'} | ${order('SELL', 'LIMIT', 0.8)}
+        ${'a MARKET BUY of 2 BTC, placed as asked'}      | ${order('BUY', 'MARKET', 2)}
+      `('does not warn of $description', async ({ advice }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(logger.warning).not.toHaveBeenCalled();
+      });
+
+      // Until the balance is read again, a capped order takes from it what it sends (see unreadOrders): taking what the SELL asked for,
+      // or the whole currency the all-in BUY was sized from, would leave the order after it short
+      it.each`
+        description                                                          | maximum | first                                   | second                                   | amount
+        ${'an all-in SELL for what a STICKY SELL of 2.5 capped at 2 leaves'} | ${2}    | ${order('SELL', 'STICKY', 2.5, 1)}      | ${order('SELL', 'STICKY', undefined, 2)} | ${1}
+        ${'an all-in BUY for what an all-in BUY capped at 5 leaves'}         | ${5}    | ${order('BUY', 'STICKY', undefined, 1)} | ${order('BUY', 'STICKY', undefined, 2)}  | ${4.5}
+      `('places $description for $amount BTC', async ({ maximum, first, second, amount }) => {
+        fakeExchange.getMarketData.mockReturnValue({ amount: { max: maximum } });
+        await trader.onStrategyCreateOrder([first, second]);
+        expect(getPlacedAmount(second)).toBe(amount);
+      });
+
+      // Binance disables a filter bound by setting it to 0
+      it.each`
+        description              | limits
+        ${'a maximum of 0'}      | ${{ amount: { max: 0 }, market: { max: 0 } }}
+        ${'an infinite maximum'} | ${{ amount: { max: Infinity } }}
+        ${'a NaN maximum'}       | ${{ amount: { max: NaN } }}
+        ${'no amount range'}     | ${{ price: { min: 0.01 } }}
+      `('places a MARKET SELL of 2 BTC as asked on a market with $description', async ({ limits }) => {
+        fakeExchange.getMarketData.mockReturnValue(limits);
+        const advice = order('SELL', 'MARKET', 2);
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(2);
+      });
+    });
+
+    // Placed for 0 and refused for it, with a reason that names the amount, not its cause: no currency on the account (a
+    // simulationBalance naming another one), or no balance read from the exchange yet
+    describe('when an all-in BUY is sized from no currency at all', () => {
+      const advice = buildAdvice({ side: 'BUY', type: 'MARKET' });
+      const btc: BalanceDetail = { free: 3, used: 0, total: 3 };
+
+      it.each`
+        description                 | portfolio                                                            | cause
+        ${'0 USDT free'}            | ${new Map([['BTC', btc], ['USDT', { free: 0, used: 0, total: 0 }]])} | ${'0 USDT free at the last synchronization'}
+        ${'no USDT on the account'} | ${new Map([['BTC', btc]])}                                           | ${'0 USDT free at the last synchronization'}
+        ${'no balance read yet'}    | ${new Map()}                                                         | ${'no balance read from the exchange yet'}
+      `('warns of it with its cause when $description', async ({ portfolio, cause }) => {
+        trader['portfolio'] = portfolio;
+        await trader.onStrategyCreateOrder([advice]);
+        expect(logger.warning).toHaveBeenCalledWith(
+          'trader',
+          `[${advice.id}] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent, which the market refuses (${cause})`,
+        );
+      });
+
+      it('places it for 0, for the exchange to refuse', async () => {
+        trader['portfolio'] = new Map();
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(0);
+      });
+    });
+
     it('creates limit order with requested price', async () => {
       const advice = buildAdvice({ type: 'LIMIT', side: 'BUY', price: 95 });
 
@@ -1792,29 +1919,25 @@ describe('Trader', () => {
         );
       });
 
-      // Defensive: the Trader keeps an order until its end is reported. Without it, the fill is still relayed, its price unknown.
-      describe('when the Trader no longer lists the LIMIT order', () => {
-        const advice = buildAdvice({ type: 'LIMIT', amount: 1, price: 95 });
-
-        beforeEach(async () => {
+      // The price an order was created with comes with its report: read from the orders the Trader lists, an order no longer listed
+      // was relayed with a price of NaN
+      it.each`
+        end                       | flow             | event                    | payload                                                                     | filled
+        ${'filled'}               | ${'creation'}    | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                                | ${0}
+        ${'filled'}               | ${'cancelation'} | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                                | ${0}
+        ${'refused after a fill'} | ${'creation'}    | ${ORDER_INVALID_EVENT}   | ${{ reason: 'Filter failure: NOTIONAL', status: 'rejected', filled: true }} | ${0.5}
+      `(
+        'relays a price of 95, its limit price, for a LIMIT order $end in the $flow flow whatever the orders the Trader lists',
+        async ({ flow, event, payload, filled }) => {
           vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
-          const order = await prepareOrder('creation', advice);
+          const order = await prepareOrder(flow, buildAdvice({ type: 'LIMIT', amount: 1, price: 95 }));
           order.createSummary.mockRejectedValue(new Error('fetchMyTrades failed'));
+          order.getFilledAmount.mockReturnValue(filled);
           getOrdersMap().clear();
-          await order.emitAndSettle(ORDER_COMPLETED_EVENT);
-        });
-
-        it('relays its fill with a price unknown', () => {
-          expect(getCompletedEvent()?.order.price).toBeNaN();
-        });
-
-        it('logs that neither the exchange nor the Trader knows the price', () => {
-          expect(logger.error).toHaveBeenCalledWith(
-            'trader',
-            `[${advice.id}] Order Summary: price is NaN, neither the exchange nor the Trader knows the price the order executed at.`,
-          );
-        });
-      });
+          await order.emitAndSettle(event, payload);
+          expect(getCompletedEvent()?.order.price).toBe(95);
+        },
+      );
     });
 
     describe.each`

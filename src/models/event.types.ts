@@ -15,16 +15,27 @@ type OrderEvent = {
   side: OrderSide;
   /** Order type ('MARKET' | 'STICKY' | 'LIMIT')*/
   type: OrderType;
-  /** Order amount */
+  /**
+   * The amount of the asset the order was placed with: the amount the strategy asked for, or the Trader's for an all-in order. A SELL is
+   * capped at the free balance of its asset, and a SELL or an all-in BUY at the most the market takes in one order, the rest then held
+   * or unspent (see Trader.sizeOrder). An order the Trader could not place carries the amount asked for, 0 for an all-in one. A
+   * completed order carries the amount it executed (see OrderCompletedEvent).
+   */
   amount: number;
-  /** Order price in currency */
+  /**
+   * The price the strategy asked for, in currency: undefined for an order without one (a MARKET or STICKY order, a LIMIT order placed
+   * at the market price). A completed order carries the price it executed at (see OrderCompletedEvent).
+   */
   price?: number;
 };
 
 export type ExchangeEvent = {
-  /** Current portfolio value */
+  /**
+   * The balances of the account, as the Trader read them last: the empty portfolio it starts with until one of its synchronizations
+   * succeeds (see isFetchedPortfolio)
+   */
   portfolio: Portfolio;
-  /** Current price of the asset in currencey */
+  /** The last price of the pair of the order, in currency: 0 when the Trader knows none, a price being above 0 */
   price: number;
 };
 
@@ -73,15 +84,28 @@ export type OrderErroredEvent = OrderInitiatedEvent & {
     mayBeLive: boolean;
   };
 };
-/** Can return NaN values in price, amount,effectivePrice, fee, feePercent */
+/**
+ * The fill of an order, as the Trader summarizes it: from the trades of the order, or estimated from what the order and the Trader know
+ * when the exchange cannot give them (see Trader.summarizeCompletedOrder). Every figure is a finite number, but the fee rate, undefined
+ * when unknown.
+ */
 export type OrderCompletedEvent = OrderInitiatedEvent & {
   order: OrderEvent & {
-    /** Order Execution date */
+    /** When the order executed: the time of its last trade, else the end of the last minute processed */
     orderExecutionDate: EpochTimeStamp;
+    /** The amount executed, in the asset: what its trades add up to, else the fill the order reported, else the amount placed */
+    amount: number;
+    /**
+     * The price it executed at, in currency: the mean of the prices of its trades weighted by their amounts, else an estimate (see
+     * Trader.estimateExecutionPrice). The Trader always sets it: optional in the type only as the requested price of the other order
+     * events is.
+     */
+    price?: number;
+    /** The price plus its share of the fee for a BUY, less it for a SELL, in currency */
     effectivePrice: number;
-    /** Order fee */
+    /** The fee, in currency: the cost times the fee rate, 0 when the rate is unknown */
     fee: number;
-    /** Order fee percentage */
+    /** The fee rate in % (0.1 for 0.1 %), undefined when unknown */
     feePercent?: number;
   };
 };

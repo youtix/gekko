@@ -19,9 +19,10 @@ import { OrderErrorEventPayload, OrderSummary } from '@services/core/order/order
 import { debug, error, info, warning } from '@services/logger';
 import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
-import { addPrecise } from '@utils/math/math.utils';
+import { getMarketOrderLimits } from '@utils/market/market.utils';
+import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
-import { clonePortfolio, createEmptyPortfolio, getAssetBalance } from '@utils/portfolio/portfolio.utils';
+import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes, differenceInMinutes } from 'date-fns';
 import { filter, isNil, noop, uniq } from 'lodash-es';
 import { UUID } from 'node:crypto';
@@ -84,15 +85,16 @@ export class Trader extends Plugin {
   private readonly pendingReports = new Set<Promise<void>>();
   /**
    * The orders placed since the balance was read, by id: what each one takes from a free balance that read does not show, and the
-   * count of synchronizations started when it was placed. A SELL takes its amount of the asset (see capToFreeBalance), a BUY what it
-   * may spend of the currency (see sizeAllInBuy). A synchronization started after an order reads a balance that shows it, filled or
+   * count of synchronizations started when it was placed. A SELL takes its amount of the asset (see sizeSell), a BUY what it may spend
+   * of the currency (see sizeOrder and sizeAllInBuy). A synchronization started after an order reads a balance that shows it, filled or
    * reserved: the order is forgotten once that synchronization has read the balance. So is an order the strategy cancels: the exchange
    * gets the cancelation before any order sent after it, and releases what the canceled order reserved.
    */
   private readonly unreadOrders = new Map<UUID, UnreadOrder>();
 
   constructor(parameters?: { portfolioUpdates?: PortfolioUpdatesConfig }) {
-    super(Trader.name);
+    // Not Trader.name: a minified build (bun build --minify) renames the class, and the Trader logged its events and failures as "GO"
+    super('Trader');
     this.orders = new Map();
     this.portfolioUpdatesConfig = parameters?.portfolioUpdates ?? null;
   }
@@ -217,53 +219,120 @@ export class Trader extends Plugin {
   /* -------------------------------------------------------------------------- */
 
   /**
-   * The amount a SELL is placed with: never more than the free balance of its asset, which the exchange refuses to exceed. A strategy
-   * may ask for more without knowing it: the amount a BUY filled, which the trailing stop of that BUY sells (see StrategyManager), is
-   * the amount of its trades, and the exchange may have taken the fee of the BUY from the asset bought, as Binance does unless the fees
-   * are paid in BNB. The account then holds that amount less the fee: the SELL of the whole was refused, an error counting towards the
-   * circuit breaker, the position left unprotected. The simulated exchange takes its fees in the currency: a backtest never showed it.
-   * The balance is the one the last synchronization read, which followed the end of the last order (see reportCompleted): the Trader
-   * does not read it again before placing an order. Read once, it is the balance of every SELL placed until the next synchronization,
-   * less what the SELLs placed before take from it (see getFreeBalanceLeft). Each SELL was capped against the whole of it: two SELLs of
-   * one asset, two trailing stops triggering on the same minute or a stop's and the strategy's, each fitted while together they sold
-   * more than was held, and the second was refused, its position left unprotected. Left as asked for:
-   * - an amount within the balance, or not a finite number (refused as before, rather than turned into the sale of every unit held);
-   * - any amount while the balance is 0: maybe a portfolio not synchronized yet, or one the SELLs placed before take whole, and a SELL
-   *   of 0 would be refused anyway.
+   * The amount `advice` is placed with, and what it takes from the free balance the last synchronization read (`balance`, see
+   * unreadOrders): of the asset for a SELL, its amount (see sizeSell); of the currency for a BUY, what it may spend (see getBuyBudget),
+   * all it was sized from for an all-in BUY (see sizeAllInBuy). A BUY with an amount is placed as asked, never capped: the strategy
+   * chose it, and the exchange refuses it when the market does not take it.
    */
-  private capToFreeBalance({ id, type }: AdviceOrder, requestedAmount: number, balance: FreeBalanceLeft, assetName: string) {
+  private sizeOrder(advice: AdviceOrder, price: number, balance: FreeBalanceLeft): { amount: number; taken: number } {
+    if (advice.side === 'SELL') {
+      const amount = this.sizeSell(advice, balance);
+      return { amount, taken: amount };
+    }
+    if (isNil(advice.amount)) return this.sizeAllInBuy(advice, price, balance);
+    return { amount: advice.amount, taken: getBuyBudget(advice.amount, price) };
+  }
+
+  /**
+   * The most the market takes in one order of the type of `advice`, in its asset: the maximum of the amount range of the market
+   * (Binance's LOT_SIZE), narrowed for a MARKET order to that of a market order (Binance's MARKET_LOT_SIZE, see getMarketOrderLimits),
+   * as the exchanges check an order before they send it. Undefined when the market sets none: a maximum that is not a finite number
+   * above 0 sets nothing there either (Binance disables a filter bound by setting it to 0).
+   */
+  private getMaximumAmount({ symbol, type }: AdviceOrder) {
+    const marketData = this.getExchange().getMarketData(symbol);
+    const maximum = (type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData).amount?.max;
+    return isFiniteNumber(maximum) && maximum > 0 ? maximum : undefined;
+  }
+
+  /**
+   * The amount a SELL is placed with: the amount asked for, or, for an all-in SELL, what the SELLs placed before it leave of the asset
+   * (see getFreeBalanceLeft), capped at two bounds. Above both, it is capped at the lower one, and one warning says which.
+   *
+   * The free balance of its asset, which the exchange refuses to exceed. A strategy may ask for more without knowing it: the amount a
+   * BUY filled, which the trailing stop of that BUY sells (see StrategyManager), is the amount of its trades, and the exchange may have
+   * taken the fee of the BUY from the asset bought, as Binance does unless the fees are paid in BNB. The account then holds that amount
+   * less the fee: the SELL of the whole was refused, an error counting towards the circuit breaker, the position left unprotected. The
+   * simulated exchange takes its fees in the currency: a backtest never showed it. The balance is the one the last synchronization
+   * read, which followed the end of the last order (see reportCompleted): the Trader does not read it again before placing an order.
+   * Read once, it is the balance of every SELL placed until the next synchronization, less what the SELLs placed before take from it
+   * (see getFreeBalanceLeft). Each SELL was capped against the whole of it: two SELLs of one asset, two trailing stops triggering on the
+   * same minute or a stop's and the strategy's, each fitted while together they sold more than was held, and the second was refused,
+   * its position left unprotected. Any amount is left as asked for while the balance is 0: maybe a portfolio not synchronized yet, or
+   * one the SELLs placed before take whole, and a SELL of 0 would be refused anyway.
+   *
+   * The most the market takes in one order of its type (see getMaximumAmount). LIMIT and STICKY BUYs can build a position larger than
+   * one MARKET order can sell (Binance's MARKET_LOT_SIZE: tens of BTC on BTCUSDT, against 9000 for LOT_SIZE): the SELL of the whole,
+   * the strategy's or its trailing stop's, was refused, and sent again at each signal or minute until the circuit breaker stopped the
+   * bot, the position unsold. Capped, it sells what one order can, and the rest stays held, for the SELLs after it.
+   *
+   * An amount that is not a finite number is left as asked for: refused as before, rather than turned into the sale of every unit held,
+   * or of the most the market takes.
+   */
+  private sizeSell(advice: AdviceOrder, balance: FreeBalanceLeft) {
+    const { id, type, symbol } = advice;
+    const [assetName] = symbol.split('/');
     const { read, taken, free } = balance;
-    const isAboveBalance = free > 0 && Number.isFinite(requestedAmount) && requestedAmount > free;
+    const requestedAmount = advice.amount ?? free;
+    const isFiniteAmount = Number.isFinite(requestedAmount);
+    const isAboveBalance = isFiniteAmount && free > 0 && requestedAmount > free;
+    const maximum = this.getMaximumAmount(advice);
+    const asked = `[${id}] ${isNil(advice.amount) ? 'All-in SELL' : 'SELL'} ${type} order of ${requestedAmount} ${assetName}`;
+
+    if (isFiniteAmount && !isNil(maximum) && (isAboveBalance ? free : requestedAmount) > maximum) {
+      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
+      warning('trader', `${asked} above ${capped}, the rest stays held`);
+      return maximum;
+    }
     if (!isAboveBalance) return requestedAmount;
-    const asked = `[${id}] SELL ${type} order of ${requestedAmount} ${assetName} above the free balance`;
-    const sent = `${free} ${assetName} sent, all that can be sold`;
+    const sent = `${asked} above the free balance: ${free} ${assetName} sent, all that can be sold`;
     // The amount sent is then less than the free balance read: what the SELLs placed since take is said
     const left = `${read} ${assetName} free at the last synchronization, less ${taken} ${assetName} for the SELLs placed since`;
-    warning('trader', taken > 0 ? `${asked}: ${sent} (${left})` : `${asked}: ${sent}`);
+    warning('trader', taken > 0 ? `${sent} (${left})` : sent);
     return free;
   }
 
   /**
-   * The amount of an all-in BUY: what the currency left buys at the price of the order, less the share DEFAULT_FEE_BUFFER keeps back
-   * for the fee, worked out in decimal (see getAllInBuyAmount): a whole number of steps of the market comes out as that number, where
-   * the exchange truncating the amount to its step placed it one step short. Left is the currency the last synchronization read, less
-   * what the BUYs placed since may spend of it (see getBuyBudget), an all-in BUY all it was sized from. Each all-in BUY was sized from
-   * the whole of the currency read: two of them on one candle (two entry signals, or two pairs of one currency), or a BUY then an
-   * all-in BUY, each fitted while together they spent more than was held, and the second was refused, an error counting towards the
-   * circuit breaker. Sized from less than was read, it is said at warn level. Once nothing is left, it is sized to 0, which the limits
-   * of the market refuse, as they refuse an all-in SELL once the SELLs before it take the asset whole.
+   * The amount of an all-in BUY, and what it takes from the currency read (see unreadOrders): what the currency left buys at the price
+   * of the order, less the share DEFAULT_FEE_BUFFER keeps back for the fee, worked out in decimal (see getAllInBuyAmount): a whole
+   * number of steps of the market comes out as that number, where the exchange truncating the amount to its step placed it one step
+   * short. Left is the currency the last synchronization read, less what the BUYs placed since may spend of it (see getBuyBudget), an
+   * all-in BUY all it was sized from. Each all-in BUY was sized from the whole of the currency read: two of them on one candle (two
+   * entry signals, or two pairs of one currency), or a BUY then an all-in BUY, each fitted while together they spent more than was
+   * held, and the second was refused, an error counting towards the circuit breaker. Sized from less than was read, it is said at warn
+   * level. Once nothing is left, it is sized to 0, which the limits of the market refuse, as they refuse an all-in SELL once the SELLs
+   * before it take the asset whole. Sized from no currency at all (none on the account, or no balance read yet), it is said at warn
+   * level too: the refusal names the amount of 0, not its cause.
+   *
+   * Capped at the most the market takes in one order of its type (see getMaximumAmount), with a warning: all-in is as much as the
+   * market takes, and above it the BUY was refused at each entry signal, an error counting towards the circuit breaker. It then takes
+   * from the currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it.
    */
-  private sizeAllInBuy({ id, type, symbol }: AdviceOrder, price: number, currency: FreeBalanceLeft) {
+  private sizeAllInBuy(advice: AdviceOrder, price: number, currency: FreeBalanceLeft): { amount: number; taken: number } {
+    const { id, type, symbol } = advice;
+    const [assetName, currencyName] = symbol.split('/');
     const { read, taken, free } = currency;
     const amount = getAllInBuyAmount(free, price);
+    const maximum = this.getMaximumAmount(advice);
+    const sized = `[${id}] All-in BUY ${type} order sized from ${free} ${currencyName}`;
+
+    if (Number.isFinite(amount) && !isNil(maximum) && amount > maximum) {
+      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
+      warning('trader', `${sized}: ${amount} ${assetName}, above ${capped}, the rest of the ${currencyName} left unspent`);
+      return { amount: maximum, taken: getBuyBudget(maximum, price) };
+    }
     if (taken > 0) {
-      const [assetName, currencyName] = symbol.split('/');
-      const sized = `[${id}] All-in BUY ${type} order sized from ${free} ${currencyName}: ${amount} ${assetName} sent`;
       const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
       const feeBuffer = `the ${shiftDecimalPoint(DEFAULT_FEE_BUFFER, 2)} % kept back for their fee included`;
-      warning('trader', `${sized} (${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer})`);
+      const left = `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
+      warning('trader', `${sized}: ${amount} ${assetName} sent (${left})`);
+    } else if (!(read > 0)) {
+      // Before any synchronization succeeded, the portfolio is the empty one the Trader starts with (see isFetchedPortfolio)
+      const isRead = isFetchedPortfolio(this.portfolio);
+      const cause = isRead ? `${read} ${currencyName} free at the last synchronization` : 'no balance read from the exchange yet';
+      warning('trader', `${sized}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
     }
-    return amount;
+    return { amount, taken: free };
   }
 
   /**
@@ -276,33 +345,37 @@ export class Trader extends Plugin {
     return { read, taken, free: taken > 0 ? Math.max(addPrecise(read, -taken), 0) : read };
   }
 
+  /**
+   * The last price known for a pair, which the events of its orders carry (see ExchangeEvent): the close of the last candle, or the bid
+   * of the last synchronization, whichever came last. 0 when none is known, as for a pair that is not watched.
+   */
+  private getLastPrice(symbol: TradingPair) {
+    return this.prices.get(symbol) || 0;
+  }
+
+  /**
+   * The completed event of an order from its summary, whose figures are usable numbers: the exchange's, checked, or an estimate (see
+   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing).
+   */
   private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent {
     const { amount, price, feePercent, side, orderExecutionDate } = summary;
     const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent);
 
-    // Defensive: a summary comes with a price, the exchange's or an estimate (see summarizeCompletedOrder), unless the Trader no
-    // longer lists the order, and so may not know its price (see estimateExecutionPrice)
-    if (Number.isNaN(price)) {
-      error('trader', `[${id}] Order Summary: price is NaN, neither the exchange nor the Trader knows the price the order executed at.`);
-    } else {
-      if (isNil(feePercent) || !Number.isFinite(feePercent))
-        warning('trader', 'Exchange did not provide fee information, assuming no fees.');
-      info(
-        'trader',
-        [
-          `[${id}] ${side} ${type} order summary for ${symbol}:`,
-          `Completed at: ${toISOString(orderExecutionDate)}`,
-          `Order amount: ${amount},`,
-          `Effective price: ${effectivePrice},`,
-          `Fee: ${fee},`,
-          `Fee percent: ${feePercent},`,
-        ].join(' '),
-      );
-    }
+    if (!isFiniteNumber(feePercent)) warning('trader', 'Exchange did not provide fee information, assuming no fees.');
+    info(
+      'trader',
+      [
+        `[${id}] ${side} ${type} order summary for ${symbol}:`,
+        `Completed at: ${toISOString(orderExecutionDate)}`,
+        `Order amount: ${amount},`,
+        `Effective price: ${effectivePrice},`,
+        `Fee: ${fee},`,
+        `Fee percent: ${feePercent},`,
+      ].join(' '),
+    );
 
-    const currentPrice = this.prices.get(symbol) ?? 0;
     const order = { ...summary, id, orderCreationDate, type, fee, effectivePrice, symbol };
-    const exchange = { price: currentPrice, portfolio: this.portfolio };
+    const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
     return { order, exchange };
   }
 
@@ -317,7 +390,7 @@ export class Trader extends Plugin {
    * exchange). Relayed as they were, they armed the trailing stop of the position with an amount of NaN, whose SELL was refused,
    * and the analyzers skipped or misdated the fill.
    */
-  private async summarizeCompletedOrder(orderInstance: OrderInstance, order: RelayedOrder) {
+  private async summarizeCompletedOrder(orderInstance: OrderInstance, order: RelayedOrder, creationPrice: number) {
     let reason: string;
     try {
       const summary = await orderInstance.createSummary();
@@ -327,7 +400,7 @@ export class Trader extends Plugin {
     } catch (err) {
       reason = `its summary could not be created: ${getErrorMessage(err)}`;
     }
-    return this.estimateOrderSummary(orderInstance, order, reason);
+    return this.estimateOrderSummary(orderInstance, order, reason, creationPrice);
   }
 
   /**
@@ -339,7 +412,7 @@ export class Trader extends Plugin {
    * - fee: unknown, which computeOrderPricing takes as no fee.
    * - execution date: the order does not know when it was filled: the end of the last minute processed.
    */
-  private estimateOrderSummary(orderInstance: OrderInstance, order: RelayedOrder, reason: string): OrderSummary {
+  private estimateOrderSummary(orderInstance: OrderInstance, order: RelayedOrder, reason: string, creationPrice: number): OrderSummary {
     const { id, side, type } = order;
     const filledAmount = orderInstance.getFilledAmount();
     const isFillReported = filledAmount > 0;
@@ -347,7 +420,7 @@ export class Trader extends Plugin {
     const amountSource = isFillReported
       ? 'the fill reported'
       : 'the amount ordered: no fill reported, and a filled order executed it in full, up to lot rounding';
-    const { price, priceSource } = this.estimateExecutionPrice(orderInstance, order);
+    const { price, priceSource } = this.estimateExecutionPrice(orderInstance, order, creationPrice);
 
     error(
       'trader',
@@ -368,17 +441,15 @@ export class Trader extends Plugin {
    * Order.getAverageFillPrice). A STICKY order was estimated at the market, which it follows, whatever its transactions filled at: one
    * that rested at 100.01 and filled before the market fell to 99 was reported at 99. Not a MARKET order: the price reported for it can
    * be the bound of its slippage, Hyperliquid placing it as a limit order 5 % beyond the market. Without them, a LIMIT order executed
-   * at its price. Any other one at the market: the last price known, else the price the order was created with. That price is kept
-   * with the order until its end is reported (see reportCompleted).
+   * at its price. Any other one at the market: the last price known, else the price the order was created with, which comes with the
+   * report (see relayTerminalEvents) whatever the orders the Trader still lists: an estimate never has a price of NaN.
    */
-  private estimateExecutionPrice(orderInstance: OrderInstance, { id, symbol, type }: RelayedOrder) {
+  private estimateExecutionPrice(orderInstance: OrderInstance, { symbol, type }: RelayedOrder, creationPrice: number) {
     const fillPrice = type === 'MARKET' ? undefined : orderInstance.getAverageFillPrice();
     if (!isNil(fillPrice)) return { price: fillPrice, priceSource: 'the prices of its fills, as the exchange reported them' };
-
-    const creationPrice = this.orders.get(id)?.price ?? NaN;
     if (type === 'LIMIT') return { price: creationPrice, priceSource: 'its limit price' };
 
-    const marketPrice = this.prices.get(symbol) ?? NaN;
+    const marketPrice = this.getLastPrice(symbol);
     if (marketPrice > 0) return { price: marketPrice, priceSource: 'the last market price' };
     return { price: creationPrice, priceSource: 'the price it was created with: no market price known' };
   }
@@ -403,7 +474,7 @@ export class Trader extends Plugin {
     } catch (err) {
       error('trader', `[${order.id}] Impossible to synchronize: ${getErrorMessage(err)}`);
     }
-    const exchange = { price: this.prices.get(order.symbol) || 0, portfolio: this.portfolio };
+    const exchange = { price: this.getLastPrice(order.symbol), portfolio: this.portfolio };
     this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, {
       order: { ...order, reason, orderErrorDate: this.currentTimestamp, filled, mayBeLive },
       exchange,
@@ -436,9 +507,12 @@ export class Trader extends Plugin {
    *   bucket was never delivered: nothing is flushed after processFinalize.
    * - in realtime, paper trading included, a report waits for the network: awaited, it would hold the bucket, and every plugin, for
    *   as long as the exchange takes to answer. It is delivered with the first flush after it ends.
+   *
+   * `creationPrice` is the price the order was created with (see TraderOrderMetadata), which estimates the price of a fill the
+   * exchange cannot summarize (see estimateExecutionPrice).
    */
-  private relayTerminalEvents(orderInstance: OrderInstance, order: RelayedOrder) {
-    orderInstance.once(ORDER_COMPLETED_EVENT, () => this.trackReport(this.reportCompleted(orderInstance, order)));
+  private relayTerminalEvents(orderInstance: OrderInstance, order: RelayedOrder, creationPrice: number) {
+    orderInstance.once(ORDER_COMPLETED_EVENT, () => this.trackReport(this.reportCompleted(orderInstance, order, creationPrice)));
     orderInstance.once(ORDER_CANCELED_EVENT, (cancelation: OrderCancelation) =>
       this.trackReport(this.reportCanceled(orderInstance, order, cancelation)),
     );
@@ -446,7 +520,7 @@ export class Trader extends Plugin {
       this.trackReport(this.reportErrored(orderInstance, order, failure)),
     );
     orderInstance.once(ORDER_INVALID_EVENT, (rejection: OrderRejection) =>
-      this.trackReport(this.reportRejected(orderInstance, order, rejection)),
+      this.trackReport(this.reportRejected(orderInstance, order, rejection, creationPrice)),
     );
   }
 
@@ -464,12 +538,12 @@ export class Trader extends Plugin {
   }
 
   /** The fill, with its summary, estimated when the exchange cannot give it (see summarizeCompletedOrder), and the portfolio after it */
-  private async reportCompleted(orderInstance: OrderInstance, order: RelayedOrder) {
+  private async reportCompleted(orderInstance: OrderInstance, order: RelayedOrder, creationPrice: number) {
     const { id, symbol, side, type, orderCreationDate } = order;
     try {
       orderInstance.removeAllListeners();
       const startedAfter = this.synchronizationCount;
-      const summary = await this.summarizeCompletedOrder(orderInstance, order);
+      const summary = await this.summarizeCompletedOrder(orderInstance, order, creationPrice);
       // The portfolio after the fill, best effort (see relayError)
       try {
         await this.synchronize(startedAfter);
@@ -501,7 +575,7 @@ export class Trader extends Plugin {
       } catch (err) {
         error('trader', `[${id}] Impossible to synchronize: ${getErrorMessage(err)}`);
       }
-      const exchange = { price: this.prices.get(symbol) ?? 0, portfolio: this.portfolio };
+      const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
       this.addDeferredEmit<OrderCanceledEvent>(ORDER_CANCELED_EVENT, {
         order: { ...order, orderCancelationDate: timestamp, filled, remaining },
         exchange,
@@ -537,7 +611,7 @@ export class Trader extends Plugin {
    * the position was not armed, and the analyzers missed it. The amount the order filled is read from it (see
    * Order.getFilledAmount): its rejection only says whether it filled anything.
    */
-  private async reportRejected(orderInstance: OrderInstance, order: RelayedOrder, rejection: OrderRejection) {
+  private async reportRejected(orderInstance: OrderInstance, order: RelayedOrder, rejection: OrderRejection, creationPrice: number) {
     const { id, side, type, amount } = order;
     try {
       orderInstance.removeAllListeners();
@@ -547,7 +621,7 @@ export class Trader extends Plugin {
       if (filledAmount > 0) {
         const fill = `after ${filledAmount} of ${amount} filled: that part is reported as a completion`;
         warning('trader', `[${id}] ${side} ${type} order: ${reason} (status: ${status}), ${fill}`);
-        await this.reportCompleted(orderInstance, order);
+        await this.reportCompleted(orderInstance, order, creationPrice);
         return;
       }
       info('trader', `[${id}] ${side} ${type} order: ${reason} (filled: ${filled}, status: ${status})`);
@@ -582,16 +656,17 @@ export class Trader extends Plugin {
       uniq(payloads).map(async id => {
         const orderMetadata = this.orders.get(id);
         if (!orderMetadata) return warning('trader', `[${id}] Impossible to cancel order: Unknown Order`);
-        const { orderInstance, side, amount, type, orderCreationDate, requestedPrice, symbol } = orderMetadata;
+        const { orderInstance, side, amount, type, orderCreationDate, price, requestedPrice, symbol } = orderMetadata;
         // Kept, an order placed since the balance was read went on taking from it: an all-in order sent after the cancelation, to trade at
         // the market instead, left out what the canceled one had reserved, which the exchange releases before that order reaches it
         this.unreadOrders.delete(id);
 
         // From now on its updates are no longer logged, and its end is relayed as the creation flow relays it: with the price the
         // strategy asked for, if any. Not the price the order was created with (see TraderOrderMetadata), the market price for an
-        // order without one, which the strategy and the EventSubscriber would read as a requested limit price.
+        // order without one, which the strategy and the EventSubscriber would read as a requested limit price: that one only goes to
+        // the report, for the estimate of a fill.
         orderInstance.removeAllListeners();
-        this.relayTerminalEvents(orderInstance, { id, orderCreationDate, amount, side, type, price: requestedPrice, symbol });
+        this.relayTerminalEvents(orderInstance, { id, orderCreationDate, amount, side, type, price: requestedPrice, symbol }, price);
 
         // Cancel, without waiting: the outcome arrives through the terminal events. A failure is reported as ORDER_ERRORED_EVENT,
         // so a rejection is not expected, but it must not become an unhandled one. Tracked as a report: the simulated exchange
@@ -628,36 +703,31 @@ export class Trader extends Plugin {
             filled: 0,
             mayBeLive: false,
           };
-          const exchange = { price: this.prices.get(symbol) || 0, portfolio: this.portfolio };
+          const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
           this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, { order, exchange });
           return;
         }
 
-        const [assetName, currencyName] = symbol.split('/');
-        const asset = this.getFreeBalanceLeft(assetName);
-        const currency = this.getFreeBalanceLeft(currencyName);
-
         // Price cannot be zero here because we call processOneMinuteBucket before events (plugins stream)
-        // We delegate the order validation (notional, lot, amount) to the exchange. An all-in SELL sells what the SELLs before it left of
-        // the asset, an all-in BUY spends what the BUYs before it left of the currency.
-        const isAllIn = isNil(advice.amount);
-        const requestedAmount = advice.amount ?? (side === 'BUY' ? this.sizeAllInBuy(advice, price, currency) : asset.free);
-        const amount = side === 'SELL' ? this.capToFreeBalance(advice, requestedAmount, asset, assetName) : requestedAmount;
+        // We delegate the order validation (notional, lot, amount) to the exchange, but for the maximum amount the market takes in one
+        // order, which a SELL and an all-in BUY are capped at (see sizeOrder). An all-in SELL sells what the SELLs before it left of the
+        // asset, an all-in BUY spends what the BUYs before it left of the currency.
+        const [assetName, currencyName] = symbol.split('/');
+        const takenFrom = side === 'SELL' ? assetName : currencyName;
+        const { amount, taken } = this.sizeOrder(advice, price, this.getFreeBalanceLeft(takenFrom));
 
         // Emit order initiated event
         const orderInitiated = { ...advice, amount, symbol };
-        const exchange = { price: this.prices.get(symbol) || 0, portfolio: this.portfolio };
+        const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
         this.addDeferredEmit<OrderInitiatedEvent>(ORDER_INITIATED_EVENT, { order: orderInitiated, exchange });
 
         // Create order
         const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price);
         this.orders.set(id, { amount, side, orderCreationDate, type, price, requestedPrice: advice.price, orderInstance, symbol });
         // Until the balance is read again, the orders after it can only take what it leaves (see unreadOrders): a SELL its amount of the
-        // asset, a BUY what it may spend of the currency, an all-in BUY all it was sized from. Not an order that cannot be placed, which
-        // the exchange refuses.
-        const taken = side === 'SELL' ? amount : isAllIn ? currency.free : getBuyBudget(amount, price);
+        // asset, a BUY what it may spend of the currency, an all-in BUY all it was sized from, unless capped at the maximum of the market.
+        // Not an order that cannot be placed, which the exchange refuses.
         if (isFinitePositive(amount) && isFinitePositive(taken)) {
-          const takenFrom = side === 'SELL' ? assetName : currencyName;
           this.unreadOrders.set(id, { assetName: takenFrom, amount: taken, synchronizationCount: this.synchronizationCount });
         }
 
@@ -672,7 +742,7 @@ export class Trader extends Plugin {
         });
 
         // TERMINAL EVENTS, relayed with the order as initiated
-        this.relayTerminalEvents(orderInstance, orderInitiated);
+        this.relayTerminalEvents(orderInstance, orderInitiated, price);
 
         // Launch the order, without waiting: the outcome arrives through the terminal events. A failure is reported as
         // ORDER_ERRORED_EVENT, so a rejection is not expected, but it must not become an unhandled one. Tracked as a report: the
