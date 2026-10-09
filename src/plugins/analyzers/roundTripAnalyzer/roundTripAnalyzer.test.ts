@@ -15,8 +15,15 @@ import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 // Mocks
 vi.mock('@services/logger');
 vi.mock('@utils/finance/stats.utils');
-vi.mock('@utils/math/math.utils');
-vi.mock('@utils/math/round.utils', () => ({ round: (val: number) => val }));
+// stdev only, which the tests drive: the formatters of the log lines read isFiniteNumber, and the decimal helpers stay actual
+vi.mock('@utils/math/math.utils', async importOriginal => ({
+  ...(await importOriginal<typeof import('@utils/math/math.utils')>()),
+  stdev: vi.fn(),
+}));
+vi.mock('@utils/math/round.utils', async importOriginal => ({
+  ...(await importOriginal<typeof import('@utils/math/round.utils')>()),
+  round: (val: number) => val,
+}));
 // The two the tests drive; isFetchedPortfolio stays actual, an automock would read every portfolio as one the Trader never fetched
 vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => ({
   ...(await importOriginal<typeof import('@utils/portfolio/portfolio.utils')>()),

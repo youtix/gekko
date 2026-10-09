@@ -244,7 +244,7 @@ describe('SQLiteStorage', () => {
       changes   | message
       ${[1, 1]} | ${'2 BTC/USDT candles written in database'}
       ${[1, 0]} | ${'1 BTC/USDT candle written in database'}
-      ${[0, 0]} | ${'0 BTC/USDT candle written in database'}
+      ${[0, 0]} | ${'0 BTC/USDT candles written in database'}
     `('logs the rows actually written, $changes, not the candles it tried', ({ changes, message }) => {
       for (const count of changes) statement.run.mockReturnValueOnce({ changes: count });
       storage.addBucket(new Map([['BTC/USDT', { start: 2, open: 2, high: 3, low: 4, close: 5, volume: 6 }]]));

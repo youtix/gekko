@@ -1,18 +1,27 @@
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { round } from '@utils/math/round.utils';
-import { camelCase } from 'lodash-es';
+import { camelCase, upperFirst } from 'lodash-es';
 import { END_Y_WORDS, IRREGULAR } from './string.const';
 
 export const toCamelCase = (...args: string[]) => {
   return camelCase(args.join(' '));
 };
 
+/**
+ * word as English writes it after count: the singular for a count of 1 or -1, the plural for any other, 0 included (the singular,
+ * once kept for every count up to 1, wrote 'Fetched 0 candle'). The plural is pluralForm when given, else the one IRREGULAR holds,
+ * else word with 'es' after s, sh, ch, x or z, 'ies' in place of a 'y' after a consonant, and 's' otherwise.
+ */
 export function pluralize(word: string, count: number, pluralForm?: string): string {
-  if (count <= 1) return word;
+  if (Math.abs(count) === 1) return word;
   if (pluralForm) return pluralForm;
 
   const lower = word.toLowerCase();
-  if (IRREGULAR[lower]) {
-    return IRREGULAR[lower];
+  // Its own keys only: read through the prototype of the map, 'constructor' gave the function Object
+  if (Object.hasOwn(IRREGULAR, lower)) {
+    const plural = IRREGULAR[lower];
+    // The map is in lower case: a capitalised word keeps its capital ('Person' → 'People'), as the rules below keep the word
+    return word[0] === lower[0] ? plural : upperFirst(plural);
   }
 
   // “bus” → “buses”, “box” → “boxes”, “buzz” → “buzzes”
@@ -31,8 +40,13 @@ const ratioFormatter = new Intl.NumberFormat('en-US', {
   useGrouping: false,
 });
 
+/**
+ * A ratio or a deviation to two decimals, for a person and for a CSV cell alike: 1.24, -0.01, and 0.00 rather than -0.00. Without a
+ * finite number it is '', as in toPlainNumber: Intl would write ∞, which no program reads back as a number, and the stats helpers
+ * give a ratio of 0, not an infinite one, for a deviation of 0.
+ */
 export function formatRatio(x: number | null | undefined): string {
-  if (x === null || x === undefined || Number.isNaN(x)) return '';
+  if (!isFiniteNumber(x)) return '';
   const rounded = Math.abs(x) < 0.005 ? 0 : x;
   return ratioFormatter.format(rounded);
 }
@@ -52,17 +66,10 @@ export const formatAmount = (value: number): string => amountFormatter.format(va
  * String writes 1.2e-7). Without a finite number it is '', where Intl would write NaN or ∞.
  */
 export const toPlainNumber = (value: number | null | undefined): string =>
-  typeof value === 'number' && Number.isFinite(value) ? plainNumberFormatter.format(value) : '';
-
-export const formatSignedAmount = (value: number, currency: string, formatter: Intl.NumberFormat) => {
-  const absolute = formatter.format(Math.abs(value));
-  if (value > 0) return `+${absolute} ${currency}`;
-  if (value < 0) return `-${absolute} ${currency}`;
-  return `${absolute} ${currency}`;
-};
+  isFiniteNumber(value) ? plainNumberFormatter.format(value) : '';
 
 export const formatSignedPercent = (value: number | null | undefined) => {
-  if (value === null || value === undefined || Number.isNaN(value) || !Number.isFinite(value)) return 'n/a';
+  if (!isFiniteNumber(value)) return 'n/a';
   const roundedValue = round(value, 2, 'halfEven');
   const absolute = Math.abs(roundedValue);
   if (roundedValue > 0) return `+${absolute}%`;
