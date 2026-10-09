@@ -1,5 +1,5 @@
 import { bench, describe } from 'vitest';
-import { addPrecise, stdev } from './math.utils';
+import { addPrecise, stdev, toSignificantDigits } from './math.utils';
 
 // Sample data for benchmarks
 const smallArray = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
@@ -38,5 +38,15 @@ describe('addPrecise Performance', () => {
     for (let i = 0; i < 100; i++) {
       result = addPrecise(result, 0.01);
     }
+  });
+});
+
+describe('toSignificantDigits Performance', () => {
+  bench('toSignificantDigits - a quotient with no end', () => {
+    toSignificantDigits(100 / 3);
+  });
+
+  bench('toSignificantDigits - a value of fewer digits', () => {
+    toSignificantDigits(0.07);
   });
 });

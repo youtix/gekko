@@ -41,7 +41,8 @@ const roundHalfEven = (n: number): number => {
 /**
  * Rounds value to `decimals` decimals: 'down' to the decimal below (Math.floor), 'up' to the nearest one, a tie to the one above
  * (Math.round), 'halfEven' to the nearest one, a tie to the even one. value is rounded as it is written, so that 8.2 rounded down
- * to 2 decimals stays 8.2 and 1.005 rounded up is 1.01. This is exact for any value.
+ * to 2 decimals stays 8.2 and 1.005 rounded up is 1.01. This is exact for any value. A negative value rounded to 0 is -0 'up', as
+ * with Math.round, and 0 'halfEven'; Intl.NumberFormat takes a negative tie away from zero (-2.914906545 to 8 decimals: -2.91490655).
  */
 export const round = (value: number, decimals = 0, option: 'down' | 'up' | 'halfEven' = 'up'): number => {
   // Nothing to round. value is given back as it is: shifted there and back, one of 16 or 17 significant digits could come back a unit off
