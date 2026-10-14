@@ -1,13 +1,11 @@
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as originalDateFns from 'date-fns';
 import { cleanDatabase } from '../../helpers/database.helper';
 import { endRealtimeRun, trackRealtimeRuns } from '../../helpers/realtimeRun.helper';
 import { createCcxtModuleMock, MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { mockDateFns } from '../../mocks/date-fns.mock';
 import { MockFetcherService } from '../../mocks/fetcher.mock';
 import { MockHeart } from '../../mocks/heart.mock';
-import { MockWinston, clearLogs, logStore } from '../../mocks/winston.mock';
+import { MockWinston, clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -96,20 +94,12 @@ mock.module('@services/configuration/configuration', () => {
 
 mock.module('ccxt', () => createCcxtModuleMock());
 
-// 6. Mock date-fns
-mock.module('date-fns', () => {
-  return {
-    ...originalDateFns,
-    ...mockDateFns,
-  };
-});
-
-// 7. Mock Heart
+// 6. Mock Heart
 mock.module('@services/core/heart/heart', () => ({
   Heart: MockHeart,
 }));
 
-// 8. End each test's run before the next test starts (see realtimeRun.helper)
+// 7. End each test's run before the next test starts (see realtimeRun.helper)
 trackRealtimeRuns();
 
 // --------------------------------------------------------------------------
@@ -253,7 +243,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
 
     // The StrategyManager forwarded both hooks of the stop to the strategy, which logs them: the orders completed are the BUY, then the
     // SELL the trigger hook was given
-    const lineStartingWith = (prefix: string) => logStore.find(log => typeof log.message === 'string' && log.message.startsWith(prefix));
+    const lineStartingWith = (prefix: string) => logStore.filter(isTextLine).find(({ message }) => message.startsWith(prefix));
     expect(lineStartingWith('Trailing stop activated')).toBeDefined();
     const [, buyId, sellId] = lineStartingWith('Trailing stop triggered')?.message.match(/BUY (\S+) .* MARKET SELL (\S+)/) ?? [];
     expect(completedLogs.map(log => log.message)).toEqual([

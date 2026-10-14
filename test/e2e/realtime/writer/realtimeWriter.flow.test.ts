@@ -1,14 +1,12 @@
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as originalDateFns from 'date-fns';
 import { first } from 'lodash-es';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
 import { cleanDatabase } from '../../helpers/database.helper';
 import { endRealtimeRun, trackRealtimeRuns } from '../../helpers/realtimeRun.helper';
 import { createCcxtModuleMock, MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { mockDateFns } from '../../mocks/date-fns.mock';
 import { MockHeart } from '../../mocks/heart.mock';
-import { MockWinston, clearLogs, logStore } from '../../mocks/winston.mock';
+import { MockWinston, clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -80,15 +78,7 @@ mock.module('@services/core/heart/heart', () => ({
   Heart: MockHeart,
 }));
 
-// 6. Mock date-fns
-mock.module('date-fns', () => {
-  return {
-    ...originalDateFns,
-    ...mockDateFns,
-  };
-});
-
-// 7. End each test's run before the next test starts (see realtimeRun.helper)
+// 6. End each test's run before the next test starts (see realtimeRun.helper)
 trackRealtimeRuns();
 
 describe('E2E: Realtime Writer (Synthetic)', () => {
@@ -267,7 +257,9 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // ASSERTION 2: Verify duplicate detection via logs
     // The live stream asks for the minutes after the last one it pushed: it drops a minute served again, with a warning
-    const warningLogs = logStore.filter(log => log.level === 'warn' && log.message.includes('Ignored a duplicate 1m candle'));
+    const warningLogs = logStore
+      .filter(isTextLine)
+      .filter(({ level, message }) => level === 'warn' && message.includes('Ignored a duplicate 1m candle'));
     expect(warningLogs.length).toBeGreaterThan(0);
 
     // ASSERTION 3: Verify the stored candles are valid and not corrupted by duplicate handling

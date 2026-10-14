@@ -1,10 +1,8 @@
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import type { DebugAdviceParams } from '@strategies/debug/debugAdvice.types';
 import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
-import * as originalDateFns from 'date-fns';
 import { endRealtimeRun, trackRealtimeRuns } from '../../helpers/realtimeRun.helper';
 import { createCcxtModuleMock, MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { mockDateFns } from '../../mocks/date-fns.mock';
 import { MockFetcherService } from '../../mocks/fetcher.mock';
 import { MockHeart } from '../../mocks/heart.mock';
 import { MockWinston, clearLogs, logStore } from '../../mocks/winston.mock';
@@ -112,20 +110,12 @@ mock.module('@services/configuration/configuration', () => {
 // 5. Mock CCXT Library
 mock.module('ccxt', () => createCcxtModuleMock());
 
-// 6. Mock date-fns
-mock.module('date-fns', () => {
-  return {
-    ...originalDateFns,
-    ...mockDateFns,
-  };
-});
-
-// 7. Mock Heart
+// 6. Mock Heart
 mock.module('@services/core/heart/heart', () => ({
   Heart: MockHeart,
 }));
 
-// 8. End each test's run before the next test starts (see realtimeRun.helper)
+// 7. End each test's run before the next test starts (see realtimeRun.helper)
 trackRealtimeRuns();
 
 import { cleanDatabase } from '../../helpers/database.helper';

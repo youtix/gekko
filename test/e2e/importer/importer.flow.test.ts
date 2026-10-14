@@ -4,7 +4,7 @@ import { beforeEach, describe, expect, it, mock } from 'bun:test';
 import { first, last } from 'lodash-es';
 import { generateSyntheticCandle } from '../fixtures/syntheticData';
 import { createCcxtModuleMock, MockCCXTExchange } from '../mocks/ccxt.mock';
-import { MockWinston, clearLogs, logStore } from '../mocks/winston.mock';
+import { MockWinston, clearLogs, isTextLine, logStore } from '../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -247,26 +247,17 @@ describe('E2E: Importer (Synthetic)', () => {
     MockCCXTExchange.shouldThrowError = true;
 
     const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-    const { inject } = await import('@services/injecter/injecter');
-    const storage = inject.storage() as SQLiteStorage;
-    const db = storage['db'];
 
-    // If gekkoPipeline handles errors internally and retries, it might not throw.
-    // If it fails, it should throw.
-    // In current Gekko2, serious pipeline errors usually propagate.
+    // The exchange's failure fails the import with its own error. The scenario accepted a normal end without a row as well as any
+    // error, so it passed when the candle streams' relay took the failure for the end of the pair's stream (an import that completes
+    // without its candles) or lost it behind another error. Caught rather than asserted through `rejects`, which Bun waits on past the
+    // test's timeout: an import that froze would hang the suite instead of failing here.
     try {
-      await gekkoPipeline();
-      // If no error thrown, we should check if data was NOT persisted
-      const rowCountBTC = db
-        .query('SELECT count(*) as count FROM candles_BTC_USDT WHERE start >= ? AND start <= ?')
-        .get(SCENARIO_D_START, SCENARIO_D_END) as { count: number };
-
-      expect(rowCountBTC.count).toBe(0);
-
-      // If it failed silently or retries exhausted, count might be 0 or partial.
-      // But usually we expect it to throw if it can't recover.
-    } catch (error) {
-      expect(error).toBeDefined();
+      const failure = await gekkoPipeline().then(
+        () => new Error('The import completed'),
+        (error: unknown) => error,
+      );
+      expect(failure).toHaveProperty('message', 'Simulated Network Error');
     } finally {
       MockCCXTExchange.shouldThrowError = false;
     }
@@ -571,7 +562,9 @@ describe('E2E: Importer (Synthetic)', () => {
     expect(firstStart).toBe(SCENARIO_L_START);
     expect(lastStart).toBeGreaterThanOrEqual(lastClosedMinute);
     expect(lastStart).toBeLessThan(minuteInProgress);
-    expect(logStore.some(({ level, message }) => level === 'warn' && message.includes('is not a closed minute yet'))).toBe(true);
+    expect(
+      logStore.filter(isTextLine).some(({ level, message }) => level === 'warn' && message.includes('is not a closed minute yet')),
+    ).toBe(true);
   }, 60000);
 
   it('Scenario M: daterange entirely in the future (nothing to import, ends cleanly)', async () => {
