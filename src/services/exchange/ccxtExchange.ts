@@ -1,3 +1,4 @@
+import { tz } from '@date-fns/tz';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { OrderSide, OrderState } from '@models/order.types';
@@ -12,15 +13,16 @@ import { addPrecise } from '@utils/math/math.utils';
 import { pluralize } from '@utils/string/string.utils';
 import ccxt, { Exchange as CCXT, Order as CCXTOrder, Trade as CCXTTrade } from 'ccxt';
 import { formatDuration, intervalToDuration } from 'date-fns';
-import { first, isNil, last } from 'lodash-es';
+import { first, isNil, last, partition } from 'lodash-es';
 import { z } from 'zod';
-import { binanceExchangeSchema } from './binance/binance.schema';
+import type { binanceExchangeSchema } from './binance/binance.schema';
 import { LIMITS, MAX_MY_TRADES_PAGES, PARAMS, PRICE_SIGNIFICANT_DIGITS } from './exchange.const';
 import { OrderOutcomeUnknown } from './exchange.error';
 import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from './exchange.types';
 import {
   checkMandatoryFeatures,
   createExchange,
+  isExecutedTrade,
   mapCcxtOrderToOpenOrder,
   mapCcxtOrderToOrder,
   mapCcxtTradeToTrade,
@@ -28,7 +30,7 @@ import {
   retry,
   translateErrors,
 } from './exchange.utils';
-import { hyperliquidExchangeSchema } from './hyperliquid/hyperliquid.schema';
+import type { hyperliquidExchangeSchema } from './hyperliquid/hyperliquid.schema';
 
 type BinanceExchangeConfig = z.infer<typeof binanceExchangeSchema>;
 type HyperliquidExchangeConfig = z.infer<typeof hyperliquidExchangeSchema>;
@@ -170,19 +172,24 @@ export class CCXTExchange implements Exchange {
       const { from, timeframe = '1m', limit = LIMITS[this.exchangeName].candles } = params;
       const ohlcvList = await this.publicClient.fetchOHLCV(symbol, timeframe, from, limit);
       const candles = mapOhlcvToCandles(ohlcvList);
-
-      debug(
-        'exchange',
-        [
-          `Fetched ${symbol} ${pluralize('candle', candles.length)} from ${this.exchangeName}.`,
-          `From ${toISOString(first(candles)?.start)}`,
-          `to ${toISOString(last(candles)?.start)}`,
-          `(${formatDuration(intervalToDuration({ start: first(candles)?.start ?? 0, end: last(candles)?.start ?? 0 }))})`,
-        ].join(' '),
-      );
-
+      debug('exchange', this.describeFetchedCandles(symbol, candles));
       return candles;
     });
+  }
+
+  /**
+   * What fetchOHLCV fetched: how many candles, and from the start of the first to the start of the last. The duration between them is
+   * counted on the UTC calendar: on the host's, a page across a DST change came out an hour off, 4999 minutes from 2026-10-24T00:00Z
+   * reading "3 days 10 hours 19 minutes" in Paris. The line used to name the candles without their count, and to date an empty page
+   * from 'Unknown Date' to 'Unknown Date'.
+   */
+  private describeFetchedCandles(symbol: string, candles: Candle[]) {
+    const fetched = `Fetched ${candles.length} ${symbol} ${pluralize('candle', candles.length)} from ${this.exchangeName}.`;
+    const start = first(candles)?.start;
+    const end = last(candles)?.start;
+    if (isNil(start) || isNil(end)) return fetched;
+    const duration = formatDuration(intervalToDuration({ start, end }, { in: tz('UTC') }));
+    return `${fetched} From ${toISOString(start)} to ${toISOString(end)}${duration ? ` (${duration})` : ''}`;
   }
 
   /**
@@ -232,8 +239,23 @@ export class CCXTExchange implements Exchange {
         since = lastTime;
       }
 
-      return [...trades.values()].filter(trade => trade.symbol === market.symbol).map(trade => mapCcxtTradeToTrade(trade, market));
+      const [executed, unknown] = partition(
+        [...trades.values()].filter(trade => trade.symbol === market.symbol),
+        isExecutedTrade,
+      );
+      if (unknown.length) this.warnOfUnknownTrades(symbol, unknown);
+      return executed.map(trade => mapCcxtTradeToTrade(trade, market));
     });
+  }
+
+  /**
+   * Warns, once for a call to fetchMyTrades, of the trades it leaves out, those that do not say what they executed (see
+   * isExecutedTrade): an order they filled is summed up without them, from the trades left, or estimated by the Trader without any.
+   */
+  private warnOfUnknownTrades(symbol: string, trades: CCXTTrade[]) {
+    const leftOut = `${trades.length} ${pluralize('trade', trades.length)} of ${symbol} on ${this.exchangeName} left out`;
+    const described = trades.map(({ id, order, amount, price }) => `trade ${id} of order ${order} (amount ${amount}, price ${price})`);
+    warning('exchange', `${leftOut}, their amount or price not a number above 0: ${described.join(', ')}`);
   }
 
   public async fetchOrder(symbol: string, id: string) {
@@ -292,9 +314,16 @@ export class CCXTExchange implements Exchange {
     _onSettled?: OrderSettledCallback, // Ignored - real exchanges use polling
   ) {
     return translateErrors<OrderState>(async () => {
-      const limits = this.publicClient.market(symbol).limits;
+      // ccxt's limits carry no precision: given with it and the values asked for, a value rounded to nothing is refused as asked, with
+      // the step that rounded it (see assertOrderWithinLimits)
+      const { limits, precision } = this.publicClient.market(symbol);
       const rounded = this.roundToMarketPrecision(symbol, amount, price);
-      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({ tag: 'exchange', ...rounded, marketData: limits });
+      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({
+        tag: 'exchange',
+        ...rounded,
+        marketData: { ...limits, precision },
+        requested: { amount, price },
+      });
       this.warnOfPriceMove(symbol, side, price, orderPrice);
 
       const order = await this.sendCreation(symbol, 'limit', side, orderAmount, orderPrice);
@@ -305,8 +334,10 @@ export class CCXTExchange implements Exchange {
   /** A write: sent once, never replayed (see the class comment). */
   public async createMarketOrder(symbol: string, side: OrderSide, amount: number) {
     return translateErrors<OrderState>(async () => {
-      // Narrowed to the amounts the exchange takes in a market order, Binance's MARKET_LOT_SIZE (see getMarketOrderLimits)
-      const limits = getMarketOrderLimits(this.publicClient.market(symbol).limits);
+      // Narrowed to the amounts the exchange takes in a market order, Binance's MARKET_LOT_SIZE (see getMarketOrderLimits), with the
+      // precision of the market, which names the step of a value rounded to nothing (see createLimitOrder)
+      const { limits: marketLimits, precision } = this.publicClient.market(symbol);
+      const limits = getMarketOrderLimits({ ...marketLimits, precision });
 
       // A read: fetchTicker retries it on its own. Its failure ends the creation before any order is sent, so it is not thrown as it
       // is: an ExchangeNetworkError thrown by a creation tells the orders that its outcome is unknown, the order maybe live
@@ -315,8 +346,14 @@ export class CCXTExchange implements Exchange {
         failure.cause = err;
         throw failure;
       });
-      const rounded = this.roundToMarketPrecision(symbol, amount, side === 'BUY' ? ticker.ask : ticker.bid);
-      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({ tag: 'exchange', ...rounded, marketData: limits });
+      const price = side === 'BUY' ? ticker.ask : ticker.bid;
+      const rounded = this.roundToMarketPrecision(symbol, amount, price);
+      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({
+        tag: 'exchange',
+        ...rounded,
+        marketData: limits,
+        requested: { amount, price },
+      });
 
       // The price goes with the order. Hyperliquid has no market order: ccxt sends an immediate-or-cancel limit order at this price
       // plus or minus its defaultSlippage option (5%), and refuses a market order without a price. Binance ignores it, its
@@ -383,11 +420,14 @@ export class CCXTExchange implements Exchange {
   private warnOfPriceMove(symbol: string, side: OrderSide, price: number, sentPrice: number) {
     const tick = this.publicClient.market(symbol).precision?.price;
     if (isNil(tick) || !(tick > 0) || 2 * Math.abs(addPrecise(sentPrice, -price)) <= tick) return;
-    const moved = `LIMIT ${side} order on ${symbol} at ${price} sent to ${this.exchangeName} at ${sentPrice}`;
+    // Every digit, without an exponent: String wrote a price under 1e-6 as 4.5678e-7, and rounded to 8 decimals the price asked for
+    // would read as the one sent
+    const write = (value: number) => this.publicClient.numberToString(value);
+    const moved = `LIMIT ${side} order on ${symbol} at ${write(price)} sent to ${this.exchangeName} at ${write(sentPrice)}`;
     const significantDigits = PRICE_SIGNIFICANT_DIGITS[this.exchangeName];
     const rule = `${this.exchangeName} takes ${significantDigits} significant digits in a price (precision.priceSignificantDigits)`;
     const reason = significantDigits ? `: ${rule}, a tick coarser than precision.price at that price` : '';
-    warning('exchange', `${moved}, more than half a tick of precision.price (${tick}) away${reason}`);
+    warning('exchange', `${moved}, more than half a tick of precision.price (${write(tick)}) away${reason}`);
   }
 
   /**

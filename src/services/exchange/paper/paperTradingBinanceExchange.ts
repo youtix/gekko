@@ -5,10 +5,19 @@ import { Trade } from '@models/trade.types';
 import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { info } from '@services/logger';
+import { formatAmount } from '@utils/string/string.utils';
 import { CCXTExchange } from '../ccxtExchange';
 import { DummyCentralizedExchange } from '../dummy/dummyCentralizedExchange';
 import { DummyExchange, Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback } from '../exchange.types';
 import { PaperTradingBinanceExchangeConfig } from './paperTradingBinanceExchange.types';
+
+/**
+ * The balances of a portfolio for a person to read, in its order: 1 BTC, 10,000 USDT. The simulator's, read once it is built: every
+ * asset and currency of the watched pairs, at 0 without a simulationBalance, and nothing else. A new simulator holds everything free.
+ * The configured simulationBalance used to be written with JSON.stringify, which writes a Map as {}: "Initial portfolio: {}".
+ */
+const describePortfolio = (portfolio: Portfolio) =>
+  [...portfolio].map(([asset, { total }]) => `${formatAmount(total)} ${asset}`).join(', ');
 
 /**
  * Paper Trading Exchange for Binance
@@ -68,7 +77,7 @@ export class PaperTradingBinanceExchange implements Exchange, DummyExchange {
     this.simulatedMarketData = marketData;
 
     info('exchange', '🔶 PAPER TRADING MODE - Using simulated orders with real market data');
-    info('exchange', `Initial portfolio: ${JSON.stringify(this.exchangeConfig.simulationBalance)}`);
+    info('exchange', `Initial portfolio: ${describePortfolio(await this.simulatedExchange.fetchBalance())}`);
   }
 
   /** The override is merged into the real fees, not substituted: a fee it leaves out (maker or taker) keeps its Binance value */

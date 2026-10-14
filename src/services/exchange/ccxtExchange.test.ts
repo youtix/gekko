@@ -2,6 +2,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { config } from '@services/configuration/configuration';
 import * as logger from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { assertOrderWithinLimits } from '@utils/market/market.utils';
 import ccxt from 'ccxt';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
@@ -324,6 +325,41 @@ describe('CCXTExchange', () => {
       expect(await exchange.fetchOHLCV('BTC/USDT', { limit: 50, from: 1000 })).toEqual(candles);
       expect(instance.fetchOHLCV).toHaveBeenCalledWith('BTC/USDT', '1m', 1000, 50);
     });
+
+    // How many candles a page holds, and the range they span. The line used to name the candles without their count, and to date an
+    // empty page from 'Unknown Date' to 'Unknown Date'.
+    describe('logging the page fetched', () => {
+      /** `count` candles a minute apart, the first one starting at `start` */
+      const candlesFrom = (start: number, count: number) => Array.from({ length: count }, (_, n) => ({ start: start + n * 60_000 }));
+      let exchange: CCXTExchange;
+
+      beforeEach(() => {
+        exchange = new CCXTExchange(binanceConfig);
+      });
+
+      it.each`
+        description       | candles                                    | message
+        ${'1000 candles'} | ${candlesFrom(Date.UTC(2026, 9, 1), 1000)} | ${'Fetched 1000 BTC/USDT candles from binance. From 2026-10-01T00:00:00.000Z to 2026-10-01T16:39:00.000Z (16 hours 39 minutes)'}
+        ${'1 candle'}     | ${candlesFrom(Date.UTC(2026, 9, 1), 1)}    | ${'Fetched 1 BTC/USDT candle from binance. From 2026-10-01T00:00:00.000Z to 2026-10-01T00:00:00.000Z'}
+        ${'no candle'}    | ${[]}                                      | ${'Fetched 0 BTC/USDT candles from binance.'}
+      `('logs a page of $description at debug level: $message', async ({ candles, message }) => {
+        (mapOhlcvToCandles as Mock).mockReturnValue(candles);
+        await exchange.fetchOHLCV('BTC/USDT');
+        expect(logger.debug).toHaveBeenCalledWith('exchange', message);
+      });
+
+      // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET. Counted on the host's calendar, a page across that night came out
+      // an hour short: 3 days 10 hours 19 minutes.
+      describe('on a host in Europe/Paris, a page across the end of DST', () => {
+        useTimeZone('Europe/Paris');
+
+        it('logs the duration of 5000 candles from 2026-10-24T00:00Z on the UTC calendar: 3 days 11 hours 19 minutes', async () => {
+          (mapOhlcvToCandles as Mock).mockReturnValue(candlesFrom(Date.UTC(2026, 9, 24), 5000));
+          await exchange.fetchOHLCV('BTC/USDT');
+          expect(logger.debug).toHaveBeenCalledWith('exchange', expect.stringMatching(/\(3 days 11 hours 19 minutes\)$/));
+        });
+      });
+    });
   });
 
   describe('fetchMyTrades', () => {
@@ -465,6 +501,30 @@ describe('CCXTExchange', () => {
       instance.fetchMyTrades.mockResolvedValue([...makeTrades(limit - 1, index => 1000 + index), makeTrade('untimed', undefined)]);
       await exchange.fetchMyTrades('BTC/USDT', 1000);
       expect(getSinceOfEachCall()).toEqual([1000, 1000]);
+    });
+
+    // ccxt leaves the amount or the price of a trade undefined when the exchange gives none. Read as 0, an unknown price entered the
+    // mean price of the order: fills of 0.5 at 100 and of 0.5 at an unknown price made a fill of 1 at 50.
+    describe('with trades that do not say what they executed', () => {
+      const executed = makeTrade('1', 1000);
+      const withoutPrice = makeTrade('2', 1001, { price: undefined });
+      const withoutAmount = makeTrade('3', 1002, { amount: undefined });
+
+      beforeEach(() => {
+        instance.fetchMyTrades.mockResolvedValue([executed, withoutPrice, withoutAmount]);
+      });
+
+      it('returns only the trade that does', async () => {
+        expect(await exchange.fetchMyTrades('BTC/USDT', 1000)).toEqual([executed]);
+      });
+
+      it('warns once, naming the trades left out', async () => {
+        await exchange.fetchMyTrades('BTC/USDT', 1000);
+        expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+          'exchange',
+          '2 trades of BTC/USDT on binance left out, their amount or price not a number above 0: trade 2 of order ord1 (amount 1, price undefined), trade 3 of order ord1 (amount undefined, price 60000)',
+        );
+      });
     });
 
     it('keeps both sides of a self-trade, which share the id of the trade', async () => {
@@ -717,7 +777,13 @@ describe('CCXTExchange', () => {
 
     it('validates the order against the limits of the market', async () => {
       await exchange.createLimitOrder('BTC/USDT', 'BUY', 1, 100);
-      expect(assertOrderWithinLimits).toHaveBeenCalledWith({ tag: 'exchange', amount: 1, price: 100, marketData: limits });
+      expect(assertOrderWithinLimits).toHaveBeenCalledWith({
+        tag: 'exchange',
+        amount: 1,
+        price: 100,
+        marketData: limits,
+        requested: { amount: 1, price: 100 },
+      });
     });
 
     it('sends the amount and the price returned by the validation', async () => {
@@ -772,7 +838,13 @@ describe('CCXTExchange', () => {
       ${'SELL'} | ${100}
     `('validates the $side order against the limits of the market at the ticker price $tickerPrice', async ({ side, tickerPrice }) => {
       await exchange.createMarketOrder('BTC/USDT', side, 1);
-      expect(assertOrderWithinLimits).toHaveBeenCalledWith({ tag: 'exchange', amount: 1, price: tickerPrice, marketData: limits });
+      expect(assertOrderWithinLimits).toHaveBeenCalledWith({
+        tag: 'exchange',
+        amount: 1,
+        price: tickerPrice,
+        marketData: limits,
+        requested: { amount: 1, price: tickerPrice },
+      });
     });
 
     it('sends the amount and the price returned by the validation', async () => {
@@ -891,9 +963,15 @@ describe('CCXTExchange', () => {
       expect(instance.createOrder).not.toHaveBeenCalled();
     });
 
-    it('validates the amount and the price rounded to the precision of the market', async () => {
+    it('validates the amount and the price rounded to the precision of the market, given those asked for', async () => {
       await create(exchange, instance, 1.234567, 100.456);
-      expect(assertOrderWithinLimits).toHaveBeenCalledWith({ tag: 'exchange', amount: 1.23456, price: 100.46, marketData: limits });
+      expect(assertOrderWithinLimits).toHaveBeenCalledWith({
+        tag: 'exchange',
+        amount: 1.23456,
+        price: 100.46,
+        marketData: { ...limits, precision },
+        requested: { amount: 1.234567, price: 100.456 },
+      });
     });
 
     it('sends the amount and the price rounded to the precision of the market', async () => {
@@ -928,17 +1006,22 @@ describe('CCXTExchange', () => {
       expect(instance.amountToPrecision).not.toHaveBeenCalled();
     });
 
-    it('refuses an amount truncated to nothing with an OrderOutOfRangeError on its amount of 0', async () => {
-      await expect(create(exchange, instance, 0.000004, 100)).rejects.toStrictEqual(new OrderOutOfRangeError('exchange', 'amount', 0));
+    // Reported as 0, the amount asked for, the step and the minimum all unsaid: "Order 'amount' with value 0 is invalid"
+    it('refuses an amount truncated to nothing with an OrderOutOfRangeError naming the amount asked for and the step', async () => {
+      await expect(create(exchange, instance, 0.000004, 100)).rejects.toStrictEqual(
+        new OrderOutOfRangeError('exchange', 'amount', 0, 0.00001, 9000, { requested: 0.000004, step: 0.00001 }),
+      );
     });
 
     it.each`
       description                                             | rounding
       ${'throws an InvalidOrder for, as it does for Binance'} | ${refusePriceRoundedToZero}
       ${'rounds to 0, as it does for Hyperliquid'}            | ${() => '0'}
-    `('refuses a price ccxt $description with an OrderOutOfRangeError on its price of 0', async ({ rounding }) => {
+    `('refuses a price ccxt $description with an OrderOutOfRangeError naming the price asked for and the step', async ({ rounding }) => {
       instance.priceToPrecision.mockImplementation(rounding);
-      await expect(create(exchange, instance, 1, 0.004)).rejects.toStrictEqual(new OrderOutOfRangeError('exchange', 'price', 0));
+      await expect(create(exchange, instance, 1, 0.004)).rejects.toStrictEqual(
+        new OrderOutOfRangeError('exchange', 'price', 0, 0.01, 1000000, { requested: 0.004, step: 0.01 }),
+      );
     });
 
     it('rejects with any other failure of the rounding', async () => {
@@ -989,6 +1072,17 @@ describe('CCXTExchange', () => {
     it('sends the order at the rounded price all the same', async () => {
       await exchange.createLimitOrder('BTC/USDC', 'SELL', 1, 10000.4);
       expect(instance.createOrder).toHaveBeenCalledWith('BTC/USDC', 'limit', 'SELL', 1, 10000);
+    });
+
+    // A price under 1e-6 on a tick of 1e-9, which String wrote 4.5678e-7 and 1e-9
+    it('writes the prices and the tick of the warning with every digit, without an exponent', async () => {
+      instance.market.mockReturnValue({ limits, precision: { amount: 0.01, price: 1e-9 } });
+      instance.priceToPrecision.mockReturnValue('0.00000046');
+      await exchange.createLimitOrder('BTC/USDC', 'BUY', 100_000_000, 4.5678e-7);
+      expect(logger.warning).toHaveBeenCalledWith(
+        'exchange',
+        'LIMIT BUY order on BTC/USDC at 0.00000045678 sent to hyperliquid at 0.00000046, more than half a tick of precision.price (0.000000001) away: hyperliquid takes 5 significant digits in a price (precision.priceSignificantDigits), a tick coarser than precision.price at that price',
+      );
     });
 
     // A rounding Binance does not make, its tick being precision.price: the warning then names no rule

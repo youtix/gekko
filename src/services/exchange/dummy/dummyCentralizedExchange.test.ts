@@ -653,14 +653,15 @@ describe('DummyCentralizedExchange', () => {
     });
 
     // The limits are checked on the amount truncated, with the message of the shared formatter, as live. An amount of at least
-    // amount.min stays so, a minimum of the market being a multiple of its step; its cost can fall under cost.min.
+    // amount.min stays so, a minimum of the market being a multiple of its step; its cost can fall under cost.min. An amount truncated
+    // to nothing is refused as asked, with the step: reported as 0, it read "value 0 is invalid", the amount asked for and the step unsaid.
     it.each`
       type        | side      | amount                    | price       | property    | value        | detail
       ${'limit'}  | ${'BUY'}  | ${0.00008595077805222816} | ${61234.56} | ${'cost'}   | ${4.8987648} | ${'is out of range. Expected a value between 5 and 9000000.'}
       ${'market'} | ${'SELL'} | ${0.00008595077805222816} | ${61234.56} | ${'cost'}   | ${4.8987648} | ${'is out of range. Expected a value between 5 and 9000000.'}
       ${'limit'}  | ${'SELL'} | ${0.0000560556}           | ${99990}    | ${'cost'}   | ${4.9995}    | ${'is out of range. Expected a value between 5 and 9000000.'}
-      ${'limit'}  | ${'SELL'} | ${0.0000099}              | ${61234.56} | ${'amount'} | ${0}         | ${'is invalid. Expected a finite number greater than 0.'}
-      ${'market'} | ${'BUY'}  | ${0.0000099}              | ${61234.56} | ${'amount'} | ${0}         | ${'is invalid. Expected a finite number greater than 0.'}
+      ${'limit'}  | ${'SELL'} | ${0.0000099}              | ${61234.56} | ${'amount'} | ${0.0000099} | ${'rounds to 0 on the amount step 0.00001 of the market. Expected a value between 0.00001 and 9000.'}
+      ${'market'} | ${'BUY'}  | ${0.0000099}              | ${61234.56} | ${'amount'} | ${0.0000099} | ${'rounds to 0 on the amount step 0.00001 of the market. Expected a value between 0.00001 and 9000.'}
     `(
       'refuses a $type $side of $amount BTC at $price: once the amount is truncated, its $property of $value $detail',
       async ({ type, side, amount, price, property, value, detail }) => {
@@ -668,6 +669,24 @@ describe('DummyCentralizedExchange', () => {
         const order =
           type === 'limit' ? exchange.createLimitOrder(SYMBOL, side, amount, price) : exchange.createMarketOrder(SYMBOL, side, amount);
         await expect(order).rejects.toThrow(`[EXCHANGE] Order '${property}' with value ${value} ${detail}`);
+      },
+    );
+
+    // The currency an order books, amount × price × (1 ± fee) rounded half up to 8 decimals, worked out in decimal. In binary each of these
+    // products came out a few ulps under the half, and was booked 1e-8 short: 1070.64727884 for 1070.64727885 the first.
+    it.each`
+      type        | side      | amount     | price       | booked           | total
+      ${'market'} | ${'BUY'}  | ${0.0107}  | ${99990.5}  | ${1070.64727885} | ${929.35272115}
+      ${'market'} | ${'SELL'} | ${0.0101}  | ${99990.5}  | ${1009.19711717} | ${3009.19711717}
+      ${'limit'}  | ${'BUY'}  | ${0.01125} | ${60622.21} | ${682.27266245}  | ${1317.72733755}
+      ${'limit'}  | ${'SELL'} | ${0.01445} | ${75000.25} | ${1083.32011106} | ${3083.32011106}
+    `(
+      'leaves $total USDT in total from 2000 once a $type $side of $amount BTC at $price books $booked USDT',
+      async ({ type, side, amount, price, total }) => {
+        const exchange = createSteppedExchange(price);
+        await executeOrder(exchange, type, side, amount, price);
+        const balance = await exchange.fetchBalance();
+        expect(balance.get('USDT')?.total).toBe(total);
       },
     );
 

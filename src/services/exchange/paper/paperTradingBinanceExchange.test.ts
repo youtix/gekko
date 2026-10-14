@@ -1,5 +1,7 @@
 import { Candle } from '@models/candle.types';
+import { Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
+import { info } from '@services/logger';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { CCXTExchange } from '../ccxtExchange';
 import { DummyCentralizedExchange } from '../dummy/dummyCentralizedExchange';
@@ -56,6 +58,9 @@ const REAL_MARKET_DATA: MarketData = {
   precision: { price: 0.01, amount: 0.00001 },
   fee: { maker: 0.001, taker: 0.002 },
 };
+/** A portfolio as the simulator holds it once built: each balance free, nothing used */
+const createPortfolio = (balances: [string, number][]): Portfolio =>
+  new Map(balances.map(([asset, balance]) => [asset, { free: balance, used: 0, total: balance }]));
 const simulatorMarketData = () => vi.mocked(DummyCentralizedExchange).mock.calls[0][0].marketData;
 const realExchangeConfig = () => vi.mocked(CCXTExchange).mock.calls[0][0];
 
@@ -64,6 +69,13 @@ describe('PaperTradingBinanceExchange', () => {
     (config.getWatch as Mock).mockReturnValue(mockWatchConfig);
     // A fresh object per call, as CCXTExchange builds one
     vi.mocked(CCXTExchange.prototype.getMarketData).mockImplementation(() => structuredClone(REAL_MARKET_DATA));
+    // The portfolio of the simulator built from mockExchangeConfig
+    vi.mocked(DummyCentralizedExchange.prototype.fetchBalance).mockResolvedValue(
+      createPortfolio([
+        ['BTC', 1],
+        ['USDT', 10000],
+      ]),
+    );
   });
 
   describe('Constructor', () => {
@@ -114,6 +126,19 @@ describe('PaperTradingBinanceExchange', () => {
       const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride });
       await exchange.loadMarkets();
       expect(simulatorMarketData().get('BTC/USDT')).toEqual({ ...REAL_MARKET_DATA, fee });
+    });
+
+    // The portfolio the simulator holds once built, every asset and currency of the watched pairs. The configured simulationBalance, a
+    // Map, used to be written with JSON.stringify: "Initial portfolio: {}".
+    it.each`
+      balances                                         | message
+      ${[['BTC', 1], ['USDT', 10000]]}                 | ${'Initial portfolio: 1 BTC, 10,000 USDT'}
+      ${[['BTC', 0.00000012], ['USDT', 0]]}            | ${'Initial portfolio: 0.00000012 BTC, 0 USDT'}
+      ${[['BTC', 0.5], ['ETH', 2.25], ['USDT', 1500]]} | ${'Initial portfolio: 0.5 BTC, 2.25 ETH, 1,500 USDT'}
+    `('logs the portfolio of the simulator at info level: $message', async ({ balances, message }) => {
+      vi.mocked(DummyCentralizedExchange.prototype.fetchBalance).mockResolvedValue(createPortfolio(balances));
+      await new PaperTradingBinanceExchange(mockExchangeConfig).loadMarkets();
+      expect(info).toHaveBeenCalledWith('exchange', message);
     });
 
     // The simulator narrows the amounts of a market order with it, so that paper trading refuses the market orders Binance refuses

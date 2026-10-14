@@ -2,9 +2,9 @@ import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { OrderSide, OrderState } from '@models/order.types';
 import { Trade } from '@models/trade.types';
-import { debug, error, warning } from '@services/logger';
+import { debug } from '@services/logger';
 import { getRetryDelay } from '@utils/fetch/fetch.utils';
-import { addPrecise, multiplyPrecise, toSignificantDigits } from '@utils/math/math.utils';
+import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
 import { wait } from '@utils/process/process.utils';
 import ccxt, { Order as CCXTOrder, Trade as CCXTTrade, ConstructorArgs, Exchange, MarketInterface, OHLCV } from 'ccxt';
@@ -115,21 +115,45 @@ export const translateErrors = async <T>(fn: () => Promise<T>): Promise<T> => {
 /**
  * Calls the exchange, and calls it again after a ccxt NetworkError, up to maxRetries more times. The error it gives up on, or any
  * other error at once, is thrown translated by translateCcxtError.
+ * - `attempt` numbers the calls from 0, the first one, as the fetcher numbers its requests: the call that failed waits
+ *   getRetryDelay(attempt) before the next one, 1000, 1585 and 2000 ms. Numbered from 1, every read waited 1585, 2000 and 2322 ms.
+ * - Each failure is logged at debug level only. The callers log what they could not read, at the level it deserves: an order poll
+ *   that failed on the network warns that the order stays open, a synchronization that failed is an error. Logged here as an error
+ *   then a warning, a read that failed once and succeeded at the next call reached Telegram as an alert (Supervision forwards every
+ *   warning and error), and a read that failed for good was reported twice.
  */
-export const retry = async <T>(fn: () => Promise<T>, currRetry = 1, maxRetries = BROKER_MAX_RETRIES_ON_FAILURE): Promise<T> => {
+export const retry = async <T>(fn: () => Promise<T>, attempt = 0, maxRetries = BROKER_MAX_RETRIES_ON_FAILURE): Promise<T> => {
   try {
     return await fn();
   } catch (err) {
-    const isRetryableError = err instanceof ccxt.NetworkError;
-    if (err instanceof Error) error('exchange', `Call to exchange failed due to ${err.message}`);
-    if (!isRetryableError || currRetry > maxRetries) throw translateCcxtError(err);
-    await wait(getRetryDelay(currRetry));
-    warning('exchange', `Retrying to fetch (attempt ${currRetry})`);
-    return retry(fn, currRetry + 1, maxRetries);
+    const failure = `Call to the exchange failed, attempt ${attempt + 1}`;
+    const reason = err instanceof Error ? err.message : inspect(err);
+    if (!(err instanceof ccxt.NetworkError)) {
+      debug('exchange', `${failure}, not retried: ${reason}`);
+      throw translateCcxtError(err);
+    }
+    if (attempt >= maxRetries) {
+      debug('exchange', `${failure} of ${maxRetries + 1}, given up: ${reason}`);
+      throw translateCcxtError(err);
+    }
+    const delay = getRetryDelay(attempt);
+    debug('exchange', `${failure} of ${maxRetries + 1}, retried in ${Math.round(delay)} ms: ${reason}`);
+    await wait(delay);
+    return retry(fn, attempt + 1, maxRetries);
   }
 };
 
-const isFiniteNumber = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value);
+/** A ccxt trade that says what it executed: an amount and a price, both finite numbers above 0 (see isExecutedTrade) */
+export type ExecutedTrade = CCXTTrade & { amount: number; price: number };
+
+/**
+ * Whether a ccxt trade says what it executed: an amount and a price, both finite numbers above 0. ccxt 4.5.39 leaves either undefined
+ * when the exchange gives none (safeTrade derives the cost from the price, never the price from the cost). Read as 0, an unknown price
+ * entered the mean price of its order as a real one: fills of 0.5 at 100 and of 0.5 at an unknown price made a fill of 1 at 50.
+ * Binance (myTrades) and Hyperliquid (fills) give both on every trade.
+ */
+export const isExecutedTrade = (trade: CCXTTrade): trade is ExecutedTrade =>
+  isFiniteNumber(trade.amount) && trade.amount > 0 && isFiniteNumber(trade.price) && trade.price > 0;
 
 /**
  * The fee rate of a ccxt trade in %, the unit of Trade.fee.rate and of the simulated exchange (0.1 for 0.1 %), or undefined when it
@@ -145,31 +169,29 @@ const isFiniteNumber = (value: unknown): value is number => typeof value === 'nu
  * amount and price are written (multiplyPrecise), the one division rounded to 15 significant digits (toSignificantDigits). In binary,
  * a rate of 0.0007 came out at 0.06999999999999999 %, and so did a fee of 0.0007 USDC on 0.01 at 100.
  */
-const getFeePercent = (trade: CCXTTrade, market: MarketInterface): number | undefined => {
+const getFeePercent = (trade: ExecutedTrade, market: MarketInterface): number | undefined => {
   const rate = trade.fee?.rate;
   if (isFiniteNumber(rate)) return shiftDecimalPoint(rate, 2);
 
   const cost = trade.fee?.cost;
   const currency = trade.fee?.currency;
-  const amount = trade.amount ?? 0;
-  const price = trade.price ?? 0;
-  if (!isFiniteNumber(cost) || !currency || !(amount > 0) || !(price > 0)) return undefined;
+  if (!isFiniteNumber(cost) || !currency) return undefined;
 
   const baseName = 'baseName' in market && typeof market.baseName === 'string' ? market.baseName : undefined;
   const percentOf = (whole: number) => toSignificantDigits(shiftDecimalPoint(cost, 2) / whole);
-  if (currency === market.quote || currency === market.quoteId) return percentOf(multiplyPrecise(amount, price));
-  if (currency === market.base || currency === baseName) return percentOf(amount);
+  if (currency === market.quote || currency === market.quoteId) return percentOf(multiplyPrecise(trade.amount, trade.price));
+  if (currency === market.base || currency === baseName) return percentOf(trade.amount);
   return undefined;
 };
 
 /**
- * Maps a ccxt trade of the market given onto a Gekko trade. Its fee rate is in % (see getFeePercent); the cost and the currency of
- * the fee are kept as ccxt gives them, for information.
+ * Maps a ccxt trade of the market given, one that says what it executed (see isExecutedTrade), onto a Gekko trade. Its fee rate is in
+ * % (see getFeePercent); the cost and the currency of the fee are kept as ccxt gives them, for information.
  */
-export const mapCcxtTradeToTrade = (trade: CCXTTrade, market: MarketInterface): Trade => ({
+export const mapCcxtTradeToTrade = (trade: ExecutedTrade, market: MarketInterface): Trade => ({
   id: trade.order ?? '',
-  amount: trade.amount ?? 0,
-  price: trade.price ?? 0,
+  amount: trade.amount,
+  price: trade.price,
   timestamp: trade.timestamp ?? Date.now(),
   fee: { rate: getFeePercent(trade, market), cost: trade.fee?.cost, currency: trade.fee?.currency },
 });

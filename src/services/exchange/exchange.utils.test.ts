@@ -1,5 +1,6 @@
 import { GekkoError } from '@errors/gekko.error';
 import * as logger from '@services/logger';
+import { wait } from '@utils/process/process.utils';
 import ccxt, { binance, hyperliquid, NetworkError } from 'ccxt';
 import { HttpsProxyAgent } from 'https-proxy-agent';
 import { pick } from 'lodash-es';
@@ -21,6 +22,11 @@ vi.mock('@utils/process/process.utils', () => ({
 
 describe('Exchange Utils', () => {
   describe('retry', () => {
+    const timeout = new ccxt.RequestTimeout('binance GET https://api.binance.com/api/v3/order request timed out (10000 ms)');
+    const keyRefused = new ccxt.AuthenticationError('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}');
+    // A rejection with a value that is not an Error, which the log line writes as inspect does
+    const hangUp = 'socket hang up';
+
     it('should return result immediately on success', async () => {
       const fn = vi.fn().mockResolvedValue('success');
       expect(await utils.retry(fn)).toBe('success');
@@ -39,7 +45,7 @@ describe('Exchange Utils', () => {
 
     it('should throw after max retries', async () => {
       const fn = vi.fn().mockRejectedValue(new NetworkError('fail'));
-      await expect(utils.retry(fn, 1, 2)).rejects.toThrow(ExchangeNetworkError);
+      await expect(utils.retry(fn, 0, 2)).rejects.toThrow(ExchangeNetworkError);
     });
 
     it('should throw non-NetworkError immediately', async () => {
@@ -47,10 +53,58 @@ describe('Exchange Utils', () => {
       await expect(utils.retry(fn)).rejects.toThrow('Fatal');
     });
 
-    it('should log error on failure', async () => {
-      const fn = vi.fn().mockRejectedValue(new Error('Fatal'));
-      await expect(utils.retry(fn)).rejects.toThrow();
-      expect(logger.error).toHaveBeenCalledWith('exchange', expect.stringContaining('Fatal'));
+    it('calls 3 times, the first call numbered 0, with a maxRetries of 2', async () => {
+      const fn = vi.fn().mockRejectedValue(new NetworkError('fail'));
+      await utils.retry(fn, 0, 2).catch(() => undefined);
+      expect(fn).toHaveBeenCalledTimes(3);
+    });
+
+    // Numbered from 0, as the fetcher numbers its requests: numbered from 1, every read waited 1585, 2000 and 2322 ms
+    it.each`
+      call | delay
+      ${1} | ${1000}
+      ${2} | ${1584.9625007211562}
+      ${3} | ${2000}
+    `('waits $delay ms after the failure of call $call, as the fetcher does', async ({ call, delay }) => {
+      await utils.retry(vi.fn().mockRejectedValue(timeout)).catch(() => undefined);
+      expect(wait).toHaveBeenNthCalledWith(call, delay);
+    });
+
+    it('waits BROKER_MAX_RETRIES_ON_FAILURE times before giving up', async () => {
+      await utils.retry(vi.fn().mockRejectedValue(timeout)).catch(() => undefined);
+      expect(wait).toHaveBeenCalledTimes(BROKER_MAX_RETRIES_ON_FAILURE);
+    });
+
+    // The callers log what they could not read, at the level it deserves. Logged here as an error then a warning, a read that failed
+    // once reached Telegram as an alert (Supervision forwards every warning and error) though it succeeded at the next call.
+    describe.each`
+      description                                      | createFn
+      ${'a read that times out once, then succeeds'}   | ${() => vi.fn().mockRejectedValueOnce(timeout).mockResolvedValue('order')}
+      ${'a read that times out on every call'}         | ${() => vi.fn().mockRejectedValue(timeout)}
+      ${'a read the exchange refuses'}                 | ${() => vi.fn().mockRejectedValue(keyRefused)}
+      ${'a read that fails with a value not an Error'} | ${() => vi.fn().mockRejectedValue(hangUp)}
+    `('$description', ({ createFn }) => {
+      it.each`
+        level
+        ${'error'}
+        ${'warning'}
+      `('logs no $level', async ({ level }) => {
+        await utils.retry(createFn()).catch(() => undefined);
+        expect(logger[level as 'error' | 'warning']).not.toHaveBeenCalled();
+      });
+    });
+
+    it.each`
+      description                       | createFn                                                                      | line | message
+      ${'a timeout, retried'}           | ${() => vi.fn().mockRejectedValue(timeout)}                                   | ${1} | ${`Call to the exchange failed, attempt 1 of 4, retried in 1000 ms: ${timeout.message}`}
+      ${'a second timeout, retried'}    | ${() => vi.fn().mockRejectedValue(timeout)}                                   | ${2} | ${`Call to the exchange failed, attempt 2 of 4, retried in 1585 ms: ${timeout.message}`}
+      ${'a fourth timeout, given up'}   | ${() => vi.fn().mockRejectedValue(timeout)}                                   | ${4} | ${`Call to the exchange failed, attempt 4 of 4, given up: ${timeout.message}`}
+      ${'a refusal, not retried'}       | ${() => vi.fn().mockRejectedValue(keyRefused)}                                | ${1} | ${`Call to the exchange failed, attempt 1, not retried: ${keyRefused.message}`}
+      ${'a value that is not an Error'} | ${() => vi.fn().mockRejectedValue(hangUp)}                                    | ${1} | ${`Call to the exchange failed, attempt 1, not retried: '${hangUp}'`}
+      ${'a refusal after a timeout'}    | ${() => vi.fn().mockRejectedValueOnce(timeout).mockRejectedValue(keyRefused)} | ${2} | ${`Call to the exchange failed, attempt 2, not retried: ${keyRefused.message}`}
+    `('logs $description at debug level, as line $line: $message', async ({ createFn, line, message }) => {
+      await utils.retry(createFn()).catch(() => undefined);
+      expect(logger.debug).toHaveBeenNthCalledWith(line, 'exchange', message);
     });
 
     it('calls again after a NetworkError up to BROKER_MAX_RETRIES_ON_FAILURE times', async () => {
@@ -67,7 +121,7 @@ describe('Exchange Utils', () => {
     it('keeps the last NetworkError as the cause once the retries are exhausted', async () => {
       const lastError = new ccxt.ExchangeNotAvailable('binance 503 Service Unavailable');
       const fn = vi.fn().mockRejectedValueOnce(new ccxt.RequestTimeout('binance request timed out')).mockRejectedValue(lastError);
-      await expect(utils.retry(fn, 1, 1)).rejects.toHaveProperty('cause', lastError);
+      await expect(utils.retry(fn, 0, 1)).rejects.toHaveProperty('cause', lastError);
     });
 
     it.each`
@@ -196,30 +250,28 @@ describe('Exchange Utils', () => {
       });
     });
 
-    it('maps a trade without fields', () => {
-      expect(utils.mapCcxtTradeToTrade({} as any, binanceMarket)).toMatchObject({ id: '', amount: 0, price: 0 });
+    it('maps a trade without an order id to an empty id', () => {
+      const trade: any = { amount: 1, price: 60000, timestamp };
+      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket)).toMatchObject({ id: '', amount: 1, price: 60000 });
     });
 
     // Trade.fee.rate is in % (0.1 for 0.1 %), and undefined when it cannot be known: never 0, which would be a trade without fees
     it.each`
-      description                                                              | market                    | amount       | price    | fee                                                   | expected
-      ${'converts the rate given by ccxt, a fraction, to a percentage'}        | ${binanceMarket}          | ${1}         | ${60000} | ${{ rate: 0.001 }}                                    | ${0.1}
-      ${'prefers the rate given by ccxt to the one derived from the cost'}     | ${binanceMarket}          | ${1}         | ${60000} | ${{ rate: 0.002, cost: 60, currency: 'USDT' }}        | ${0.2}
-      ${'derives the rate of a fee in the quote from the cost of the trade'}   | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: 60, currency: 'USDT' }}                     | ${0.1}
-      ${'derives the rate of a fee in the base from the amount of the trade'}  | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: 0.001, currency: 'BTC' }}                   | ${0.1}
-      ${'derives the rate of a fee in the token of the base (baseName)'}       | ${hyperliquidMarket}      | ${1}         | ${60000} | ${{ cost: 0.001, currency: 'UBTC', rate: undefined }} | ${0.1}
-      ${'derives the rate of a fee in the quote of hyperliquid'}               | ${hyperliquidMarket}      | ${1}         | ${60000} | ${{ cost: 60, currency: 'USDC', rate: undefined }}    | ${0.1}
-      ${'derives the rate of a fee in the token of the quote (quoteId)'}       | ${hyperliquidUsdt0Market} | ${1}         | ${40}    | ${{ cost: 0.04, currency: 'USDT0', rate: undefined }} | ${0.1}
-      ${'derives a rate of 0 from a fee that cost nothing'}                    | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: 0, currency: 'USDT' }}                      | ${0}
-      ${'derives the rate when the rate given by ccxt is not finite'}          | ${binanceMarket}          | ${1}         | ${60000} | ${{ rate: Number.NaN, cost: 60, currency: 'USDT' }}   | ${0.1}
-      ${'leaves the rate of a fee in another currency (BNB discount) unknown'} | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: 0.0001, currency: 'BNB' }}                  | ${undefined}
-      ${'leaves the rate of a trade without fee unknown'}                      | ${binanceMarket}          | ${1}         | ${60000} | ${undefined}                                          | ${undefined}
-      ${'leaves the rate of a fee with neither cost nor currency unknown'}     | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: undefined, currency: undefined }}           | ${undefined}
-      ${'leaves the rate of a fee without cost unknown'}                       | ${binanceMarket}          | ${1}         | ${60000} | ${{ currency: 'USDT' }}                               | ${undefined}
-      ${'leaves the rate of a fee without currency unknown'}                   | ${binanceMarket}          | ${1}         | ${60000} | ${{ cost: 60 }}                                       | ${undefined}
-      ${'leaves the rate of a trade of no amount unknown'}                     | ${binanceMarket}          | ${0}         | ${60000} | ${{ cost: 60, currency: 'USDT' }}                     | ${undefined}
-      ${'leaves the rate of a trade without amount unknown'}                   | ${binanceMarket}          | ${undefined} | ${60000} | ${{ cost: 0.001, currency: 'BTC' }}                   | ${undefined}
-      ${'leaves the rate of a trade at no price unknown'}                      | ${binanceMarket}          | ${1}         | ${0}     | ${{ cost: 60, currency: 'USDT' }}                     | ${undefined}
+      description                                                              | market                    | amount | price    | fee                                                   | expected
+      ${'converts the rate given by ccxt, a fraction, to a percentage'}        | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.001 }}                                    | ${0.1}
+      ${'prefers the rate given by ccxt to the one derived from the cost'}     | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.002, cost: 60, currency: 'USDT' }}        | ${0.2}
+      ${'derives the rate of a fee in the quote from the cost of the trade'}   | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDT' }}                     | ${0.1}
+      ${'derives the rate of a fee in the base from the amount of the trade'}  | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'BTC' }}                   | ${0.1}
+      ${'derives the rate of a fee in the token of the base (baseName)'}       | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'UBTC', rate: undefined }} | ${0.1}
+      ${'derives the rate of a fee in the quote of hyperliquid'}               | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDC', rate: undefined }}    | ${0.1}
+      ${'derives the rate of a fee in the token of the quote (quoteId)'}       | ${hyperliquidUsdt0Market} | ${1}   | ${40}    | ${{ cost: 0.04, currency: 'USDT0', rate: undefined }} | ${0.1}
+      ${'derives a rate of 0 from a fee that cost nothing'}                    | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0, currency: 'USDT' }}                      | ${0}
+      ${'derives the rate when the rate given by ccxt is not finite'}          | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: Number.NaN, cost: 60, currency: 'USDT' }}   | ${0.1}
+      ${'leaves the rate of a fee in another currency (BNB discount) unknown'} | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.0001, currency: 'BNB' }}                  | ${undefined}
+      ${'leaves the rate of a trade without fee unknown'}                      | ${binanceMarket}          | ${1}   | ${60000} | ${undefined}                                          | ${undefined}
+      ${'leaves the rate of a fee with neither cost nor currency unknown'}     | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: undefined, currency: undefined }}           | ${undefined}
+      ${'leaves the rate of a fee without cost unknown'}                       | ${binanceMarket}          | ${1}   | ${60000} | ${{ currency: 'USDT' }}                               | ${undefined}
+      ${'leaves the rate of a fee without currency unknown'}                   | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60 }}                                       | ${undefined}
     `('$description', ({ market, amount, price, fee, expected }) => {
       const trade: any = { id: '1', order: 'ord1', amount, price, timestamp, fee };
       expect(utils.mapCcxtTradeToTrade(trade, market).fee.rate).toBe(expected);
@@ -241,6 +293,26 @@ describe('Exchange Utils', () => {
     `('gives the rate of $description as a decimal, $expected %', ({ market, amount, price, fee, expected }) => {
       const trade: any = { id: '1', order: 'ord1', amount, price, timestamp, fee };
       expect(utils.mapCcxtTradeToTrade(trade, market).fee.rate).toBe(expected);
+    });
+  });
+
+  // ccxt 4.5.39 leaves the amount or the price of a trade undefined when the exchange gives none. Read as 0, an unknown price entered
+  // the mean price of its order: fills of 0.5 at 100 and of 0.5 at an unknown price made a fill of 1 at 50.
+  describe('isExecutedTrade', () => {
+    it.each`
+      description                     | amount        | price        | expected
+      ${'an amount and a price'}      | ${0.5}        | ${100}       | ${true}
+      ${'no amount'}                  | ${undefined}  | ${100}       | ${false}
+      ${'no price'}                   | ${0.5}        | ${undefined} | ${false}
+      ${'an amount of 0'}             | ${0}          | ${100}       | ${false}
+      ${'a price of 0'}               | ${0.5}        | ${0}         | ${false}
+      ${'a negative amount'}          | ${-0.5}       | ${100}       | ${false}
+      ${'a negative price'}           | ${0.5}        | ${-100}      | ${false}
+      ${'an amount that is NaN'}      | ${Number.NaN} | ${100}       | ${false}
+      ${'a price that is not finite'} | ${0.5}        | ${Infinity}  | ${false}
+    `('says a trade with $description executed: $expected', ({ amount, price, expected }) => {
+      const trade: any = { id: '1', order: 'ord1', amount, price, timestamp: 1600000000000 };
+      expect(utils.isExecutedTrade(trade)).toBe(expected);
     });
   });
 

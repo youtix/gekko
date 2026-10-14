@@ -9,13 +9,13 @@ import { config } from '@services/configuration/configuration';
 import { DUMMY_CANDLE_BUFFER_SIZE, DUMMY_CANDLE_BUFFER_TRIM_MARGIN, LIMITS } from '@services/exchange/exchange.const';
 import { InvalidOrder, OrderNotFound } from '@services/exchange/exchange.error';
 import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from '@services/exchange/exchange.types';
+import { AsyncMutex } from '@utils/async/asyncMutex';
 import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/market.utils';
-import { addPrecise } from '@utils/math/math.utils';
+import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { round, shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, initializePortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes } from 'date-fns';
 import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
-import { AsyncMutex } from '../../../utils/async/asyncMutex';
 import { COST_DECIMALS } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
 import { roundToMarketPrecision } from './dummyCentralizedExchange.utils';
@@ -178,7 +178,12 @@ export class DummyCentralizedExchange implements Exchange {
       // out of them is refused with the same error in every mode
       const marketData = this.getPairMarketData(symbol);
       const rounded = roundToMarketPrecision(amount, price, marketData);
-      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({ tag: 'exchange', ...rounded, marketData });
+      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({
+        tag: 'exchange',
+        ...rounded,
+        marketData,
+        requested: { amount, price },
+      });
 
       this.reserveBalance(symbol, side, orderAmount, orderPrice);
 
@@ -216,7 +221,12 @@ export class DummyCentralizedExchange implements Exchange {
       const price = side === 'BUY' ? this.ticker.get(symbol)?.ask : this.ticker.get(symbol)?.bid;
       if (isNil(price)) throw new InvalidOrder(`Ticker not found for symbol ${symbol}`);
       const rounded = roundToMarketPrecision(amount, price, marketData);
-      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({ tag: 'exchange', ...rounded, marketData });
+      const { amount: orderAmount, price: orderPrice } = assertOrderWithinLimits({
+        tag: 'exchange',
+        ...rounded,
+        marketData,
+        requested: { amount, price },
+      });
 
       const id = `market-order-${++this.orderSequence}`;
       const { assetBalance, currencyBalance } = this.getPairBalances(symbol);
@@ -340,12 +350,16 @@ export class DummyCentralizedExchange implements Exchange {
   /**
    * The currency an order of `amount` at `price` books, at the fee of its type (see getFeeRate): what a BUY costs, its fee on top, or
    * what a SELL brings in, its fee taken off. The product is rounded to COST_DECIMALS decimals, a half rounded up, as an exchange books
-   * it: the balances it is added to then stay decimals (see addToBalance). Computed in binary, a product within a few ulps of a half can
-   * round the other way, 1e-8 off, the same at every booking of the order.
+   * it: the balances it is added to then stay decimals (see addToBalance). It is worked out in decimal (multiplyPrecise, addPrecise),
+   * exact while each product has 15 significant digits or fewer, as for any booking under 10,000 on the steps of Binance's BTC/USDT
+   * (prices to the cent, amounts to 1e-5). In binary, a product a few ulps under a half was rounded down, 1e-8 short: a SELL of 0.01325
+   * at 81619.12 at a fee of 0.00075 booked 1080.64224999 for 1080.64225. With more digits (prices and amounts of 8 decimals) it is a
+   * binary product of the decimal parts, as near as a double gets, and can still be 1e-8 off.
    */
   private getCurrencyAmount(symbol: TradingPair, type: DummyInternalOrder['type'], side: OrderSide, amount: number, price: number) {
     const feeRate = this.getFeeRate(symbol, type);
-    return round(amount * price * (side === 'BUY' ? 1 + feeRate : 1 - feeRate), COST_DECIMALS);
+    const feeFactor = addPrecise(1, side === 'BUY' ? feeRate : -feeRate);
+    return round(multiplyPrecise(multiplyPrecise(amount, price), feeFactor), COST_DECIMALS);
   }
 
   /**
