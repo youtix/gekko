@@ -8,24 +8,29 @@ import { DummyExchange } from '@services/exchange/exchange.types';
 import { isDummyExchange } from '@services/exchange/exchange.utils';
 import { inject } from '@services/injecter/injecter';
 import { info, error as logError, warning } from '@services/logger';
-import { isString, partition } from 'lodash-es';
+import { partition } from 'lodash-es';
 import { Writable } from 'node:stream';
-import { inspect } from 'node:util';
 
-/** A plugin that failed on a bucket, and what it threw */
+/** A plugin that failed on a bucket or in its finalisation, and what it threw */
 type PluginFailure = { plugin: Plugin; reason: unknown };
 
-/** Whether a plugin failed on the bucket: its processing rejected */
+/** Whether a plugin failed: its processing of the bucket, or its finalisation, rejected */
 const isRejected = (result: PromiseSettledResult<void>): result is PromiseRejectedResult => result.status === 'rejected';
 
+/** The plugins whose call rejected, each with what it threw, in the order of `plugins`, which `results` follows */
+const collectFailures = (plugins: Plugin[], results: PromiseSettledResult<void>[]): PluginFailure[] =>
+  results.flatMap((result, index) => (isRejected(result) ? [{ plugin: plugins[index], reason: result.reason }] : []));
+
 /**
- * A failure in one line, as main() starts reporting it: a GekkoError's message explains it, any other error is named. Not String()
- * for a value that is not an error, which gives '[object Object]' for an object and throws for one without a prototype.
+ * A failure in one line, as main() starts reporting it: a GekkoError's message explains it, any other error is named, and any other
+ * value is written as describeError writes it. Not String() for a value that is not an error, which gives '[object Object]' for an
+ * object and throws for one without a prototype; nor util.inspect, which wrote Bun's ResolveMessage, the rejection of a dynamic
+ * import() of a file that cannot be found, as 'ResolveMessage {}'.
  */
 const describeReason = (reason: unknown) => {
   if (reason instanceof GekkoError) return reason.message;
   if (reason instanceof Error) return String(reason); // "<name>: <message>"
-  return isString(reason) ? reason : inspect(reason);
+  return describeError(reason);
 };
 
 export class PluginsStream extends Writable {
@@ -35,8 +40,11 @@ export class PluginsStream extends Writable {
   private readonly dummyExchange?: DummyExchange;
   /** The bucket being processed. _destroy waits for it, so that no plugin is finalised in the middle of a bucket. */
   private pendingWrite?: Promise<void>;
-  /** Started by whichever of _final, a failed bucket and _destroy comes first; the others wait for the same promise. */
-  private finalization?: Promise<void>;
+  /**
+   * Started by whichever of _final, a failed bucket and _destroy comes first; the others wait for the same promise. It resolves to the
+   * error that names the plugins whose finalisation failed, if any (see finalizePlugins).
+   */
+  private finalization?: Promise<GekkoError | undefined>;
   /** The error a bucket failed with. The stream reports it even when a stream upstream fails while the plugins are finalised. */
   private caughtError?: Error;
   /** The plugins that failed on that bucket besides the one whose failure is the error: logged after it */
@@ -85,7 +93,14 @@ export class PluginsStream extends Writable {
   public async _final(done: (error?: Nullable<Error>) => void) {
     // Only reached after every bucket succeeded: a failed bucket destroys the stream, which then never calls _final
     try {
-      await this.finalizeAllPlugins();
+      // A failed finalisation fails a run that otherwise ended normally. It was only logged as a warning, hidden at the default level:
+      // an import whose last insert failed exited with code 0, its last minutes missing from the database, and a backtest of its range
+      // stopped later on missing candles, without a word on why.
+      const finalizationFailure = await this.finalizeAllPlugins();
+      if (finalizationFailure) {
+        done(finalizationFailure);
+        return;
+      }
       info('stream', 'Gekko is closing the application !');
       done();
     } catch (error) {
@@ -99,8 +114,8 @@ export class PluginsStream extends Writable {
    * once the bucket in progress, if any, is done.
    */
   public async _destroy(error: Nullable<Error>, callback: (error?: Nullable<Error>) => void) {
-    // A failure upstream or of _construct. Not once the finalisation has started: a failed bucket has said why already, and a failure
-    // of _final is one of the finalisation itself, logged below.
+    // A failure upstream or of _construct. Not once the finalisation has started: a failed bucket has said why already, and the error
+    // _final fails with is the finalisation's own.
     if (error && !this.finalization) this.logCloseReason(error);
     // A failure upstream destroys the stream at once, whatever the bucket in progress is doing: its handlers run to their end (an
     // order being created, deferred events being delivered) before the plugins are finalised, not under them
@@ -108,11 +123,14 @@ export class PluginsStream extends Writable {
     // Counted once that bucket is done: what is left waits for a bucket that never comes. A failed bucket has named them already.
     if (error && !this.finalization) this.logDroppedEvents();
     try {
-      await this.finalizeAllPlugins(this.caughtError ?? error ?? undefined);
+      const finalizationFailure = await this.finalizeAllPlugins(this.caughtError ?? error ?? undefined);
+      // The run failed or was stopped, and its own error stays the one reported: a failed finalisation is logged besides it. Unless it
+      // is that error: _final failed the run with it, and the stream is destroyed with it.
+      if (finalizationFailure && finalizationFailure !== error) logError('stream', describeError(finalizationFailure));
     } catch (finalizeError) {
-      warning('stream', `Finalization errors: ${toError(finalizeError).message}`);
+      warning('stream', `Finalization errors: ${describeError(finalizeError)}`);
     }
-    // The error of a failed bucket, or else the one the stream was destroyed with, never a finalisation failure
+    // The error of a failed bucket, or else the one the stream was destroyed with: a finalisation failure only when _final failed with it
     callback(this.caughtError ?? error);
   }
 
@@ -132,7 +150,9 @@ export class PluginsStream extends Writable {
     // Broadcast the deferred events plugin by plugin, in config order. Each call delivers the oldest group of the plugin's queue,
     // the payloads queued in a row under one event name, so that the events arrive in the order they were queued. It resolves to
     // false once the queue is empty. Not called while a plugin has nothing queued (see hasDeferredEvents): an awaited call per plugin
-    // and bucket, most of them with nothing to deliver.
+    // and bucket, most of them with nothing to deliver. Asked as each plugin's turn comes, not once before the loop: a handler of a
+    // plugin flushed earlier queues events on a later one, delivered with this bucket (in a backtest, the order a TradingAdvisor's
+    // advice places ends on the Trader at once, and the strategy and the analyzers hear of it in the bucket it filled in).
     for (const plugin of this.plugins) {
       while (plugin.hasDeferredEvents() && (await plugin.broadcastDeferredEmit()));
     }
@@ -172,10 +192,7 @@ export class PluginsStream extends Writable {
    * plugin failed first in time: the failure reported does not depend on timing.
    */
   private rankFailures(results: PromiseSettledResult<void>[]): PluginFailure[] {
-    const failures = results.flatMap((result, index) =>
-      result.status === 'rejected' ? [{ plugin: this.plugins[index], reason: result.reason }] : [],
-    );
-    const [stops, others] = partition(failures, ({ reason }) => reason instanceof ApplicationStopError);
+    const [stops, others] = partition(collectFailures(this.plugins, results), ({ reason }) => reason instanceof ApplicationStopError);
     return [...stops, ...others];
   }
 
@@ -198,23 +215,26 @@ export class PluginsStream extends Writable {
       warning('stream', `Deferred events dropped as the application closes, the final reports may miss them: ${dropped.join(', ')}`);
   }
 
-  /**
-   * Safely finalize all plugins whose init completed, ensuring each plugin's cleanup runs
-   * regardless of errors in other plugins.
-   */
-  private finalizeAllPlugins(failure?: Error): Promise<void> {
+  /** Finalises the plugins whose init completed, once: whoever asks later gets the same promise (see finalization) */
+  private finalizeAllPlugins(failure?: Error): Promise<GekkoError | undefined> {
     this.finalization ??= this.finalizePlugins(failure);
     return this.finalization;
   }
 
-  /** `failure` tells the plugins that the run stops before its end: their final reports then describe a partial run */
-  private async finalizePlugins(failure?: Error): Promise<void> {
+  /**
+   * `failure` tells the plugins that the run stops before its end: their final reports then describe a partial run. Each plugin's
+   * cleanup runs whatever the others do. Resolves to undefined when none failed, else to an error naming each plugin that did with
+   * what it threw, caused by that failure, or by an AggregateError of them when several failed: _final fails the run with it, _destroy
+   * logs it.
+   */
+  private async finalizePlugins(failure?: Error): Promise<GekkoError | undefined> {
     const results = await Promise.allSettled(this.initializedPlugins.map(plugin => plugin.processCloseStream(failure)));
+    const failures = collectFailures(this.initializedPlugins, results);
+    if (!failures.length) return undefined;
 
-    const errors = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected').map(r => toError(r.reason));
-
-    if (errors.length > 0) {
-      warning('stream', `Finalization errors: ${errors.map(e => e.message).join(', ')}`);
-    }
+    const message = failures.map(({ plugin, reason }) => `${plugin.emitterName} failed to finalize: ${describeError(reason)}`).join('; ');
+    const reasons = failures.map(({ reason }) => reason);
+    const cause = reasons.length === 1 ? reasons[0] : new AggregateError(reasons, `${reasons.length} plugins failed to finalize`);
+    return new GekkoError('stream', message, { cause });
   }
 }

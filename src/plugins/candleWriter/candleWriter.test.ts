@@ -1,3 +1,4 @@
+import { GekkoError } from '@errors/gekko.error';
 import { Storage } from '@services/storage/storage';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CandleWriter } from './candleWriter';
@@ -64,6 +65,15 @@ describe('CandleWriter', () => {
     it('closes the storage, which inserts the buffered candles', () => {
       writer['processFinalize']();
       expect(fakeStorage.close).toHaveBeenCalled();
+    });
+
+    // The failure of the run: an import whose last candles were not written ends with code 1, saying which minutes are missing
+    it('fails when the storage cannot write the buffered candles', () => {
+      const failure = new GekkoError('storage', 'Could not write the buffered candles');
+      vi.mocked(fakeStorage.close).mockImplementation(() => {
+        throw failure;
+      });
+      expect(() => writer['processFinalize']()).toThrow(failure);
     });
   });
 

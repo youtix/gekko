@@ -34,6 +34,21 @@ vi.mock('@services/logger', () => ({
 
 const BUCKET: CandleBucket = new Map();
 
+/** As Bun's ResolveMessage, which the dynamic import() of a file that cannot be found rejects with: not an Error, its message a getter */
+class ResolveMessage {
+  readonly #message: string;
+
+  constructor(message: string) {
+    this.#message = message;
+  }
+
+  get message() {
+    return this.#message;
+  }
+}
+
+const STRATEGY_FILE = '/strategies/my.strategy.ts';
+
 const createPluginStub = (overrides?: Partial<Record<keyof Plugin, unknown>>) =>
   ({
     emitterName: 'Stub',
@@ -93,6 +108,12 @@ const throwing = (thrown: unknown) =>
   });
 
 const waitForError = (stream: PluginsStream) => new Promise<Error>(resolve => stream.once('error', resolve));
+
+/** The logger throws `thrown` as the stream logs a failed finalisation at error level, as a logger that is down would */
+const failToLogFinalizationFailure = (thrown: unknown) =>
+  vi.mocked(error).mockImplementation((_tag, message) => {
+    if (typeof message === 'string' && message.includes('failed to finalize')) throw thrown;
+  });
 
 /** Writes a bucket to the stream on its own, outside any pipeline, and resolves once the stream has processed it */
 const writeBucket = (stream: PluginsStream) =>
@@ -210,6 +231,22 @@ describe('PluginsStream', () => {
         expect(delivered).toEqual(['orderErrored', 'orderCompleted', 'orderErrored']);
       });
 
+      // A fill reaches the strategy and the analyzers in the bucket it happened in: the Trader's queue fills as the TradingAdvisor's is
+      // flushed. Working out which plugins have something queued before the loop leaves that event for the next bucket.
+      it('delivers within the bucket an event a handler queues on a plugin flushed after its own', async () => {
+        const advisor = createEmittingPluginStub('TradingAdvisor');
+        const trader = createEmittingPluginStub('Trader');
+        const onOrderCompleted = vi.fn();
+        // The Trader places the order the advice asks for, and the simulator ends it at once: its end is queued on the Trader
+        advisor.on('strategyCreateOrder', () => trader.addDeferredEmit('orderCompleted', { id: 2 }));
+        trader.on('orderCompleted', onOrderCompleted);
+        vi.mocked(advisor.processInputStream).mockImplementation(async () => advisor.addDeferredEmit('strategyCreateOrder', { id: 1 }));
+
+        await writeBucket(new PluginsStream([advisor, trader]));
+
+        expect(onOrderCompleted).toHaveBeenCalledOnce();
+      });
+
       // Awaited for every plugin on every bucket, though most have nothing queued
       it('does not broadcast for a plugin with nothing queued', async () => {
         const plugin = createPluginStub({ hasDeferredEvents: vi.fn(() => false) });
@@ -274,12 +311,14 @@ describe('PluginsStream', () => {
         expect(plugin.processCloseStream).toHaveBeenCalledWith(failure);
       });
 
+      // util.inspect wrote a ResolveMessage as 'ResolveMessage {}', without the module or the file that imported it
       it.each`
-        kind               | thrown                                    | reason
-        ${'a GekkoError'}  | ${new GekkoError('trader', 'No balance')} | ${'[TRADER] No balance'}
-        ${'an Error'}      | ${new TypeError('fetch failed')}          | ${'TypeError: fetch failed'}
-        ${'a string'}      | ${'string error'}                         | ${'string error'}
-        ${'another value'} | ${{ code: 42 }}                           | ${'{ code: 42 }'}
+        kind                  | thrown                                                                          | reason
+        ${'a GekkoError'}     | ${new GekkoError('trader', 'No balance')}                                       | ${'[TRADER] No balance'}
+        ${'an Error'}         | ${new TypeError('fetch failed')}                                                | ${'TypeError: fetch failed'}
+        ${'a string'}         | ${'string error'}                                                               | ${'string error'}
+        ${'another value'}    | ${{ code: 42 }}                                                                 | ${'{ code: 42 }'}
+        ${'a ResolveMessage'} | ${new ResolveMessage(`Cannot find module './signals' from '${STRATEGY_FILE}'`)} | ${`ResolveMessage: Cannot find module './signals' from '${STRATEGY_FILE}'`}
       `('logs why the application closes when a plugin throws $kind', async ({ thrown, reason }) => {
         await runPipeline([BUCKET], [createPluginStub({ processInputStream: throwing(thrown) })]);
 
@@ -330,14 +369,12 @@ describe('PluginsStream', () => {
         expect(plugins[1].processCloseStream).toHaveBeenCalledOnce();
       });
 
-      describe('when the finalization itself throws', () => {
+      describe('when logging the failed finalization throws', () => {
         const bucketError = new Error('fail');
         let rejection: unknown;
 
         beforeEach(async () => {
-          vi.mocked(warning).mockImplementationOnce(() => {
-            throw new Error('log down');
-          });
+          failToLogFinalizationFailure(new Error('log down'));
           const plugin = createPluginStub({
             processInputStream: throwing(bucketError),
             processCloseStream: throwing(new Error('finalize failed')),
@@ -355,18 +392,34 @@ describe('PluginsStream', () => {
         });
       });
 
-      // String() threw for a value without a prototype: the warning named the TypeError instead of the failure
+      // A warning, hidden at the default level, without the plugin. String() threw for a value without a prototype: the warning named
+      // the TypeError instead of the failure.
       it.each`
         kind                             | thrown                                                 | logged
-        ${'an Error'}                    | ${new Error('finalize failed')}                        | ${'finalize failed'}
-        ${'another value'}               | ${'finalize failed'}                                   | ${'finalize failed'}
-        ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'[Object: null prototype] { status: 503 }'}
-      `('logs a finalization that throws $kind as a warning: Finalization errors: $logged', async ({ thrown, logged }) => {
+        ${'an Error'}                    | ${new Error('finalize failed')}                        | ${'Stub failed to finalize: finalize failed'}
+        ${'a GekkoError'}                | ${new GekkoError('storage', 'disk full')}              | ${'Stub failed to finalize: disk full'}
+        ${'another value'}               | ${'finalize failed'}                                   | ${'Stub failed to finalize: finalize failed'}
+        ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'Stub failed to finalize: [Object: null prototype] { status: 503 }'}
+      `('logs a finalization that throws $kind at error level: $logged', async ({ thrown, logged }) => {
         const plugin = createPluginStub({ processInputStream: throwing(new Error('fail')), processCloseStream: throwing(thrown) });
 
         await runPipeline([BUCKET], [plugin]);
 
-        expect(warning).toHaveBeenCalledWith('stream', `Finalization errors: ${logged}`);
+        expect(error).toHaveBeenCalledWith('stream', logged);
+      });
+
+      it('logs a failed finalization after the reason the application closes', async () => {
+        const plugin = createPluginStub({
+          processInputStream: throwing(new Error('fail')),
+          processCloseStream: throwing(new Error('finalize failed')),
+        });
+
+        await runPipeline([BUCKET], [plugin]);
+
+        expect(vi.mocked(error).mock.calls).toEqual([
+          ['stream', 'Gekko is closing the application due to an error: Error: fail'],
+          ['stream', 'Stub failed to finalize: finalize failed'],
+        ]);
       });
     });
 
@@ -556,29 +609,128 @@ describe('PluginsStream', () => {
   });
 
   describe('_final', () => {
+    // Only logged as a warning, hidden at the default level: an import whose last insert failed exited with code 0, its last minutes
+    // missing from the database
+    describe('when a plugin finalization fails at the end of the stream', () => {
+      const finalizeError = new Error('database is locked');
+      let plugins: Plugin[];
+      let rejection: unknown;
+
+      beforeEach(async () => {
+        plugins = [createPluginStub({ emitterName: 'CandleWriter', processCloseStream: throwing(finalizeError) }), createPluginStub()];
+
+        rejection = await runPipeline([BUCKET], plugins);
+      });
+
+      it('rejects the pipeline with a GekkoError', () => {
+        expect(rejection).toBeInstanceOf(GekkoError);
+      });
+
+      it('rejects the pipeline naming the plugin and its failure', () => {
+        expect(rejection).toHaveProperty('message', '[STREAM] CandleWriter failed to finalize: database is locked');
+      });
+
+      it('rejects the pipeline with the failure of the plugin as the cause', () => {
+        expect(rejection).toHaveProperty('cause', finalizeError);
+      });
+
+      it('finalizes the other plugins', () => {
+        expect(plugins[1].processCloseStream).toHaveBeenCalledOnce();
+      });
+
+      // main() reports what the pipeline rejects with: logged by the stream as well, the failure showed twice
+      it('logs nothing at error level', () => {
+        expect(error).not.toHaveBeenCalled();
+      });
+
+      it('does not log the closing message', () => {
+        expect(info).not.toHaveBeenCalledWith('stream', 'Gekko is closing the application !');
+      });
+    });
+
     it.each`
-      kind               | thrown
-      ${'an Error'}      | ${new Error('finalize err')}
-      ${'another value'} | ${'finalize err'}
-    `('logs a plugin finalization that throws $kind as a warning', async ({ thrown }) => {
+      kind                             | thrown                                                 | message
+      ${'a GekkoError'}                | ${new GekkoError('storage', 'disk full')}              | ${'[STREAM] Stub failed to finalize: disk full'}
+      ${'a string'}                    | ${'finalize err'}                                      | ${'[STREAM] Stub failed to finalize: finalize err'}
+      ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'[STREAM] Stub failed to finalize: [Object: null prototype] { status: 503 }'}
+    `('rejects the pipeline with $message when a plugin finalization throws $kind', async ({ thrown, message }) => {
       const plugin = createPluginStub({ processCloseStream: throwing(thrown) });
 
-      await runPipeline([BUCKET], [plugin]);
+      expect(await runPipeline([BUCKET], [plugin])).toHaveProperty('message', message);
+    });
 
-      expect(warning).toHaveBeenCalledWith('stream', 'Finalization errors: finalize err');
+    describe('when several plugin finalizations fail', () => {
+      const firstError = new Error('database is locked');
+      const secondError = new TypeError('this.strategy.end is not a function');
+      let rejection: unknown;
+
+      beforeEach(async () => {
+        rejection = await runPipeline(
+          [BUCKET],
+          [
+            createPluginStub({ emitterName: 'CandleWriter', processCloseStream: throwing(firstError) }),
+            createPluginStub(),
+            createPluginStub({ emitterName: 'TradingAdvisor', processCloseStream: throwing(secondError) }),
+          ],
+        );
+      });
+
+      it('rejects the pipeline naming each of them, in config order', () => {
+        expect(rejection).toHaveProperty(
+          'message',
+          '[STREAM] CandleWriter failed to finalize: database is locked; TradingAdvisor failed to finalize: this.strategy.end is not a function',
+        );
+      });
+
+      it('rejects the pipeline with an AggregateError of their failures as the cause', () => {
+        expect(rejection).toHaveProperty('cause', new AggregateError([firstError, secondError], '2 plugins failed to finalize'));
+      });
     });
 
     it.each`
       kind               | thrown                   | message
       ${'an Error'}      | ${new Error('log down')} | ${'log down'}
       ${'another value'} | ${'log down'}            | ${'log down'}
-    `('rejects the pipeline when the finalization itself throws $kind', async ({ thrown, message }) => {
-      vi.mocked(warning).mockImplementationOnce(() => {
+    `('rejects the pipeline when logging the closing message throws $kind', async ({ thrown, message }) => {
+      vi.mocked(info).mockImplementationOnce(() => {
         throw thrown;
       });
-      const plugin = createPluginStub({ processCloseStream: throwing(new Error('finalize err')) });
 
-      expect(await runPipeline([BUCKET], [plugin])).toEqual(new Error(message));
+      expect(await runPipeline([BUCKET], [createPluginStub()])).toEqual(new Error(message));
+    });
+
+    // As pipeline() does when a stream of the chain fails, or its signal aborts, while _final finalises the plugins
+    describe('when destroyed while the plugins are finalized at the end of the stream', () => {
+      const destroyError = new Error('aborted');
+      let reported: unknown;
+
+      beforeEach(async () => {
+        const finalization = createHeldWork();
+        const plugin = createPluginStub({
+          emitterName: 'CandleWriter',
+          processCloseStream: vi.fn(async () => {
+            await finalization.run();
+            throw new Error('database is locked');
+          }),
+        });
+        const stream = new PluginsStream([plugin]);
+        const streamError = waitForError(stream);
+        stream.end();
+        await finalization.started;
+        stream.destroy(destroyError);
+        finalization.release();
+
+        reported = await streamError;
+      });
+
+      it('reports the error it was destroyed with', () => {
+        expect(reported).toBe(destroyError);
+      });
+
+      // A destroyed stream drops the error _final gives it: the failure has to be logged
+      it('logs the failed finalization at error level', () => {
+        expect(error).toHaveBeenCalledWith('stream', 'CandleWriter failed to finalize: database is locked');
+      });
     });
   });
 
@@ -615,6 +767,13 @@ describe('PluginsStream', () => {
         const [logCallOrder] = vi.mocked(error).mock.invocationCallOrder;
         const [finalizeCallOrder] = vi.mocked(plugins[0].processCloseStream).mock.invocationCallOrder;
         expect(logCallOrder).toBeLessThan(finalizeCallOrder);
+      });
+
+      it('logs the failed finalization at error level, after why the application closes', () => {
+        expect(vi.mocked(error).mock.calls).toEqual([
+          ['stream', 'Gekko is closing the application due to an error: Error: download failed'],
+          ['stream', 'Stub failed to finalize: finalize failed'],
+        ]);
       });
 
       it.each`
@@ -911,13 +1070,11 @@ describe('PluginsStream', () => {
       expect(warning).not.toHaveBeenCalled();
     });
 
-    describe('when the finalization itself throws', () => {
+    describe('when logging the failed finalization throws', () => {
       const sourceError = new Error('download failed');
 
       const failWhileFinalizationThrows = (thrown: unknown) => {
-        vi.mocked(warning).mockImplementationOnce(() => {
-          throw thrown;
-        });
+        failToLogFinalizationFailure(thrown);
         const bucketProcessed = createGate();
         const plugin = createPluginStub({
           processInputStream: vi.fn(async () => bucketProcessed.open()),
@@ -939,7 +1096,7 @@ describe('PluginsStream', () => {
         kind               | thrown
         ${'an Error'}      | ${new Error('log down')}
         ${'another value'} | ${'log down'}
-      `('logs the failure as a warning when the finalization throws $kind', async ({ thrown }) => {
+      `('logs the failure as a warning when the logger throws $kind', async ({ thrown }) => {
         await failWhileFinalizationThrows(thrown);
 
         expect(warning).toHaveBeenLastCalledWith('stream', 'Finalization errors: log down');

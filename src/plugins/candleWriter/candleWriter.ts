@@ -21,7 +21,7 @@ export class CandleWriter extends Plugin {
   }
 
   protected processFinalize(): void {
-    // close() inserts the buffered candles first
+    // close() inserts the buffered candles first. Not caught: when it cannot, the run fails, saying which minutes were not written.
     this.getStorage().close();
   }
 

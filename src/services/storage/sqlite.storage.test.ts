@@ -1,4 +1,5 @@
 import { GekkoError } from '@errors/gekko.error';
+import { TradingPair } from '@models/utility.types';
 import { debug } from '@services/logger';
 import { Database } from 'bun:sqlite';
 import { mkdirSync } from 'node:fs';
@@ -129,15 +130,51 @@ describe('SQLiteStorage', () => {
       expect(() => new SQLiteStorage([])).toThrow(expect.objectContaining({ cause: failure }));
     });
 
+    // The read of the schema comes first, under the busy timeout: it is where a file that is not a database fails
     it.each`
       mode          | statements
-      ${'importer'} | ${['PRAGMA busy_timeout = 5000;', 'PRAGMA journal_mode = WAL;', 'PRAGMA synchronous = NORMAL;', 'CREATE TABLE', 'CREATE TABLE']}
-      ${'backtest'} | ${['PRAGMA busy_timeout = 5000;']}
+      ${'importer'} | ${['PRAGMA busy_timeout = 5000;', 'SELECT count(*) FROM sqlite_master;', 'PRAGMA journal_mode = WAL;', 'PRAGMA synchronous = NORMAL;', 'CREATE TABLE', 'CREATE TABLE']}
+      ${'backtest'} | ${['PRAGMA busy_timeout = 5000;', 'SELECT count(*) FROM sqlite_master;']}
     `('sets up the database in $mode mode with $statements', ({ mode, statements }) => {
       mockConfig.getWatch.mockReturnValue({ mode });
       mockDb.run.mockClear();
       new SQLiteStorage(['BTC/USDT', 'ETH/USDT']);
       expect(runSql().map(sql => (sql.includes('CREATE TABLE') ? 'CREATE TABLE' : sql))).toEqual(statements);
+    });
+
+    // bun:sqlite opens such a file without a word, and fails at the first statement that reads it: that was the first query of a
+    // backtest, or the switch to WAL of the other modes, which threw SQLite's error and its stack, without the path or the hint
+    describe('on a file that is not a database, a CSV or a truncated copy', () => {
+      const notADatabase = Object.assign(new Error('file is not a database'), { name: 'SQLiteError', code: 'SQLITE_NOTADB' });
+
+      beforeEach(() => {
+        // Every statement that reads the file throws, as SQLite does: the busy timeout reads nothing
+        mockDb.run.mockImplementation((sql: string) => {
+          if (sql !== 'PRAGMA busy_timeout = 5000;') throw notADatabase;
+        });
+        tablesQuery.get.mockImplementation(() => {
+          throw notADatabase;
+        });
+      });
+
+      it.each`
+        mode          | message
+        ${'importer'} | ${`Cannot open the database ${resolve(database)} (file is not a database).`}
+        ${'realtime'} | ${`Cannot open the database ${resolve(database)} (file is not a database).`}
+        ${'backtest'} | ${`Cannot open the database ${resolve(database)} (file is not a database). A backtest reads an existing database: check storage.database, or import the candles first.`}
+      `('reports it in $mode mode with its resolved path', ({ mode, message }) => {
+        mockConfig.getWatch.mockReturnValue({ mode });
+        expect(() => new SQLiteStorage(['BTC/USDT'])).toThrow(new GekkoError('storage', message));
+      });
+
+      it('keeps the failure of its first read as the cause', () => {
+        expect(() => new SQLiteStorage(['BTC/USDT'])).toThrow(expect.objectContaining({ cause: notADatabase }));
+      });
+
+      it('closes the connection it opened', () => {
+        attempt(() => new SQLiteStorage(['BTC/USDT']));
+        expect(mockDb.close).toHaveBeenCalledOnce();
+      });
     });
 
     it('looks up, in backtest mode, the table of every pair', () => {
@@ -348,6 +385,71 @@ describe('SQLiteStorage', () => {
       storage.close();
       storage.close();
       expect(mockDb.close).toHaveBeenCalledOnce();
+    });
+
+    // The candles are in the WAL, which the next connection reads: nothing to count as unwritten
+    it('rethrows a failed checkpoint as SQLite reports it', () => {
+      mockDb.run.mockImplementation(sql => {
+        if (sql.startsWith('PRAGMA wal_checkpoint')) throw new Error('disk I/O error');
+      });
+      expect(() => storage.close()).toThrow(new Error('disk I/O error'));
+    });
+
+    // SQLite's error alone, which the end of an import logged as a hidden warning: it exited with code 0, its last minutes missing
+    describe('when the insert of the buffered candles fails', () => {
+      const lockError = Object.assign(new Error('database is locked'), { name: 'SQLiteError', code: 'SQLITE_BUSY' });
+      const failingStatement = () => ({
+        run: vi.fn(() => {
+          throw lockError;
+        }),
+        finalize: vi.fn(),
+      });
+      /** Buffers a bucket per entry, one minute after the other from 2024-01-01T00:00Z, holding the candles of its pairs */
+      const bufferBuckets = (buckets: TradingPair[][]) =>
+        buckets.forEach((symbols, index) =>
+          storage.addBucket(new Map(symbols.map(symbol => [symbol, { ...candle, start: Date.UTC(2024, 0, 1, 0, index) }]))),
+        );
+
+      beforeEach(() => {
+        mockDb.prepare.mockImplementation(failingStatement);
+      });
+
+      it.each`
+        scenario                                                                   | buckets                                                                           | written         | unwritten
+        ${'every pair, when the first insert fails'}                               | ${[['BTC/USDT', 'ETH/USDT'], ['BTC/USDT', 'ETH/USDT'], ['BTC/USDT', 'ETH/USDT']]} | ${[]}           | ${'the minutes from 2024-01-01T00:00:00.000Z to 2024-01-01T00:02:00.000Z were not written, 3 of BTC/USDT, 3 of ETH/USDT'}
+        ${'only the pairs left, when an insert fails after another one succeeded'} | ${[['BTC/USDT'], ['BTC/USDT', 'ETH/USDT'], ['BTC/USDT', 'ETH/USDT']]}             | ${['BTC/USDT']} | ${'the minutes from 2024-01-01T00:01:00.000Z to 2024-01-01T00:02:00.000Z were not written, 2 of ETH/USDT'}
+      `('reports the buffered minutes it could not write, per pair, and their range: $scenario', ({ buckets, written, unwritten }) => {
+        mockDb.prepare.mockImplementation((sql: string) =>
+          written.some((symbol: string) => sql.includes(`"CANDLES_${symbol.replace('/', '_')}"`))
+            ? { run: vi.fn(() => ({ changes: 1 })), finalize: vi.fn() }
+            : failingStatement(),
+        );
+        bufferBuckets(buckets);
+        expect(() => storage.close()).toThrow(
+          new GekkoError(
+            'storage',
+            `Could not write the buffered candles into ${resolve(database)} (database is locked): ${unwritten}. An import of that range writes them.`,
+          ),
+        );
+      });
+
+      it('keeps the failure of the insert as the cause', () => {
+        bufferBuckets([['BTC/USDT']]);
+        expect(() => storage.close()).toThrow(expect.objectContaining({ cause: lockError }));
+      });
+
+      it('still closes the database', () => {
+        bufferBuckets([['BTC/USDT']]);
+        attempt(() => storage.close());
+        expect(mockDb.close).toHaveBeenCalledOnce();
+      });
+
+      // The connection is closed: main() closes the storage again on its way out, where a second report would throw past the failure
+      it('does nothing on a second close', () => {
+        bufferBuckets([['BTC/USDT']]);
+        attempt(() => storage.close());
+        expect(() => storage.close()).not.toThrow();
+      });
     });
   });
 });

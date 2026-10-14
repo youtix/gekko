@@ -6,6 +6,7 @@ import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { debug } from '@services/logger';
+import { toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
 import { Database, SQLQueryBindings, Statement } from 'bun:sqlite';
 import { Interval } from 'date-fns';
@@ -19,21 +20,23 @@ const IN_MEMORY = ':memory:';
 
 export class SQLiteStorage extends Storage {
   db: Database;
+  /** storage.database, the path of the SQLite file */
+  private readonly database: string;
   /**
    * A backtest only reads, so a mistyped path fails instead of creating an empty database. An in-memory database cannot be
    * opened read-only and starts empty anyway: it is read-write in every mode (only tests use it).
    */
   private readonly readOnly: boolean;
-  /** CandleWriter closes the storage when it is finalised, and main() closes it again on its way out */
+  /** CandleWriter closes the storage when it is finalised, and main() closes it again on its way out (see close) */
   private closed = false;
 
   constructor(symbols: TradingPair[]) {
     super();
     const database = config.getStorage()?.database;
     if (!database) throw new GekkoError('storage', 'No database to open: set storage.database to the path of the SQLite file.');
+    this.database = database;
     this.readOnly = config.getWatch().mode === 'backtest' && database !== IN_MEMORY;
     this.db = this.open(database);
-    this.db.run('PRAGMA busy_timeout = 5000;'); // Wait instead of erroring when the DB is locked
     if (this.readOnly) {
       this.checkTables(database, symbols);
     } else {
@@ -143,12 +146,20 @@ export class SQLiteStorage extends Storage {
     return query.get({ $start: start, $end: end });
   }
 
+  /**
+   * Inserts the buffered candles and closes the connection, whatever the insert did. A failed insert leaves the buffered minutes of the
+   * pairs it did not reach out of the database: SQLite's error alone did not say so, and the import whose last insert it was exited
+   * with code 0. The error thrown counts those minutes per pair and gives their range, which an import writes again.
+   * Only the first call does anything, a failed one included: the connection is closed, writing the buffer would mean opening the
+   * database again only to wait out the same lock or meet the same full disk, and main() closes the storage again after CandleWriter,
+   * where a second report of the same minutes would throw past the failure of the run.
+   */
   public close(): void {
     if (this.closed) return;
     this.closed = true;
     try {
       // Without it, a crash or a stop outside the plugins (main()'s uncaughtException handler) would lose the buffered buckets
-      this.flush();
+      this.flushBeforeClosing();
       // Copies the WAL into the database file and empties it, so that the file alone holds every candle (a copy, a backup)
       if (!this.readOnly) this.db.run('PRAGMA wal_checkpoint(TRUNCATE);');
     } finally {
@@ -156,12 +167,51 @@ export class SQLiteStorage extends Storage {
     }
   }
 
-  private open(database: string) {
+  /** flush(), whose failure names the buffered minutes it did not write: those of every pair it did not insert (see close) */
+  private flushBeforeClosing() {
+    const inserted = new Set<TradingPair>();
     try {
-      if (this.readOnly) return new Database(database, { readonly: true, create: false });
-      if (database !== IN_MEMORY) mkdirSync(dirname(database), { recursive: true }); // db/ is gitignored: absent from a fresh clone
-      return new Database(database);
+      this.flush(inserted);
     } catch (error) {
+      const minuteCounts = new Map<TradingPair, number>();
+      let first = Infinity;
+      let last = -Infinity;
+      for (const bucket of this.buffer) {
+        for (const [symbol, { start }] of bucket) {
+          if (inserted.has(symbol)) continue;
+          minuteCounts.set(symbol, (minuteCounts.get(symbol) ?? 0) + 1);
+          first = Math.min(first, start);
+          last = Math.max(last, start);
+        }
+      }
+      const counts = Array.from(minuteCounts, ([symbol, count]) => `${count} of ${symbol}`).join(', ');
+      throw new GekkoError(
+        'storage',
+        `Could not write the buffered candles into ${resolve(this.database)} (${describeError(error)}): the minutes from ${toISOString(first)} to ${toISOString(last)} were not written, ${counts}. An import of that range writes them.`,
+        { cause: error },
+      );
+    }
+  }
+
+  /**
+   * Opens the database and reads its schema. bun:sqlite reads the file only for the first statement that needs it: a file that is not
+   * a database (a CSV, another tool's file) or a truncated copy failed there, at the first query of a backtest or the switch to WAL of
+   * the other modes, with SQLite's own error and its stack, without the path and the hint below.
+   */
+  private open(database: string) {
+    let db: Database | undefined;
+    try {
+      if (this.readOnly) db = new Database(database, { readonly: true, create: false });
+      else {
+        if (database !== IN_MEMORY) mkdirSync(dirname(database), { recursive: true }); // db/ is gitignored: absent from a fresh clone
+        db = new Database(database);
+      }
+      db.run('PRAGMA busy_timeout = 5000;'); // Wait instead of erroring when the DB is locked, from the read below on
+      // Not PRAGMA schema_version, which a file cut within the 100 bytes of its header passes: it reads the schema version only
+      db.run('SELECT count(*) FROM sqlite_master;');
+      return db;
+    } catch (error) {
+      db?.close(false);
       const hint = this.readOnly ? ' A backtest reads an existing database: check storage.database, or import the candles first.' : '';
       // Kept as the cause, which main() appends to its report: only its message was kept, the error (its class, code and stack) dropped
       throw new GekkoError('storage', `Cannot open the database ${resolve(database)} (${describeError(error)}).${hint}`, { cause: error });

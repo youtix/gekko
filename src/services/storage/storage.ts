@@ -29,11 +29,18 @@ export abstract class Storage {
     if (this.buffer.length >= this.insertThreshold) this.flush();
   }
 
-  /** Inserts the candles of every pair the buffer holds, not only the pairs of its last bucket, then empties it. */
-  protected flush() {
+  /**
+   * Inserts the candles of every pair the buffer holds, not only the pairs of its last bucket, then empties it. The pairs are inserted
+   * one after the other: an insert that fails stops the flush and keeps the whole buffer, the pairs inserted before it included, which
+   * the next flush writes again, to the same rows. `inserted` collects those, for close() to tell what a failure left out.
+   */
+  protected flush(inserted = new Set<TradingPair>()) {
     const symbols = new Set<TradingPair>();
     for (const bucket of this.buffer) for (const symbol of bucket.keys()) symbols.add(symbol);
-    for (const symbol of symbols) this.insertCandles(symbol);
+    for (const symbol of symbols) {
+      this.insertCandles(symbol);
+      inserted.add(symbol);
+    }
     this.buffer = [];
   }
 
@@ -48,6 +55,9 @@ export abstract class Storage {
   public abstract getCandleDateranges(symbol: TradingPair): Nullable<CandleDateranges[]>;
   public abstract getCandles(symbol: TradingPair, interval: Interval<EpochTimeStamp, EpochTimeStamp>): Candle[];
   public abstract checkInterval(symbol: TradingPair, interval: Interval<EpochTimeStamp, EpochTimeStamp>): Nullable<MissingCandleCount>;
-  /** Inserts the buffered candles, then closes the connection. */
+  /**
+   * Inserts the buffered candles, then closes the connection, whatever the insert did: a failed insert throws an error that says which
+   * minutes it left out of the database. Only the first call does anything.
+   */
   public abstract close(): void;
 }

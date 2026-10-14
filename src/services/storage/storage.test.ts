@@ -1,5 +1,6 @@
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
+import { TradingPair } from '@models/utility.types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from './storage';
 import { INSERT_THRESHOLD } from './storage.const';
@@ -84,6 +85,45 @@ describe('Storage', () => {
       storage.addBucket(bucket);
       storage.addBucket(bucket);
       expect(storage['buffer']).toEqual([]);
+    });
+  });
+
+  // close() counts what a failed flush left out of the database from the buffer and the pairs inserted before the failure
+  describe('flush, when an insert fails', () => {
+    const symbols: TradingPair[] = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT'];
+    let storage: TestStorage;
+
+    /** Flushes, swallowing the failure, so that the test can check what it left */
+    const attemptFlush = (inserted?: Set<TradingPair>) => {
+      try {
+        storage['flush'](inserted);
+      } catch {
+        // Expected
+      }
+    };
+
+    beforeEach(() => {
+      mockConfig.getStorage.mockReturnValue({ type: 'sqlite', database: ':memory:', insertThreshold: 10 });
+      storage = new TestStorage();
+      storage.addBucket(new Map(symbols.map(symbol => [symbol, { start: 0 } as Candle])));
+      storage.insertCandles.mockImplementation((symbol: string) => {
+        if (symbol === 'ETH/USDT') throw new Error('database is locked');
+      });
+    });
+
+    it('rethrows the failure', () => {
+      expect(() => storage['flush']()).toThrow('database is locked');
+    });
+
+    it('collects the pairs it inserted before it', () => {
+      const inserted = new Set<TradingPair>();
+      attemptFlush(inserted);
+      expect([...inserted]).toEqual(['BTC/USDT']);
+    });
+
+    it('keeps the whole buffer', () => {
+      attemptFlush();
+      expect(storage['buffer']).toHaveLength(1);
     });
   });
 
