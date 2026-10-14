@@ -35,6 +35,7 @@ import {
   OnOrderCompletedEventParams,
   OnOrderErroredEventParams,
   Strategy,
+  Tools,
 } from '@strategies/strategy.types';
 import { toTimestamp } from '@utils/date/date.utils';
 import { UUID } from 'node:crypto';
@@ -196,7 +197,16 @@ type AdvisorOptions = Partial<{
   strategyPath: string;
 }>;
 
-/** An advisor set up as the pipeline does it: built from its parsed configuration, then given the exchange it asks for. */
+/** What the listeners of an advisor record while flushDeferredEvents broadcasts its queue: the payloads delivered, by event */
+type DeliveryRecorder = { delivered?: Map<string, unknown[]> };
+const recorders = new WeakMap<TradingAdvisor, DeliveryRecorder>();
+
+/**
+ * An advisor set up as the pipeline does it: built from its parsed configuration, given the exchange it asks for, and listened to on
+ * every event it emits before it queues any, as the pipeline wires the plugins before it starts the stream: an event queued while
+ * nobody listens reaches nobody. The listeners record the deferred events flushDeferredEvents broadcasts, not the events emitted at
+ * once (the error line of the strategy).
+ */
 const createAdvisor = ({
   timeframe = '3m',
   warmupCandleCount = 0,
@@ -207,6 +217,14 @@ const createAdvisor = ({
   vi.mocked(config.getWatch).mockReturnValue(watch(timeframe, warmupCandleCount));
   const advisor = new TradingAdvisor({ name: 'TradingAdvisor', strategyName, strategyPath, maxConsecutiveErrors });
   advisor.setExchange(exchange as Exchange);
+  const recorder: DeliveryRecorder = {};
+  for (const event of EMITTED_EVENTS) {
+    advisor.on<unknown[]>(event, payloads => {
+      const { delivered } = recorder;
+      if (delivered) delivered.set(event, [...(delivered.get(event) ?? []), ...payloads]);
+    });
+  }
+  recorders.set(advisor, recorder);
   return advisor;
 };
 
@@ -221,17 +239,18 @@ const sendBuckets = async (advisor: TradingAdvisor, count: number) => {
   for (let minute = 0; minute < count; minute++) await advisor.processInputStream(oneMinuteBucket(minute));
 };
 
-/** Broadcasts what the advisor queued, as PluginsStream does after a bucket, and returns the payloads delivered for each event. */
+/**
+ * Broadcasts what the advisor queued, as PluginsStream does after a bucket, and returns the payloads delivered for each event to the
+ * listeners createAdvisor wired.
+ */
 const flushDeferredEvents = async (advisor: TradingAdvisor) => {
+  const recorder = recorders.get(advisor)!;
   const delivered = new Map<string, unknown[]>();
-  for (const event of EMITTED_EVENTS) {
-    advisor.on<unknown[]>(event, payloads => {
-      delivered.set(event, [...(delivered.get(event) ?? []), ...payloads]);
-    });
-  }
+  recorder.delivered = delivered;
   while (await advisor.broadcastDeferredEmit()) {
     // Until the queue is empty
   }
+  delete recorder.delivered;
   return delivered;
 };
 
@@ -422,6 +441,32 @@ describe('TradingAdvisor', () => {
         it('is not queued with the events of the bucket as well', async () => {
           expect((await flushDeferredEvents(advisor)).has(STRATEGY_INFO_EVENT)).toBe(false);
         });
+      });
+
+      // Bun loads a strategyPath without type-checking it. An object holding a function, tools itself included, could not be copied
+      // with the events of its bucket: the bucket failed on a DataCloneError that named neither tools.log nor the strategy info.
+      describe.each`
+        kind                                 | pick
+        ${'an object holding a function'}    | ${() => ({ rsi: 42, onTick: () => undefined })}
+        ${'the tools the strategy is given'} | ${(tools: Tools<object>) => tools}
+      `('when the strategy logs $kind, as an untyped strategy can', ({ pick }: { pick: (tools: Tools<object>) => unknown }) => {
+        beforeEach(() => {
+          strategy.onEachTimeframeCandle.mockImplementation(({ tools }) => tools.log('info', pick(tools) as string));
+        });
+
+        it('does not fail the bucket', async () => {
+          await expect(sendBuckets(advisor, 3)).resolves.toBeUndefined();
+        });
+      });
+
+      it('queues a message that is not a string as util.inspect writes it: { rsi: 42, onTick: [Function: onTick] }', async () => {
+        strategy.onEachTimeframeCandle.mockImplementation(({ tools }) =>
+          tools.log('info', { rsi: 42, onTick: function onTick() {} } as unknown as string),
+        );
+        await sendBuckets(advisor, 3);
+        expect((await flushDeferredEvents(advisor)).get(STRATEGY_INFO_EVENT)).toEqual([
+          strategyInfo('info', '{ rsi: 42, onTick: [Function: onTick] }'),
+        ]);
       });
 
       it.each`
@@ -787,10 +832,10 @@ describe('TradingAdvisor', () => {
 
     // The analyzers said in their reports why a run stopped before its end, while the end of the strategy could not know it
     it.each`
-      run                                   | failure                                                                 | interruption
-      ${'that reached its end'}             | ${undefined}                                                            | ${undefined}
-      ${'that the circuit breaker stopped'} | ${new ApplicationStopError('Max consecutive order errors reached (5)')} | ${'[CORE] Max consecutive order errors reached (5)'}
-      ${'that a crash stopped'}             | ${new Error('Database locked')}                                         | ${'Database locked'}
+      run                                   | failure                                                                             | interruption
+      ${'that reached its end'}             | ${undefined}                                                                        | ${undefined}
+      ${'that the circuit breaker stopped'} | ${new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)')} | ${'[STRATEGY] Max consecutive order errors reached (5)'}
+      ${'that a crash stopped'}             | ${new Error('Database locked')}                                                     | ${'Database locked'}
     `('gives the end of the strategy the interruption of a run $run: $interruption', async ({ failure, interruption }) => {
       const advisor = await startAdvisor();
       await advisor.processCloseStream(failure);

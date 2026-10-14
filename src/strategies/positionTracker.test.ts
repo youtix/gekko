@@ -28,17 +28,30 @@ describe('PositionTracker', () => {
   let orders: OrderRecorder;
 
   /**
-   * Plays the steps (see playSteps): 'buy' and 'sell' place an order through the tracker, 'stop' is the SELL of a trailing stop, which
-   * the StrategyManager creates and the tracker adopts, 'unadopted' such a SELL left unadopted
+   * Plays the steps (see playSteps): 'buy' and 'sell' place an order through the tracker, 'sell2' a SELL of 2 BTC, 'stop' is the SELL
+   * of a trailing stop, which the StrategyManager creates and the tracker adopts, 'unadopted' such a SELL left unadopted
    */
   const play = (steps: string) =>
     playSteps(steps, tracker, orders, step => {
       if (step === 'buy') tracker.buy(orders.createOrder, { type: 'STICKY', symbol });
       else if (step === 'sell') tracker.sell(orders.createOrder, { type: 'STICKY', symbol });
+      else if (step === 'sell2') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, amount: 2 });
       else if (step === 'stop') tracker.adoptSell(orders.createOrder({ type: 'MARKET', side: 'SELL', symbol }));
       else if (step === 'unadopted') orders.createOrder({ type: 'MARKET', side: 'SELL', symbol });
       else throw new Error(`Unknown step: ${step}`);
     });
+
+  // At 100 USDT the minimum cost, 5 USDT, is 0.05 BTC, above the minimum amount, 0.001 BTC; a market order takes 0.2 BTC at least.
+  // Amounts are sent truncated to 0.0001 BTC.
+  const PRICE = 100;
+  const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
+  const marketData = new Map<TradingPair, MarketData>([[symbol, limits]]);
+  const LONG = 'buy completed:1 sell';
+  const STOP = 'buy completed:1 stop';
+
+  /** Relays the outcome of the last order placed, its event reporting the facts given, at 100 USDT on the market above by default */
+  const relayLast = (outcome: OrderOutcome, facts: OutcomeFacts) =>
+    relayOrderOutcome(tracker, outcome, orders.created(orders.ids.length)!, { price: PRICE, marketData, ...facts });
 
   beforeEach(() => {
     tracker = new PositionTracker();
@@ -79,19 +92,8 @@ describe('PositionTracker', () => {
   });
 
   describe('position after an order that did not complete', () => {
-    // At 100 USDT the minimum cost, 5 USDT, is 0.05 BTC, above the minimum amount, 0.001 BTC; a market order takes 0.2 BTC at least.
-    // Amounts are sent truncated to 0.0001 BTC.
-    const PRICE = 100;
-    const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
-    const marketData = new Map<TradingPair, MarketData>([[symbol, limits]]);
     // A step that is not a power of ten, unlike those of Binance and Hyperliquid: the amount is not truncated
     const quarterStep = new Map<TradingPair, MarketData>([[symbol, { ...limits, precision: { amount: 0.25 } }]]);
-    const LONG = 'buy completed:1 sell';
-    const STOP = 'buy completed:1 stop';
-
-    /** Relays the outcome of the last order placed, its event reporting the facts given, at 100 USDT on the market above by default */
-    const relayLast = (outcome: OrderOutcome, facts: OutcomeFacts) =>
-      relayOrderOutcome(tracker, outcome, orders.created(orders.ids.length)!, { price: PRICE, marketData, ...facts });
 
     describe('the fill a cancelation reports', () => {
       it.each`
@@ -248,6 +250,71 @@ describe('PositionTracker', () => {
     });
   });
 
+  // The Trader caps a SELL to the free balance and to the most the market takes in one order: read flat once its first SELL had
+  // completed, a position bought above that maximum was held while the strategy ignored its SELL signals and followed its BUY signals
+  describe('position after a SELL that completed', () => {
+    const SELL2 = 'buy completed:1 sell2';
+    let log: Mock<LoggerFn>;
+
+    /** Relays the fill of the last order placed for `sold`, the portfolio after it holding `free` BTC, if given, at 100 USDT */
+    const completeLast = (sold: number, free?: number) =>
+      relayOrderOutcome(
+        tracker,
+        'completed',
+        { ...orders.created(orders.ids.length)!, amount: sold },
+        { price: PRICE, marketData, log, portfolio: free === undefined ? undefined : holding(symbol, free) },
+      );
+
+    beforeEach(() => {
+      log = vi.fn();
+    });
+
+    it.each`
+      case                                                                       | steps    | sold      | free         | isLong
+      ${'an all-in SELL that left nothing free: flat'}                           | ${LONG}  | ${1}      | ${0}         | ${false}
+      ${'an all-in SELL that left 0.0001 BTC free, too little to sell: flat'}    | ${LONG}  | ${1}      | ${0.0001}    | ${false}
+      ${'an all-in SELL capped, 0.5 BTC left free: long'}                        | ${LONG}  | ${1}      | ${0.5}       | ${true}
+      ${'an all-in SELL, the portfolio without BTC: flat'}                       | ${LONG}  | ${1}      | ${undefined} | ${false}
+      ${'a SELL of 2 that sold 2, 1 BTC left free: flat'}                        | ${SELL2} | ${2}      | ${1}         | ${false}
+      ${'a SELL of 2 capped at 1, 1 BTC left free: long'}                        | ${SELL2} | ${1}      | ${1}         | ${true}
+      ${'a SELL of 2 capped at 1.9999, 0.0001 BTC left free: flat'}              | ${SELL2} | ${1.9999} | ${0.0001}    | ${false}
+      ${'a SELL of 2 capped at 1, the portfolio without BTC: flat'}              | ${SELL2} | ${1}      | ${undefined} | ${false}
+      ${'an adopted stop SELL capped, 0.5 BTC left free: long'}                  | ${STOP}  | ${1}      | ${0.5}       | ${true}
+      ${'an adopted stop SELL, 0.1 BTC left free, under a MARKET minimum: flat'} | ${STOP}  | ${1}      | ${0.1}       | ${false}
+    `('reads $case', ({ steps, sold, free, isLong }) => {
+      play(steps);
+      completeLast(sold, free);
+      expect(tracker.isLong).toBe(isLong);
+    });
+
+    it.each`
+      case                         | steps    | sold | free   | message
+      ${'an all-in SELL capped'}   | ${LONG}  | ${1} | ${0.5} | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 BTC: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+      ${'a SELL of 2 capped at 1'} | ${SELL2} | ${1} | ${1}   | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 of the 2 BTC it asked for: 1 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+    `('logs the position it reads long after $case', ({ steps, sold, free, message }) => {
+      play(steps);
+      completeLast(sold, free);
+      expect(log.mock.calls).toEqual([['info', message]]);
+    });
+
+    it.each`
+      case                                  | steps    | sold | free
+      ${'an all-in SELL that left nothing'} | ${LONG}  | ${1} | ${0}
+      ${'a SELL of 2 that sold 2'}          | ${SELL2} | ${2} | ${1}
+    `('logs nothing after $case, which makes it flat', ({ steps, sold, free }) => {
+      play(steps);
+      completeLast(sold, free);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    // canSell: long, nothing pending
+    it('lets the strategy sell again after a SELL capped', () => {
+      play(LONG);
+      completeLast(1, 0.5);
+      expect(tracker.canSell()).toBe(true);
+    });
+  });
+
   describe('canBuy and canSell', () => {
     it.each`
       case                           | steps                     | canBuy   | canSell
@@ -314,15 +381,19 @@ describe('PositionTracker', () => {
 // The rule the tracker reads a position with, exported for whoever checks an all-in SELL the same way (a trailing stop's)
 describe('isSellable', () => {
   const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
+  // A minimum whose binary product with an amount worth it exactly falls an ulp under it: 0.00007 × 100000 is 6.999999999999999
+  const minimumOfSeven: MarketData = { cost: { min: 7 }, precision: { amount: 0.00001 } };
   it.each`
-    amount     | price  | type        | data      | description                                                 | expected
-    ${0.1}     | ${100} | ${'LIMIT'}  | ${limits} | ${'0.1 at 100, 10 USDT'}                                    | ${true}
-    ${0.1}     | ${100} | ${'MARKET'} | ${limits} | ${'0.1 in a MARKET order, under its minimum of 0.2'}        | ${false}
-    ${0.04999} | ${100} | ${'LIMIT'}  | ${limits} | ${'0.04999 at 100, 4.999 USDT, under the minimum cost'}     | ${false}
-    ${0.05009} | ${100} | ${'LIMIT'}  | ${limits} | ${'0.05009, sent as 0.05: 5 USDT, the minimum cost itself'} | ${true}
-    ${0.0005}  | ${0}   | ${'LIMIT'}  | ${limits} | ${'0.0005 at an unknown price, under the minimum amount'}   | ${false}
-    ${0.01}    | ${0}   | ${'LIMIT'}  | ${limits} | ${'0.01 at an unknown price, the cost unchecked'}           | ${true}
-    ${0}       | ${100} | ${'LIMIT'}  | ${{}}     | ${'nothing, on a market without limits'}                    | ${false}
+    amount     | price     | type        | data              | description                                                        | expected
+    ${0.1}     | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.1 at 100, 10 USDT'}                                           | ${true}
+    ${0.1}     | ${100}    | ${'MARKET'} | ${limits}         | ${'0.1 in a MARKET order, under its minimum of 0.2'}               | ${false}
+    ${0.04999} | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.04999 at 100, 4.999 USDT, under the minimum cost'}            | ${false}
+    ${0.05009} | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.05009, sent as 0.05: 5 USDT, the minimum cost itself'}        | ${true}
+    ${0.0005}  | ${0}      | ${'LIMIT'}  | ${limits}         | ${'0.0005 at an unknown price, under the minimum amount'}          | ${false}
+    ${0.01}    | ${0}      | ${'LIMIT'}  | ${limits}         | ${'0.01 at an unknown price, the cost unchecked'}                  | ${true}
+    ${0}       | ${100}    | ${'LIMIT'}  | ${{}}             | ${'nothing, on a market without limits'}                           | ${false}
+    ${0.00007} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00007 at 100000, 7 USDT in decimal, the minimum cost itself'} | ${true}
+    ${0.00006} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00006 at 100000, 6 USDT, under the minimum cost'}             | ${false}
   `('is $expected for $description', ({ amount, price, type, data, expected }) => {
     expect(isSellable(amount, price, type, data)).toBe(expected);
   });

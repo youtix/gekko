@@ -31,14 +31,15 @@ import { debug, error, info, isLevelEnabled, warning } from '@services/logger';
 import * as strategies from '@strategies/index';
 import { getBucketTimestamp, getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
-import { isFiniteNumber } from '@utils/math/math.utils';
+import { copyPayload } from '@utils/event/event.utils';
+import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
 import { clonePortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes } from 'date-fns';
-import { bindAll, cloneDeep, isNil, omit } from 'lodash-es';
+import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
 import { randomUUID, UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { isAbsolute, resolve } from 'node:path';
-import { inspect } from 'node:util';
+import { inspect, InspectOptions } from 'node:util';
 import { z } from 'zod';
 import { isSellable } from './positionTracker';
 import { IndicatorResults, Strategy, StrategyConstructor, Tools } from './strategy.types';
@@ -154,12 +155,21 @@ const copyResult = (result: unknown): unknown => {
 };
 
 /**
- * The strategy's own copy of an order event. The event is one clone shared by every plugin listening to it, the analyzers reading its
- * order and its portfolio after the strategy, and the StrategyManager reads it again once the hook has run: a BUY whose side the
- * strategy rewrote to SELL canceled the stop it had just armed. structuredClone copies whatever the event holds: it passed through it
- * when it was queued.
+ * The strategy's own copy of an order event: the StrategyManager reads the event again once the hook has run, to arm and settle the
+ * trailing stops, and a BUY whose side the strategy rewrote to SELL canceled the stop it had just armed. The event is the
+ * TradingAdvisor's own, each listener of a deferred event getting its copy: what the strategy writes reaches no other plugin either
+ * way. It holds plain data and a Map, which copyPayload copies by hand: structuredClone took five times as long, on every order end.
  */
-const copyOrderEvent = <O extends OrderInitiatedEvent['order']>(order: O, exchange: ExchangeEvent) => structuredClone({ order, exchange });
+const copyOrderEvent = <O extends OrderInitiatedEvent['order']>(order: O, exchange: ExchangeEvent) => copyPayload({ order, exchange });
+
+/** How a message that is not a string is written (see StrategyManager.log): on one line, the objects it holds two levels deep */
+const MESSAGE_INSPECT_OPTIONS: InspectOptions = { depth: 2, breakLength: Infinity };
+
+/** What a stop sells, and when, as the warnings about it say: its amount, its stop price and the peak that price trails from */
+const describeSale = ({ symbol, amount, stopPrice, highestPeak }: TrailingStopState) => {
+  const [asset] = symbol.split('/');
+  return `${amount} ${asset} once a price reaches its stop price, ${stopPrice}, trailing from its peak, ${highestPeak}`;
+};
 
 export class StrategyManager extends EventEmitter {
   private readonly warmupPeriod: number;
@@ -294,11 +304,11 @@ export class StrategyManager extends EventEmitter {
 
     this.armPendingTrailingStop(order, order.amount);
 
-    // The SELL of a stop sold what its own BUY filled: that stop is over, and the other stops of the pair still protect theirs. A SELL
-    // the strategy created closed the position the stops of its pair protected.
+    // The SELL of a stop settles that stop alone (see settleCompletedStopSell): the other stops of the pair still protect theirs. A
+    // SELL the strategy created closed the position the stops of its pair protected.
     this.strategySellIds.delete(order.id);
     const isTrailingStopSell = this.trailingStopSellIds.delete(order.id);
-    if (isTrailingStopSell) this.trailingStopManager.removeSellingStop(order.id);
+    if (isTrailingStopSell) this.settleCompletedStopSell(order, exchange);
     else if (order.side === 'SELL') this.cancelTrailingStopsOfPair(order);
   }
 
@@ -341,7 +351,8 @@ export class StrategyManager extends EventEmitter {
     } else {
       this.settleTrailingStopOfErroredBuy(order, filled);
     }
-    if (isConsecutiveErrorsReached) throw new ApplicationStopError(`Max consecutive order errors reached (${this.maxConsecutiveErrors})`);
+    if (isConsecutiveErrorsReached)
+      throw new ApplicationStopError('strategy', `Max consecutive order errors reached (${this.maxConsecutiveErrors})`);
   }
 
   /** `failure` is the error that stops the run before its end, if any: the strategy's end gets its message (see Strategy.end) */
@@ -365,8 +376,9 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onPortfolioChange(portfolio: Portfolio) {
-    // A copy: the portfolio is one clone shared by every plugin listening to it, the analyzers keeping it as their latest, and what the
-    // strategy wrote there skewed their equity until the next change
+    // The strategy's own copy, which the candle hooks get, and may write to, until the next change. What it is made from is the
+    // TradingAdvisor's own, the balance it read at start-up or its copy of an event, each listener of a deferred event getting one: no
+    // other plugin reads it.
     this.portfolio = clonePortfolio(portfolio);
   }
 
@@ -466,25 +478,30 @@ export class StrategyManager extends EventEmitter {
   /**
    * Logs a line of the strategy, printed if GEKKO_LOG_LEVEL lets its level through. An info, warn or error line is also relayed as
    * strategy info (the strat_info notifications of the EventSubscriber), whatever GEKKO_LOG_LEVEL; a debug line is not. An error line
-   * then throws.
+   * then throws. A message that is not a string, which only an untyped strategy can pass, is written as util.inspect shows it, on one
+   * line (see MESSAGE_INSPECT_OPTIONS).
    */
-  private log(level: LogLevel, message: string) {
+  private log(level: LogLevel, message: unknown) {
+    // Bun loads a strategyPath without type-checking it. An object reached the logger and the strat_info subscribers as
+    // "[object Object]", and one holding a function (tools itself) could not be copied with the events of its bucket: the bucket
+    // failed on a DataCloneError that named neither tools.log nor the strategy info.
+    const text = isString(message) ? message : inspect(message, MESSAGE_INSPECT_OPTIONS);
     let relayedLevel = level;
     switch (level) {
       case 'debug':
         // Not relayed: the built-in strategies log their indicator values at debug, up to four lines a candle (MACD), which reached the
         // strat_info subscribers as as many Telegram messages. Not even formatted below GEKKO_LOG_LEVEL: winston formats a line before
         // its level filter drops it, and with the relay that was most of the cost of a candle in a backtest.
-        if (isLevelEnabled('debug')) debug('strategy', message);
+        if (isLevelEnabled('debug')) debug('strategy', text);
         return;
       case 'info':
-        info('strategy', message);
+        info('strategy', text);
         break;
       case 'warn':
-        warning('strategy', message);
+        warning('strategy', text);
         break;
       case 'error':
-        error('strategy', message);
+        error('strategy', text);
         break;
       default: {
         // Bun loads a strategyPath without type-checking it, and a JavaScript strategy has no types: a level outside LogLevel ('warning',
@@ -497,14 +514,14 @@ export class StrategyManager extends EventEmitter {
             `Unknown log level ${inspect(unknownLevel)} in tools.log: its messages are logged and relayed at info level (levels: debug, info, warn, error)`,
           );
         }
-        info('strategy', message);
+        info('strategy', text);
         relayedLevel = 'info';
       }
     }
-    this.emit<StrategyInfo>(STRATEGY_INFO_EVENT, { timestamp: this.currentTimestamp, level: relayedLevel, tag: 'strategy', message });
+    this.emit<StrategyInfo>(STRATEGY_INFO_EVENT, { timestamp: this.currentTimestamp, level: relayedLevel, tag: 'strategy', message: text });
     // Relayed before the throw, as every other line is: thrown first, an error line was never relayed, even when the strategy caught the
     // error and went on
-    if (level === 'error') throw new GekkoError('strategy', message);
+    if (level === 'error') throw new GekkoError('strategy', text);
   }
 
   /* -------------------------------------------------------------------------- */
@@ -621,30 +638,19 @@ export class StrategyManager extends EventEmitter {
    * its answer or was busy, a crash on an overloaded exchange included. What is left of the risk: a second sale, of the stop's amount
    * at most, of coins of the asset the account holds besides.
    *
-   * Unless the portfolio after that SELL (`exchange`) shows too little of the asset free to sell: nothing is left for the stop to
-   * protect (sold by hand on the exchange, or by a SELL whose outcome was lost), and resumed it sent a SELL refused on each such minute
-   * until the breaker stopped the bot. It is removed, with a warning. Not while a SELL the strategy created is pending on the pair,
-   * whose reservation of the asset leaves little free while the position is held: that SELL decides (see isTriggerHeld). Nor when the
-   * portfolio does not list the asset, read before the first synchronization: nothing tells then. Too little is the PositionTracker's
-   * rule (see isSellable), for the MARKET SELL the stop sends.
+   * Unless the portfolio after that SELL (`exchange`) shows too little of the asset free to sell (see isNothingFreeToSell): nothing
+   * is left for the stop to protect (sold by hand on the exchange, or by a SELL whose outcome was lost), and resumed it sent a SELL
+   * refused on each such minute until the breaker stopped the bot. It is removed, with a warning.
    */
-  private resumeTrailingStop(
-    sellId: UUID,
-    outcome: string,
-    sold: number,
-    { portfolio, price }: ExchangeEvent,
-    reason?: string,
-    mayBeLive = false,
-  ) {
+  private resumeTrailingStop(sellId: UUID, outcome: string, sold: number, exchange: ExchangeEvent, reason?: string, mayBeLive = false) {
     const stop = this.trailingStopManager.resumeSellingStop(sellId, sold);
     if (!stop) return;
     const [asset] = stop.symbol.split('/');
     const sale = sold > 0 ? ` after selling ${sold} ${asset}` : ', no fill reported';
     const ending = `${outcome}${sale}${reason ? ` (${reason})` : ''}`;
-    const free = portfolio.get(asset)?.free;
-    const isStrategySelling = this.getStrategySellIds(stop.symbol).length > 0;
-    if (isFiniteNumber(free) && !isStrategySelling && !isSellable(free, price, 'MARKET', this.marketData.get(stop.symbol))) {
+    if (this.isNothingFreeToSell(stop, exchange)) {
       this.trailingStopManager.removeOrder(stop.id);
+      const free = exchange.portfolio.get(asset)?.free;
       warning(
         'strategy',
         [
@@ -654,8 +660,7 @@ export class StrategyManager extends EventEmitter {
       );
       return;
     }
-    const stopPrice = `its stop price, ${stop.stopPrice}, trailing from its peak, ${stop.highestPeak}`;
-    const selling = `${stop.amount} ${asset} once a price reaches ${stopPrice}`;
+    const selling = describeSale(stop);
     if (!mayBeLive) {
       warning('strategy', `Trailing stop of BUY ${stop.id} active again: its SELL ${sellId} ${ending}. It sells ${selling}`);
       return;
@@ -668,6 +673,69 @@ export class StrategyManager extends EventEmitter {
         `one is refused for lack of free ${asset} and the stop removed, unless the account holds other ${asset} free, which it would sell`,
       ].join(' '),
     );
+  }
+
+  /**
+   * Settles the stop whose SELL completed: over once that SELL sold all the stop sells, the position it protected sold. The Trader caps
+   * a SELL to the free balance and to the most the market takes in one order (its maximum amount, that of a market order for a MARKET
+   * one), and the SELL then completes for less. Over all the same, the stop left the rest of the position without protection: the SELL
+   * of a position bought above the maximum of a MARKET order (by a STICKY or a LIMIT BUY) sold that maximum only. The stop is now
+   * active again for the rest, from the peak and the stop price it triggered at, with a warning, as after a SELL that ended without
+   * completing (see resumeTrailingStop): the next price at or below that stop price sells the next part. Unless the rest is too little
+   * to sell at the minimums of the market, or the portfolio after that SELL shows too little of the asset free (see
+   * isNothingFreeToSell): a BUY whose fee the exchange took from the asset bought leaves its stop selling more than is free, its SELL
+   * capped to what is, and nothing is left to protect. The stop is then over, said at info level.
+   */
+  private settleCompletedStopSell({ id: sellId, amount: sold }: OrderCompletedEvent['order'], exchange: ExchangeEvent) {
+    const stop = this.getSellingStop(sellId);
+    // None once the strategy, or a SELL it created, removed the stop while it sold: that SELL was the strategy's
+    if (!stop) return;
+    if (!(sold < stop.amount)) {
+      this.trailingStopManager.removeSellingStop(sellId);
+      return;
+    }
+    const [asset] = stop.symbol.split('/');
+    const left = addPrecise(stop.amount, -sold);
+    const ending = `its SELL ${sellId} completed after selling ${sold} of its ${stop.amount} ${asset}`;
+    const isLeftSellable = isSellable(left, exchange.price, 'MARKET', this.marketData.get(stop.symbol));
+    if (!isLeftSellable || this.isNothingFreeToSell(stop, exchange)) {
+      this.trailingStopManager.removeSellingStop(sellId);
+      const tooLittle = isLeftSellable
+        ? `the portfolio after it shows ${exchange.portfolio.get(asset)?.free} ${asset} free,`
+        : `the rest, ${left} ${asset}, is`;
+      info(
+        'strategy',
+        `Trailing stop of BUY ${stop.id} over: ${ending}, and ${tooLittle} too little to sell at the minimums of the market`,
+      );
+      return;
+    }
+    const resumed = this.trailingStopManager.resumeSellingStop(sellId, sold) ?? stop;
+    warning(
+      'strategy',
+      [
+        `Trailing stop of BUY ${stop.id} active again: ${ending} (the Trader caps a SELL to the free balance and to the maximum amount`,
+        `of the market). It sells ${describeSale(resumed)}`,
+      ].join(' '),
+    );
+  }
+
+  /**
+   * Whether the portfolio after the SELL of a stop (`exchange`) shows too little of its asset free to sell: nothing is left for the
+   * stop to protect. Not while a SELL the strategy created is pending on the pair, whose reservation of the asset leaves little free
+   * while the position is held: that SELL decides (see isTriggerHeld). Nor when the portfolio does not list the asset, read before the
+   * first synchronization: nothing tells then. Too little is the PositionTracker's rule (see isSellable), for the MARKET SELL the stop
+   * sends.
+   */
+  private isNothingFreeToSell({ symbol }: TrailingStopState, { portfolio, price }: ExchangeEvent): boolean {
+    const [asset] = symbol.split('/');
+    const free = portfolio.get(asset)?.free;
+    if (!isFiniteNumber(free) || this.getStrategySellIds(symbol).length > 0) return false;
+    return !isSellable(free, price, 'MARKET', this.marketData.get(symbol));
+  }
+
+  /** The stop selling through the SELL `sellId` (see TrailingStopState.sellOrderId), if any */
+  private getSellingStop(sellId: UUID): TrailingStopState | undefined {
+    return [...this.trailingStopManager.getOrders().values()].find(stop => stop.status === 'selling' && stop.sellOrderId === sellId);
   }
 
   /**

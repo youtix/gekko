@@ -697,10 +697,10 @@ describe('StrategyManager', () => {
       // The end of the strategy could not know that the run stopped before its end, nor why: it gets the message the analyzers report,
       // not the error every plugin is finalised with
       it.each`
-        run                                   | failure                                                                 | interruption
-        ${'that reached its end'}             | ${undefined}                                                            | ${undefined}
-        ${'that the circuit breaker stopped'} | ${new ApplicationStopError('Max consecutive order errors reached (5)')} | ${'[CORE] Max consecutive order errors reached (5)'}
-        ${'that the strategy stopped'}        | ${new GekkoError('strategy', 'Indicator out of range')}                 | ${'[STRATEGY] Indicator out of range'}
+        run                                   | failure                                                                             | interruption
+        ${'that reached its end'}             | ${undefined}                                                                        | ${undefined}
+        ${'that the circuit breaker stopped'} | ${new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)')} | ${'[STRATEGY] Max consecutive order errors reached (5)'}
+        ${'that the strategy stopped'}        | ${new GekkoError('strategy', 'Indicator out of range')}                             | ${'[STRATEGY] Indicator out of range'}
       `('gives the end of the strategy the interruption of a run $run: $interruption', ({ failure, interruption }) => {
         const strategy = { end: vi.fn() };
         manager['strategy'] = strategy as any;
@@ -822,8 +822,13 @@ describe('StrategyManager', () => {
       it('stops the run with an ApplicationStopError on the 5th error in a row, maxConsecutiveErrors by default', () => {
         expect(firstErrorThatThrows(manager, 6)).toEqual({
           errorNumber: 5,
-          thrown: new ApplicationStopError('Max consecutive order errors reached (5)'),
+          thrown: new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)'),
         });
+      });
+
+      // Tagged 'core', the stop read "[CORE] Max consecutive order errors reached (5)" in the reports, on Telegram and in the exit log
+      it('tags the stop with the strategy, whose orders tripped it: [STRATEGY] Max consecutive order errors reached (5)', () => {
+        expect((firstErrorThatThrows(manager, 6)?.thrown as Error).message).toBe('[STRATEGY] Max consecutive order errors reached (5)');
       });
 
       // An order that does not end with an error breaks the run of errors
@@ -1478,9 +1483,31 @@ describe('StrategyManager', () => {
             },
             exchange,
           });
+        /**
+         * Reports the fill of the SELL `id` of the stop for `sold`, which the Trader capped to the free balance or to the maximum amount
+         * of the market, the portfolio after it holding `free` BTC, if given
+         */
+        const sellCompletedFor = (sold: number, free?: number, id = SELL_ID) =>
+          manager.onOrderCompleted({
+            order: {
+              id,
+              symbol,
+              side: 'SELL',
+              type: 'MARKET',
+              amount: sold,
+              orderCreationDate,
+              orderExecutionDate: 61000,
+              effectivePrice: 48000,
+              fee: 0,
+            },
+            exchange: { price: 48000, portfolio: new Map(free === undefined ? [] : [['BTC', { free, used: 0, total: free }]]) },
+          });
         /** What the manager said at warning level of the stop of the BUY */
         const stopWarnings = () =>
           vi.mocked(warning).mock.calls.filter(([, message]) => typeof message === 'string' && message.includes(`BUY ${BUY_ID}`));
+        /** What the manager said at info level of the stop of the BUY */
+        const stopInfos = () =>
+          vi.mocked(info).mock.calls.filter(([, message]) => typeof message === 'string' && message.includes(`BUY ${BUY_ID}`));
 
         beforeEach(() => {
           vi.mocked(randomUUID).mockReturnValueOnce(BUY_ID).mockReturnValueOnce(SELL_ID);
@@ -1530,6 +1557,133 @@ describe('StrategyManager', () => {
           it('sends no SELL when the price falls further', () => {
             manager.onOneMinuteBucket(minute(48000, 40000));
             expect(listener).not.toHaveBeenCalled();
+          });
+
+          it('says nothing of the stop', () => {
+            expect([...stopWarnings(), ...stopInfos()]).toEqual([]);
+          });
+        });
+
+        // The Trader caps a SELL to the free balance and to the most the market takes in one order: removed once that SELL completed,
+        // the stop left the rest of the position without protection, the SELL of a position bought above the maximum of a MARKET order
+        // selling that maximum only. A MARKET order sells 0.0003 BTC at least (the higher of the two minimums), in steps of 0.00001, for
+        // at least 5 USDT.
+        describe('once it completes for less than the stop sells', () => {
+          beforeEach(() => {
+            manager.setMarketData(
+              new Map([[symbol, { amount: { min: 0.0001 }, market: { min: 0.0003 }, cost: { min: 5 }, precision: { amount: 0.00001 } }]]),
+            );
+          });
+
+          describe('after selling 0.3 of 0.5, the portfolio after it showing the rest free', () => {
+            beforeEach(() => {
+              vi.mocked(randomUUID).mockReturnValueOnce(NEXT_SELL_ID);
+              sellCompletedFor(0.3, 0.2);
+            });
+
+            it('makes the stop active again', () => {
+              expect(stop()?.status).toBe('active');
+            });
+
+            it('keeps the peak and the stop price it triggered at', () => {
+              expect(stop()).toEqual(expect.objectContaining({ highestPeak: 50000, stopPrice: 49000 }));
+            });
+
+            it('sends a SELL of 0.2, what is left, on the next minute at or below its stop price', () => {
+              manager.onOneMinuteBucket(minute(48500, 48000));
+              expect(listener).toHaveBeenCalledExactlyOnceWith(
+                expect.objectContaining({ id: NEXT_SELL_ID, symbol, side: 'SELL', type: 'MARKET', amount: 0.2 }),
+              );
+            });
+
+            it('says at warning level that the stop is active again, and for what', () => {
+              expect(stopWarnings()).toEqual([
+                [
+                  'strategy',
+                  `Trailing stop of BUY ${BUY_ID} active again: its SELL ${SELL_ID} completed after selling 0.3 of its 0.5 BTC (the Trader caps a SELL to the free balance and to the maximum amount of the market). It sells 0.2 BTC once a price reaches its stop price, 49000, trailing from its peak, 50000`,
+                ],
+              ]);
+            });
+
+            it('removes the stop once the SELL of the rest completes, selling it all', () => {
+              manager.onOneMinuteBucket(minute(48500, 48000));
+              sellCompletedFor(0.2, 0, NEXT_SELL_ID);
+              expect(stop()).toBeUndefined();
+            });
+          });
+
+          // Nothing tells that nothing is left: what the SELL left by the stop's own figures is what the stop sells. Nor does the portfolio
+          // while a SELL the strategy created reserves the asset: that SELL decides.
+          it.each`
+            shows                                                            | free         | before
+            ${'no balance of the asset'}                                     | ${undefined} | ${() => undefined}
+            ${'nothing free, the asset reserved for a SELL of the strategy'} | ${0}         | ${() => manager['createOrder']({ symbol, side: 'SELL', type: 'STICKY' })}
+          `('makes the stop active again when the portfolio after it shows $shows', ({ free, before }) => {
+            before();
+            sellCompletedFor(0.3, free);
+            expect(stop()?.status).toBe('active');
+          });
+
+          // A BUY whose fee the exchange took from the asset bought leaves its stop selling more than is free: the Trader caps its SELL to
+          // what is, and nothing is left to protect. Nor is anything left when the rest is under the minimums, other BTC free or not.
+          describe.each`
+            shows                                                              | sold      | free      | tooLittle
+            ${'nothing free, the fee of the BUY taken from the BTC it bought'} | ${0.4995} | ${0}      | ${'the portfolio after it shows 0 BTC free,'}
+            ${'other BTC free, the rest under the minimum of a MARKET order'}  | ${0.4999} | ${1.0001} | ${'the rest, 0.0001 BTC, is'}
+          `('after selling $sold of 0.5, the portfolio after it showing $shows', ({ sold, free, tooLittle }) => {
+            beforeEach(() => {
+              sellCompletedFor(sold, free);
+            });
+
+            it('removes the stop', () => {
+              expect(stop()).toBeUndefined();
+            });
+
+            it('says at info level why: too little is left to sell', () => {
+              expect(stopInfos()).toEqual([
+                [
+                  'strategy',
+                  `Trailing stop of BUY ${BUY_ID} over: its SELL ${SELL_ID} completed after selling ${sold} of its 0.5 BTC, and ${tooLittle} too little to sell at the minimums of the market`,
+                ],
+              ]);
+            });
+
+            it('says nothing at warning level', () => {
+              expect(stopWarnings()).toEqual([]);
+            });
+
+            it('sends no SELL when the price falls further', () => {
+              manager.onOneMinuteBucket(minute(48000, 40000));
+              expect(listener).not.toHaveBeenCalled();
+            });
+          });
+
+          // A stop of an amount off the step of the market, whose SELL the exchange truncated to the step: the rest is under one step,
+          // which no order sells, though the portfolio shows BTC free, the first stop's
+          describe('after a SELL truncated to the step of the market, the portfolio after it showing BTC free', () => {
+            const OFF_STEP_BUY_ID: UUID = '0b0b0b0b-0000-4000-8000-00000000000f';
+            const OFF_STEP_SELL_ID: UUID = '5e115e11-0000-4000-8000-000000000010';
+
+            beforeEach(() => {
+              vi.mocked(randomUUID).mockReturnValueOnce(OFF_STEP_BUY_ID).mockReturnValueOnce(OFF_STEP_SELL_ID);
+              manager['createOrder']({ symbol, side: 'BUY', type: 'MARKET', trailing: { percentage: 2 } });
+              completeBuy(OFF_STEP_BUY_ID, 0.200004);
+              manager.onOneMinuteBucket(minute(50000, 48000)); // Peak 50000, stop price 49000: the stop of 0.200004 triggers
+              sellCompletedFor(0.2, 0.5, OFF_STEP_SELL_ID);
+            });
+
+            it('removes the stop', () => {
+              expect(manager['trailingStopManager'].getOrders().has(OFF_STEP_BUY_ID)).toBe(false);
+            });
+
+            it('says at info level why: the rest, 0.000004 BTC, is too little to sell', () => {
+              expect(vi.mocked(info).mock.calls.filter(([, message]) => String(message).includes(`BUY ${OFF_STEP_BUY_ID}`))).toEqual([
+                [
+                  'strategy',
+                  `Trailing stop of BUY ${OFF_STEP_BUY_ID} over: its SELL ${OFF_STEP_SELL_ID} completed after selling 0.2 of its 0.200004 BTC, and the rest, 0.000004 BTC, is too little to sell at the minimums of the market`,
+                ],
+              ]);
+            });
           });
         });
 
@@ -1843,6 +1997,11 @@ describe('StrategyManager', () => {
           it('cancels no other stop of the pair when that SELL completes: it sold what the stop protected', () => {
             sellCompleted(SELL_ID);
             expect(manager['trailingStopManager'].getOrders().has(DORMANT_ID)).toBe(true);
+          });
+
+          it('does not bring it back when that SELL completes for less than the stop sold', () => {
+            sellCompletedFor(0.3, 0.2);
+            expect(stop()).toBeUndefined();
           });
         });
 
@@ -2452,8 +2611,8 @@ describe('StrategyManager', () => {
         manager.onTimeFrameCandle(bucket);
       });
 
-      // One clone is shared by every plugin listening to the change of portfolio, the analyzers keeping it as their latest
-      it('leaves the portfolio the other plugins received as it was', () => {
+      // The portfolio handed over, the TradingAdvisor's own copy of the change, stays as it was
+      it('leaves the portfolio received as it was', () => {
         expect(portfolio).toEqual(balances());
       });
 
@@ -2506,13 +2665,20 @@ describe('StrategyManager', () => {
           manager[handler](event as any);
         });
 
-        // One clone is shared by every plugin listening to the event, the analyzers reading it after the strategy
-        it('leaves the order the other plugins receive as it was', () => {
+        // The manager reads the event again once the hook has run, to arm and settle the trailing stops
+        it('leaves the order of the event as it was', () => {
           expect(event.order).toEqual(EVENTS[handler]().order);
         });
 
         it('leaves the portfolio and the price of the event as they were', () => {
           expect(event.exchange).toEqual(exchangeEvent());
+        });
+
+        // Copied by hand, the event holding plain data and a Map: structuredClone took five times as long, on every order end
+        it('copies the event for the hook without structuredClone', () => {
+          const clone = vi.spyOn(globalThis, 'structuredClone');
+          manager[handler](EVENTS[handler]() as any);
+          expect(clone).not.toHaveBeenCalled();
         });
       });
 
@@ -3536,6 +3702,48 @@ describe('StrategyManager', () => {
           unknownLevelWarning(quoted('warning')),
           unknownLevelWarning(quoted('ERROR')),
         ]);
+      });
+
+      // Only an untyped strategy can pass these messages. An object reached the logger and the strat_info subscribers as "[object
+      // Object]", and one holding a function (tools itself) could not be copied with the events of its bucket, which failed.
+      describe.each`
+        kind                                  | message                                      | written
+        ${'an object'}                        | ${{ rsi: 42, isBuy: true }}                  | ${'{ rsi: 42, isBuy: true }'}
+        ${'an object holding a function'}     | ${{ rsi: 42, onTick: function onTick() {} }} | ${'{ rsi: 42, onTick: [Function: onTick] }'}
+        ${'a function'}                       | ${function onTick() {}}                      | ${'[Function: onTick]'}
+        ${'objects nested beyond two levels'} | ${{ a: { b: { c: { d: 1 } } } }}             | ${'{ a: { b: { c: [Object] } } }'}
+        ${'a number'}                         | ${42}                                        | ${'42'}
+        ${'undefined'}                        | ${undefined}                                 | ${'undefined'}
+      `('when the strategy logs $kind', ({ message, written }) => {
+        let listener: Mock;
+
+        beforeEach(() => {
+          listener = vi.fn();
+          manager.on(STRATEGY_INFO_EVENT, listener);
+          manager['log']('info', message);
+        });
+
+        it(`hands the logger the message as util.inspect writes it, on one line: ${written}`, () => {
+          expect(vi.mocked(info).mock.calls).toEqual([['strategy', written]]);
+        });
+
+        it(`relays it as that text: ${written}`, () => {
+          expect(listener.mock.calls.map(([strategyInfo]) => strategyInfo.message)).toEqual([written]);
+        });
+      });
+
+      // Two levels deep, the market data of each pair shows its keys, not every limit: one line, not a page per watched pair
+      it('writes the tools the strategy is given on one line, two levels deep', () => {
+        manager['log']('info', manager['tools']);
+        const [[, written]] = vi.mocked(info).mock.calls;
+        // The functions are those bindAll made, whatever lodash names them
+        expect(String(written).replaceAll(/\[Function: \w+\]/g, '[Function]')).toBe(
+          `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { each: 1, wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function] }`,
+        );
+      });
+
+      it('throws a GekkoError with that text at error level: [STRATEGY] { rsi: 42 }', () => {
+        expect(() => manager['log']('error', { rsi: 42 })).toThrow(new GekkoError('strategy', '{ rsi: 42 }'));
       });
     });
   });

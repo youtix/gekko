@@ -352,7 +352,7 @@ describe('E2E: Realtime Screener Flow', () => {
       } catch (err: any) {
         // The pipeline rejects with the ApplicationStopError itself (not a premature close), so main() can exit with 0
         expect(err).toBeInstanceOf(ApplicationStopError);
-        expect(err.message).toBe('[CORE] Max consecutive order errors reached (5)');
+        expect(err.message).toBe('[STRATEGY] Max consecutive order errors reached (5)');
       }
 
       const calls = MockFetcherService.callHistory.filter(c => c.method === 'POST');
