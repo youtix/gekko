@@ -208,6 +208,15 @@ describe('PluginsStream', () => {
         expect(delivered).toEqual(['orderErrored', 'orderCompleted', 'orderErrored']);
       });
 
+      // The ranking allocated its arrays on every bucket, though a run that goes on has no failure to rank
+      it('does not rank the failures of a bucket every plugin processed', async () => {
+        const rankFailures = vi.spyOn(PluginsStream.prototype as any, 'rankFailures');
+
+        await runPipeline([BUCKET, BUCKET], [createPluginStub(), createPluginStub()]);
+
+        expect(rankFailures).not.toHaveBeenCalled();
+      });
+
       it('finalizes the plugins at the end of the stream', async () => {
         const plugin = createPluginStub();
 

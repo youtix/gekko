@@ -599,6 +599,44 @@ describe('Trader', () => {
       expect(trader['currentTimestamp']).toBe(1_700_000_060_000); // start + 1 min
     });
 
+    // The backtest synchronizes on the minutes since the epoch that are a multiple of getBacktestModeIntervalSyncTime, 10 at 1m, the
+    // minutes counted as date-fns' differenceInMinutes counted them: truncated
+    it.each`
+      start                | minute                              | calls
+      ${1_700_000_400_000} | ${'28,333,340'}                     | ${1}
+      ${1_700_000_430_000} | ${'28,333,340, 30 seconds into it'} | ${1}
+      ${1_700_000_460_000} | ${'28,333,341'}                     | ${0}
+      ${1_700_000_940_000} | ${'28,333,349'}                     | ${0}
+      ${1_700_001_000_000} | ${'28,333,350'}                     | ${1}
+    `('synchronizes $calls time(s) in backtest on a bucket of minute $minute since the epoch', async ({ start, calls }) => {
+      (trader as any).mode = 'backtest';
+      const synchronizeSpy = vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+
+      await trader['processOneMinuteBucket'](new Map([['BTC/USDT', { ...defaultCandle, start }]]));
+
+      expect(synchronizeSpy).toHaveBeenCalledTimes(calls);
+    });
+
+    // In backtest a bucket checks the STICKY orders and waits for the reports in flight. With no order listed, nothing can be checked,
+    // nor start a report: awaited all the same, each cost a turn of the microtask queue, on most buckets of a run.
+    describe('in backtest, with no order listed and no report in flight', () => {
+      const bucket = new Map([['BTC/USDT', defaultCandle]]) as any;
+
+      beforeEach(() => {
+        (trader as any).mode = 'backtest';
+      });
+
+      it.each`
+        method
+        ${'checkStickyOrders'}
+        ${'settlePendingReports'}
+      `('does not call $method', async ({ method }) => {
+        const spy = vi.spyOn(trader as any, method);
+        await trader['processOneMinuteBucket'](bucket);
+        expect(spy).not.toHaveBeenCalled();
+      });
+    });
+
     // In realtime an interval of each order runs its check. In backtest nothing does but the bucket, for the STICKY orders, which
     // move to follow the market: the simulated exchange settles LIMIT and MARKET orders through the callback of their creation.
     describe('order checks', () => {
@@ -2476,6 +2514,14 @@ describe('Trader', () => {
         trader['currentTimestamp'] = 0;
         await trader['processOneMinuteBucket'](new Map([['BTC/USDT', { ...defaultCandle, start: 1_700_000_400_000 }]]));
         expect(synchronizeSpy).not.toHaveBeenCalled();
+      });
+
+      // The stream calls it at least once per bucket, most often with no report in flight: awaited all the same, the wait cost a turn of
+      // the microtask queue each time
+      it('does not wait for the reports in a flush when none is in flight', async () => {
+        const settleSpy = vi.spyOn(trader as any, 'settlePendingReports');
+        await flush();
+        expect(settleSpy).not.toHaveBeenCalled();
       });
     });
 

@@ -3761,14 +3761,18 @@ describe('StrategyManager', () => {
 
       // Only an untyped strategy can pass these messages. An object reached the logger and the strat_info subscribers as "[object
       // Object]", and one holding a function (tools itself) could not be copied with the events of its bucket, which failed.
+      // util.inspect wrote an array of more than six items in rows unless compact, and the object holding one with it
       describe.each`
-        kind                                  | message                                      | written
-        ${'an object'}                        | ${{ rsi: 42, isBuy: true }}                  | ${'{ rsi: 42, isBuy: true }'}
-        ${'an object holding a function'}     | ${{ rsi: 42, onTick: function onTick() {} }} | ${'{ rsi: 42, onTick: [Function: onTick] }'}
-        ${'a function'}                       | ${function onTick() {}}                      | ${'[Function: onTick]'}
-        ${'objects nested beyond two levels'} | ${{ a: { b: { c: { d: 1 } } } }}             | ${'{ a: { b: { c: [Object] } } }'}
-        ${'a number'}                         | ${42}                                        | ${'42'}
-        ${'undefined'}                        | ${undefined}                                 | ${'undefined'}
+        kind                                       | message                                      | written
+        ${'an object'}                             | ${{ rsi: 42, isBuy: true }}                  | ${'{ rsi: 42, isBuy: true }'}
+        ${'an object holding a function'}          | ${{ rsi: 42, onTick: function onTick() {} }} | ${'{ rsi: 42, onTick: [Function: onTick] }'}
+        ${'a function'}                            | ${function onTick() {}}                      | ${'[Function: onTick]'}
+        ${'objects nested beyond two levels'}      | ${{ a: { b: { c: { d: 1 } } } }}             | ${'{ a: { b: { c: [Object] } } }'}
+        ${'a number'}                              | ${42}                                        | ${'42'}
+        ${'undefined'}                             | ${undefined}                                 | ${'undefined'}
+        ${'an array of more than six items'}       | ${[1, 2, 3, 4, 5, 6, 7, 8]}                  | ${'[ 1, 2, 3, 4, 5, 6, 7, 8 ]'}
+        ${'an object holding such an array'}       | ${{ rsi: [1, 2, 3, 4, 5, 6, 7, 8] }}         | ${'{ rsi: [ 1, 2, 3, 4, 5, 6, 7, 8 ] }'}
+        ${'arrays of more than six items, nested'} | ${[[1, 2, 3, 4, 5, 6, 7], [8]]}              | ${'[ [ 1, 2, 3, 4, 5, 6, 7 ], [ 8 ] ]'}
       `('when the strategy logs $kind', ({ message, written }) => {
         let listener: Mock;
 
@@ -3795,6 +3799,13 @@ describe('StrategyManager', () => {
         expect(String(written).replaceAll(/\[Function: \w+\]/g, '[Function]')).toBe(
           `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { each: 1, wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function] }`,
         );
+      });
+
+      // The one message written on several lines: what a strategy that logs an Error wants to read is where it was thrown
+      it('hands the logger an Error as util.inspect writes it, with its stack', () => {
+        const failure = new Error('Indicator out of range');
+        manager['log']('info', failure);
+        expect(vi.mocked(info).mock.calls).toEqual([['strategy', failure.stack]]);
       });
 
       it('throws a GekkoError with that text at error level: [STRATEGY] { rsi: 42 }', () => {

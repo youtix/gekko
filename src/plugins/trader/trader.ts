@@ -9,6 +9,7 @@ import {
   PORTFOLIO_CHANGE_EVENT,
 } from '@constants/event.const';
 import { DEFAULT_FEE_BUFFER } from '@constants/order.const';
+import { ONE_MINUTE } from '@constants/time.const';
 import { describeError } from '@errors/error.utils';
 import { AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
@@ -24,7 +25,6 @@ import { getMarketOrderLimits } from '@utils/market/market.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
-import { addMinutes, differenceInMinutes } from 'date-fns';
 import { filter, isNil, noop, uniq } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { ORDER_FACTORY } from './trader.const';
@@ -791,21 +791,25 @@ export class Trader extends Plugin {
     const isFirstBucket = !this.currentTimestamp;
 
     // Update all candle bucket prices, and the time: the end of the minute, where the clock of the simulated exchange already is
-    // (see PluginsStream). A report settled during the bucket dates an estimated fill, or an error, with it.
+    // (see PluginsStream). A report settled during the bucket dates an estimated fill, or an error, with it. In epoch milliseconds:
+    // date-fns' addMinutes built a Date on every bucket for this sum.
     for (const [symbol, candle] of bucket) this.prices.set(symbol, candle.close);
-    this.currentTimestamp = addMinutes(firstEntry.start, 1).getTime();
+    this.currentTimestamp = firstEntry.start + ONE_MINUTE;
 
     if (this.mode === 'backtest') {
-      // Check the orders before the synchronization, which then sees what a move reserves (see checkStickyOrders)
-      await this.checkStickyOrders();
+      // Check the orders before the synchronization, which then sees what a move reserves (see checkStickyOrders). Not without an order
+      // listed: nothing to check, and awaited all the same, it cost a turn of the microtask queue on most buckets of a backtest. With
+      // one listed, STICKY or not, it is awaited as before: the reports of the orders the bucket filled run meanwhile.
+      if (this.orders.size) await this.checkStickyOrders();
 
-      // Synchronize periodically in backtest mode (order fills are handled by exchange callbacks)
-      const minutes = differenceInMinutes(firstEntry.start, 0);
+      // Synchronize periodically in backtest mode (order fills are handled by exchange callbacks), on the minutes since the epoch that
+      // are a multiple of the interval: counted as differenceInMinutes counted them, truncated, without the two Dates it built
+      const minutes = Math.trunc(firstEntry.start / ONE_MINUTE);
       if (!isFirstBucket && minutes % getBacktestModeIntervalSyncTime(this.timeframe) === 0) await this.synchronize();
 
       // The ends of orders the simulated exchange settled with this bucket, or the checks above, are queued before its events are
       // flushed, and delivered with it (see relayTerminalEvents)
-      await this.settlePendingReports();
+      if (this.pendingReports.size) await this.settlePendingReports();
     }
   }
 
@@ -815,7 +819,8 @@ export class Trader extends Plugin {
    * (see relayTerminalEvents).
    */
   public async broadcastDeferredEmit(): Promise<boolean> {
-    if (this.mode === 'backtest') await this.settlePendingReports();
+    // Awaited only when a report is in flight: the stream calls this at least once per bucket, most often with none
+    if (this.mode === 'backtest' && this.pendingReports.size) await this.settlePendingReports();
     return super.broadcastDeferredEmit();
   }
 

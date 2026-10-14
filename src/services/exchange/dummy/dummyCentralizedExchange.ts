@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
@@ -15,7 +16,6 @@ import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { round, shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, initializePortfolio } from '@utils/portfolio/portfolio.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
-import { addMinutes } from 'date-fns';
 import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
 import { COST_DECIMALS } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
@@ -93,8 +93,8 @@ export class DummyCentralizedExchange implements Exchange {
   public async processOneMinuteBucket(bucket: CandleBucket): Promise<void> {
     return this.mutex.runExclusive(() => {
       for (const [symbol, candle] of bucket) {
-        // I need the close time of the candle
-        this.currentTimestamp = addMinutes(candle.start, 1).getTime();
+        // The close time of the candle, in epoch milliseconds: date-fns' addMinutes built a Date for each candle of each bucket
+        this.currentTimestamp = candle.start + ONE_MINUTE;
         const oldCandles = this.candles.get(symbol);
         if (oldCandles) {
           oldCandles.push(candle);

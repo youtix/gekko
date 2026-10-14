@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@constants/event.const';
 import { describeError } from '@errors/error.utils';
 import {
@@ -15,7 +16,6 @@ import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '@utils/finance/stats.utils';
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
-import { addMinutes } from 'date-fns';
 import { first, isNil, omit } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
@@ -325,7 +325,7 @@ export class PortfolioAnalyzer extends Plugin {
   protected processOneMinuteBucket(bucket: CandleBucket): void {
     // Throw error if bucket is empty
     const firstCandle = getFirstCandleFromBucket(bucket);
-    this.currentTimestamp = addMinutes(firstCandle.start, 1).getTime();
+    this.currentTimestamp = firstCandle.start + ONE_MINUTE;
 
     // Update prices for all assets, through the pairs the plugin holds rather than pairs built anew on every bucket
     for (const pair of this.pairs) {

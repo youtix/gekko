@@ -38,7 +38,7 @@ export type AddIndicatorFn = <T extends IndicatorNames>(name: T, symbol: Trading
  * an untyped strategy can pass, is logged and relayed at info, after one warning per level.
  *
  * A message that is not a string, which only an untyped strategy can pass too, is written as util.inspect shows it, the objects it
- * holds two levels deep: on one line, but for an Error, written with its stack, and an array of more than six items, written in rows.
+ * holds two levels deep: on one line, but for an Error, written with its stack.
  * It used to reach the logs and the subscribers as "[object Object]", and one holding a function (`tools` itself) failed its bucket.
  */
 export type LoggerFn = (level: LogLevel, msg: string) => void;

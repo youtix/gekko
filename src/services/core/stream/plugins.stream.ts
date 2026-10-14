@@ -15,6 +15,9 @@ import { inspect } from 'node:util';
 /** A plugin that failed on a bucket, and what it threw */
 type PluginFailure = { plugin: Plugin; reason: unknown };
 
+/** Whether a plugin failed on the bucket: its processing rejected */
+const isRejected = (result: PromiseSettledResult<void>): result is PromiseRejectedResult => result.status === 'rejected';
+
 /**
  * A failure in one line, as main() starts reporting it: a GekkoError's message explains it, any other error is named. Not String()
  * for a value that is not an error, which gives '[object Object]' for an object and throws for one without a prototype.
@@ -119,8 +122,9 @@ export class PluginsStream extends Writable {
 
     // Forward bucket to all plugins concurrently, and let them all finish before the plugins can be finalised
     const results = await Promise.allSettled(this.plugins.map(plugin => plugin.processInputStream(bucket)));
-    const [failure, ...otherFailures] = this.rankFailures(results);
-    if (failure) {
+    // Ranked once a plugin failed: the ranking allocated its arrays on every bucket, though none fails in a run that goes on
+    if (results.some(isRejected)) {
+      const [failure, ...otherFailures] = this.rankFailures(results);
       this.otherFailures = otherFailures;
       throw failure.reason;
     }

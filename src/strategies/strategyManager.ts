@@ -7,6 +7,7 @@ import {
   TRAILING_STOP_TRIGGERED,
 } from '@constants/event.const';
 import { ORDER_SIDES, ORDER_TYPES } from '@constants/order.const';
+import { ONE_MINUTE } from '@constants/time.const';
 import { ApplicationStopError } from '@errors/applicationStop.error';
 import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
@@ -35,7 +36,6 @@ import { toISOString } from '@utils/date/date.utils';
 import { copyPayload } from '@utils/event/event.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { clonePortfolio } from '@utils/portfolio/portfolio.utils';
-import { addMinutes } from 'date-fns';
 import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
 import { randomUUID, UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
@@ -160,8 +160,11 @@ const copyResult = (result: unknown): unknown => {
  */
 const copyOrderEvent = <O extends OrderInitiatedEvent['order']>(order: O, exchange: ExchangeEvent) => copyPayload({ order, exchange });
 
-/** How a message that is not a string is written (see StrategyManager.log): on one line, the objects it holds two levels deep */
-const MESSAGE_INSPECT_OPTIONS: InspectOptions = { depth: 2, breakLength: Infinity };
+/**
+ * How a message that is not a string is written (see StrategyManager.log): the objects it holds two levels deep, on one line but for an
+ * Error, written with its stack. Not compact, util.inspect wrote an array of more than six items in rows, and whatever held one with it.
+ */
+const MESSAGE_INSPECT_OPTIONS: InspectOptions = { depth: 2, breakLength: Infinity, compact: true };
 
 /** What a stop sells, and when, as the warnings about it say: its amount, its stop price and the peak that price trails from */
 const describeSale = ({ symbol, amount, stopPrice, highestPeak }: TrailingStopState) => {
@@ -262,7 +265,8 @@ export class StrategyManager extends EventEmitter {
   public onOneMinuteBucket(bucket: CandleBucket) {
     // Update current timestamp with the latest candle data
     const firstCandle = getFirstCandleFromBucket(bucket);
-    this.currentTimestamp = addMinutes(firstCandle.start, 1).getTime();
+    // The end of the minute, in epoch milliseconds: date-fns' addMinutes built a Date on every bucket for this sum
+    this.currentTimestamp = firstCandle.start + ONE_MINUTE;
     // init runs on the first bucket, once the clock is set: it dates what init logs
     if (!this.isInitialized) this.initStrategy(bucket);
     // Update trailing stop orders each minute with the latest candle data
@@ -476,7 +480,7 @@ export class StrategyManager extends EventEmitter {
    * Logs a line of the strategy, printed if GEKKO_LOG_LEVEL lets its level through. An info, warn or error line is also relayed as
    * strategy info (the strat_info notifications of the EventSubscriber), whatever GEKKO_LOG_LEVEL; a debug line is not. An error line
    * then throws. A message that is not a string, which only an untyped strategy can pass, is written as util.inspect shows it, on one
-   * line (see MESSAGE_INSPECT_OPTIONS).
+   * line but for an Error's stack (see MESSAGE_INSPECT_OPTIONS).
    */
   private log(level: LogLevel, message: unknown) {
     // Bun loads a strategyPath without type-checking it. An object reached the logger and the strat_info subscribers as
