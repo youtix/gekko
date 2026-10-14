@@ -25,50 +25,63 @@ const end = start + 3 * MINUTE;
 // Minute 2 is missing: one gap, so two date ranges
 const candles = [0, 1, 3].map(minute => ({ start: start + minute * MINUTE, open: 10, high: 12, low: 9, close: 11, volume: minute + 1 }));
 
-describe('SQLiteStorage - table names', () => {
+describe('SQLiteStorage', () => {
   let SQLiteStorage: typeof ISQLiteStorage;
 
   beforeAll(async () => {
     ({ SQLiteStorage } = await import('@services/storage/sqlite.storage'));
   });
 
-  describe.each([
-    ['BTC/USDT', 'CANDLES_BTC_USDT'],
-    ['1INCH/USDT', 'CANDLES_1INCH_USDT'],
-    ['C98/USDT', 'CANDLES_C98_USDT'],
-    ['1000SATS/USDT', 'CANDLES_1000SATS_USDT'],
-    ['BTC/USD1', 'CANDLES_BTC_USD1'],
-    ['FLX-CRCL/USDC:USDC', 'CANDLES_FLX-CRCL_USDC:USDC'],
-    ['A"B/USDT', 'CANDLES_A"B_USDT'],
-  ] as const)('%s', (symbol, table) => {
-    let storage: ISQLiteStorage;
+  describe('table names', () => {
+    describe.each([
+      ['BTC/USDT', 'CANDLES_BTC_USDT'],
+      ['1INCH/USDT', 'CANDLES_1INCH_USDT'],
+      ['C98/USDT', 'CANDLES_C98_USDT'],
+      ['1000SATS/USDT', 'CANDLES_1000SATS_USDT'],
+      ['BTC/USD1', 'CANDLES_BTC_USD1'],
+      ['FLX-CRCL/USDC:USDC', 'CANDLES_FLX-CRCL_USDC:USDC'],
+      ['A"B/USDT', 'CANDLES_A"B_USDT'],
+    ] as const)('%s', (symbol, table) => {
+      let storage: ISQLiteStorage;
 
-    beforeEach(() => {
-      storage = new SQLiteStorage([symbol]);
-      candles.forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
+      beforeEach(() => {
+        storage = new SQLiteStorage([symbol]);
+        candles.forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
+      });
+
+      afterEach(() => {
+        storage.close();
+      });
+
+      it(`creates the table ${table}`, () => {
+        expect(storage.db.query('SELECT name FROM sqlite_master WHERE name LIKE ?').all('CANDLES%')).toEqual([{ name: table }]);
+      });
+
+      it('reads back the inserted candles', () => {
+        expect(storage.getCandles(symbol, { start, end })).toEqual(candles.map((candle, index) => ({ id: index + 1, ...candle })));
+      });
+
+      it('lists the date ranges of the candles', () => {
+        expect(storage.getCandleDateranges(symbol)).toEqual([
+          { daterange_start: start, daterange_end: start + MINUTE },
+          { daterange_start: end, daterange_end: end },
+        ]);
+      });
+
+      it('counts the missing candles of the interval', () => {
+        expect(storage.checkInterval(symbol, { start, end })).toEqual({ missingCandleCount: 1 });
+      });
     });
 
-    afterEach(() => {
+    it('reads a table created by the former, unquoted statement', () => {
+      const storage = new SQLiteStorage([]);
+      storage.db.run(
+        'CREATE TABLE IF NOT EXISTS CANDLES_BTC_USDT (id INTEGER PRIMARY KEY AUTOINCREMENT, start INTEGER UNIQUE, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL)',
+      );
+      storage.db.run('INSERT INTO CANDLES_BTC_USDT VALUES (NULL, ?, 10, 12, 9, 11, 1)', [start]);
+      storage.createTable('btc/usdt');
+      expect(storage.getCandles('btc/usdt', { start, end })).toEqual([{ id: 1, ...candles[0] }]);
       storage.close();
-    });
-
-    it(`creates the table ${table}`, () => {
-      expect(storage.db.query('SELECT name FROM sqlite_master WHERE name LIKE ?').all('CANDLES%')).toEqual([{ name: table }]);
-    });
-
-    it('reads back the inserted candles', () => {
-      expect(storage.getCandles(symbol, { start, end })).toEqual(candles.map((candle, index) => ({ id: index + 1, ...candle })));
-    });
-
-    it('lists the date ranges of the candles', () => {
-      expect(storage.getCandleDateranges(symbol)).toEqual([
-        { daterange_start: start, daterange_end: start + MINUTE },
-        { daterange_start: end, daterange_end: end },
-      ]);
-    });
-
-    it('counts the missing candles of the interval', () => {
-      expect(storage.checkInterval(symbol, { start, end })).toEqual({ missingCandleCount: 1 });
     });
   });
 
@@ -141,34 +154,28 @@ describe('SQLiteStorage - table names', () => {
     });
   });
 
-  it('reads a table created by the former, unquoted statement', () => {
-    const storage = new SQLiteStorage([]);
-    storage.db.run(
-      'CREATE TABLE IF NOT EXISTS CANDLES_BTC_USDT (id INTEGER PRIMARY KEY AUTOINCREMENT, start INTEGER UNIQUE, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL)',
-    );
-    storage.db.run('INSERT INTO CANDLES_BTC_USDT VALUES (NULL, ?, 10, 12, 9, 11, 1)', [start]);
-    storage.createTable('btc/usdt');
-    expect(storage.getCandles('btc/usdt', { start, end })).toEqual([{ id: 1, ...candles[0] }]);
-    storage.close();
-  });
-
   describe('database file', () => {
     let directory: string;
     let database: string;
     const symbol = 'BTC/USDT';
-    const writeCandles = (path: string) => {
+    // An import of the candles whose storage is left open: they wait in its buffer, which it writes as it closes
+    const startImport = (path: string) => {
       storageConfig = { type: 'sqlite', database: path, insertThreshold: 1000 };
       mode = 'importer';
       const storage = new SQLiteStorage([symbol]);
       candles.forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
-      storage.close();
+      return storage;
     };
+    const writeCandles = (path: string) => startImport(path).close();
     const countRows = (path: string) => {
       const reader = new Database(path, { readonly: true });
       const { count } = reader.query('SELECT COUNT(*) AS count FROM CANDLES_BTC_USDT').get() as { count: number };
       reader.close();
       return count;
     };
+    // A missing file in a directory that exists: under the default path's missing directories no open mode could create it, so a
+    // backtest that created its database passed the tests meant to refuse it
+    const missingDatabase = () => join(directory, `${crypto.randomUUID()}.sql`);
 
     beforeAll(() => {
       directory = mkdtempSync(join(tmpdir(), 'gekko-storage-e2e-'));
@@ -192,16 +199,32 @@ describe('SQLiteStorage - table names', () => {
       expect(existsSync(database)).toBe(true);
     });
 
-    it('writes the buffered candles to the database file itself on close, leaving no WAL behind', () => {
+    it('leaves no WAL or shared-memory file behind when it closes the only connection to the file', () => {
       writeCandles(database);
       expect([existsSync(`${database}-wal`), existsSync(`${database}-shm`)]).toEqual([false, false]);
     });
 
-    it('leaves every candle in the database file alone, as a copy of it shows', () => {
+    it('writes every candle into the database file itself when it closes the only connection to it, as a copy of the file shows', () => {
       writeCandles(database);
       const copy = `${database}.copy`;
       copyFileSync(database, copy);
       expect(countRows(copy)).toBe(candles.length);
+    });
+
+    it('writes every candle into the database file itself while another connection keeps the file open, as a copy of the file shows', () => {
+      const storage = startImport(database);
+      // A database browser, or a backtest reading the file. SQLite moves the WAL into the database file by itself only when the last
+      // connection to it closes: with another one open, the storage's own checkpoint is what puts the candles in the file.
+      const other = new Database(database, { readonly: true });
+      try {
+        other.query('SELECT COUNT(*) FROM sqlite_master').get(); // A connection holds the file from its first read, not from its opening
+        storage.close();
+        const copy = `${database}.copy`;
+        copyFileSync(database, copy);
+        expect(countRows(copy)).toBe(candles.length);
+      } finally {
+        other.close();
+      }
     });
 
     it('reads in backtest mode the candles an import wrote', () => {
@@ -227,21 +250,23 @@ describe('SQLiteStorage - table names', () => {
       }
     });
 
-    it('refuses a database that does not exist in backtest mode, naming its path, without creating it', () => {
-      storageConfig = { type: 'sqlite', database };
+    it('refuses a database that does not exist in backtest mode, naming its path', () => {
+      const missing = missingDatabase();
+      storageConfig = { type: 'sqlite', database: missing };
       mode = 'backtest';
-      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${database} (unable to open database file).`);
+      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${missing} (unable to open database file).`);
     });
 
     it('does not create the database it refused in backtest mode', () => {
-      storageConfig = { type: 'sqlite', database };
+      const missing = missingDatabase();
+      storageConfig = { type: 'sqlite', database: missing };
       mode = 'backtest';
       try {
         new SQLiteStorage([symbol]);
       } catch {
         // Expected
       }
-      expect(existsSync(database)).toBe(false);
+      expect(existsSync(missing)).toBe(false);
     });
 
     it('refuses in backtest mode a pair the database has no table for', () => {
