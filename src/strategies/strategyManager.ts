@@ -625,10 +625,10 @@ export class StrategyManager extends EventEmitter {
 
   /**
    * Makes the stop whose SELL ended without completing active again, for what that SELL left unsold (see
-   * TrailingStopManager.resumeSellingStop), with a warning. A SELL refused every time (an amount out of the limits of the market, an
-   * API key refused) is then sent again on each minute whose price reaches the stop price, each refusal counting towards the circuit
-   * breaker, which stops the bot: rather than run on with the position held without any stop. A stop removed while it sold (canceled
-   * by the strategy, or by a SELL the strategy created) stays removed: that SELL is the strategy's.
+   * TrailingStopManager.resumeSellingStop), with a warning. A SELL refused every time with the asset still free (an API key refused,
+   * an exchange that refuses what it should take) is then sent again on each minute whose price reaches the stop price, each refusal
+   * counting towards the circuit breaker, which stops the bot: rather than run on with the position held without any stop. A stop
+   * removed while it sold (canceled by the strategy, or by a SELL the strategy created) stays removed: that SELL is the strategy's.
    *
    * A stop whose SELL errored while it may still be live on the exchange (`mayBeLive`: its creation's answer lost, the exchange busy
    * or overloaded) is made active again too, with a warning that says so. That SELL is a MARKET order: it may have executed, it rests
@@ -638,7 +638,14 @@ export class StrategyManager extends EventEmitter {
    * its answer or was busy, a crash on an overloaded exchange included. What is left of the risk: a second sale, of the stop's amount
    * at most, of coins of the asset the account holds besides.
    *
-   * Unless the portfolio after that SELL (`exchange`) shows too little of the asset free to sell (see isNothingFreeToSell): nothing
+   * Unless what that SELL left unsold is too little to sell at the minimums of the market, the PositionTracker's rule for the MARKET
+   * SELL the stop sends (see isSellable): nothing is left for the stop to protect, may that SELL still be live or not. Resumed, it sent
+   * a SELL of that rest, refused on each such minute until the breaker stopped the bot, whenever the account held other coins of the
+   * asset free (the position of another stop, a holding of its own), which kept the check below from removing it; a stop armed for
+   * less than the minimums did so from its first SELL. The stop is over, said at info level, as after a SELL that completed for less
+   * (see settleCompletedStopSell).
+   *
+   * Nor when the portfolio after that SELL (`exchange`) shows too little of the asset free to sell (see isNothingFreeToSell): nothing
    * is left for the stop to protect (sold by hand on the exchange, or by a SELL whose outcome was lost), and resumed it sent a SELL
    * refused on each such minute until the breaker stopped the bot. It is removed, with a warning.
    */
@@ -648,6 +655,14 @@ export class StrategyManager extends EventEmitter {
     const [asset] = stop.symbol.split('/');
     const sale = sold > 0 ? ` after selling ${sold} ${asset}` : ', no fill reported';
     const ending = `${outcome}${sale}${reason ? ` (${reason})` : ''}`;
+    if (!isSellable(stop.amount, exchange.price, 'MARKET', this.marketData.get(stop.symbol))) {
+      this.trailingStopManager.removeOrder(stop.id);
+      info(
+        'strategy',
+        `Trailing stop of BUY ${stop.id} over: its SELL ${sellId} ${ending}, and the rest, ${stop.amount} ${asset}, is too little to sell at the minimums of the market`,
+      );
+      return;
+    }
     if (this.isNothingFreeToSell(stop, exchange)) {
       this.trailingStopManager.removeOrder(stop.id);
       const free = exchange.portfolio.get(asset)?.free;

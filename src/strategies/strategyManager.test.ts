@@ -1006,6 +1006,12 @@ describe('StrategyManager', () => {
     describe('trailing stop of a BUY, from its creation to its SELL', () => {
       const symbol = 'BTC/USDT';
       const orderCreationDate = 61000;
+      // A MARKET order sells 0.0003 BTC at least (the higher of the two minimums), in steps of 0.00001, for at least 5 USDT. A stop whose
+      // SELL ends without completing is active again only for a rest it can sell: under the minimum amount of 1 of the default market
+      // data, every rest of these 0.5 BTC stops was too little to sell.
+      const MARKET_MINIMUMS = new Map<TradingPair, MarketData>([
+        [symbol, { amount: { min: 0.0001 }, market: { min: 0.0003 }, cost: { min: 5 }, precision: { amount: 0.00001 } }],
+      ]);
       const minute = (high: number, low: number): CandleBucket =>
         new Map([[symbol, { start: 120000, open: high, high, low, close: low, volume: 1 }]]);
       const completeBuy = (id: UUID, amount: number) =>
@@ -1566,13 +1572,10 @@ describe('StrategyManager', () => {
 
         // The Trader caps a SELL to the free balance and to the most the market takes in one order: removed once that SELL completed,
         // the stop left the rest of the position without protection, the SELL of a position bought above the maximum of a MARKET order
-        // selling that maximum only. A MARKET order sells 0.0003 BTC at least (the higher of the two minimums), in steps of 0.00001, for
-        // at least 5 USDT.
+        // selling that maximum only
         describe('once it completes for less than the stop sells', () => {
           beforeEach(() => {
-            manager.setMarketData(
-              new Map([[symbol, { amount: { min: 0.0001 }, market: { min: 0.0003 }, cost: { min: 5 }, precision: { amount: 0.00001 } }]]),
-            );
+            manager.setMarketData(MARKET_MINIMUMS);
           });
 
           describe('after selling 0.3 of 0.5, the portfolio after it showing the rest free', () => {
@@ -1699,6 +1702,7 @@ describe('StrategyManager', () => {
           ${'is canceled, no fill told'}  | ${() => sellCanceled(0, 0)}     | ${0.5} | ${'was canceled, no fill reported'}
         `('once it $outcome', ({ end, amount, sale }) => {
           beforeEach(() => {
+            manager.setMarketData(MARKET_MINIMUMS);
             vi.mocked(randomUUID).mockReturnValueOnce(NEXT_SELL_ID);
             end();
           });
@@ -1746,6 +1750,7 @@ describe('StrategyManager', () => {
           ${'its poll failed for good after 0.2 sold'} | ${0.2} | ${'Order not found'} | ${0.3} | ${'errored after selling 0.2 BTC (Order not found)'}
         `('once it errors, $case, and may still be live on the exchange', ({ sold, reason, amount, sale }) => {
           beforeEach(() => {
+            manager.setMarketData(MARKET_MINIMUMS);
             vi.mocked(randomUUID).mockReturnValueOnce(NEXT_SELL_ID);
             sellErrored(sold, { mayBeLive: true, reason });
           });
@@ -1792,11 +1797,12 @@ describe('StrategyManager', () => {
           });
         });
 
-        // Nothing left to sell (by hand on the exchange), or an amount out of the limits of the market: its SELL is sent again on each
-        // minute at or below the stop price, and the refusals count towards the circuit breaker, which stops the run
+        // Refused every time for what it can sell, with nothing to tell that nothing is left (a portfolio not read yet, an API key
+        // refused): its SELL is sent again on each minute at or below the stop price, and the refusals count towards the circuit breaker,
+        // which stops the run
         it('stops the run once the SELL of a stop is refused maxConsecutiveErrors times in a row', () => {
           const target = new StrategyManager(0, 3);
-          target.setMarketData(defaultMarketData);
+          target.setMarketData(MARKET_MINIMUMS);
           const sells: AdviceOrder[] = [];
           target.on(STRATEGY_CREATE_ORDER_EVENT, (advice: AdviceOrder) => sells.push(advice));
           target.onOneMinuteBucket(bucket);
@@ -1875,11 +1881,8 @@ describe('StrategyManager', () => {
               });
           };
 
-          // A MARKET order sells at least 0.0003 (the higher of the two minimums), in steps of 0.00001, for at least 5 USDT
           beforeEach(() => {
-            manager.setMarketData(
-              new Map([[symbol, { amount: { min: 0.0001 }, market: { min: 0.0003 }, cost: { min: 5 }, precision: { amount: 0.00001 } }]]),
-            );
+            manager.setMarketData(MARKET_MINIMUMS);
           });
 
           describe.each`
@@ -1963,6 +1966,55 @@ describe('StrategyManager', () => {
                 ],
               ]);
             });
+          });
+
+          // What that SELL left unsold is all the stop sells: too little at the minimums of the market, no SELL sells it. The portfolio
+          // shows 1 BTC free, the position of another stop or a holding of the account's, which kept the stop from being removed: active
+          // again, it sent a SELL of that rest, refused on each minute under its stop price, until the circuit breaker stopped the bot.
+          // So when that SELL may still be live: whatever it did, too little is left of what the stop protects.
+          describe.each`
+            case                                                 | outcome          | sold      | price    | mayBeLive | reason                    | ending                                                       | rest
+            ${'errors after selling 0.4999 of 0.5'}              | ${'errors'}      | ${0.4999} | ${48000} | ${false}  | ${'Insufficient balance'} | ${'errored after selling 0.4999 BTC (Insufficient balance)'} | ${0.0001}
+            ${'is canceled after selling 0.4999 of 0.5'}         | ${'is canceled'} | ${0.4999} | ${48000} | ${false}  | ${undefined}              | ${'was canceled after selling 0.4999 BTC'}                   | ${0.0001}
+            ${'errors after selling 0.4996 of 0.5, 4 USDT left'} | ${'errors'}      | ${0.4996} | ${10000} | ${false}  | ${'Insufficient balance'} | ${'errored after selling 0.4996 BTC (Insufficient balance)'} | ${0.0004}
+            ${'errors after selling 0.4999 of 0.5, maybe live'}  | ${'errors'}      | ${0.4999} | ${48000} | ${true}   | ${'Order not found'}      | ${'errored after selling 0.4999 BTC (Order not found)'}      | ${0.0001}
+          `('when it $case, the rest too little to sell, other BTC free', ({ outcome, sold, price, mayBeLive, reason, ending, rest }) => {
+            beforeEach(() => {
+              endSell(outcome, sold, price, { free: 1, used: 0, total: 1 }, { mayBeLive, reason });
+            });
+
+            it('removes the stop', () => {
+              expect(stop()).toBeUndefined();
+            });
+
+            it(`says at info level why: the rest, ${rest} BTC, is too little to sell`, () => {
+              expect(stopInfos()).toEqual([
+                [
+                  'strategy',
+                  `Trailing stop of BUY ${BUY_ID} over: its SELL ${SELL_ID} ${ending}, and the rest, ${rest} BTC, is too little to sell at the minimums of the market`,
+                ],
+              ]);
+            });
+
+            it('says nothing at warning level', () => {
+              expect(stopWarnings()).toEqual([]);
+            });
+
+            it('sends no SELL when the price falls further', () => {
+              manager.onOneMinuteBucket(minute(48000, 40000));
+              expect(listener).not.toHaveBeenCalled();
+            });
+          });
+
+          // A rest it can sell is protected again, whatever else the account holds, may that SELL still be live or not
+          it.each`
+            case                                             | outcome          | mayBeLive | reason
+            ${'errors after selling 0.2 of 0.5'}             | ${'errors'}      | ${false}  | ${'Insufficient balance'}
+            ${'is canceled after selling 0.2 of 0.5'}        | ${'is canceled'} | ${false}  | ${undefined}
+            ${'errors after selling 0.2 of 0.5, maybe live'} | ${'errors'}      | ${true}   | ${'Order not found'}
+          `('makes the stop active again for the rest, 0.3 BTC, when it $case, other BTC free', ({ outcome, mayBeLive, reason }) => {
+            endSell(outcome, 0.2, 48000, { free: 1, used: 0, total: 1 }, { mayBeLive, reason });
+            expect(stop()).toEqual(expect.objectContaining({ status: 'active', amount: 0.3 }));
           });
         });
 
@@ -2395,6 +2447,7 @@ describe('StrategyManager', () => {
         // was refused, all of the asset reserved for the strategy's
         describe('when the SELL of the stop is refused, the asset reserved for a SELL the strategy created since', () => {
           beforeEach(() => {
+            manager.setMarketData(MARKET_MINIMUMS);
             armStop(BUY_ID, 0.5, 2);
             vi.mocked(randomUUID).mockReturnValueOnce(STOP_SELL_ID);
             manager.onOneMinuteBucket(minute(50000, 48000)); // Peak 50000, stop price 49000, which its low goes through
