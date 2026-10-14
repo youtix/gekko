@@ -1,12 +1,14 @@
-import { isNumber } from 'lodash-es';
+import { GekkoError } from '@errors/gekko.error';
 
 /** A sum that starts from its first item, as lodash's does: one that starts from 0 turns a sum of -0 into 0 */
 const addFromFirst = (sum: number | undefined, item: number) => (sum === undefined ? item : sum + item);
 
+/** A value as a refusal names it: a string quoted, so that '3' does not read as the number 3 */
+const show = (value: unknown) => (typeof value === 'string' ? JSON.stringify(value) : String(value));
+
 /**
- * The last `size` items pushed, read oldest first. Every read works on the items in place: first and at are index arithmetic, and
- * max, min, sum and reduce walk the items once without copying them. first used to take the whole window through toArray, three
- * arrays per call, on every candle of ROC (TRIX through it); CCI and BollingerBands copied it to sum it.
+ * The last `size` items pushed, read oldest first. The indicators read their window on every candle, so every read works on the items
+ * in place: first reads one slot, and max, min, sum and reduce walk the items once, without the arrays toArray makes.
  */
 export class RingBuffer<T> {
   private size: number;
@@ -14,6 +16,10 @@ export class RingBuffer<T> {
   private buffer: T[];
 
   constructor(size: number) {
+    // Each item takes the slot of an array index: a size of 0 or NaN wrote the items after the first to a "NaN" property, a fraction to
+    // fractional ones, and the reads contradicted each other (isFull() true while empty, first set while toArray was empty)
+    if (!Number.isInteger(size) || size < 1)
+      throw new GekkoError('utils', `RingBuffer size must be a whole number, at least 1, got ${show(size)}`);
     this.buffer = [];
     this.size = size;
   }
@@ -23,28 +29,14 @@ export class RingBuffer<T> {
     return this.buffer.length;
   }
 
-  /** The largest item, as Math.max of them all would give it: NaN if one is not a number, -Infinity while empty */
-  max() {
-    const buffer = this.buffer;
-    let max = -Infinity;
-    for (let i = 0; i < buffer.length; i++) {
-      const item = buffer[i];
-      if (!isNumber(item)) return NaN;
-      max = Math.max(max, item);
-    }
-    return max;
+  /** The largest item, as Math.max of them all gives it: NaN if one is NaN, 0 above -0, -Infinity while empty */
+  max(this: RingBuffer<number>) {
+    return this.extreme(Math.max, -Infinity);
   }
 
-  /** The smallest item, as Math.min of them all would give it: NaN if one is not a number, Infinity while empty */
-  min() {
-    const buffer = this.buffer;
-    let min = Infinity;
-    for (let i = 0; i < buffer.length; i++) {
-      const item = buffer[i];
-      if (!isNumber(item)) return NaN;
-      min = Math.min(min, item);
-    }
-    return min;
+  /** The smallest item, as Math.min of them all gives it: NaN if one is NaN, -0 below 0, Infinity while empty */
+  min(this: RingBuffer<number>) {
+    return this.extreme(Math.min, Infinity);
   }
 
   /** The items added oldest first, as lodash's sum of toArray() adds them (see addFromFirst). 0 while empty */
@@ -60,28 +52,20 @@ export class RingBuffer<T> {
   reduce<U, A>(callback: (accumulator: U, item: T, argument: A) => U, initial: U, argument: A): U;
   reduce<U, A>(callback: (accumulator: U, item: T, argument?: A) => U, initial: U, argument?: A): U {
     const buffer = this.buffer;
-    // Until the buffer is full the oldest item is at 0; then it is the next one push overwrites
-    const start = this.isFull() ? this.index : 0;
+    const start = this.oldest();
     let accumulator = initial;
     for (let i = start; i < buffer.length; i++) accumulator = callback(accumulator, buffer[i], argument);
     for (let i = 0; i < start; i++) accumulator = callback(accumulator, buffer[i], argument);
     return accumulator;
   }
 
-  /** The item `index` places after the oldest, read in place (the newest at length - 1): undefined outside the items held */
-  at(index: number): T | undefined {
-    if (index < 0 || index >= this.buffer.length) return undefined;
-    const cursor = (this.isFull() ? this.index : 0) + index;
-    return this.buffer[cursor < this.size ? cursor : cursor - this.size];
-  }
-
   /** The oldest item, undefined while empty */
-  first() {
-    return this.at(0);
+  first(): T | undefined {
+    return this.buffer[this.oldest()];
   }
 
   push(...items: T[]) {
-    // A plain loop: forEach made a closure on every push
+    // A plain loop: forEach would make a closure on every push
     for (let i = 0; i < items.length; i++) {
       this.buffer[this.index] = items[i];
       this.index = (this.index + 1) % this.size;
@@ -95,5 +79,21 @@ export class RingBuffer<T> {
   toArray() {
     if (!this.isFull()) return this.buffer.slice(0, this.index);
     return [...this.buffer.slice(this.index), ...this.buffer.slice(0, this.index)];
+  }
+
+  /** The slot of the oldest item: 0 until the buffer is full, then the one the next push overwrites */
+  private oldest() {
+    return this.isFull() ? this.index : 0;
+  }
+
+  /**
+   * Math.max or Math.min of the items, in the order they are stored: either gives the same in any order, NaN and -0 included. A loop of
+   * its own: through reduce, max and min took up to half as long again on every candle
+   */
+  private extreme(this: RingBuffer<number>, pick: (a: number, b: number) => number, initial: number) {
+    const buffer = this.buffer;
+    let result = initial;
+    for (let i = 0; i < buffer.length; i++) result = pick(result, buffer[i]);
+    return result;
   }
 }
