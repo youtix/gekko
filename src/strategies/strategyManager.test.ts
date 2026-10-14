@@ -40,7 +40,9 @@ const indicatorMocks = vi.hoisted(() => ({
   }),
 }));
 
-vi.mock('@indicators/index', () => ({
+// The other indicators are the registry's own: what addIndicator hands their constructors meets their own checks
+vi.mock('@indicators/index', async importOriginal => ({
+  ...(await importOriginal<typeof import('@indicators/index')>()),
   SMA: indicatorMocks.IndicatorMock,
   UNKNOWN: undefined,
 }));
@@ -2951,6 +2953,128 @@ describe('StrategyManager', () => {
           'message',
           `[STRATEGY] Impossible to add the SMA indicator on ETH/BTC: symbol must be one of the watched pairs (BTC/USDT, ETH/USDT), got ${quoted('ETH/BTC')}`,
         );
+      });
+
+      // An untyped strategy can pass anything as the parameters, or none. Handed on as they came, null and undefined threw a TypeError
+      // in the constructors, which destructure them, naming neither the indicator nor the parameter, and anything but an object was read
+      // as an object holding none of them: addIndicator('RSI', pair, 7) built an RSI of 14 without a word.
+      describe('on the parameters it is given', () => {
+        /** A period held by the instance of a class: readable as an object literal's, but not a plain object */
+        class SmaParameters {
+          period = 7;
+        }
+
+        /** Registers an SMA on BTC/USDT with `parameters`, as an untyped strategy can, and returns what it throws */
+        const addSmaWith = (parameters: unknown) => {
+          try {
+            manager['addIndicator']('SMA', 'BTC/USDT', parameters as never);
+          } catch (caught) {
+            return caught;
+          }
+        };
+
+        it.each`
+          kind          | parameters
+          ${'left out'} | ${undefined}
+          ${'null'}     | ${null}
+        `('creates the indicator with {}, for its defaults, when they are $kind', ({ parameters }) => {
+          addSmaWith(parameters);
+          expect(indicatorMocks.IndicatorMock).toHaveBeenCalledExactlyOnceWith({});
+        });
+
+        it.each`
+          kind                             | parameters
+          ${'an empty object'}             | ${{}}
+          ${'an object without prototype'} | ${Object.assign(Object.create(null), { period: 7 })}
+        `('creates the indicator with the very object, when they are $kind', ({ parameters }) => {
+          addSmaWith(parameters);
+          expect(indicatorMocks.IndicatorMock.mock.calls[0]?.[0]).toBe(parameters);
+        });
+
+        describe.each`
+          kind                        | parameters                  | shown
+          ${'a number'}               | ${7}                        | ${'7'}
+          ${'a string'}               | ${'7'}                      | ${quoted('7')}
+          ${'a boolean'}              | ${true}                     | ${'true'}
+          ${'an array'}               | ${[7]}                      | ${'[ 7 ]'}
+          ${'a function'}             | ${() => 7}                  | ${'[Function (anonymous)]'}
+          ${'a Map'}                  | ${new Map([['period', 7]])} | ${`Map(1) { ${quoted('period')} => 7 }`}
+          ${'an instance of a class'} | ${new SmaParameters()}      | ${'SmaParameters { period: 7 }'}
+        `('when they are $kind', ({ parameters, shown }) => {
+          let failure: unknown;
+
+          beforeEach(() => {
+            failure = addSmaWith(parameters);
+          });
+
+          it('refuses the indicator with a GekkoError', () => {
+            expect(failure).toBeInstanceOf(GekkoError);
+          });
+
+          it('names the indicator and its pair, and says that the parameters must be a plain object, {} for the defaults', () => {
+            expect(failure).toHaveProperty(
+              'message',
+              `[STRATEGY] Impossible to add the SMA indicator on BTC/USDT: parameters must be a plain object of the indicator's parameters by name, {} to take its defaults, got ${shown}`,
+            );
+          });
+
+          it('creates no indicator', () => {
+            expect(indicatorMocks.IndicatorMock).not.toHaveBeenCalled();
+          });
+
+          it('keeps no indicator', () => {
+            expect(manager['indicators']).toEqual([]);
+          });
+        });
+
+        // The registry's own indicators: those whose period has no default refuse it missing with their own GekkoError, as they do
+        // given {}. Handed undefined, eleven of them threw `Cannot destructure property 'period'` instead.
+        describe.each`
+          name         | minimum
+          ${'ADX'}     | ${2}
+          ${'ATR'}     | ${1}
+          ${'DEMA'}    | ${1}
+          ${'DX'}      | ${2}
+          ${'MinusDI'} | ${1}
+          ${'MinusDM'} | ${1}
+          ${'PlusDI'}  | ${1}
+          ${'PlusDM'}  | ${1}
+          ${'ROC'}     | ${1}
+          ${'SMMA'}    | ${1}
+          ${'TEMA'}    | ${1}
+          ${'WMA'}     | ${1}
+        `('when an untyped strategy registers $name, whose period has no default, without parameters', ({ name, minimum }) => {
+          let failure: unknown;
+
+          beforeEach(() => {
+            manager['strategy'] = {
+              // Called as a JavaScript strategy can, with no third argument
+              init: ({ addIndicator }: InitParams<object>) =>
+                (addIndicator as (indicatorName: string, symbol: TradingPair) => void)(name, 'BTC/USDT'),
+            };
+            failure = undefined;
+            try {
+              manager.onOneMinuteBucket(bucket);
+            } catch (caught) {
+              failure = caught;
+            }
+          });
+
+          it('refuses the indicator with a GekkoError', () => {
+            expect(failure).toBeInstanceOf(GekkoError);
+          });
+
+          it('names the indicator and its period, and says what the period must be', () => {
+            expect(failure).toHaveProperty(
+              'message',
+              expect.stringContaining(`[STRATEGY] Indicator ${name}: period must be a whole number, at least ${minimum}, got undefined`),
+            );
+          });
+
+          it('keeps no indicator', () => {
+            expect(manager['indicators']).toEqual([]);
+          });
+        });
       });
 
       // Kept from init and called from a later hook, it added an indicator fed from then on only, and one more argument to every hook:

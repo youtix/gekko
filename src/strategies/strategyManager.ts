@@ -37,7 +37,7 @@ import { copyPayload } from '@utils/event/event.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { clonePortfolio } from '@utils/portfolio/portfolio.utils';
 import { pluralize } from '@utils/string/string.utils';
-import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
+import { bindAll, cloneDeep, isNil, isPlainObject, isString, omit } from 'lodash-es';
 import { randomUUID, UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { isAbsolute, resolve } from 'node:path';
@@ -55,6 +55,20 @@ import { TrailingStopState } from './trailingStopManager.types';
 const getPairProblem = (symbol: TradingPair, marketData: Map<TradingPair, MarketData>): string | undefined => {
   if (marketData.has(symbol)) return;
   return `symbol must be one of the watched pairs (${[...marketData.keys()].join(', ')}), got ${inspect(symbol)}`;
+};
+
+/**
+ * What is wrong with the parameters of an indicator, or undefined when nothing is: a plain object of its parameters by name, or none
+ * (undefined, or null from an untyped strategy), which addIndicator hands on as {} for the defaults of the indicator. Handed on as they
+ * came, null threw a TypeError in every constructor but two, and undefined in most of those whose period has no default, naming
+ * neither the indicator nor the parameter. A number, a string, an array or a Map, which only an untyped strategy can pass, was read as
+ * an object holding none of the parameters: addIndicator('RSI', pair, 7) built an RSI of 14 without a word, and an ATR said its period
+ * was undefined. An instance of a class, not a plain object either, is refused with them: an object literal and the strategy block
+ * both are plain objects.
+ */
+const getParametersProblem = (parameters: unknown): string | undefined => {
+  if (isNil(parameters) || isPlainObject(parameters)) return;
+  return `parameters must be a plain object of the indicator's parameters by name, {} to take its defaults, got ${inspect(parameters)}`;
 };
 
 /** Values as util.inspect shows them, quoted when they are strings: the case of a side or a type shows */
@@ -439,9 +453,13 @@ export class StrategyManager extends EventEmitter {
     // for them never traded, with one warning per candle that the default log level hid
     const pairProblem = getPairProblem(symbol, this.marketData);
     if (pairProblem) throw new GekkoError('strategy', `Impossible to add the ${name} indicator on ${symbol}: ${pairProblem}`);
+    const parametersProblem = getParametersProblem(parameters);
+    if (parametersProblem) throw new GekkoError('strategy', `Impossible to add the ${name} indicator on ${symbol}: ${parametersProblem}`);
 
+    // None given, the indicator gets {}: its defaults, or the refusal of its own checks for a parameter it requires (see
+    // getParametersProblem)
     // @ts-expect-error TODO fix complex typescript error
-    const indicator = new Indicator(parameters);
+    const indicator = new Indicator(parameters ?? {});
     this.indicators.push({ indicator, symbol });
   }
 

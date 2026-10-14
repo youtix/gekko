@@ -22,6 +22,12 @@ export type IndicatorResults<T = unknown> = { results: T; symbol: TradingPair };
  * `symbol` must be a watched pair, a key of `tools.marketData`: an indicator on any other pair would never get a candle, its results
  * null for the whole run. Any other symbol throws a GekkoError naming it and the watched pairs: the bot stops.
  *
+ * `parameters` holds the parameters of the indicator by name, `{}` for its defaults (`undefined` for TrueRange, which takes none; an
+ * untyped strategy may also leave them out, or pass null). The indicator checks them as it is built: a value it refuses, or a
+ * parameter it requires left out, throws a GekkoError naming the indicator and the parameter, and the bot stops. Anything but a plain
+ * object, which only an untyped strategy can pass (7 for a period, an array, a Map), throws a GekkoError before the indicator is
+ * built: such a value used to build most indicators with their defaults, without a word.
+ *
  * Available in init only: called once init has returned, kept from it, it throws a GekkoError and the bot stops. An indicator added
  * later would only be fed from then on, and would give every hook one more argument.
  */
@@ -119,9 +125,9 @@ export type OnCandleEventParams<T> = {
   /** The timeframe candle of every watched pair: the strategy's own copy, made once per candle and shared by the hooks of that candle */
   candle: CandleBucket;
   /**
-   * The latest portfolio the Trader relayed, as of the candle: the balance at start-up, then the one a portfolio change or the end of
-   * an order carries (read after that order ended, whatever the Trader's portfolioUpdates filter). The strategy's own copy, made when
-   * it was received and kept until the next one
+   * The latest portfolio, as of the candle: the balance the TradingAdvisor reads at start-up, then the one the Trader sends with a
+   * portfolio change or the end of an order (read after that order ended, whatever the Trader's portfolioUpdates filter). The
+   * strategy's own copy, made when it was received and kept until the next one
    */
   portfolio: Portfolio;
   tools: Tools<T>;
@@ -209,7 +215,8 @@ export interface Strategy<T> {
   onOrderErrored?(params: OnOrderErroredEventParams<T>, ...indicators: IndicatorResults[]): void;
   /**
    * On each trailing stop activated: when the high of a one-minute candle reaches its trigger, or, for a stop without one, as soon
-   * as it is armed (its BUY completed, right after onOrderCompleted). The latter has not trailed any candle yet: its highestPeak and
+   * as it is armed, right after the hook of its BUY's end: onOrderCompleted, or onOrderErrored for a BUY that errored after a reported
+   * fill, whose stop is armed for that fill (see Tools.createOrder). The latter has not trailed any candle yet: its highestPeak and
    * stopPrice are still 0. The former's peak is that candle's open when the open reached the trigger, else its high; the rest of the
    * candle is trailed after this hook (see TrailingStopState.highestPeak), unless the stop is canceled here
    * (tools.cancelTrailingOrder(state.id), state.id being its BUY's id).
@@ -227,10 +234,12 @@ export interface Strategy<T> {
    * leaves the strategy long once the stop has sold everything, and the SELL the strategy advises next is refused: nothing is left.
    *
    * The stop sells until that SELL ends (state.status 'selling', state.sellOrderId). Completed for all the stop sells, the stop is
-   * over. Completed for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the
-   * exchange truncates its amount to the step of the market), errored or canceled, the stop is active again for what that SELL did
-   * not sell, with a warning and without onTrailingStopActivated, from the peak and the stop price it triggered at: the next price at
-   * or below that stop price triggers it again, and this hook announces its new SELL, under a new id.
+   * over. So it is when that SELL errors or is canceled after a reported fill (order.filled) of all of it, said at info level under
+   * the 'trailing stop' tag, not the strategy's (`Trailing stop of BUY <id> over: its SELL <id> sold 0.5, all of its 0.5`). Completed
+   * for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the exchange truncates its
+   * amount to the step of the market), errored or canceled for less, the stop is active again for what that SELL did not sell,
+   * with a warning and without onTrailingStopActivated, from the peak and the stop price it triggered at: the next price at or below
+   * that stop price triggers it again, and this hook announces its new SELL, under a new id.
    *
    * Unless that rest is too little to sell at the minimums of the market, those of a MARKET order in tools.marketData, its cost
    * worked out in decimal (see isSellable), whatever else the account holds, and may that SELL still be live or not: the stop is then
