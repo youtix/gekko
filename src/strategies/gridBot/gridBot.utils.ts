@@ -1,22 +1,24 @@
 import { OrderSide } from '@models/order.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { MarketData } from '@services/exchange/exchange.types';
-import { checkOrderPrice } from '@utils/market/market.utils';
-import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
+import { checkOrderPrice, toBound } from '@utils/market/market.utils';
+import { getPriceSignificantDigits, getPriceTick, roundToStep } from '@utils/market/precision.utils';
+import { addPrecise, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { countDecimals, round } from '@utils/math/round.utils';
+import { getAssetBalance } from '@utils/portfolio/portfolio.utils';
 import { minBy } from 'lodash-es';
-import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION, EMPTY_BALANCE } from './gridBot.const';
+import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION } from './gridBot.const';
 import { GridBotStrategyParams, GridBounds, GridSize, GridSpacingType, OutOfRangeSide, RebalancePlan } from './gridBot.types';
 
+/** The balances of the traded asset and of its currency, a balance of 0 for either the portfolio lacks (see getAssetBalance) */
 export const getPortfolioContent = (
   portfolio: Portfolio,
   base: string,
   quote: string,
-): { asset: BalanceDetail; currency: BalanceDetail } => {
-  const asset = portfolio.get(base) ?? { ...EMPTY_BALANCE };
-  const currency = portfolio.get(quote) ?? { ...EMPTY_BALANCE };
-  return { asset, currency };
-};
+): { asset: BalanceDetail; currency: BalanceDetail } => ({
+  asset: getAssetBalance(portfolio, base),
+  currency: getAssetBalance(portfolio, quote),
+});
 
 /**
  * The maker fee of the market, a fraction (0.001 is 0.1 %), which a LIMIT order pays: the grid's orders and the STICKY rebalance's.
@@ -51,14 +53,8 @@ export const getRebalanceBuyCost = (amount: number, price: number, marketData: M
 };
 
 /**
- * A market limit is a bound only as a finite number above 0: Binance disables a filter bound by setting it to 0 (see market.utils). So
- * is a precision a step: a precision of 0 states none.
- */
-const toBound = (limit?: number): number | undefined => (limit !== undefined && Number.isFinite(limit) && limit > 0 ? limit : undefined);
-
-/**
- * The step of numbers rounded to `decimals` decimals, one unit of the last: 1e-8 for 8. The step of the amounts (see
- * inferAmountPrecision), and of the prices when the market states no price step (see inferPricePrecision)
+ * The step of numbers rounded to `decimals` decimals, one unit of the last: 1e-8 for 8. The step of the amounts when the market states
+ * none (see inferAmountPrecision), and of the prices (see inferPricePrecision)
  */
 const getDecimalStep = (decimals: number): number => Number(`1e-${decimals}`);
 
@@ -70,46 +66,17 @@ const getDecimalStep = (decimals: number): number => Number(`1e-${decimals}`);
 const getDecimals = (value: number): number => (Number.isFinite(value) ? Math.max(countDecimals(value), 0) : 0);
 
 /**
- * The significant digits of a market whose tick depends on the price (see MarketData.precision.priceSignificantDigits): a whole number
- * above 0, undefined for any other value, which states no such rule
- */
-const toSignificantDigits = (digits?: number): number | undefined =>
-  digits !== undefined && Number.isInteger(digits) && digits > 0 ? digits : undefined;
-
-/**
- * The exponent of the first significant digit of a price above 0, read from the digits String writes: 3 for 1234.5, -3 for 0.0012345.
- * Math.log10 rounds a price just under a power of ten up to it: 999.9999999999999 would read as 1000.
- */
-const getFirstDigitExponent = (price: number): number => {
-  const [mantissa, exponent = '0'] = String(price).split('e');
-  const [integer, fraction = ''] = mantissa.split('.');
-  return (integer !== '0' ? integer.length - 1 : -(fraction.search(/[1-9]/) + 1)) + Number(exponent);
-};
-
-/**
- * The tick at a price of a market that takes `priceSignificantDigits` significant digits in a price, an integer part of more digits
- * being kept whole: one unit of its last significant digit, 0.001 at 12.345, 0.1 at 1234.5 and 1 from 10000 on, at 5 digits.
- * Undefined without the rule, or for a price that is not a finite number above 0.
- */
-const getSignificantTick = (price: number, priceSignificantDigits?: number): number | undefined => {
-  const digits = toSignificantDigits(priceSignificantDigits);
-  if (!digits || !(price > 0) || !Number.isFinite(price)) return undefined;
-  return getDecimalStep(Math.max(digits - 1 - getFirstDigitExponent(price), 0));
-};
-
-/**
  * The smallest amount of an order at `price` that the market takes: one amount step at least, amount.min and cost.min / price,
- * rounded up to the amount precision (see inferAmountPrecision). The order layer works the cost out in decimal (see
+ * rounded up to the amount step (see inferAmountPrecision). The order layer works the cost out in decimal (see
  * assertOrderWithinLimits): 0.00007 is the minimum for a cost of 7 at 100000, though 0.00007 × 100000 is 6.999999999999999 in binary.
  * The quotient is binary, and can come out an ulp above a whole number of steps, rounded up to a step more than the cost needs:
  * 0.0001 / 0.000001 is 100.00000000000001, 101 DOGE where 100 cost the 0.0001 BTC that Binance takes at least on its pairs quoted in
  * BTC. The step under is taken when its cost is enough.
  */
 export const getMinimumAmount = (price: number, marketData: MarketData): number => {
-  const amountDecimals = inferAmountPrecision(marketData);
-  const step = getDecimalStep(amountDecimals);
-  // Rounded up as -(the negated value rounded down): round has no ceiling
-  const roundUp = (value: number) => -round(-value, amountDecimals, 'down');
+  const step = inferAmountPrecision(marketData);
+  // Rounded up as -(the negated value rounded down): roundToStep has no ceiling
+  const roundUp = (value: number) => -roundToStep(-value, step, 'down');
   const atLeast = Math.max(step, roundUp(toBound(marketData.amount?.min) ?? 0));
   const minimumCost = toBound(marketData.cost?.min);
   if (!minimumCost || !(price > 0)) return atLeast;
@@ -119,17 +86,16 @@ export const getMinimumAmount = (price: number, marketData: MarketData): number 
 };
 
 /**
- * The largest amount of an order at `price` that the market takes: amount.max and cost.max / price, rounded down to the amount
- * precision. Infinity when the market sets neither. The order layer works the cost out in decimal (see assertOrderWithinLimits):
- * 0.00001 is the maximum for a cost of 3 at 300000, though 0.00001 × 300000 is 3.0000000000000004 in binary.
+ * The largest amount of an order at `price` that the market takes: amount.max and cost.max / price, rounded down to the amount step.
+ * Infinity when the market sets neither. The order layer works the cost out in decimal (see assertOrderWithinLimits): 0.00001 is the
+ * maximum for a cost of 3 at 300000, though 0.00001 × 300000 is 3.0000000000000004 in binary.
  */
 export const getMaximumAmount = (price: number, marketData: MarketData): number => {
-  const amountDecimals = inferAmountPrecision(marketData);
   const maximumCost = toBound(marketData.cost?.max);
   const atCost = maximumCost && price > 0 ? maximumCost / price : Infinity;
   const limit = Math.min(toBound(marketData.amount?.max) ?? Infinity, atCost);
   if (!Number.isFinite(limit)) return Infinity;
-  return roundAmount(limit, amountDecimals);
+  return roundAmount(limit, inferAmountPrecision(marketData));
 };
 
 /**
@@ -143,52 +109,39 @@ export const inferPricePrecision = (
   marketData: MarketData,
 ): { priceDecimals: number; priceStep?: number; priceSignificantDigits?: number } => {
   const priceStep = toBound(marketData.precision?.price);
-  const priceSignificantDigits = toSignificantDigits(marketData.precision?.priceSignificantDigits);
+  const priceSignificantDigits = getPriceSignificantDigits(marketData.precision);
   const precision = priceStep ? { priceDecimals: getDecimals(priceStep), priceStep } : { priceDecimals: DEFAULT_PRICE_PRECISION };
   return priceSignificantDigits ? { ...precision, priceSignificantDigits } : precision;
 };
 
 /**
- * The decimals of the market's amount step (precision.amount), which the amounts are rounded down to: DEFAULT_AMOUNT_PRECISION for a
- * market that states no step
+ * The step of the market's amounts (precision.amount), which the amounts are rounded down to, as the exchange truncates them (see
+ * roundAmount): one unit of the DEFAULT_AMOUNT_PRECISION-th decimal for a market that states no step. The amounts were rounded down to
+ * the decimals of the step, and stayed off a step that is not one unit of a decimal: on a step of 10, a quantity of 4705, which the
+ * exchange takes as 4700, and a minimum of 5, which it takes as 0.
  */
-export const inferAmountPrecision = (marketData: MarketData): number => {
-  const amountStep = toBound(marketData.precision?.amount);
-  return amountStep ? getDecimals(amountStep) : DEFAULT_AMOUNT_PRECISION;
-};
+export const inferAmountPrecision = (marketData: MarketData): number =>
+  toBound(marketData.precision?.amount) ?? getDecimalStep(DEFAULT_AMOUNT_PRECISION);
 
 /**
- * Rounds a price to the nearest multiple of the price step, a tie to the one above, as round does, or to `priceDecimals` decimals
- * without a step. The price is rounded as it is written: divided by the step in binary, a tie went the other way, 1.005 to 1 at a
- * step of 0.01, 1.005 / 0.01 being 100.49999999999999. A step of one unit of its last decimal (0.01), as exchanges state their tick,
- * rounds the price to those decimals. A step of several (0.05, 0.25) takes the nearest of the multiples around the binary quotient,
- * which can be one off, the distances measured in decimal. A price that is not a finite number is 0.
- * On a market that takes `priceSignificantDigits` significant digits in a price, the price is rounded to the tick at that price where
- * it is coarser than the step (see getSignificantTick), as the exchange rounds it. Rounded to the step alone, as precision.price states
- * it at the price the markets were loaded at, two prices a step apart above the next power of ten were sent at one price: on Hyperliquid
- * loaded at 9990, a step of 0.1, 10000.5 and 10001 were both sent at 10001.
+ * Rounds a price to the tick of the market at that price, the nearest multiple, a tie to the one above (see roundToStep): the price
+ * step, or one unit of the `priceDecimals`-th decimal without a step. On a market that takes `priceSignificantDigits` significant digits
+ * in a price, the tick at that price where it is coarser than the step (see getPriceTick), as the exchange rounds it: rounded to the
+ * step alone, as precision.price states it at the price the markets were loaded at, two prices a step apart above the next power of ten
+ * were sent at one price, 10000.5 and 10001 both at 10001 on Hyperliquid loaded at 9990, a step of 0.1. The price is rounded as it is
+ * written: divided by the step in binary, a tie went the other way, 1.005 to 1 at a step of 0.01, 1.005 / 0.01 being
+ * 100.49999999999999. A price at or below 0, which only a grid configured below 0 reaches, is rounded to the step; one that is not a
+ * finite number is 0.
  */
 export const roundPrice = (value: number, priceDecimals: number, priceStep?: number, priceSignificantDigits?: number): number => {
   if (!Number.isFinite(value)) return 0;
-  const step = toBound(priceStep);
-  const significantTick = getSignificantTick(value, priceSignificantDigits);
-  if (significantTick && significantTick > (step ?? getDecimalStep(priceDecimals))) return round(value, getDecimals(significantTick));
-  if (!step || step === getDecimalStep(priceDecimals)) return round(value, priceDecimals);
-
-  const stepDecimals = getDecimals(step);
-  const quotient = Math.round(value / step);
-  // The higher first: the first of two equal distances is kept, a tie going to the multiple above
-  const multiples = [quotient + 1, quotient, quotient - 1].map(multiple => round(multiple * step, stepDecimals));
-  return minBy(multiples, multiple => Math.abs(addPrecise(value, -multiple)))!;
+  const step = toBound(priceStep) ?? getDecimalStep(priceDecimals);
+  return roundToStep(value, getPriceTick(value, { price: step, priceSignificantDigits }), 'up');
 };
 
-/**
- * Round amount to specified precision.
- */
-export const roundAmount = (value: number, amountDecimals: number): number => {
-  if (!Number.isFinite(value) || value <= 0) return 0;
-  return round(value, amountDecimals, 'down');
-};
+/** Rounds an amount down to the amount step (see inferAmountPrecision and roundToStep): 0 for one that is not a finite number above 0 */
+export const roundAmount = (value: number, amountStep: number): number =>
+  isFinitePositive(value) ? roundToStep(value, amountStep, 'down') : 0;
 
 /**
  * Compute the price of the grid `levelIndex` steps away from the center price, based on spacing type: steps × spacingValue away for
@@ -380,10 +333,10 @@ export const checkPriceTick = (
 
   const spaced = `spaced by spacingValue ${params.spacingValue} (${params.spacingType}) around the center price ${centerPrice}`;
   const step = priceStep ?? getDecimalStep(priceDecimals);
-  const significantTick = getSignificantTick(prices[collision], priceSignificantDigits);
+  const tick = getPriceTick(prices[collision], { price: step, priceSignificantDigits }) ?? step;
   const rule = `the market taking ${priceSignificantDigits} significant digits in a price (precision.priceSignificantDigits)`;
-  const tick = significantTick && significantTick > step ? `${significantTick}, ${rule}` : step;
-  return `Grid configuration would result in a level buying and selling at the same price: ${spaced}, two adjacent prices of the grid would both round to ${prices[collision]} at the price tick ${tick}`;
+  const tickNamed = tick > step ? `${tick}, ${rule}` : step;
+  return `Grid configuration would result in a level buying and selling at the same price: ${spaced}, two adjacent prices of the grid would both round to ${prices[collision]} at the price tick ${tickNamed}`;
 };
 
 /**
@@ -421,13 +374,19 @@ export const checkRoundTripFee = (params: GridBotStrategyParams, centerPrice: nu
 /**
  * The sums of the BUY prices of the grid from the center price down, one more level each, the first 0 for none: as far as the prices
  * are positive. The strategy plans and builds no grid with a BUY at or below 0 (see checkLowestBuyPrice), so it never reaches one.
+ * Added with `add`: in binary, as the rebalance splits the value (see getGridFunding), or in decimal, as a quantity's need is checked
+ * against the free currency (see deriveLevelQuantity).
  */
-const getBuyPriceSums = (priceAt: (steps: number) => number, buyLevels: number): number[] => {
+const getBuyPriceSums = (
+  priceAt: (steps: number) => number,
+  buyLevels: number,
+  add: (sum: number, price: number) => number = (sum, price) => sum + price,
+): number[] => {
   const buyPriceSums = [0];
   for (let i = 1; i <= buyLevels; i++) {
     const price = priceAt(-i);
     if (price <= 0) break;
-    buyPriceSums.push(buyPriceSums[i - 1] + price);
+    buyPriceSums.push(add(buyPriceSums[i - 1], price));
   }
   return buyPriceSums;
 };
@@ -452,19 +411,25 @@ export const getGridFunding = (
 };
 
 /**
- * The amount of a rebalance BUY planned at `price` that `currency` pays: the largest on the amount step whose cost, worked out in
- * decimal (see getRebalanceBuyCost), is at most `currency`. `estimate` is the binary quotient of the currency by the cost of a unit,
- * which can fall an ulp either side of a whole number of steps where the currency pays exactly that many: rounded down as it was,
- * 7.0007 at 100.01, 0.06999999999999999, bought 0.06 where 0.07 costs 7.0007. So one step more or less is taken, as the cost says.
+ * The largest amount on the amount step whose need, worked out in decimal by `needOf`, is at most `free`. `estimate` is the binary
+ * quotient of `free` by the need of a unit, which can fall an ulp either side of a whole number of steps where `free` funds exactly that
+ * many: rounded down as it was, 7.0007 USDT for a BUY at 100.01 was 0.06999999999999999, 0.06 where 0.07 costs 7.0007, and 0.3 BTC
+ * over three SELLs 0.09999999999999999, 0.09 a SELL. So one step more or less is taken, as the need says.
  */
-const getRebalanceBuyAmount = (estimate: number, currency: number, price: number, marketData: MarketData): number => {
-  const amountDecimals = inferAmountPrecision(marketData);
-  const step = getDecimalStep(amountDecimals);
-  const amount = roundAmount(estimate, amountDecimals);
+const getFundedAmount = (estimate: number, free: number, needOf: (amount: number) => number, step: number): number => {
+  const amount = roundAmount(estimate, step);
   const more = addPrecise(amount, step);
-  if (getRebalanceBuyCost(more, price, marketData) <= currency) return more;
-  return amount > 0 && getRebalanceBuyCost(amount, price, marketData) > currency ? addPrecise(amount, -step) : amount;
+  if (needOf(more) <= free) return more;
+  return amount > 0 && needOf(amount) > free ? addPrecise(amount, -step) : amount;
 };
+
+/**
+ * The amount of a rebalance BUY planned at `price` that `currency` pays: the largest on the amount step whose cost, worked out in
+ * decimal (see getRebalanceBuyCost), is at most `currency` (see getFundedAmount), from `estimate`, the binary quotient of the currency
+ * by the cost of a unit
+ */
+const getRebalanceBuyAmount = (estimate: number, currency: number, price: number, marketData: MarketData): number =>
+  getFundedAmount(estimate, currency, amount => getRebalanceBuyCost(amount, price, marketData), inferAmountPrecision(marketData));
 
 /**
  * Plans the rebalance after which the balances given, the free ones the grid is sized on, fund every level of the grid with the same
@@ -513,11 +478,11 @@ export const computeRebalancePlan = (
   const spendable = currencyFree - funding.currency * quantity;
   const gap = side === 'BUY' ? spendable / unitValue : assetFree - funding.asset * quantity;
 
-  // Rounded down to the amount precision, at most the market's maximum. An amount under amount.min used to be raised to it, beyond
-  // what the gap called for and what the balances paid: a rebalance under the market's minimum is no order to send
-  const amountDecimals = inferAmountPrecision(marketData);
+  // Rounded down to the amount step, at most the market's maximum. An amount under amount.min used to be raised to it, beyond what the
+  // gap called for and what the balances paid: a rebalance under the market's minimum is no order to send
   const orderPrice = getRebalanceOrderPrice(side, centerPrice, marketData);
-  const rounded = side === 'BUY' ? getRebalanceBuyAmount(gap, spendable, centerPrice, marketData) : roundAmount(gap, amountDecimals);
+  const rounded =
+    side === 'BUY' ? getRebalanceBuyAmount(gap, spendable, centerPrice, marketData) : roundAmount(gap, inferAmountPrecision(marketData));
   const amount = Math.min(rounded, getMaximumAmount(orderPrice, marketData));
 
   if (amount <= 0) return null;
@@ -539,9 +504,10 @@ export const computeRebalancePlan = (
  * - A BUY needs its cost with the maker fee on top (see getMakerFee): the buy levels share the free currency in proportion to their
  *   prices. Sized on the prices alone, the BUYs needed the whole free currency before their fees: the simulator refused the last one
  *   placed, the highest, at every attempt.
- * The quantity is the smaller of the two shares, rounded down to the amount precision, at most the market's maximum at the highest
- * price of the grid (see getMaximumAmount): 0, with no level, when the free balances fund none. What the larger share holds beyond
- * it stays idle, which the rebalance avoids (see computeRebalancePlan).
+ * Each share is the largest amount on the amount step that its free balance funds, its need worked out in decimal (see
+ * getFundedAmount). The quantity is the smaller of the two, at most the market's maximum at the highest price of the grid (see
+ * getMaximumAmount): 0, with no level, when the free balances fund none. What the larger share holds beyond it stays idle, which the
+ * rebalance avoids (see computeRebalancePlan).
  */
 export const deriveLevelQuantity = (
   centerPrice: number,
@@ -558,11 +524,19 @@ export const deriveLevelQuantity = (
 ): GridSize => {
   const priceAt = (steps: number) =>
     computeLevelPrice(centerPrice, steps, priceDecimals, spacingType, spacingValue, priceStep, priceSignificantDigits);
-  const amountDecimals = inferAmountPrecision(marketData);
+  const step = inferAmountPrecision(marketData);
 
-  const buyPriceSums = getBuyPriceSums(priceAt, buyLevels);
-  const currencyShare = (levels: number) => (levels > 0 ? currencyFree / (buyPriceSums[levels] * (1 + getMakerFee(marketData))) : Infinity);
-  const assetShare = (levels: number) => (levels > 0 ? assetFree / levels : Infinity);
+  // What a unit of the quantity needs on `levels` levels, in decimal: of the currency, the BUY prices with the maker fee on top, of the
+  // asset, one unit a SELL. Divided in binary and rounded down, a share fell a step short of what the free balance funds exactly
+  const buyPriceSums = getBuyPriceSums(priceAt, buyLevels, addPrecise);
+  const withFee = addPrecise(1, getMakerFee(marketData));
+  const currencyShare = (levels: number) => {
+    if (levels <= 0) return Infinity;
+    const unitCost = multiplyPrecise(buyPriceSums[levels], withFee);
+    return getFundedAmount(currencyFree / unitCost, currencyFree, amount => multiplyPrecise(amount, unitCost), step);
+  };
+  const assetShare = (levels: number) =>
+    levels > 0 ? getFundedAmount(assetFree / levels, assetFree, amount => multiplyPrecise(amount, levels), step) : Infinity;
   // The market minimum at the lowest price of a grid of `levels` buy levels: its lowest BUY, or without any the center price, where
   // the first sell level buys once it has sold
   const minimumAt = (levels: number) => getMinimumAmount(levels > 0 ? priceAt(-levels) : centerPrice, marketData);
@@ -571,14 +545,14 @@ export const deriveLevelQuantity = (
   // unrounded: the last orders placed were refused for want of funds, and CCXTExchange truncated the others to the amount step,
   // under cost.min again, so that a small account had most of its levels refused at every attempt
   let fundedBuyLevels = buyPriceSums.length - 1;
-  while (fundedBuyLevels > 0 && roundAmount(currencyShare(fundedBuyLevels), amountDecimals) < minimumAt(fundedBuyLevels)) fundedBuyLevels--;
+  while (fundedBuyLevels > 0 && currencyShare(fundedBuyLevels) < minimumAt(fundedBuyLevels)) fundedBuyLevels--;
   const minimumAmount = minimumAt(fundedBuyLevels);
   let fundedSellLevels = Math.max(sellLevels, 0);
-  while (fundedSellLevels > 0 && roundAmount(assetShare(fundedSellLevels), amountDecimals) < minimumAmount) fundedSellLevels--;
+  while (fundedSellLevels > 0 && assetShare(fundedSellLevels) < minimumAmount) fundedSellLevels--;
 
   if (fundedBuyLevels === 0 && fundedSellLevels === 0) return { quantity: 0, buyLevels: 0, sellLevels: 0, minimumAmount };
 
-  const share = roundAmount(Math.min(assetShare(fundedSellLevels), currencyShare(fundedBuyLevels)), amountDecimals);
+  const share = Math.min(assetShare(fundedSellLevels), currencyShare(fundedBuyLevels));
   // At most the market maximum at the highest price of the grid: its highest SELL, or without any the center price, where the first
   // buy level sells once it has bought
   const quantity = Math.min(share, getMaximumAmount(priceAt(fundedSellLevels), marketData));

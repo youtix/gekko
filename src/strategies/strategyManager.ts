@@ -8,6 +8,7 @@ import {
 } from '@constants/event.const';
 import { ORDER_SIDES, ORDER_TYPES } from '@constants/order.const';
 import { ApplicationStopError } from '@errors/applicationStop.error';
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import * as indicators from '@indicators/index';
 import { Indicator } from '@indicators/indicator';
@@ -32,7 +33,7 @@ import * as strategies from '@strategies/index';
 import { getBucketTimestamp, getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { copyPayload } from '@utils/event/event.utils';
-import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
+import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { clonePortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes } from 'date-fns';
 import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
@@ -57,9 +58,6 @@ const getPairProblem = (symbol: TradingPair, marketData: Map<TradingPair, Market
 
 /** Values as util.inspect shows them, quoted when they are strings: the case of a side or a type shows */
 const showValues = (values: readonly unknown[]) => values.map(value => inspect(value)).join(', ');
-
-/** Whether a value is a number above 0: not NaN, not Infinity, and not a quoted number, which Number.isFinite does not coerce */
-const isAboveZero = (value: unknown) => isFiniteNumber(value) && value > 0;
 
 /** The keys of `object` that are not among `keys`, in the order `object` holds them, whatever their values: undefined ones included */
 const getUnknownKeys = (object: object, keys: readonly string[]) => Object.keys(object).filter(key => !keys.includes(key));
@@ -99,9 +97,9 @@ const getKeysProblem = (order: StrategyOrder): string | undefined => {
 const getOrderProblem = ({ side, type, amount, price }: StrategyOrder): string | undefined => {
   if (!ORDER_SIDES.includes(side)) return `side must be one of ${showValues(ORDER_SIDES)}, got ${inspect(side)}`;
   if (!ORDER_TYPES.includes(type)) return `type must be one of ${showValues(ORDER_TYPES)}, got ${inspect(type)}`;
-  if (!isNil(amount) && !isAboveZero(amount))
+  if (!isNil(amount) && !isFinitePositive(amount))
     return `amount must be a number above 0, or left out for an all-in order, got ${inspect(amount)}`;
-  if (!isNil(price) && !isAboveZero(price))
+  if (!isNil(price) && !isFinitePositive(price))
     return `price must be a number above 0, or left out for the last price of the pair, got ${inspect(price)}`;
 };
 
@@ -337,8 +335,7 @@ export class StrategyManager extends EventEmitter {
     } catch (hookError) {
       if (!isConsecutiveErrorsReached) throw hookError;
       // The orderly stop prevails, as in PluginsStream: a restart-on-failure supervisor leaves the bot stopped
-      const reason = hookError instanceof Error ? hookError.message : inspect(hookError);
-      error('strategy', `The strategy's onOrderErrored failed on the error that trips the circuit breaker: ${reason}`);
+      error('strategy', `The strategy's onOrderErrored failed on the error that trips the circuit breaker: ${describeError(hookError)}`);
     }
     // What the order executed before its error, as far as the exchange reported it
     const filled = isFiniteNumber(order.filled) && order.filled > 0 ? order.filled : 0;

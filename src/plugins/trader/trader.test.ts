@@ -9,6 +9,7 @@ import {
   PORTFOLIO_CHANGE_EVENT,
 } from '@constants/event.const';
 import { EMPTY_ORDER_SUMMARY } from '@constants/order.const';
+import { GekkoError } from '@errors/gekko.error';
 import { AdviceOrder } from '@models/advice.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
@@ -491,6 +492,19 @@ describe('Trader', () => {
       trader['processInit']();
       await vi.advanceTimersByTimeAsync(exchangeSynchInterval);
       expect(logger.error).toHaveBeenCalledWith('trader', 'Impossible to synchronize: network down');
+    });
+
+    // Quoted under the Trader's tag: a GekkoError without its own, which showed two tags, and a value without a prototype as util.inspect
+    // writes it: String() threw for it, from the handler meant to log the failure, and left the rejection unhandled
+    it.each`
+      failure                          | thrown                                                                         | reason
+      ${'a GekkoError'}                | ${new GekkoError('exchange', 'binance GET /api/v3/account request timed out')} | ${'binance GET /api/v3/account request timed out'}
+      ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })}                         | ${'[Object: null prototype] { status: 503 }'}
+    `('logs a synchronization that fails with $failure as: Impossible to synchronize: $reason', async ({ thrown, reason }) => {
+      fakeExchange.fetchBalance.mockRejectedValue(thrown);
+      trader['processInit']();
+      await vi.advanceTimersByTimeAsync(0);
+      expect(logger.error).toHaveBeenCalledWith('trader', `Impossible to synchronize: ${reason}`);
     });
 
     describe('when a periodic synchronization comes while one is in flight', () => {

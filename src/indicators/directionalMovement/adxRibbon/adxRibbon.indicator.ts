@@ -1,6 +1,6 @@
 import { checkInteger } from '@indicators/indicator.utils';
 import { Candle } from '@models/candle.types';
-import { isNumber } from 'lodash-es';
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { Indicator } from '../../indicator';
 import { ADX } from '../adx/adx.indicator';
 
@@ -30,7 +30,8 @@ export class ADXRibbon extends Indicator<'ADXRibbon'> {
     for (const adx of this.adxs) {
       adx.onNewCandle(candle);
       const result = adx.getResult();
-      if (!isNumber(result)) continue;
+      // Not ready, or not a finite number: lodash's isNumber let a NaN ADX through, and the spread with it
+      if (!isFiniteNumber(result)) continue;
       results.push(result);
       highest = Math.max(highest, result);
       lowest = Math.min(lowest, result);

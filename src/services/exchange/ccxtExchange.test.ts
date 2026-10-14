@@ -918,6 +918,19 @@ describe('CCXTExchange', () => {
         '[EXCHANGE] Market order not sent: ticker unavailable (Fetch ticker failed to return data for BTC/USDT)',
       );
     });
+
+    // Quoted whole: the regular expression that cut the tag off a GekkoError cut a word in brackets off any other message too, and
+    // String() threw for a value without a prototype, rejecting the order with a TypeError
+    it.each`
+      failure                                        | rejection                                              | quoted
+      ${'an Error starting with a word in brackets'} | ${new Error('[503] Service Unavailable')}              | ${'[503] Service Unavailable'}
+      ${'a value without a prototype'}               | ${Object.assign(Object.create(null), { status: 503 })} | ${'[Object: null prototype] { status: 503 }'}
+    `('rejects an order whose ticker failed with $failure with a GekkoError quoting it: $quoted', async ({ rejection, quoted }) => {
+      instance.fetchTicker.mockRejectedValue(rejection);
+      await expect(exchange.createMarketOrder('BTC/USDT', 'BUY', 1)).rejects.toThrow(
+        `[EXCHANGE] Market order not sent: ticker unavailable (${quoted})`,
+      );
+    });
   });
 
   // The price of a limit order is the one given, that of a market order the ask of the ticker for a BUY
@@ -1320,6 +1333,17 @@ describe('CCXTExchange', () => {
         const failure = await call(exchange).catch((err: unknown) => err);
         expect((failure as Error).cause).toBeInstanceOf(GekkoError);
       });
+    });
+
+    // String() threw for it: the creation rejected with a TypeError, which the orders took for a failure that placed nothing
+    it('rejects a creation whose read-back failed with a value without a prototype with an OrderOutcomeUnknown quoting it', async () => {
+      instance.createOrder.mockResolvedValue(answerWithoutStatus);
+      instance.fetchOrder.mockRejectedValue(Object.assign(Object.create(null), { status: 503 }));
+      await expect(call(exchange)).rejects.toThrow(
+        new OrderOutcomeUnknown(
+          'Order 6195281425 was created on hyperliquid for BTC/USDT, but its state could not be read back: [Object: null prototype] { status: 503 }',
+        ),
+      );
     });
 
     it.each`

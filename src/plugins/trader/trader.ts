@@ -9,6 +9,7 @@ import {
   PORTFOLIO_CHANGE_EVENT,
 } from '@constants/event.const';
 import { DEFAULT_FEE_BUFFER } from '@constants/order.const';
+import { describeError } from '@errors/error.utils';
 import { AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -20,7 +21,7 @@ import { debug, error, info, warning } from '@services/logger';
 import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { getMarketOrderLimits } from '@utils/market/market.utils';
-import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
+import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes, differenceInMinutes } from 'date-fns';
@@ -38,9 +39,6 @@ import {
   shouldEmitPortfolio,
   ShouldEmitPortfolioParams,
 } from './trader.utils';
-
-const getErrorMessage = (err: unknown) => (err instanceof Error ? err.message : String(err));
-const isFinitePositive = (value: number) => Number.isFinite(value) && value > 0;
 
 type OrderInstance = TraderOrderMetadata['orderInstance'];
 /** An order, as the events relayed to the strategy describe it */
@@ -185,7 +183,7 @@ export class Trader extends Plugin {
    */
   private synchronizeInBackground() {
     if (this.synchronization) return debug('trader', 'Synchronization skipped: another one is in flight');
-    this.synchronize().catch(err => error('trader', `Impossible to synchronize: ${getErrorMessage(err)}`));
+    this.synchronize().catch(err => error('trader', `Impossible to synchronize: ${describeError(err)}`));
   }
 
   /* -------------------------------------------------------------------------- */
@@ -209,7 +207,7 @@ export class Trader extends Plugin {
       .map(([id, { orderInstance, side, type }]) =>
         orderInstance
           .checkOrder()
-          .catch(err => error('trader', `[${id}] Impossible to check the ${side} ${type} order: ${getErrorMessage(err)}`)),
+          .catch(err => error('trader', `[${id}] Impossible to check the ${side} ${type} order: ${describeError(err)}`)),
       );
     await Promise.all(checks);
   }
@@ -416,7 +414,7 @@ export class Trader extends Plugin {
       if (isFinitePositive(amount) && isFinitePositive(price) && Number.isFinite(orderExecutionDate)) return summary;
       reason = `its trades were not found, or not usable (amount ${amount}, price ${price}, executed at ${toISOString(orderExecutionDate)})`;
     } catch (err) {
-      reason = `its summary could not be created: ${getErrorMessage(err)}`;
+      reason = `its summary could not be created: ${describeError(err)}`;
     }
     return this.estimateOrderSummary(orderInstance, order, reason, creationPrice);
   }
@@ -490,7 +488,7 @@ export class Trader extends Plugin {
     try {
       await this.synchronize(startedAfter);
     } catch (err) {
-      error('trader', `[${order.id}] Impossible to synchronize: ${getErrorMessage(err)}`);
+      error('trader', `[${order.id}] Impossible to synchronize: ${describeError(err)}`);
     }
     const exchange = { price: this.getLastPrice(order.symbol), portfolio: this.portfolio };
     this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, {
@@ -566,13 +564,13 @@ export class Trader extends Plugin {
       try {
         await this.synchronize(startedAfter);
       } catch (err) {
-        error('trader', `[${id}] Impossible to synchronize: ${getErrorMessage(err)}`);
+        error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
       const orderCompletedEvent = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
       this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, orderCompletedEvent);
       this.orders.delete(id);
     } catch (err) {
-      error('trader', `[${id}] Impossible to report the completion of the ${side} ${type} order: ${getErrorMessage(err)}`);
+      error('trader', `[${id}] Impossible to report the completion of the ${side} ${type} order: ${describeError(err)}`);
     }
   }
 
@@ -591,7 +589,7 @@ export class Trader extends Plugin {
       try {
         await this.synchronize(startedAfter);
       } catch (err) {
-        error('trader', `[${id}] Impossible to synchronize: ${getErrorMessage(err)}`);
+        error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
       const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
       this.addDeferredEmit<OrderCanceledEvent>(ORDER_CANCELED_EVENT, {
@@ -599,7 +597,7 @@ export class Trader extends Plugin {
         exchange,
       });
     } catch (err) {
-      error('trader', `[${id}] Impossible to report the cancelation of the ${side} ${type} order: ${getErrorMessage(err)}`);
+      error('trader', `[${id}] Impossible to report the cancelation of the ${side} ${type} order: ${describeError(err)}`);
     }
   }
 
@@ -616,7 +614,7 @@ export class Trader extends Plugin {
       error('trader', `[${id}] ${side} ${type} order: ${reason} (status: ERROR)${live}`);
       await this.relayError(order, reason, startedAfter, orderInstance.getFilledAmount(), mayBeLive);
     } catch (err) {
-      error('trader', `[${id}] Impossible to report the error of the ${side} ${type} order: ${getErrorMessage(err)}`);
+      error('trader', `[${id}] Impossible to report the error of the ${side} ${type} order: ${describeError(err)}`);
     }
   }
 
@@ -646,7 +644,7 @@ export class Trader extends Plugin {
       // Refused, it left nothing on the exchange
       await this.relayError(order, reason, startedAfter, filledAmount, false);
     } catch (err) {
-      error('trader', `[${id}] Impossible to report the rejection of the ${side} ${type} order: ${getErrorMessage(err)}`);
+      error('trader', `[${id}] Impossible to report the rejection of the ${side} ${type} order: ${describeError(err)}`);
     }
   }
 
@@ -664,7 +662,7 @@ export class Trader extends Plugin {
     try {
       await this.synchronize();
     } catch (err) {
-      error('trader', `[warmup] Impossible to synchronize: ${getErrorMessage(err)}`);
+      error('trader', `[warmup] Impossible to synchronize: ${describeError(err)}`);
     }
   }
 
@@ -692,7 +690,7 @@ export class Trader extends Plugin {
         this.trackReport(
           orderInstance
             .cancel()
-            .catch(err => error('trader', `[${id}] Impossible to cancel the ${side} ${type} order: ${getErrorMessage(err)}`)),
+            .catch(err => error('trader', `[${id}] Impossible to cancel the ${side} ${type} order: ${describeError(err)}`)),
         );
       }),
     );
@@ -768,7 +766,7 @@ export class Trader extends Plugin {
         this.trackReport(
           orderInstance
             .launch()
-            .catch(err => error('trader', `[${id}] Impossible to launch the ${side} ${type} order: ${getErrorMessage(err)}`)),
+            .catch(err => error('trader', `[${id}] Impossible to launch the ${side} ${type} order: ${describeError(err)}`)),
         );
       }),
     );

@@ -5,7 +5,7 @@ import { Portfolio } from '@models/portfolio.types';
 import { Trade } from '@models/trade.types';
 import { TradingPair } from '@models/utility.types';
 import z from 'zod';
-import { exchangeSchema } from './exchange.schema';
+import type { exchangeSchema } from './exchange.schema';
 
 export type ExchangeConfig = z.infer<typeof exchangeSchema>;
 

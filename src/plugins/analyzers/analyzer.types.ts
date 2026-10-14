@@ -1,6 +1,6 @@
 import { Report } from '@models/event.types';
 import { z } from 'zod';
-import { analyzerSchema } from './analyzer.schema';
+import type { analyzerSchema } from './analyzer.schema';
 
 export type AnalyzerConfig = z.infer<typeof analyzerSchema>;
 

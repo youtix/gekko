@@ -14,11 +14,22 @@ import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/mar
 import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { round, shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, initializePortfolio } from '@utils/portfolio/portfolio.utils';
+import { formatEveryDecimal } from '@utils/string/string.utils';
 import { addMinutes } from 'date-fns';
 import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
 import { COST_DECIMALS } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
 import { roundToMarketPrecision } from './dummyCentralizedExchange.utils';
+
+/**
+ * Why an order is refused for want of a free balance: what the portfolio holds free and what the order needs of it, the currency a BUY
+ * costs, or the amount of the asset a SELL sells, each with every decimal (see formatEveryDecimal). Written by String, a dust balance
+ * read 5e-7, and a limit SELL's amount was labelled its order cost.
+ */
+const describeShortfall = (side: OrderSide, free: number, need: number) =>
+  side === 'BUY'
+    ? `Insufficient currency balance (portfolio: ${formatEveryDecimal(free)}, order cost: ${formatEveryDecimal(need)})`
+    : `Insufficient asset balance (portfolio: ${formatEveryDecimal(free)}, amount: ${formatEveryDecimal(need)})`;
 
 /**
  * Adds each change to its part of the balance (free, used or total) in decimal, as addPrecise does: an exchange books decimals. Added in
@@ -233,13 +244,11 @@ export class DummyCentralizedExchange implements Exchange {
 
       if (side === 'BUY') {
         const totalCost = this.getCurrencyAmount(symbol, 'MARKET', side, orderAmount, orderPrice);
-        if (currencyBalance.free < totalCost)
-          throw new InvalidOrder(`Insufficient currency balance (portfolio: ${currencyBalance.free}, order cost: ${totalCost})`);
+        if (currencyBalance.free < totalCost) throw new InvalidOrder(describeShortfall('BUY', currencyBalance.free, totalCost));
         addToBalance(currencyBalance, { free: -totalCost, total: -totalCost });
         addToBalance(assetBalance, { free: orderAmount, total: orderAmount });
       } else {
-        if (assetBalance.free < orderAmount)
-          throw new InvalidOrder(`Insufficient asset balance (portfolio: ${assetBalance.free}, amount: ${orderAmount})`);
+        if (assetBalance.free < orderAmount) throw new InvalidOrder(describeShortfall('SELL', assetBalance.free, orderAmount));
         const gain = this.getCurrencyAmount(symbol, 'MARKET', side, orderAmount, orderPrice);
         addToBalance(assetBalance, { free: -orderAmount, total: -orderAmount });
         addToBalance(currencyBalance, { free: gain, total: gain });
@@ -376,12 +385,10 @@ export class DummyCentralizedExchange implements Exchange {
 
     if (side === 'BUY') {
       const totalCost = this.getLimitBuyCost(symbol, amount, price);
-      if (currencyBalance.free < totalCost)
-        throw new InvalidOrder(`Insufficient currency balance (portfolio: ${currencyBalance.free}, order cost: ${totalCost})`);
+      if (currencyBalance.free < totalCost) throw new InvalidOrder(describeShortfall('BUY', currencyBalance.free, totalCost));
       addToBalance(currencyBalance, { free: -totalCost, used: totalCost });
     } else {
-      if (assetBalance.free < amount)
-        throw new InvalidOrder(`Insufficient asset balance (portfolio: ${assetBalance.free}, order cost: ${amount})`);
+      if (assetBalance.free < amount) throw new InvalidOrder(describeShortfall('SELL', assetBalance.free, amount));
       addToBalance(assetBalance, { free: -amount, used: amount });
     }
   }

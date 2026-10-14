@@ -1,7 +1,7 @@
 import { OrderSide, OrderState } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
 import z from 'zod';
-import { dummyExchangeSchema } from './dummyCentralizedExchange.schema';
+import type { dummyExchangeSchema } from './dummyCentralizedExchange.schema';
 
 export type DummyCentralizedExchangeConfig = z.infer<typeof dummyExchangeSchema>;
 

@@ -20,6 +20,7 @@ import {
   getMaximumAmount,
   getMinimumAmount,
   getOutOfRangeSide,
+  getPortfolioContent,
   getRebalanceBuyCost,
   getRebalanceOrderPrice,
   hasOnlyOneSide,
@@ -105,16 +106,20 @@ describe('gridBot.utils', () => {
     });
   });
 
+  // The step itself, not its decimals: on a step that is not one unit of a decimal, 10 or 0.5, the amounts were rounded to its decimals,
+  // 4705 and 1.4, which the exchange takes as 4700 and 1
   describe('inferAmountPrecision', () => {
     it.each`
-      marketData                             | description                                        | expected
-      ${{ precision: { amount: 0.001 } }}    | ${'an amount step of 0.001'}                       | ${3}
-      ${{ precision: { amount: 1e-8 } }}     | ${'an amount step String writes with an exponent'} | ${8}
-      ${{ precision: { amount: 1 } }}        | ${'an amount step of 1'}                           | ${0}
-      ${{}}                                  | ${'no precision: DEFAULT_AMOUNT_PRECISION'}        | ${8}
-      ${{ precision: { amount: 0 } }}        | ${'an amount step of 0, which states none'}        | ${8}
-      ${{ precision: { amount: Infinity } }} | ${'an infinite amount step, which states none'}    | ${8}
-    `('is $expected decimals for $description', ({ marketData, expected }) => {
+      marketData                             | description                                          | expected
+      ${{ precision: { amount: 0.001 } }}    | ${'an amount step of 0.001'}                         | ${0.001}
+      ${{ precision: { amount: 1e-8 } }}     | ${'an amount step String writes with an exponent'}   | ${1e-8}
+      ${{ precision: { amount: 1 } }}        | ${'an amount step of 1'}                             | ${1}
+      ${{ precision: { amount: 10 } }}       | ${'an amount step of 10, not one unit of 0 decimal'} | ${10}
+      ${{ precision: { amount: 0.5 } }}      | ${'an amount step of 0.5, not one unit of a tenth'}  | ${0.5}
+      ${{}}                                  | ${'no precision: DEFAULT_AMOUNT_PRECISION'}          | ${1e-8}
+      ${{ precision: { amount: 0 } }}        | ${'an amount step of 0, which states none'}          | ${1e-8}
+      ${{ precision: { amount: Infinity } }} | ${'an infinite amount step, which states none'}      | ${1e-8}
+    `('is the step $expected for $description', ({ marketData, expected }) => {
       expect(inferAmountPrecision(marketData)).toBe(expected);
     });
   });
@@ -203,22 +208,25 @@ describe('gridBot.utils', () => {
     });
   });
 
+  // As the exchange truncates an amount (see roundToStep): to the step, not to its decimals
   describe('roundAmount', () => {
     it.each`
-      value     | decimals | expected
-      ${1.999}  | ${2}     | ${1.99}
-      ${1.001}  | ${2}     | ${1}
-      ${0.1234} | ${3}     | ${0.123}
-    `('rounds $value down to $expected (decimals=$decimals)', ({ value, decimals, expected }) => {
-      expect(roundAmount(value, decimals)).toBe(expected);
+      value      | step     | expected
+      ${1.999}   | ${0.01}  | ${1.99}
+      ${1.001}   | ${0.01}  | ${1}
+      ${0.1234}  | ${0.001} | ${0.123}
+      ${4705.33} | ${10}    | ${4700}
+      ${1.4}     | ${0.5}   | ${1}
+    `('rounds $value down to $expected on a step of $step', ({ value, step, expected }) => {
+      expect(roundAmount(value, step)).toBe(expected);
     });
 
     it('returns 0 for non-positive values', () => {
-      expect(roundAmount(-1, 2)).toBe(0);
+      expect(roundAmount(-1, 0.01)).toBe(0);
     });
 
     it('returns 0 for non-finite values', () => {
-      expect(roundAmount(Infinity, 2)).toBe(0);
+      expect(roundAmount(Infinity, 0.01)).toBe(0);
     });
   });
 
@@ -694,19 +702,21 @@ describe('gridBot.utils', () => {
   // amount step, under cost.min again, and the exchange refused it
   describe('getMinimumAmount', () => {
     it.each`
-      price       | marketData                                                                       | description                                                                        | expected
-      ${100}      | ${{ precision: { amount: 0.01 } }}                                               | ${'no limit: one amount step'}                                                     | ${0.01}
-      ${100}      | ${{}}                                                                            | ${'no limit and no precision: one step of 8 decimals'}                             | ${1e-8}
-      ${100}      | ${{ amount: { min: 0, max: 0 }, cost: { min: 0 }, precision: { amount: 0.01 } }} | ${'limits of 0, which bound nothing: one amount step'}                             | ${0.01}
-      ${100}      | ${{ amount: { min: 0.1 }, precision: { amount: 0.01 } }}                         | ${'amount.min'}                                                                    | ${0.1}
-      ${100}      | ${{ amount: { min: 0.015 }, precision: { amount: 0.01 } }}                       | ${'amount.min off the amount step, rounded up to it'}                              | ${0.02}
-      ${58172.83} | ${{ cost: { min: 5 }, precision: { amount: 0.00001 } }}                          | ${'cost.min / price, 0.0000859507…, rounded up to the amount step'}                | ${0.00009}
-      ${58172.83} | ${{ amount: { min: 0.0001 }, cost: { min: 5 }, precision: { amount: 0.00001 } }} | ${'the larger of amount.min and cost.min / price'}                                 | ${0.0001}
-      ${50000}    | ${{ cost: { min: 5 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.0001 × 50000 being 5 in floating point'}            | ${0.0001}
-      ${100000}   | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.00007 × 100000 being 7 in decimal'}                 | ${0.00007}
-      ${0.000001} | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 100, though 0.0001 / 0.000001 is 100.00000000000001'} | ${100}
-      ${8e-7}     | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 125, though 0.0001 / 8e-7 is 125.00000000000001'}     | ${125}
-      ${0}        | ${{ cost: { min: 5 }, precision: { amount: 0.01 } }}                             | ${'a price of 0, which sets no amount from cost.min: one amount step'}             | ${0.01}
+      price       | marketData                                                                       | description                                                                          | expected
+      ${100}      | ${{ precision: { amount: 0.01 } }}                                               | ${'no limit: one amount step'}                                                       | ${0.01}
+      ${100}      | ${{}}                                                                            | ${'no limit and no precision: one step of 8 decimals'}                               | ${1e-8}
+      ${100}      | ${{ amount: { min: 0, max: 0 }, cost: { min: 0 }, precision: { amount: 0.01 } }} | ${'limits of 0, which bound nothing: one amount step'}                               | ${0.01}
+      ${100}      | ${{ amount: { min: 0.1 }, precision: { amount: 0.01 } }}                         | ${'amount.min'}                                                                      | ${0.1}
+      ${100}      | ${{ amount: { min: 0.015 }, precision: { amount: 0.01 } }}                       | ${'amount.min off the amount step, rounded up to it'}                                | ${0.02}
+      ${58172.83} | ${{ cost: { min: 5 }, precision: { amount: 0.00001 } }}                          | ${'cost.min / price, 0.0000859507…, rounded up to the amount step'}                  | ${0.00009}
+      ${58172.83} | ${{ amount: { min: 0.0001 }, cost: { min: 5 }, precision: { amount: 0.00001 } }} | ${'the larger of amount.min and cost.min / price'}                                   | ${0.0001}
+      ${50000}    | ${{ cost: { min: 5 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.0001 × 50000 being 5 in floating point'}              | ${0.0001}
+      ${100000}   | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.00007 × 100000 being 7 in decimal'}                   | ${0.00007}
+      ${0.000001} | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 100, though 0.0001 / 0.000001 is 100.00000000000001'}   | ${100}
+      ${8e-7}     | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 125, though 0.0001 / 8e-7 is 125.00000000000001'}       | ${125}
+      ${0}        | ${{ cost: { min: 5 }, precision: { amount: 0.01 } }}                             | ${'a price of 0, which sets no amount from cost.min: one amount step'}               | ${0.01}
+      ${1}        | ${{ cost: { min: 5 }, precision: { amount: 10 } }}                               | ${'cost.min / price on an amount step of 10: 10, not the 5 the exchange sends as 0'} | ${10}
+      ${1}        | ${{ amount: { min: 0.7 }, precision: { amount: 0.5 } }}                          | ${'amount.min rounded up to a step of 0.5: 1, not 0.7'}                              | ${1}
     `('is $expected for $description', ({ price, marketData, expected }) => {
       expect(getMinimumAmount(price, marketData)).toBe(expected);
     });
@@ -744,6 +754,7 @@ describe('gridBot.utils', () => {
       ${300}    | ${{ cost: { max: 1000 }, precision: { amount: 0.01 } }}                     | ${'cost.max / price, 3.333…, rounded down to the amount step'}     | ${3.33}
       ${300}    | ${{ amount: { max: 3 }, cost: { max: 1000 }, precision: { amount: 0.01 } }} | ${'the smaller of amount.max and cost.max / price'}                | ${3}
       ${300000} | ${{ cost: { max: 3 }, precision: { amount: 1e-8 } }}                        | ${'cost.max / price exactly, 0.00001 × 300000 being 3 in decimal'} | ${0.00001}
+      ${100}    | ${{ amount: { max: 4705 }, precision: { amount: 10 } }}                     | ${'amount.max rounded down to a step of 10: 4700, not 4705'}       | ${4700}
     `('is $expected for $description', ({ price, marketData, expected }) => {
       expect(getMaximumAmount(price, marketData)).toBe(expected);
     });
@@ -1204,6 +1215,45 @@ describe('gridBot.utils', () => {
       expect(deriveLevelQuantity(10050, 0, 20095.5, 2, 0, 1, 'fixed', 1.5, rule, 0.1, 5).quantity).toBe(0.99);
     });
 
+    // Each share is the largest amount on the step that its free balance funds, its need worked out in decimal. Divided in binary and
+    // rounded down, a share fell a step short where the balance funds a whole number of steps: 7.0007 / 100.01 is 0.06999999999999999,
+    // and 0.3 / 3 is 0.09999999999999999
+    describe('on free balances funding a whole number of amount steps', () => {
+      const cents: MarketData = { precision: { price: 0.01, amount: 0.01 } };
+      // Its one BUY at 100.01, spaced by 0.01 around 100.02
+      const oneBuy: Grid = {
+        center: 100.02,
+        assetFree: 0,
+        currencyFree: 7.0007,
+        buyLevels: 1,
+        sellLevels: 0,
+        spacingType: 'fixed',
+        spacingValue: 0.01,
+        marketData: cents,
+      };
+      const threeSells: Grid = { ...oneBuy, center: 100, assetFree: 0.3, currencyFree: 0, buyLevels: 0, sellLevels: 3, spacingValue: 1 };
+
+      it.each`
+        grid                                                                 | description                                                            | expected
+        ${oneBuy}                                                            | ${'7.0007 USDT for one BUY at 100.01: 0.07, not 0.06'}                 | ${{ quantity: 0.07, buyLevels: 1, sellLevels: 0, minimumAmount: 0.01 }}
+        ${{ ...oneBuy, currencyFree: 7.0006 }}                               | ${'7.0006 USDT for one BUY at 100.01: 0.06, 0.07 costing 7.0007'}      | ${{ quantity: 0.06, buyLevels: 1, sellLevels: 0, minimumAmount: 0.01 }}
+        ${threeSells}                                                        | ${'0.3 BTC over three SELLs: 0.1, not 0.09'}                           | ${{ quantity: 0.1, buyLevels: 0, sellLevels: 3, minimumAmount: 0.01 }}
+        ${{ ...threeSells, assetFree: 0.29999999 }}                          | ${'0.29999999 BTC over three SELLs: 0.09'}                             | ${{ quantity: 0.09, buyLevels: 0, sellLevels: 3, minimumAmount: 0.01 }}
+        ${{ ...threeSells, marketData: { ...cents, amount: { min: 0.1 } } }} | ${'0.3 BTC over three SELLs at amount.min 0.1: three of 0.1, not two'} | ${{ quantity: 0.1, buyLevels: 0, sellLevels: 3, minimumAmount: 0.1 }}
+        ${{ ...threeSells, assetFree: 0.7, sellLevels: 7 }}                  | ${'0.7 BTC over seven SELLs: 0.1, not 0.09'}                           | ${{ quantity: 0.1, buyLevels: 0, sellLevels: 7, minimumAmount: 0.01 }}
+      `('sizes $description', ({ grid, expected }) => {
+        expect(sizeOf(grid)).toEqual(expected);
+      });
+    });
+
+    // As the exchange takes an amount, truncated to the step: rounded to the decimals of a step of 0.5, the grid was sized at 3.3 a level,
+    // which the exchange takes as 3
+    it('sizes 10 BTC over three SELLs on an amount step of 0.5: 3 a level', () => {
+      const halfStep: Grid = { ...twoByTwo, buyLevels: 0, sellLevels: 3, marketData: { precision: { price: 0.01, amount: 0.5 } } };
+
+      expect(sizeOf(halfStep)).toEqual({ quantity: 3, buyLevels: 0, sellLevels: 3, minimumAmount: 0.5 });
+    });
+
     // The simulator charges the maker fee in currency on top of each BUY. Sized on the prices alone, the BUYs of a grid limited by its
     // currency needed the whole free currency before their fees: the last one placed, the highest, was refused at every attempt
     describe('limited by the free currency, on a market with a maker fee', () => {
@@ -1409,6 +1459,22 @@ describe('gridBot.utils', () => {
 
         expect(roundAmount(quantity, inferAmountPrecision(grid.marketData))).toBe(quantity);
       });
+    });
+  });
+
+  describe('getPortfolioContent', () => {
+    const portfolio = new Map([
+      ['BTC', { free: 1, used: 0.5, total: 1.5 }],
+      ['USDT', { free: 100, used: 0, total: 100 }],
+    ]);
+
+    it.each`
+      base     | quote     | description                                            | expected
+      ${'BTC'} | ${'USDT'} | ${'the balances of the asset and of the currency'}     | ${{ asset: { free: 1, used: 0.5, total: 1.5 }, currency: { free: 100, used: 0, total: 100 } }}
+      ${'ETH'} | ${'USDT'} | ${'a balance of 0 for an asset the portfolio lacks'}   | ${{ asset: { free: 0, used: 0, total: 0 }, currency: { free: 100, used: 0, total: 100 } }}
+      ${'BTC'} | ${'EUR'}  | ${'a balance of 0 for a currency the portfolio lacks'} | ${{ asset: { free: 1, used: 0.5, total: 1.5 }, currency: { free: 0, used: 0, total: 0 } }}
+    `('reads $description', ({ base, quote, expected }) => {
+      expect(getPortfolioContent(portfolio, base, quote)).toEqual(expected);
     });
   });
 

@@ -92,7 +92,8 @@ describe('PositionTracker', () => {
   });
 
   describe('position after an order that did not complete', () => {
-    // A step that is not a power of ten, unlike those of Binance and Hyperliquid: the amount is not truncated
+    // A step that is not a power of ten, unlike those of Binance and Hyperliquid, which CCXTExchange truncates an amount to as to any
+    // other: 0.05269 BTC is sent as 0. Only a power of ten used to be truncated to, and 0.05269 BTC read as enough to sell
     const quarterStep = new Map<TradingPair, MarketData>([[symbol, { ...limits, precision: { amount: 0.25 } }]]);
 
     describe('the fill a cancelation reports', () => {
@@ -168,7 +169,8 @@ describe('PositionTracker', () => {
         ${'no BTC on a market without data'}                            | ${0}       | ${PRICE} | ${new Map()}   | ${false}
         ${'0.05269 BTC at 95 USDT, sent as 0.0526 BTC: 4.997 USDT'}     | ${0.05269} | ${95}    | ${marketData}  | ${false}
         ${'0.0527 BTC at 95 USDT, 5.0065 USDT'}                         | ${0.0527}  | ${95}    | ${marketData}  | ${true}
-        ${'0.05269 BTC at 95 USDT, a step of 0.25 BTC not applied'}     | ${0.05269} | ${95}    | ${quarterStep} | ${true}
+        ${'0.05269 BTC at 95 USDT on a step of 0.25 BTC, sent as 0'}    | ${0.05269} | ${95}    | ${quarterStep} | ${false}
+        ${'0.3 BTC at 95 USDT on a step of 0.25 BTC, sent as 0.25'}     | ${0.3}     | ${95}    | ${quarterStep} | ${true}
       `('reads a SELL errored with $case as long ($isLong)', ({ free, price, data, isLong }) => {
         play(LONG);
         relayLast('errored', { portfolio: holding(symbol, free), price, marketData: data });
@@ -383,6 +385,9 @@ describe('isSellable', () => {
   const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
   // A minimum whose binary product with an amount worth it exactly falls an ulp under it: 0.00007 × 100000 is 6.999999999999999
   const minimumOfSeven: MarketData = { cost: { min: 7 }, precision: { amount: 0.00001 } };
+  // A step that is not one unit of a decimal, which CCXTExchange truncates to as to any other: 1.4 is sent as 1. Only a power of ten was
+  // truncated to, and 1.4 read as sellable over a minimum of 1.1
+  const halfStep: MarketData = { amount: { min: 1.1 }, precision: { amount: 0.5 } };
   it.each`
     amount     | price     | type        | data              | description                                                        | expected
     ${0.1}     | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.1 at 100, 10 USDT'}                                           | ${true}
@@ -394,6 +399,8 @@ describe('isSellable', () => {
     ${0}       | ${100}    | ${'LIMIT'}  | ${{}}             | ${'nothing, on a market without limits'}                           | ${false}
     ${0.00007} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00007 at 100000, 7 USDT in decimal, the minimum cost itself'} | ${true}
     ${0.00006} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00006 at 100000, 6 USDT, under the minimum cost'}             | ${false}
+    ${1.4}     | ${10}     | ${'LIMIT'}  | ${halfStep}       | ${'1.4 on a step of 0.5, sent as 1, under the minimum of 1.1'}     | ${false}
+    ${1.6}     | ${10}     | ${'LIMIT'}  | ${halfStep}       | ${'1.6 on a step of 0.5, sent as 1.5, over the minimum of 1.1'}    | ${true}
   `('is $expected for $description', ({ amount, price, type, data, expected }) => {
     expect(isSellable(amount, price, type, data)).toBe(expected);
   });

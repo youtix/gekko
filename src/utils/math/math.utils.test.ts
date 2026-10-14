@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise, stdev, toSignificantDigits } from './math.utils';
+import {
+  addPrecise,
+  compareWithTolerance,
+  isFiniteNumber,
+  isFinitePositive,
+  multiplyPrecise,
+  stdev,
+  toSignificantDigits,
+} from './math.utils';
 
 describe('stdev', () => {
   it.each`
@@ -118,6 +126,26 @@ describe('isFiniteNumber', () => {
     ${'1'}              | ${false}
   `('should tell whether $value is a finite number: $expected', ({ value, expected }) => {
     expect(isFiniteNumber(value)).toBe(expected);
+  });
+});
+
+describe('isFinitePositive', () => {
+  it.each`
+    value               | expected
+    ${5e-324}           | ${true}
+    ${0.00001}          | ${true}
+    ${Number.MAX_VALUE} | ${true}
+    ${0}                | ${false}
+    ${-0}               | ${false}
+    ${-2.5}             | ${false}
+    ${NaN}              | ${false}
+    ${Infinity}         | ${false}
+    ${-Infinity}        | ${false}
+    ${null}             | ${false}
+    ${undefined}        | ${false}
+    ${'1'}              | ${false}
+  `('should tell whether $value is a finite number above 0: $expected', ({ value, expected }) => {
+    expect(isFinitePositive(value)).toBe(expected);
   });
 });
 

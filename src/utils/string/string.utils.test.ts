@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { formatAmount, formatRatio, formatSignedPercent, pluralize, toCamelCase, toPlainNumber } from './string.utils';
+import { formatAmount, formatEveryDecimal, formatRatio, formatSignedPercent, pluralize, toCamelCase, toPlainNumber } from './string.utils';
 
 describe('toCamelCase', () => {
   it.each`
@@ -100,6 +100,31 @@ describe('toPlainNumber', () => {
     ${'a loss rounded to zero, without sign'} | ${-0.000000001} | ${'0'}
   `('should write $description as $expected', ({ value, expected }) => {
     expect(toPlainNumber(value)).toBe(expected);
+  });
+});
+
+// Every decimal String writes, without its exponent: a value quoted beside the bound it missed must not read as that bound
+describe('formatEveryDecimal', () => {
+  it.each`
+    description                                                       | value                    | expected
+    ${'a value String writes with an exponent'}                       | ${1e-7}                  | ${'0.0000001'}
+    ${'a price under 1e-6 of several digits'}                         | ${4.5678e-7}             | ${'0.00000045678'}
+    ${'a dust balance below 0'}                                       | ${-5e-7}                 | ${'-0.0000005'}
+    ${'a cost a hair under a minimum of 0.0001, unrounded'}           | ${0.000099997}           | ${'0.000099997'}
+    ${'a balance of 8 decimals'}                                      | ${1080.64224999}         | ${'1080.64224999'}
+    ${'a binary sum, its noise kept'}                                 | ${0.1 + 0.2}             | ${'0.30000000000000004'}
+    ${'an exact binary tie, the neighbour String picks, not toFixed'} | ${-104563116752869.125}  | ${'-104563116752869.12'}
+    ${'an integer past 2 ** 53, the digits String writes'}            | ${181719011963580970000} | ${'181719011963580970000'}
+    ${'a number from 1e21 on, without exponent'}                      | ${1.5e21}                | ${'1500000000000000000000'}
+    ${'zero'}                                                         | ${0}                     | ${'0'}
+    ${'minus zero, as String writes it'}                              | ${-0}                    | ${'0'}
+    ${'100 decimals, the most written out'}                           | ${1e-100}                | ${`0.${'0'.repeat(99)}1`}
+    ${'more than 100 decimals, with the exponent'}                    | ${5e-324}                | ${'5e-324'}
+    ${'NaN'}                                                          | ${NaN}                   | ${'NaN'}
+    ${'Infinity'}                                                     | ${Infinity}              | ${'Infinity'}
+    ${'-Infinity'}                                                    | ${-Infinity}             | ${'-Infinity'}
+  `('should write $description as $expected', ({ value, expected }) => {
+    expect(formatEveryDecimal(value)).toBe(expected);
   });
 });
 

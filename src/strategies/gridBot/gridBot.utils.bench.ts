@@ -56,7 +56,7 @@ describe('gridBot.utils Performance', () => {
   describe('roundAmount', () => {
     bench('10000 amount roundings', () => {
       for (let i = 0; i < 10000; i++) {
-        roundAmount(1.23456, 3);
+        roundAmount(1.23456, 0.001);
       }
     });
   });

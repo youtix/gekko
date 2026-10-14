@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { eventSubscriberSchema } from './eventSubscriber.schema';
+import type { eventSubscriberSchema } from './eventSubscriber.schema';
 
 export const EVENT_NAMES = [
   'strat_info',

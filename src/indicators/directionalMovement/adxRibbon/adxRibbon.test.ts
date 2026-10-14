@@ -52,4 +52,13 @@ describe('ADXRibbon', () => {
     ribbon.onNewCandle(candle);
     expect(ribbon.getResult()).toEqual(approximately(expected, 12));
   });
+
+  // Candles without a finite price leave its ADXs NaN: lodash's isNumber took them for results, and the ribbon was complete with a
+  // spread of NaN
+  it('stays null while its ADXs are not finite numbers', () => {
+    const ribbonOfNaN = new ADXRibbon({ count: 2, start: 2, step: 1 });
+    const candle = { start: 0, open: NaN, high: NaN, low: NaN, close: NaN, volume: 1 };
+    for (let i = 0; i < 10; i++) ribbonOfNaN.onNewCandle(candle);
+    expect(ribbonOfNaN.getResult()).toBeNull();
+  });
 });

@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { rsiStrategySchema } from './rsi.schema';
+import type { rsiStrategySchema } from './rsi.schema';
 
 export type RSICurrentTrend = {
   duration: number;

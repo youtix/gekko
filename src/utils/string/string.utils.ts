@@ -1,5 +1,5 @@
 import { isFiniteNumber } from '@utils/math/math.utils';
-import { round } from '@utils/math/round.utils';
+import { countDecimals, round } from '@utils/math/round.utils';
 import { camelCase, upperFirst } from 'lodash-es';
 import { END_Y_WORDS, IRREGULAR } from './string.const';
 
@@ -67,6 +67,26 @@ export const formatAmount = (value: number): string => amountFormatter.format(va
  */
 export const toPlainNumber = (value: number | null | undefined): string =>
   isFiniteNumber(value) ? plainNumberFormatter.format(value) : '';
+
+/**
+ * A number with every decimal String gives it, without an exponent: 0.0000001, which String writes 1e-7, and 0.000099997, which
+ * formatAmount and toPlainNumber round to 0.0001. For a message that quotes a value beside the bound it missed, or a balance beside
+ * what an order needs: rounded, the two could read alike, "value 0.0001 is too low. Minimum allowed is 0.0001". String's own digits,
+ * the point moved where its exponent puts it (String writes one below 1e-6 and from 1e21 on): toFixed works the digits out again from
+ * the double and can write another neighbour of it, -104563116752869.13 for the -104563116752869.12 String writes. NaN, ±Infinity and
+ * a number of more than 100 decimals, which no market has, are written as String writes them.
+ */
+export const formatEveryDecimal = (value: number): string => {
+  const text = String(value);
+  const [mantissa, exponent] = text.split('e');
+  if (exponent === undefined || countDecimals(value) > 100) return text;
+  // One digit before the point, never 0: 4.5678e-7, 1.5e+21
+  const [integer, fraction = ''] = mantissa.replace('-', '').split('.');
+  const digits = integer + fraction;
+  const point = integer.length + Number(exponent);
+  const unsigned = point <= 0 ? `0.${'0'.repeat(-point)}${digits}` : digits.padEnd(point, '0');
+  return value < 0 ? `-${unsigned}` : unsigned;
+};
 
 export const formatSignedPercent = (value: number | null | undefined) => {
   if (!isFiniteNumber(value)) return 'n/a';

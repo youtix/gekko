@@ -893,11 +893,13 @@ describe('StrategyManager', () => {
           });
         });
 
-        // The orderly stop prevails, as when two plugins fail on one bucket: a restart-on-failure supervisor leaves the bot stopped
+        // The orderly stop prevails, as when two plugins fail on one bucket: a restart-on-failure supervisor leaves the bot stopped. The
+        // line quotes a GekkoError without its tag, having the strategy's own ("…: [STRATEGY] Retry limit reached" showed it twice), and
+        // a string as it is, which util.inspect quoted.
         describe.each`
           kind              | thrown                                               | reason
-          ${'a GekkoError'} | ${new GekkoError('strategy', 'Retry limit reached')} | ${'[STRATEGY] Retry limit reached'}
-          ${'a string'}     | ${'Retry limit reached'}                             | ${quoted('Retry limit reached')}
+          ${'a GekkoError'} | ${new GekkoError('strategy', 'Retry limit reached')} | ${'Retry limit reached'}
+          ${'a string'}     | ${'Retry limit reached'}                             | ${'Retry limit reached'}
         `('when the strategy throws $kind as it hears of it', ({ thrown, reason }) => {
           beforeEach(() => {
             strategy.onOrderErrored.mockImplementation(({ order }) => {
@@ -910,7 +912,7 @@ describe('StrategyManager', () => {
             expect(failure).toBeInstanceOf(ApplicationStopError);
           });
 
-          it('logs the failure of the strategy', () => {
+          it(`logs the failure of the strategy: ${reason}`, () => {
             expect(error).toHaveBeenCalledExactlyOnceWith(
               'strategy',
               `The strategy's onOrderErrored failed on the error that trips the circuit breaker: ${reason}`,

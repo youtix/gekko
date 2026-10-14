@@ -4,9 +4,9 @@ import { Candle } from '@models/candle.types';
 import { TIMEFRAMES } from '@services/configuration/configuration.const';
 import { CandleSize } from '@services/core/batcher/candleBatcher/candleBatcher.types';
 import { FastCandleBatcher, isTimeframeCandleClose } from '@services/core/batcher/candleBatcher/fastCandleBatcher';
+import { toISOString, toTimestamp } from '@utils/date/date.utils';
 import { range, sortedUniq } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
-import { toISOString, toTimestamp } from '../date/date.utils';
 import {
   createEmptyCandle,
   getBucketTimestamp,

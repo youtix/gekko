@@ -1,11 +1,11 @@
 import { GekkoError } from '@errors/gekko.error';
+import type { Configuration as ConfigurationModel } from '@models/configuration.types';
 import { readFileSync } from 'fs';
 import { CORE_SCHEMA, load } from 'js-yaml';
 import JSON5 from 'json5';
 import { find, isNil } from 'lodash-es';
 import { extname } from 'path';
 import { z } from 'zod';
-import { Configuration as ConfigurationModel } from '../../models/configuration.types';
 import { configurationSchema } from './configuration.schema';
 
 export class Configuration {

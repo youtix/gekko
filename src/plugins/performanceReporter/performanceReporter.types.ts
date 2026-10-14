@@ -1,7 +1,7 @@
 import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '@plugins/analyzers/roundTripAnalyzer/roundTrip.types';
 import { z } from 'zod';
-import { performanceReporterSchema } from './performanceReporter.schema';
+import type { performanceReporterSchema } from './performanceReporter.schema';
 
 export type PerformanceReporterConfig = z.infer<typeof performanceReporterSchema>;
 

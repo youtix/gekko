@@ -2,7 +2,7 @@ import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { MarketData } from '@services/exchange/exchange.types';
 import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
-import { assertOrderWithinLimits, checkOrderPrice, getMarketOrderLimits } from './market.utils';
+import { assertOrderWithinLimits, checkOrderPrice, getMarketOrderLimits, toBound } from './market.utils';
 
 describe('Market Utils', () => {
   const marketData: MarketData = {
@@ -18,6 +18,22 @@ describe('Market Utils', () => {
   };
   // The same market with Binance's BTC/USDT steps, a price to the cent and an amount to 5 decimals, which the callers round to
   const steppedMarketData: MarketData = { ...binanceMarketData, precision: { price: 0.01, amount: 0.00001 } };
+
+  // A limit or a step that is not a finite number above 0 is none: Binance disables a filter bound with 0
+  describe('toBound', () => {
+    it.each`
+      limit        | expected
+      ${0.00001}   | ${0.00001}
+      ${9000}      | ${9000}
+      ${0}         | ${undefined}
+      ${-1}        | ${undefined}
+      ${NaN}       | ${undefined}
+      ${Infinity}  | ${undefined}
+      ${undefined} | ${undefined}
+    `('reads a limit of $limit as the bound $expected', ({ limit, expected }) => {
+      expect(toBound(limit)).toBe(expected);
+    });
+  });
 
   describe('checkOrderPrice', () => {
     it.each`

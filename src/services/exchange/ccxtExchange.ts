@@ -1,4 +1,5 @@
 import { tz } from '@date-fns/tz';
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { OrderSide, OrderState } from '@models/order.types';
@@ -10,7 +11,7 @@ import { debug, error, warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
 import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/market.utils';
 import { addPrecise } from '@utils/math/math.utils';
-import { pluralize } from '@utils/string/string.utils';
+import { formatEveryDecimal, pluralize } from '@utils/string/string.utils';
 import ccxt, { Exchange as CCXT, Order as CCXTOrder, Trade as CCXTTrade } from 'ccxt';
 import { formatDuration, intervalToDuration } from 'date-fns';
 import { first, isNil, last, partition } from 'lodash-es';
@@ -43,9 +44,6 @@ export type CCXTExchangeConfig = BinanceExchangeConfig | HyperliquidExchangeConf
  */
 const getTradeKey = ({ id, order, timestamp, side, price, amount }: CCXTTrade) =>
   JSON.stringify(isNil(id) ? [order, timestamp, side, price, amount] : [order, id]);
-
-/** The message of a failure, for a GekkoError that quotes it: without the tag a GekkoError starts with ([EXCHANGE]), which it adds again */
-const getUntaggedMessage = (err: unknown) => (err instanceof Error ? err.message.replace(/^\[[A-Z0-9 ]+\] /, '') : String(err));
 
 /**
  * A real exchange reached through ccxt. Every call goes through one of two wrappers of exchange.utils, which both translate the
@@ -342,9 +340,7 @@ export class CCXTExchange implements Exchange {
       // A read: fetchTicker retries it on its own. Its failure ends the creation before any order is sent, so it is not thrown as it
       // is: an ExchangeNetworkError thrown by a creation tells the orders that its outcome is unknown, the order maybe live
       const ticker = await this.fetchTicker(symbol).catch((err: unknown) => {
-        const failure = new GekkoError('exchange', `Market order not sent: ticker unavailable (${getUntaggedMessage(err)})`);
-        failure.cause = err;
-        throw failure;
+        throw new GekkoError('exchange', `Market order not sent: ticker unavailable (${describeError(err)})`, { cause: err });
       });
       const price = side === 'BUY' ? ticker.ask : ticker.bid;
       const rounded = this.roundToMarketPrecision(symbol, amount, price);
@@ -420,9 +416,9 @@ export class CCXTExchange implements Exchange {
   private warnOfPriceMove(symbol: string, side: OrderSide, price: number, sentPrice: number) {
     const tick = this.publicClient.market(symbol).precision?.price;
     if (isNil(tick) || !(tick > 0) || 2 * Math.abs(addPrecise(sentPrice, -price)) <= tick) return;
-    // Every digit, without an exponent: String wrote a price under 1e-6 as 4.5678e-7, and rounded to 8 decimals the price asked for
+    // Every decimal, without an exponent: String wrote a price under 1e-6 as 4.5678e-7, and rounded to 8 decimals the price asked for
     // would read as the one sent
-    const write = (value: number) => this.publicClient.numberToString(value);
+    const write = formatEveryDecimal;
     const moved = `LIMIT ${side} order on ${symbol} at ${write(price)} sent to ${this.exchangeName} at ${write(sentPrice)}`;
     const significantDigits = PRICE_SIGNIFICANT_DIGITS[this.exchangeName];
     const rule = `${this.exchangeName} takes ${significantDigits} significant digits in a price (precision.priceSignificantDigits)`;
@@ -468,7 +464,7 @@ export class CCXTExchange implements Exchange {
     try {
       return await this.readOrderBack(symbol, order.id, created);
     } catch (err) {
-      throw new OrderOutcomeUnknown(`${created}, but its state could not be read back: ${getUntaggedMessage(err)}`, { cause: err });
+      throw new OrderOutcomeUnknown(`${created}, but its state could not be read back: ${describeError(err)}`, { cause: err });
     }
   }
 

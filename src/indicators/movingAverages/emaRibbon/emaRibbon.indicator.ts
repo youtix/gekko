@@ -1,6 +1,6 @@
 import { checkInputSource, checkInteger } from '@indicators/indicator.utils';
 import { Candle } from '@models/candle.types';
-import { isNumber } from 'lodash-es';
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { Indicator } from '../../indicator';
 import { EMA } from '../ema/ema.indicator';
 
@@ -32,7 +32,8 @@ export class EMARibbon extends Indicator<'EMARibbon'> {
     for (const ema of this.emas) {
       ema.onNewCandle(candle);
       const result = ema.getResult();
-      if (!isNumber(result)) continue;
+      // Not ready, or not a finite number: lodash's isNumber let a NaN EMA through, and the spread with it
+      if (!isFiniteNumber(result)) continue;
       results.push(result);
       highest = Math.max(highest, result);
       lowest = Math.min(lowest, result);

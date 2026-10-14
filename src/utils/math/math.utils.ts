@@ -58,6 +58,13 @@ export const toSignificantDigits = (value: number): number => {
 export const isFiniteNumber = (value: unknown): value is number => Number.isFinite(value);
 
 /**
+ * A finite number above 0: what an order's price, amount and cost must be, and a market's bound or step to be one. NaN, ±Infinity, 0,
+ * a negative number, undefined and a quoted number are not (Number.isFinite does not coerce). The order layer, the simulator, the
+ * Trader and the StrategyManager each kept a copy of their own, which a change to one would not have reached.
+ */
+export const isFinitePositive = (value: unknown): value is number => isFiniteNumber(value) && value > 0;
+
+/**
  * Math.sign(a - b), NaN if either is NaN, but 0 when a and b differ by at most `tolerance` times the larger magnitude. Below a tolerance
  * of 1 (0.5 under 2.3e-308) only 0 equals 0, and an infinite value only itself. Values equal in exact arithmetic come out a few ulps
  * apart, either way, once computed apart (a flat window's price and its running-sum SMA; p and (p + p + p) / 3, for 15 % of prices):

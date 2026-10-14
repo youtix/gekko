@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { supervisionSchema } from './supervision.schema';
+import type { supervisionSchema } from './supervision.schema';
 
 export const SUBSCRIPTION_NAMES = ['cpu_check', 'memory_check', 'candle_check', 'monitor_log'] as const;
 

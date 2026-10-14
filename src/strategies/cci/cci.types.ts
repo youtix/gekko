@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { cciStrategySchema } from './cci.schema';
+import type { cciStrategySchema } from './cci.schema';
 
 export type CCIStrategyParams = z.infer<typeof cciStrategySchema>;
 

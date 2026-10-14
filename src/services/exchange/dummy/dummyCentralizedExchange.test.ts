@@ -233,6 +233,23 @@ describe('DummyCentralizedExchange', () => {
     });
   });
 
+  // What the portfolio holds free and what the order needs of it, with every decimal: written by String, a dust balance read 5e-7, and
+  // a limit SELL's amount was labelled its order cost
+  describe('an order of 1 BTC the free balance cannot pay', () => {
+    it.each`
+      type        | side      | btc     | usdt      | message
+      ${'LIMIT'}  | ${'BUY'}  | ${10}   | ${5e-7}   | ${'Insufficient currency balance (portfolio: 0.0000005, order cost: 100.1)'}
+      ${'LIMIT'}  | ${'SELL'} | ${5e-7} | ${50_000} | ${'Insufficient asset balance (portfolio: 0.0000005, amount: 1)'}
+      ${'MARKET'} | ${'BUY'}  | ${10}   | ${5e-7}   | ${'Insufficient currency balance (portfolio: 0.0000005, order cost: 100.2)'}
+      ${'MARKET'} | ${'SELL'} | ${5e-7} | ${50_000} | ${'Insufficient asset balance (portfolio: 0.0000005, amount: 1)'}
+    `('refuses a $type $side with: $message', async ({ type, side, btc, usdt, message }) => {
+      const exchange = createExchange({ simulationBalance: createSimulationBalance(btc, usdt) });
+      await exchange.processOneMinuteBucket(createBucket(Date.now() - 60_000));
+      const order = type === 'LIMIT' ? exchange.createLimitOrder(SYMBOL, side, 1, 100) : exchange.createMarketOrder(SYMBOL, side, 1);
+      await expect(order).rejects.toThrow(message);
+    });
+  });
+
   // The limits are checked by assertOrderWithinLimits, as CCXTExchange checks them: an order out of them is refused with the same
   // OrderOutOfRangeError, and the same message, in backtest and paper trading as live. The dummy used to throw an InvalidOrder with
   // messages of its own, some of them broken ("Invalid cost: cost", "Must be between 0.1 and undefined"), and did not check the price

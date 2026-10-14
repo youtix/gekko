@@ -4,7 +4,7 @@ import { Order as AbstractOrder } from '@services/core/order/order';
 import { OrderSummary } from '@services/core/order/order.types';
 import { UUID } from 'node:crypto';
 import { z } from 'zod';
-import { traderSchema } from './trader.schema';
+import type { traderSchema } from './trader.schema';
 
 export type Trader = z.infer<typeof traderSchema>;
 

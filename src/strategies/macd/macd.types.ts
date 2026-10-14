@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { macdStrategySchema } from './macd.schema';
+import type { macdStrategySchema } from './macd.schema';
 
 export type MACDStrategyParams = z.infer<typeof macdStrategySchema>;
 

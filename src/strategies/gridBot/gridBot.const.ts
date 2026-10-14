@@ -1,7 +1,7 @@
 /** Default retryOnError: the retries of a failed order before GridBot gives up on it */
 export const DEFAULT_RETRY_LIMIT = 3;
 
-/** Default amount precision when not specified by exchange */
+/** Decimals of the amount step of a market that states none (precision.amount): its amounts are rounded down to 1e-8 */
 export const DEFAULT_AMOUNT_PRECISION = 8;
 
 /**
@@ -9,5 +9,3 @@ export const DEFAULT_AMOUNT_PRECISION = 8;
  * warns of it when the grid starts
  */
 export const DEFAULT_PRICE_PRECISION = 8;
-
-export const EMPTY_BALANCE = { free: 0, used: 0, total: 0 };

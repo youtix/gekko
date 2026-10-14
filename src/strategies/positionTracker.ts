@@ -4,8 +4,8 @@ import { OrderSide, OrderType } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import { getMarketOrderLimits } from '@utils/market/market.utils';
+import { roundToStep } from '@utils/market/precision.utils';
 import { isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
-import { round } from '@utils/math/round.utils';
 import { UUID } from 'node:crypto';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams, Tools } from './strategy.types';
 
@@ -18,12 +18,6 @@ type PendingOrder = { side: OrderSide; amount?: number };
 /** Whether a value above 0 is below a market minimum: one left undefined, 0 or below sets no bound, as for the orders (market.utils) */
 export const isBelowMinimum = (value: number, minimum?: number) => minimum !== undefined && value < minimum;
 
-/** The amount truncated to the step of the market, a power of ten (0.00001 for 5 decimals); any other step, or none, leaves it as it is */
-export const truncateToStep = (amount: number, step?: number) => {
-  const decimals = step !== undefined && step > 0 ? -Math.log10(step) : NaN;
-  return Number.isInteger(decimals) ? round(amount, decimals, 'down') : amount;
-};
-
 /**
  * Whether an all-in SELL of `amount` passes the minimums of the market as the exchange checks them: the amount, truncated to the step
  * of the market as CCXTExchange sends it, against the minimum amount (that of a market order for a MARKET one, which the exchange
@@ -35,7 +29,7 @@ export const truncateToStep = (amount: number, step?: number) => {
  */
 export const isSellable = (amount: number, price: number, type: OrderType, marketData: MarketData = {}) => {
   const limits = type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData;
-  const sent = truncateToStep(amount, limits.precision?.amount);
+  const sent = roundToStep(amount, limits.precision?.amount, 'down');
   if (!(sent > 0) || isBelowMinimum(sent, limits.amount?.min)) return false;
   return !(price > 0) || !isBelowMinimum(multiplyPrecise(sent, price), limits.cost?.min);
 };

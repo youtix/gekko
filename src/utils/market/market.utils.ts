@@ -1,7 +1,7 @@
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { Tag } from '@models/tag.types';
 import { MarketData, MarketValidationResult } from '@services/exchange/exchange.types';
-import { multiplyPrecise } from '@utils/math/math.utils';
+import { isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { isNil, max, min } from 'lodash-es';
 
 /** What an order is checked on: its price, its amount, then its cost, the two multiplied */
@@ -10,15 +10,13 @@ type OrderValue = 'price' | 'amount' | 'cost';
 /** A value refused: which one, its value as checked, and the bounds of the market for it, as toBound reads them */
 type Refusal = { isValid: false; reason: OrderValue; value: number; min?: number; max?: number };
 
-/** NaN, ±Infinity, zero and negative numbers are never a valid order price, amount or cost, whatever the market limits */
-const isFinitePositive = (value?: number): value is number => value !== undefined && Number.isFinite(value) && value > 0;
-
 /**
  * A market limit that is not a finite number above 0 sets no bound. Binance disables a filter bound by setting it to 0, and ccxt
  * copies the PRICE_FILTER maxPrice of 0 into limits.price.max, where it would refuse every price. A minimum of 0 or below bounds
- * nothing anyway, since the value itself must be above 0. The refusals report these normalized bounds.
+ * nothing anyway, since the value itself must be above 0. The refusals report these normalized bounds. So is a precision a step
+ * only as a finite number above 0: a precision of 0 states none.
  */
-const toBound = (limit?: number) => (isFinitePositive(limit) ? limit : undefined);
+export const toBound = (limit?: number) => (isFinitePositive(limit) ? limit : undefined);
 
 /** Checks that a value is a finite number above 0, within the range of the market for it */
 const checkWithinRange = (

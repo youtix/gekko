@@ -1,7 +1,7 @@
 import { OrderSide } from '@models/order.types';
 import { UUID } from 'node:crypto';
 import { z } from 'zod';
-import { gridBotStrategySchema } from './gridBot.schema';
+import type { gridBotStrategySchema } from './gridBot.schema';
 
 /** Strategy configuration parameters: the output of GridBot.schema, retryOnError defaulted */
 export type GridBotStrategyParams = z.infer<typeof gridBotStrategySchema>;

@@ -71,4 +71,14 @@ describe('EMARibbon', () => {
     ribbonLow.onNewCandle(candle);
     expect(ribbonLow.getResult()).toEqual(approximately(expected, 12));
   });
+
+  // A candle without a finite price leaves its EMAs NaN for good: lodash's isNumber took them for results, and the ribbon was complete
+  // with a spread of NaN
+  it('stays null while its EMAs are not finite numbers', () => {
+    const ribbonOfNaN = new EMARibbon({ count: 2, start: 1, step: 1 });
+    const candle = { start: 0, open: NaN, high: NaN, low: NaN, close: NaN, volume: 1 };
+    ribbonOfNaN.onNewCandle(candle);
+    ribbonOfNaN.onNewCandle(candle);
+    expect(ribbonOfNaN.getResult()).toBeNull();
+  });
 });
