@@ -11,12 +11,15 @@ export class RSI extends Indicator<'RSI'> {
   private getPrice: (candle: Candle) => number;
 
   /**
-   * @param period - Period of the smoothed gains and losses: a whole number, at least 1. Default 14
+   * @param period - Period of the smoothed gains and losses: a whole number, at least 2, TA-Lib's minimum, since with 1 the averages
+   * are the last gain and the last loss, and the RSI 100 on a rise and 0 on any other candle, an unchanged close included. Default 14
    * @param src - Price read from each candle: open, high, low, close, hl2, hlc3 or ohlc4. Default close
    */
   constructor({ period = 14, src }: IndicatorRegistry['RSI']['input'] = {}) {
     super();
-    checkInteger('RSI', 'period', period);
+    // Period 1 used to be accepted: an RSI strategy read every unchanged close, the flat candles that fill a gap included, as the most
+    // oversold reading, and bought on a market that did not move
+    checkInteger('RSI', 'period', period, 2, 'the RSI of a single change is 100 on a rise, and 0 on a fall or an unchanged close');
     checkInputSource('RSI', src);
     this.wilderGain = new WilderSmoothing({ period });
     this.wilderLoss = new WilderSmoothing({ period });

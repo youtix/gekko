@@ -165,10 +165,11 @@ describe('RSI Strategy', () => {
     const withThresholds = (thresholds: object) => ({ ...params, thresholds: { ...params.thresholds, ...thresholds } });
 
     it.each`
-      scenario                               | block                  | expected
-      ${'the documentation example'}         | ${params}              | ${params}
-      ${'a persistence of 0, on ohlc4'}      | ${onOhlc4}             | ${onOhlc4}
-      ${'a block without src, on the close'} | ${omit(params, 'src')} | ${params}
+      scenario                               | block                       | expected
+      ${'the documentation example'}         | ${params}                   | ${params}
+      ${'a persistence of 0, on ohlc4'}      | ${onOhlc4}                  | ${onOhlc4}
+      ${'a block without src, on the close'} | ${omit(params, 'src')}      | ${params}
+      ${'a period of 2, the smallest'}       | ${{ ...params, period: 2 }} | ${{ ...params, period: 2 }}
     `('accepts $scenario', ({ block, expected }) => {
       expect(RSI.schema.parse(block)).toEqual(expected);
     });
@@ -185,6 +186,7 @@ describe('RSI Strategy', () => {
       ${'a quoted period'}                             | ${{ ...params, period: '14' }}              | ${['period']}
       ${'a fractional period'}                         | ${{ ...params, period: 14.5 }}              | ${['period']}
       ${'a period of 0'}                               | ${{ ...params, period: 0 }}                 | ${['period']}
+      ${'a period of 1'}                               | ${{ ...params, period: 1 }}                 | ${['period']}
       ${'an unknown source'}                           | ${{ ...params, src: 'hcl3' }}               | ${['src']}
       ${'a misspelt src (scr), not left to the close'} | ${{ ...omit(params, 'src'), scr: 'ohlc4' }} | ${[]}
       ${'a missing thresholds block'}                  | ${omit(params, 'thresholds')}               | ${['thresholds']}
@@ -193,6 +195,13 @@ describe('RSI Strategy', () => {
       ${'a negative persistence'}                      | ${withThresholds({ persistence: -1 })}      | ${['thresholds', 'persistence']}
     `('refuses $scenario', ({ block, path }) => {
       expect(RSI.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
+    });
+
+    // A period of 1 read every unchanged close as oversold, the flat candles that fill a gap included, and the strategy bought on them
+    it('says why it refuses a period of 1', () => {
+      expect(RSI.schema.safeParse({ ...params, period: 1 }).error?.issues[0].message).toBe(
+        'period must be at least 2 (the RSI of a single change is 100 on a rise, and 0 on a fall or an unchanged close)',
+      );
     });
   });
 });

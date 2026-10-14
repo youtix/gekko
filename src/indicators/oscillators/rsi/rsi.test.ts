@@ -53,7 +53,7 @@ describe('RSI', () => {
   // Every close of the table above moves, so the guard for a market that never did could be dropped without a test failing. On an
   // illiquid market, with period 2, the made-up candles it starts with neither gain nor lose: the RSI is 0, as in TA-Lib, rather than
   // the 0 / 0 of its formula. Later, the made-up candles and the close that does not move halve both averages, so the RSI holds at
-  // 1900 / 27 over them
+  // 1900 / 27 over them. Period 1, now refused, gave 100 on the rise to 13 and 0 on each of them, the most oversold reading
   it('should return 0 on the flat start of an illiquid market, and hold over its made-up candles', () => {
     const results = resultsOf(new RSI({ period: 2 }), illiquidCandles);
     expect(results).toEqual(

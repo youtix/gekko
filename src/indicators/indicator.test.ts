@@ -44,6 +44,9 @@ const MA_TYPES = '"sma", "ema", "dema", "wma"';
 // Why DX, ADX and the ADX ribbon refuse period 1
 const SINGLE_CANDLE_DX = 'the DX of a single candle is 100, or 0/0 when it has no directional movement';
 const SINGLE_CANDLE_ADX = 'the ADX of a single candle is 100, or 0/0 when it has no directional movement';
+// Why RSI and Stochastic RSI refuse period 1, which they used to take: the RSI of each unchanged close was 0, the most oversold reading
+const SINGLE_CHANGE_RSI = 'the RSI of a single change is 100 on a rise, and 0 on a fall or an unchanged close';
+const SINGLE_CHANGE_STOCHASTIC_RSI = 'the RSI of a single change is only ever 0 or 100, and so is fastK';
 
 describe('Indicator', () => {
   it.each`
@@ -74,6 +77,7 @@ describe('Indicator', () => {
     ${'StochasticRSI'}   | ${{}}                                                                      | ${21}
     ${'StochasticRSI'}   | ${{ slowMaType: 'dema' }}                                                  | ${23}
     ${'StochasticRSI'}   | ${{ fastKPeriod: 2, fastDPeriod: 5, slowMaType: 'dema' }}                  | ${24}
+    ${'StochasticRSI'}   | ${{ period: 2, fastKPeriod: 2, fastDPeriod: 1 }}                           | ${4}
     ${'TRIX'}            | ${{}}                                                                      | ${89}
     ${'WilliamsR'}       | ${{}}                                                                      | ${14}
     ${'DEMA'}            | ${{ period: 10 }}                                                          | ${19}
@@ -87,6 +91,7 @@ describe('Indicator', () => {
     ${'AO'}              | ${{}}                                                                      | ${34}
     ${'CCI'}             | ${{}}                                                                      | ${14}
     ${'RSI'}             | ${{}}                                                                      | ${15}
+    ${'RSI'}             | ${{ period: 2 }}                                                           | ${3}
     ${'ATR'}             | ${{ period: 14 }}                                                          | ${15}
     ${'ATRCD'}           | ${{}}                                                                      | ${35}
     ${'BollingerBands'}  | ${{}}                                                                      | ${5}
@@ -265,7 +270,8 @@ describe('Indicator parameters', () => {
     ${'Stochastic'}    | ${{ slowKMaType: 'smma' }}   | ${`slowKMaType must be one of ${MA_TYPES}, got "smma"`}
     ${'Stochastic'}    | ${{ slowDPeriod: 2.5 }}      | ${'slowDPeriod must be a whole number, at least 1, got 2.5'}
     ${'Stochastic'}    | ${{ slowDMaType: null }}     | ${`slowDMaType must be one of ${MA_TYPES}, got null`}
-    ${'StochasticRSI'} | ${{ period: 0 }}             | ${'period must be a whole number, at least 1, got 0'}
+    ${'StochasticRSI'} | ${{ period: 0 }}             | ${`period must be a whole number, at least 2, got 0 (${SINGLE_CHANGE_STOCHASTIC_RSI})`}
+    ${'StochasticRSI'} | ${{ period: 1 }}             | ${`period must be a whole number, at least 2, got 1 (${SINGLE_CHANGE_STOCHASTIC_RSI})`}
     ${'StochasticRSI'} | ${{ fastKPeriod: 1 }}        | ${'fastKPeriod must be a whole number, at least 2, got 1 (the range of a single RSI value is 0, so fastK would always be 0)'}
     ${'StochasticRSI'} | ${{ fastDPeriod: 1.5 }}      | ${'fastDPeriod must be a whole number, at least 1, got 1.5'}
     ${'StochasticRSI'} | ${{ slowMaType: 'SMA' }}     | ${`slowMaType must be one of ${MA_TYPES}, got "SMA"`}
@@ -298,7 +304,8 @@ describe('Indicator parameters', () => {
     ${'AO'}  | ${{ long: 34.5 }}         | ${'long must be a whole number, at least 1, got 34.5'}
     ${'CCI'} | ${{ period: 1 }}          | ${'period must be a whole number, at least 2, got 1 (the CCI of a single candle is always 0)'}
     ${'CCI'} | ${{ period: 0 }}          | ${'period must be a whole number, at least 2, got 0 (the CCI of a single candle is always 0)'}
-    ${'RSI'} | ${{ period: 0 }}          | ${'period must be a whole number, at least 1, got 0'}
+    ${'RSI'} | ${{ period: 0 }}          | ${`period must be a whole number, at least 2, got 0 (${SINGLE_CHANGE_RSI})`}
+    ${'RSI'} | ${{ period: 1 }}          | ${`period must be a whole number, at least 2, got 1 (${SINGLE_CHANGE_RSI})`}
     ${'RSI'} | ${{ src: 'hlc' }}         | ${`src must be one of ${SOURCES}, got "hlc"`}
   `('should refuse $parameters for the oscillator $name', expectRefusal);
 
@@ -338,7 +345,7 @@ describe('Indicator parameters', () => {
     ${'PSAR'}            | ${{ acceleration: 0.001, maxAcceleration: 0.001 }}
     ${'ROC'}             | ${{ period: 1 }}
     ${'Stochastic'}      | ${{ fastKPeriod: 1, slowKPeriod: 1, slowDPeriod: 1 }}
-    ${'StochasticRSI'}   | ${{ period: 1, fastKPeriod: 2, fastDPeriod: 1 }}
+    ${'StochasticRSI'}   | ${{ period: 2, fastKPeriod: 2, fastDPeriod: 1 }}
     ${'TRIX'}            | ${{ period: 1 }}
     ${'WilliamsR'}       | ${{ period: 1 }}
     ${'ADX'}             | ${{ period: 2 }}
@@ -350,7 +357,7 @@ describe('Indicator parameters', () => {
     ${'PlusDM'}          | ${{ period: 1 }}
     ${'AO'}              | ${{ short: 1, long: 2 }}
     ${'CCI'}             | ${{ period: 2 }}
-    ${'RSI'}             | ${{ period: 1 }}
+    ${'RSI'}             | ${{ period: 2 }}
     ${'ATR'}             | ${{ period: 1 }}
     ${'ATRCD'}           | ${{ short: 1, long: 2, signal: 1 }}
     ${'BollingerBands'}  | ${{ period: 2, stdevUp: 0, stdevDown: 0 }}
