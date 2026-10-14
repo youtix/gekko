@@ -40,6 +40,8 @@ const createPluginStub = (overrides?: Partial<Record<keyof Plugin, unknown>>) =>
     processInitStream: vi.fn(async () => undefined),
     processInputStream: vi.fn(async () => undefined),
     processCloseStream: vi.fn(async () => undefined),
+    // Something queued, as far as the stream asks: what broadcastDeferredEmit resolves to tells what it delivered
+    hasDeferredEvents: vi.fn(() => true),
     broadcastDeferredEmit: vi.fn(async () => false),
     countUndeliveredPayloads: vi.fn(() => new Map()),
     ...overrides,
@@ -206,6 +208,15 @@ describe('PluginsStream', () => {
         await runPipeline([BUCKET], [trader]);
 
         expect(delivered).toEqual(['orderErrored', 'orderCompleted', 'orderErrored']);
+      });
+
+      // Awaited for every plugin on every bucket, though most have nothing queued
+      it('does not broadcast for a plugin with nothing queued', async () => {
+        const plugin = createPluginStub({ hasDeferredEvents: vi.fn(() => false) });
+
+        await runPipeline([BUCKET], [plugin]);
+
+        expect(plugin.broadcastDeferredEmit).not.toHaveBeenCalled();
       });
 
       // The ranking allocated its arrays on every bucket, though a run that goes on has no failure to rank

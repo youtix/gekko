@@ -92,6 +92,14 @@ export class SequentialEventEmitter {
   }
 
   /**
+   * Whether a group of deferred events is queued, which a broadcast would deliver. Synchronous: the stream skips the broadcast of a
+   * plugin with nothing queued, an awaited call per plugin and bucket otherwise, most of them with nothing to deliver.
+   */
+  public hasDeferredEvents(): boolean {
+    return this.deferredGroups.length > 0;
+  }
+
+  /**
    * How many deferred payloads are still queued, per event name, in the order the names were first queued: what never arrives if no
    * broadcast follows. Only the events listened to are counted, nothing is lost with the others. It leaves the queue as it is.
    */

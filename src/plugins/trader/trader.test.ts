@@ -2549,6 +2549,27 @@ describe('Trader', () => {
     });
   });
 
+  // The stream broadcasts only while a plugin has something to deliver: in backtest, a report in flight queues the end of its order
+  // before the broadcast that waits for it delivers it (see broadcastDeferredEmit)
+  describe('hasDeferredEvents', () => {
+    it.each`
+      mode          | reports | expected
+      ${'backtest'} | ${1}    | ${true}
+      ${'backtest'} | ${0}    | ${false}
+      ${'realtime'} | ${1}    | ${false}
+    `('is $expected in $mode with $reports report(s) in flight and nothing queued', ({ mode, reports, expected }) => {
+      (trader as any).mode = mode;
+      for (let index = 0; index < reports; index++) trader['trackReport'](new Promise(noop));
+      expect(trader.hasDeferredEvents()).toBe(expected);
+    });
+
+    it('is true with an event queued', () => {
+      delete (trader as any).addDeferredEmit;
+      trader.addDeferredEmit(PORTFOLIO_CHANGE_EVENT, new Map());
+      expect(trader.hasDeferredEvents()).toBe(true);
+    });
+  });
+
   describe('checkOrderSummary', () => {
     it('returns completion summary with computed pricing', () => {
       const summary: OrderSummary = {

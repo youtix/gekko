@@ -824,6 +824,14 @@ export class Trader extends Plugin {
     return super.broadcastDeferredEmit();
   }
 
+  /**
+   * Whether a broadcast has something to deliver: in backtest, a report in flight too, which queues the end of its order before the
+   * broadcast delivers it (see broadcastDeferredEmit)
+   */
+  public hasDeferredEvents(): boolean {
+    return (this.mode === 'backtest' && this.pendingReports.size > 0) || super.hasDeferredEvents();
+  }
+
   protected async processFinalize() {
     if (this.syncInterval) clearInterval(this.syncInterval);
     // Nothing is flushed any more, but in backtest the reports in flight end before the run does, their logs complete

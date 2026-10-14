@@ -500,4 +500,29 @@ describe('SequentialEventEmitter', () => {
       expect(deliveries).toEqual([['a', ['a1']]]);
     });
   });
+
+  // The stream asks it before each broadcast, so that a plugin with nothing queued is not awaited. A payload nobody listens to is
+  // queued too: its broadcast takes it out of the queue.
+  describe('hasDeferredEvents', () => {
+    it.each`
+      state                            | queued                 | expected
+      ${'nothing queued'}              | ${[]}                  | ${false}
+      ${'a payload queued'}            | ${[['a', 'a1']]}       | ${true}
+      ${'a payload nobody listens to'} | ${[['unheard', 'u1']]} | ${true}
+    `('should be $expected with $state', ({ queued, expected }: { queued: [string, string][]; expected: boolean }) => {
+      const { emitter } = createRecordingEmitter(['a']);
+      for (const [event, payload] of queued) emitter.addDeferredEmit(event, payload);
+
+      expect(emitter.hasDeferredEvents()).toBe(expected);
+    });
+
+    it('should be false once the queue is broadcast', async () => {
+      const { emitter } = createRecordingEmitter(['a']);
+      emitter.addDeferredEmit('a', 'a1');
+
+      await broadcastAll(emitter);
+
+      expect(emitter.hasDeferredEvents()).toBe(false);
+    });
+  });
 });

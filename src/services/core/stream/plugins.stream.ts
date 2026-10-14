@@ -131,9 +131,10 @@ export class PluginsStream extends Writable {
 
     // Broadcast the deferred events plugin by plugin, in config order. Each call delivers the oldest group of the plugin's queue,
     // the payloads queued in a row under one event name, so that the events arrive in the order they were queued. It resolves to
-    // false once the queue is empty.
+    // false once the queue is empty. Not called while a plugin has nothing queued (see hasDeferredEvents): an awaited call per plugin
+    // and bucket, most of them with nothing to deliver.
     for (const plugin of this.plugins) {
-      while (await plugin.broadcastDeferredEmit());
+      while (plugin.hasDeferredEvents() && (await plugin.broadcastDeferredEmit()));
     }
   }
 
