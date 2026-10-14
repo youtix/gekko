@@ -2,12 +2,7 @@ import { bench, describe } from 'vitest';
 import { AsyncMutex } from './asyncMutex';
 
 describe('AsyncMutex Performance', () => {
-  bench('acquire and release (uncontended)', async () => {
-    const mutex = new AsyncMutex();
-    const release = await mutex.acquire();
-    release();
-  });
-
+  // What the simulator does for every bucket and every exchange call: a synchronous section, the lock nearly always free
   bench('runExclusive with sync fn (uncontended)', async () => {
     const mutex = new AsyncMutex();
     await mutex.runExclusive(() => 42);
@@ -18,12 +13,9 @@ describe('AsyncMutex Performance', () => {
     await mutex.runExclusive(async () => 42);
   });
 
-  bench('sequential acquire/release (10 operations)', async () => {
+  bench('sequential runExclusive (10 operations)', async () => {
     const mutex = new AsyncMutex();
-    for (let i = 0; i < 10; i++) {
-      const release = await mutex.acquire();
-      release();
-    }
+    for (let i = 0; i < 10; i++) await mutex.runExclusive(() => 42);
   });
 
   bench('concurrent runExclusive (10 contenders)', async () => {

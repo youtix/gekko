@@ -1,223 +1,210 @@
+import { noop } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { AsyncMutex } from './asyncMutex';
 
+/** A promise the test resolves itself: a function returning it holds the lock until then */
+const deferred = () => {
+  let resolve: () => void = () => undefined;
+  const promise = new Promise<void>(res => (resolve = res));
+  return { promise, resolve };
+};
+
+/**
+ * Lets the microtask queue turn `turns` times, many more than a hand-over of the lock takes: a function the mutex let run by then has
+ * started. Timers are not needed, nor wanted: the order of the microtasks is deterministic, a timer only waits longer.
+ */
+const yieldMicrotasks = async (turns = 10) => {
+  for (let turn = 0; turn < turns; turn++) await Promise.resolve();
+};
+
+/**
+ * Takes the free lock as runExclusive does, for a holder whose end the test decides: it returns the holder's release, which runExclusive
+ * calls once its function is done
+ */
+const holdLock = (mutex: AsyncMutex) => mutex['grant']();
+
+const throwSync = () => {
+  throw new Error('sync-error');
+};
+
+const throwAsync = async () => {
+  await Promise.resolve();
+  throw new Error('async-error');
+};
+
 describe('AsyncMutex', () => {
-  describe('acquire', () => {
-    it('should return a release function when lock is available', async () => {
-      const mutex = new AsyncMutex();
-
-      const release = await mutex.acquire();
-
-      expect(typeof release).toBe('function');
-    });
-
-    it('should acquire lock immediately when not locked', async () => {
-      const mutex = new AsyncMutex();
-      const events: string[] = [];
-
-      events.push('before-acquire');
-      await mutex.acquire();
-      events.push('after-acquire');
-
-      expect(events).toEqual(['before-acquire', 'after-acquire']);
-    });
-
-    it('should queue callers when lock is already held', async () => {
-      const mutex = new AsyncMutex();
-      const events: string[] = [];
-
-      const release1 = await mutex.acquire();
-      events.push('acquired-1');
-
-      // Start a second acquire that should wait
-      const acquire2Promise = mutex.acquire().then(release => {
-        events.push('acquired-2');
-        return release;
-      });
-
-      // Give the event loop a chance to process
-      await Promise.resolve();
-      expect(events).toEqual(['acquired-1']);
-
-      // Release first lock
-      release1();
-      await acquire2Promise;
-
-      expect(events).toEqual(['acquired-1', 'acquired-2']);
-    });
-
-    it('should process waiting callers in FIFO order', async () => {
-      const mutex = new AsyncMutex();
-      const events: string[] = [];
-
-      const release1 = await mutex.acquire();
-      events.push('acquired-1');
-
-      // Queue multiple waiters
-      const acquire2Promise = mutex.acquire().then(release => {
-        events.push('acquired-2');
-        return release;
-      });
-      const acquire3Promise = mutex.acquire().then(release => {
-        events.push('acquired-3');
-        return release;
-      });
-
-      // Release first, should go to second
-      release1();
-      const release2 = await acquire2Promise;
-
-      expect(events).toEqual(['acquired-1', 'acquired-2']);
-
-      // Release second, should go to third
-      release2();
-      await acquire3Promise;
-
-      expect(events).toEqual(['acquired-1', 'acquired-2', 'acquired-3']);
-    });
-
-    it('should allow re-acquiring lock after release when no waiters', async () => {
-      const mutex = new AsyncMutex();
-      const events: string[] = [];
-
-      const release1 = await mutex.acquire();
-      events.push('acquired-1');
-      release1();
-
-      const release2 = await mutex.acquire();
-      events.push('acquired-2');
-      release2();
-
-      expect(events).toEqual(['acquired-1', 'acquired-2']);
-    });
-  });
-
   describe('runExclusive', () => {
-    it('should return the value from the provided function', async () => {
-      const mutex = new AsyncMutex();
-
-      const result = await mutex.runExclusive(() => 42);
-
-      expect(result).toBe(42);
+    it.each`
+      kind       | fn                            | expected
+      ${'sync'}  | ${() => 42}                   | ${42}
+      ${'async'} | ${async () => 'async-result'} | ${'async-result'}
+    `('should resolve to $expected, what the $kind function returns', async ({ fn, expected }) => {
+      await expect(new AsyncMutex().runExclusive(fn)).resolves.toBe(expected);
     });
 
-    it('should return the value from an async function', async () => {
-      const mutex = new AsyncMutex();
-
-      const result = await mutex.runExclusive(async () => {
-        await Promise.resolve();
-        return 'async-result';
-      });
-
-      expect(result).toBe('async-result');
+    it.each`
+      kind       | fn            | message
+      ${'sync'}  | ${throwSync}  | ${'sync-error'}
+      ${'async'} | ${throwAsync} | ${'async-error'}
+    `('should reject with $message, the error the $kind function throws', async ({ fn, message }) => {
+      await expect(new AsyncMutex().runExclusive(fn)).rejects.toThrow(message);
     });
 
-    it('should release the lock after sync function completes', async () => {
+    it('should start the function before returning when the lock is free: fn, then the caller', async () => {
       const mutex = new AsyncMutex();
       const events: string[] = [];
 
-      await mutex.runExclusive(() => {
-        events.push('first');
+      const done = mutex.runExclusive(() => {
+        events.push('fn');
       });
+      events.push('caller');
+      await done;
 
-      await mutex.runExclusive(() => {
-        events.push('second');
-      });
-
-      expect(events).toEqual(['first', 'second']);
+      expect(events).toEqual(['fn', 'caller']);
     });
 
-    it('should release the lock after async function completes', async () => {
+    it('should keep a caller waiting while the lock is held: nothing started after 10 turns of the microtask queue', async () => {
       const mutex = new AsyncMutex();
+      const holder = deferred();
+      const started: string[] = [];
+      void mutex.runExclusive(() => holder.promise);
+
+      void mutex.runExclusive(() => {
+        started.push('waiter');
+      });
+      await yieldMicrotasks();
+
+      expect(started).toEqual([]);
+    });
+
+    it('should run the functions waiting for the lock one after the other, in the order they called: A, B, then C', async () => {
+      const mutex = new AsyncMutex();
+      const holder = deferred();
       const events: string[] = [];
-
-      await mutex.runExclusive(async () => {
-        await Promise.resolve();
-        events.push('first');
-      });
-
-      await mutex.runExclusive(async () => {
-        await Promise.resolve();
-        events.push('second');
-      });
-
-      expect(events).toEqual(['first', 'second']);
-    });
-
-    it('should release the lock when function throws synchronously', async () => {
-      const mutex = new AsyncMutex();
-      const testError = new Error('sync-error');
-
-      await expect(
-        mutex.runExclusive(() => {
-          throw testError;
-        }),
-      ).rejects.toThrow(testError);
-
-      // Lock should be released, so next acquire should work immediately
-      const acquired = await Promise.race([
-        mutex.acquire().then(() => 'acquired'),
-        new Promise(resolve => setTimeout(() => resolve('timeout'), 10)),
-      ]);
-
-      expect(acquired).toBe('acquired');
-    });
-
-    it('should release the lock when async function rejects', async () => {
-      const mutex = new AsyncMutex();
-      const testError = new Error('async-error');
-
-      await expect(
+      // The first to call runs the longest, so that functions running at once would end in the reverse order
+      const task = (name: string, turns: number) =>
         mutex.runExclusive(async () => {
-          await Promise.resolve();
-          throw testError;
-        }),
-      ).rejects.toThrow(testError);
-
-      // Lock should be released, so next acquire should work immediately
-      const acquired = await Promise.race([
-        mutex.acquire().then(() => 'acquired'),
-        new Promise(resolve => setTimeout(() => resolve('timeout'), 10)),
-      ]);
-
-      expect(acquired).toBe('acquired');
-    });
-
-    it('should serialize concurrent runExclusive calls', async () => {
-      const mutex = new AsyncMutex();
-      const events: string[] = [];
-
-      const task = (id: string, delay: number) =>
-        mutex.runExclusive(async () => {
-          events.push(`start-${id}`);
-          await new Promise(resolve => setTimeout(resolve, delay));
-          events.push(`end-${id}`);
-          return id;
+          events.push(`start-${name}`);
+          await yieldMicrotasks(turns);
+          events.push(`end-${name}`);
         });
+      const held = mutex.runExclusive(() => holder.promise);
+      const tasks = [task('A', 3), task('B', 2), task('C', 1)];
 
-      // Start all tasks concurrently
-      const results = await Promise.all([task('A', 20), task('B', 10), task('C', 5)]);
+      holder.resolve();
+      await Promise.all([held, ...tasks]);
 
-      // Tasks should complete in order A, B, C despite different delays
       expect(events).toEqual(['start-A', 'end-A', 'start-B', 'end-B', 'start-C', 'end-C']);
-      expect(results).toEqual(['A', 'B', 'C']);
     });
 
-    it('should prevent race conditions on shared state', async () => {
+    it('should count 3 after three concurrent increments that read the counter, await, then write it', async () => {
       const mutex = new AsyncMutex();
       let counter = 0;
-
       const increment = () =>
         mutex.runExclusive(async () => {
           const current = counter;
-          await Promise.resolve(); // Simulate async operation
+          await Promise.resolve();
           counter = current + 1;
         });
 
-      // Without mutex, these would race and result in counter = 1
       await Promise.all([increment(), increment(), increment()]);
 
       expect(counter).toBe(3);
+    });
+
+    it('should hand the lock to the waiter before a caller arriving once it is released: the waiter, then the late caller', async () => {
+      const mutex = new AsyncMutex();
+      const order: string[] = [];
+      const release = holdLock(mutex);
+      const waiter = mutex.runExclusive(() => {
+        order.push('waiter');
+      });
+
+      release();
+      const late = mutex.runExclusive(() => {
+        order.push('late');
+      });
+      await Promise.all([waiter, late]);
+
+      expect(order).toEqual(['waiter', 'late']);
+    });
+
+    // What the simulator relies on: the exchange calls an onSettled callback starts wait for the bucket being processed
+    it('should make a runExclusive called by the function holding the lock wait for it to end: end, then nested', async () => {
+      const mutex = new AsyncMutex();
+      const events: string[] = [];
+      let nested: Promise<void> | undefined;
+
+      await mutex.runExclusive(() => {
+        nested = mutex.runExclusive(() => {
+          events.push('nested');
+        });
+        events.push('end');
+      });
+      await nested;
+
+      expect(events).toEqual(['end', 'nested']);
+    });
+
+    it.each`
+      outcome       | fn
+      ${'returned'} | ${() => 42}
+      ${'resolved'} | ${async () => 42}
+      ${'thrown'}   | ${throwSync}
+      ${'rejected'} | ${throwAsync}
+    `('should free the lock once the function has $outcome: the next function starts at once', async ({ fn }) => {
+      const mutex = new AsyncMutex();
+      await mutex.runExclusive(fn).catch(noop);
+      let started = false;
+
+      void mutex.runExclusive(() => {
+        started = true;
+      });
+
+      expect(started).toBe(true);
+    });
+  });
+
+  describe('a release', () => {
+    it('should hand the lock to one waiter only when called twice: A started, B still waiting', async () => {
+      const mutex = new AsyncMutex();
+      const holderA = deferred();
+      const started: string[] = [];
+      const release = holdLock(mutex);
+      void mutex.runExclusive(() => {
+        started.push('A');
+        return holderA.promise;
+      });
+      void mutex.runExclusive(() => {
+        started.push('B');
+      });
+
+      release();
+      release();
+      await yieldMicrotasks();
+
+      expect(started).toEqual(['A']);
+    });
+
+    it('should leave the lock to its next holder when called again: A started, C still waiting', async () => {
+      const mutex = new AsyncMutex();
+      const holderA = deferred();
+      const started: string[] = [];
+      const release = holdLock(mutex);
+      void mutex.runExclusive(() => {
+        started.push('A');
+        return holderA.promise;
+      });
+      release();
+      await yieldMicrotasks();
+
+      release();
+      void mutex.runExclusive(() => {
+        started.push('C');
+      });
+      await yieldMicrotasks();
+
+      expect(started).toEqual(['A']);
     });
   });
 });
