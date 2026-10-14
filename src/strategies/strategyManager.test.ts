@@ -708,6 +708,19 @@ describe('StrategyManager', () => {
         expect(strategy.end).toHaveBeenCalledExactlyOnceWith(interruption);
       });
 
+      // Counted as English writes them: "trailing stop(s)" whatever the count. The stops left at the end, as the manager of the stops
+      // holds them: two of each status
+      it.each`
+        status       | message
+        ${'active'}  | ${'Strategy ended with 2 active trailing stops that never triggered.'}
+        ${'selling'} | ${'Strategy ended with 2 triggered trailing stops whose SELL had not ended.'}
+      `('warns, for two $status stops left at the end: $message', ({ status, message }) => {
+        const stops = new Map(['stop-1', 'stop-2'].map(id => [id, { status }]));
+        vi.spyOn(manager['trailingStopManager'], 'getOrders').mockReturnValue(stops as any);
+        manager.onStrategyEnd();
+        expect(warning).toHaveBeenCalledExactlyOnceWith('strategy', message);
+      });
+
       // An all-in BUY with a stop of 2% without trigger, which filled 0.5: its stop is armed, active at once
       describe('when the strategy ends with a stop armed', () => {
         const BUY_ID: UUID = '0b0b0b0b-0000-4000-8000-0000000000b2';
@@ -734,10 +747,7 @@ describe('StrategyManager', () => {
         });
 
         it('warns that the stop never triggered', () => {
-          expect(warning).toHaveBeenCalledExactlyOnceWith(
-            'strategy',
-            'Strategy ended with 1 active trailing stop(s) that never triggered.',
-          );
+          expect(warning).toHaveBeenCalledExactlyOnceWith('strategy', 'Strategy ended with 1 active trailing stop that never triggered.');
         });
 
         // The strategy is over: a stop no longer reaches it, nor sends a SELL for it
@@ -755,9 +765,10 @@ describe('StrategyManager', () => {
       // normally, without a trade and without a word about the warmup.
       describe.each`
         warmupPeriod | candleCount | counts
-        ${3}         | ${0}        | ${'0 timeframe candle(s) processed, 4 needed (warmup.candleCount: 3, then one to trade on)'}
-        ${3}         | ${3}        | ${'3 timeframe candle(s) processed, 4 needed (warmup.candleCount: 3, then one to trade on)'}
-        ${0}         | ${0}        | ${'0 timeframe candle(s) processed, 1 needed (warmup.candleCount: 0, then one to trade on)'}
+        ${3}         | ${0}        | ${'0 timeframe candles processed, 4 needed (warmup.candleCount: 3, then one to trade on)'}
+        ${3}         | ${1}        | ${'1 timeframe candle processed, 4 needed (warmup.candleCount: 3, then one to trade on)'}
+        ${3}         | ${3}        | ${'3 timeframe candles processed, 4 needed (warmup.candleCount: 3, then one to trade on)'}
+        ${0}         | ${0}        | ${'0 timeframe candles processed, 1 needed (warmup.candleCount: 0, then one to trade on)'}
       `(
         'when the run ends after $candleCount timeframe candles, with a warmup of $warmupPeriod',
         ({ warmupPeriod, candleCount, counts }) => {
@@ -1545,7 +1556,7 @@ describe('StrategyManager', () => {
 
         it('says, if the strategy ends then, that the SELL of the stop had not ended', () => {
           manager.onStrategyEnd();
-          expect(warning).toHaveBeenCalledWith('strategy', 'Strategy ended with 1 triggered trailing stop(s) whose SELL had not ended.');
+          expect(warning).toHaveBeenCalledWith('strategy', 'Strategy ended with 1 triggered trailing stop whose SELL had not ended.');
         });
 
         it('does not count it, if the strategy ends then, among the stops that never triggered', () => {

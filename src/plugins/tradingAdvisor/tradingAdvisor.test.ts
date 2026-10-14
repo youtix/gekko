@@ -845,7 +845,7 @@ describe('TradingAdvisor', () => {
     // With a warmup of one 3m candle, the second one completes it: a run that ended before used to say nothing about it
     it.each`
       bucketCount | errors
-      ${3}        | ${[['strategy', 'Strategy ended before its warmup was over, so it never traded: 1 timeframe candle(s) processed, 2 needed (warmup.candleCount: 1, then one to trade on)']]}
+      ${3}        | ${[['strategy', 'Strategy ended before its warmup was over, so it never traded: 1 timeframe candle processed, 2 needed (warmup.candleCount: 1, then one to trade on)']]}
       ${6}        | ${[]}
     `('logs $errors.length error(s) when the run ends after $bucketCount one-minute buckets', async ({ bucketCount, errors }) => {
       const advisor = await startAdvisor({ warmupCandleCount: 1 });

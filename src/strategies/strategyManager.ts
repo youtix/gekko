@@ -36,6 +36,7 @@ import { toISOString } from '@utils/date/date.utils';
 import { copyPayload } from '@utils/event/event.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
 import { clonePortfolio } from '@utils/portfolio/portfolio.utils';
+import { pluralize } from '@utils/string/string.utils';
 import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
 import { randomUUID, UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
@@ -364,13 +365,18 @@ export class StrategyManager extends EventEmitter {
     if (!this.isWarmupCompleted)
       error(
         'strategy',
-        `Strategy ended before its warmup was over, so it never traded: ${this.age} timeframe candle(s) processed, ${this.warmupPeriod + 1} needed (warmup.candleCount: ${this.warmupPeriod}, then one to trade on)`,
+        `Strategy ended before its warmup was over, so it never traded: ${this.age} timeframe ${pluralize('candle', this.age)} processed, ${this.warmupPeriod + 1} needed (warmup.candleCount: ${this.warmupPeriod}, then one to trade on)`,
       );
     const stops = [...this.trailingStopManager.getOrders().values()];
     const sellingCount = stops.filter(({ status }) => status === 'selling').length;
     const armedCount = stops.length - sellingCount;
-    if (armedCount > 0) warning('strategy', `Strategy ended with ${armedCount} active trailing stop(s) that never triggered.`);
-    if (sellingCount > 0) warning('strategy', `Strategy ended with ${sellingCount} triggered trailing stop(s) whose SELL had not ended.`);
+    if (armedCount > 0)
+      warning('strategy', `Strategy ended with ${armedCount} active trailing ${pluralize('stop', armedCount)} that never triggered.`);
+    if (sellingCount > 0)
+      warning(
+        'strategy',
+        `Strategy ended with ${sellingCount} triggered trailing ${pluralize('stop', sellingCount)} whose SELL had not ended.`,
+      );
     this.trailingStopManager.removeAllListeners();
     // The message, not the error, which every plugin is finalised with: what a hook receives is the strategy's own (see Strategy)
     this.strategy?.end?.(failure?.message);
