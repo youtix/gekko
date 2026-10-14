@@ -1,7 +1,8 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
+import { bench } from '@utils/bench/bench.mock';
 import { addPrecise } from '@utils/math/math.utils';
-import { bench, describe } from 'vitest';
+import { describe } from 'vitest';
 import { FastCandleBatcher } from './fastCandleBatcher';
 
 // One day of 1-minute candles with exchange-like volumes (up to 8 decimals)

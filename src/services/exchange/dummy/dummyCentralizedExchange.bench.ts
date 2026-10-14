@@ -1,5 +1,6 @@
 import { Candle } from '@models/candle.types';
-import { bench, describe, vi } from 'vitest';
+import { bench } from '@utils/bench/bench.mock';
+import { describe, vi } from 'vitest';
 import { DummyCentralizedExchange } from './dummyCentralizedExchange';
 import { DEFAULT_TICKER } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig } from './dummyCentralizedExchange.types';

@@ -1,4 +1,5 @@
-import { bench, describe } from 'vitest';
+import { bench } from '@utils/bench/bench.mock';
+import { describe } from 'vitest';
 import { addPrecise, stdev, toSignificantDigits } from './math.utils';
 
 // Sample data for benchmarks

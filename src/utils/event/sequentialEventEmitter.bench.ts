@@ -1,6 +1,7 @@
 import { Candle } from '@models/candle.types';
 import { CandleBucket, EquitySnapshot } from '@models/event.types';
-import { bench, describe } from 'vitest';
+import { bench } from '@utils/bench/bench.mock';
+import { describe } from 'vitest';
 import { SequentialEventEmitter } from './sequentialEventEmitter';
 
 const MINUTE_START = Date.UTC(2024, 0, 1);
