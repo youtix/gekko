@@ -1,15 +1,21 @@
+import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
+import { toISOString } from '@utils/date/date.utils';
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { Readable } from 'node:stream';
 
 type TradingPairCandle = { symbol: TradingPair; candle: Candle };
 
 /**
- * Synchronizes multiple streams of CandleEvents by timestamp.
- * It waits for data from all active streams and emits CandleBuckets in strict chronological order.
- * For a given timestamp T, it aggregates all events at T into a single CandleBucket,
- * before moving to T+1.
+ * Synchronizes the candle streams of several pairs by timestamp. It waits until every stream still going has a candle, then emits
+ * the earliest minute as a CandleBucket holding the candle of each stream at that minute, in the order of the streams: the callers
+ * pass them in the order of `watch.assets`, and a strategy trades the first pair of the bucket.
+ *
+ * A stream that ends lets the others go on. A stream that fails fails the output with its error, and one that closes without ending
+ * (destroyed without an error) or delivers a candle whose start is not a finite number fails it with a GekkoError, rather than leave
+ * its pair out of every later bucket, or the buckets waiting for it, without a word. Destroying the output destroys every stream.
  */
 export const synchronizeStreams = (streams: Readable[]): Readable => {
   if (streams.length === 0) return Readable.from([]);
@@ -19,6 +25,8 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
   const numStreams = streams.length;
   const buffers: (TradingPairCandle | null)[] = new Array(numStreams).fill(null);
   const ended: boolean[] = new Array(numStreams).fill(false);
+  /** The last candle read from each stream, to name its pair if the stream closes early */
+  const lastRead: (TradingPairCandle | undefined)[] = new Array(numStreams).fill(undefined);
 
   const out = new Readable({
     objectMode: true,
@@ -44,10 +52,21 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
       for (let i = 0; i < numStreams; i++) {
         if (!ended[i] && buffers[i] === null) {
           const chunk = streams[i].read() as TradingPairCandle | null;
-          if (chunk !== null) {
-            buffers[i] = chunk;
-          } else {
+          if (chunk === null) {
             needsWait = true;
+          } else if (!isFiniteNumber(chunk.candle.start)) {
+            // A start that is not a finite number is no minute. A NaN start, neither before nor at any other, never left its slot:
+            // its pair was missing from every later bucket while the others went on, then the output waited for it forever
+            out.destroy(
+              new GekkoError(
+                'stream',
+                `Received a candle of ${chunk.symbol} whose start is ${chunk.candle.start}, not a timestamp: it cannot be synchronised with the other pairs.`,
+              ),
+            );
+            return;
+          } else {
+            buffers[i] = chunk;
+            lastRead[i] = chunk;
           }
         }
       }
@@ -64,25 +83,14 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
         return;
       }
 
-      // 3. Find minimum timestamp among all valid buffered items
+      // 3. Find the earliest start among the buffered candles: every stream still going has one (step 1), and some stream has one
+      // since the output has not ended (step 2), so the minimum is the start of a buffered candle, finite as step 1 checked
       let minTimestamp = Infinity;
-      for (let i = 0; i < numStreams; i++) {
-        const buf = buffers[i];
-        if (buf !== null && buf.candle.start < minTimestamp) {
-          minTimestamp = buf.candle.start;
-        }
+      for (const buf of buffers) {
+        if (buf !== null && buf.candle.start < minTimestamp) minTimestamp = buf.candle.start;
       }
 
-      // Handling abstract edge cases where minTimestamp cannot be found.
-      if (minTimestamp === Infinity) {
-        if (streamsEnded === numStreams) {
-          out.push(null);
-          reading = false;
-        }
-        return;
-      }
-
-      // 4. Aggregate all events at minTimestamp into a CandleBucket
+      // 4. Aggregate the candles at minTimestamp into a CandleBucket, in the order of the streams
       const bucket: CandleBucket = new Map();
       for (let i = 0; i < numStreams; i++) {
         const buf = buffers[i];
@@ -97,6 +105,14 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
     }
   };
 
+  /** Why the output fails when stream i closes before its end, naming its pair once it has delivered a candle */
+  const describeEarlyClose = (i: number) => {
+    const last = lastRead[i];
+    return last
+      ? `The candle stream of ${last.symbol} closed before its end (last candle @ ${toISOString(last.candle.start)}): the pair no longer delivers.`
+      : `Candle stream ${i + 1} of ${numStreams} closed before its end and before its first candle: its pair never delivered.`;
+  };
+
   // Attach listeners to handle internal node stream events synchronously
   for (let i = 0; i < numStreams; i++) {
     const s = streams[i];
@@ -108,6 +124,12 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
     });
     s.on('error', err => {
       out.destroy(err);
+    });
+    // A stream destroyed without an error emits 'close' alone. Unheard, it left the output waiting for its next candle forever;
+    // taken for an end, its pair would drop out of the buckets while the others go on, and in realtime the gap filler would fill
+    // it with flat candles for as long as the bot runs. A stream closing because the output was destroyed is not a failure.
+    s.on('close', () => {
+      if (!ended[i] && !out.destroyed) out.destroy(new GekkoError('stream', describeEarlyClose(i)));
     });
   }
 
