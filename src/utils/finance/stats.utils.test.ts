@@ -1,3 +1,4 @@
+import { useTimeZone } from '@utils/date/date.mock';
 import { describe, expect, it } from 'vitest';
 import {
   calculateAlpha,
@@ -16,45 +17,68 @@ import {
   extractTopMAEs,
 } from './stats.utils';
 
-// Pre-computed timestamps for testing (using UTC dates to avoid timezone issues)
-const JAN_01_2023 = Date.UTC(2023, 0, 1);
-const JUL_02_2023 = Date.UTC(2023, 6, 2);
-const JAN_01_2024 = Date.UTC(2024, 0, 1);
-const JUL_01_2024 = Date.UTC(2024, 6, 1);
-const JAN_01_2025 = Date.UTC(2025, 0, 1);
-const JUL_01_2025 = Date.UTC(2025, 6, 1);
-
 describe('calculateElapsedYears', () => {
-  it.each`
-    description               | startDate      | endDate        | expected
-    ${'same day returns 0'}   | ${JAN_01_2024} | ${JAN_01_2024} | ${0}
-    ${'exactly 1 year'}       | ${JAN_01_2024} | ${JAN_01_2025} | ${1}
-    ${'exactly 2 years'}      | ${JAN_01_2023} | ${JAN_01_2025} | ${2}
-    ${'half year (non-leap)'} | ${JAN_01_2023} | ${JUL_02_2023} | ${0.5}
-    ${'half year (leap)'}     | ${JAN_01_2024} | ${JUL_01_2024} | ${0.5}
-    ${'1.5 years'}            | ${JAN_01_2024} | ${JUL_01_2025} | ${1.5}
-  `('should return $expected when $description', ({ startDate, endDate, expected }) => {
-    expect(calculateElapsedYears(startDate, endDate)).toBeCloseTo(expected, 1);
+  // Counted in UTC from an anniversary of the start to the next, the same on every host. Counted in local time, as date-fns counted
+  // them, the rows about Paris or New York came out an hour or a day off on a host there, and two of the rows from a Feb 29 were off on
+  // every host. The values are exact: a year of 365 or 365.25 days fails them.
+  describe.each`
+    timeZone
+    ${'UTC'}
+    ${'Europe/Paris'}
+    ${'America/New_York'}
+  `('on a host in $timeZone', ({ timeZone }) => {
+    useTimeZone(timeZone);
+
+    it.each`
+      description                                                              | start                     | end                       | years                  | expected
+      ${'the same instant'}                                                    | ${'2024-01-01T00:00:00Z'} | ${'2024-01-01T00:00:00Z'} | ${'0'}                 | ${0}
+      ${'a day of 2024, a leap year'}                                          | ${'2024-01-01T00:00:00Z'} | ${'2024-01-02T00:00:00Z'} | ${'1/366'}             | ${1 / 366}
+      ${'half of 2023'}                                                        | ${'2023-01-01T00:00:00Z'} | ${'2023-07-02T00:00:00Z'} | ${'182/365'}           | ${182 / 365}
+      ${'half of 2024, a leap year'}                                           | ${'2024-01-01T00:00:00Z'} | ${'2024-07-01T00:00:00Z'} | ${'182/366'}           | ${182 / 366}
+      ${'2024, a leap year'}                                                   | ${'2024-01-01T00:00:00Z'} | ${'2025-01-01T00:00:00Z'} | ${'1'}                 | ${1}
+      ${'two years'}                                                           | ${'2023-01-01T00:00:00Z'} | ${'2025-01-01T00:00:00Z'} | ${'2'}                 | ${2}
+      ${'a year and a half'}                                                   | ${'2024-01-01T00:00:00Z'} | ${'2025-07-01T00:00:00Z'} | ${'1 + 181/365'}       | ${1 + 181 / 365}
+      ${'a year from summer time to winter time in Paris'}                     | ${'2018-03-26T00:00:00Z'} | ${'2019-03-26T00:00:00Z'} | ${'1'}                 | ${1}
+      ${'a year from winter time to summer time in New York'}                  | ${'2024-03-10T06:30:00Z'} | ${'2025-03-10T06:30:00Z'} | ${'1'}                 | ${1}
+      ${'a year from Feb 28, 23:00, already Feb 29 in Paris'}                  | ${'2024-02-28T23:00:00Z'} | ${'2025-02-28T23:00:00Z'} | ${'1'}                 | ${1}
+      ${'a day from Feb 28, 23:30, already Feb 29 in Paris'}                   | ${'2024-02-28T23:30:00Z'} | ${'2024-02-29T23:30:00Z'} | ${'1/366'}             | ${1 / 366}
+      ${'half a year from Mar 1, still Feb 28 in New York, in a 366-day year'} | ${'2019-03-01T00:00:00Z'} | ${'2019-09-01T00:00:00Z'} | ${'184/366'}           | ${184 / 366}
+      ${'Mar 1, still Feb 28 in New York, to the next Feb 29'}                 | ${'2023-03-01T00:00:00Z'} | ${'2024-02-29T00:00:00Z'} | ${'365/366'}           | ${365 / 366}
+      ${'a year from a Feb 29, to the Feb 28 after'}                           | ${'2024-02-29T00:00:00Z'} | ${'2025-02-28T00:00:00Z'} | ${'1'}                 | ${1}
+      ${'a Feb 29 to the Mar 1 a year after'}                                  | ${'2024-02-29T00:00:00Z'} | ${'2025-03-01T00:00:00Z'} | ${'1 + 1/365'}         | ${1 + 1 / 365}
+      ${'a Feb 29 to Mar 1 three years on, in a 366-day year'}                 | ${'2024-02-29T00:00:00Z'} | ${'2027-03-01T00:00:00Z'} | ${'3 + 1/366'}         | ${3 + 1 / 366}
+      ${'a Feb 29 to a minute before the next'}                                | ${'2024-02-29T00:00:00Z'} | ${'2028-02-28T23:59:00Z'} | ${'3 + 527039/527040'} | ${3 + 527039 / 527040}
+      ${'a Feb 29 to the next'}                                                | ${'2024-02-29T00:00:00Z'} | ${'2028-02-29T00:00:00Z'} | ${'4'}                 | ${4}
+    `('should count $years years from $start to $end: $description', ({ start, end, expected }) => {
+      expect(calculateElapsedYears(Date.parse(start), Date.parse(end))).toBe(expected);
+    });
   });
 
   it('should throw error when endDate is before startDate', () => {
-    expect(() => calculateElapsedYears(JAN_01_2025, JAN_01_2024)).toThrow('endDate must be greater than or equal to startDate');
+    expect(() => calculateElapsedYears(Date.UTC(2025, 0, 1), Date.UTC(2024, 0, 1))).toThrow(
+      'endDate must be greater than or equal to startDate',
+    );
   });
 });
 
 describe('calculateTotalReturnPct', () => {
+  // The percentages here and below are decimals: the reporters round them to 2 decimals, most of them down, and the binary value a
+  // description gives came out an ulp or so off its decimal, a hundredth too low once floored when below it
   it.each`
-    description             | currentEquity | startEquity | expected
-    ${'100% gain'}          | ${2000}       | ${1000}     | ${100}
-    ${'50% gain'}           | ${1500}       | ${1000}     | ${50}
-    ${'no change'}          | ${1000}       | ${1000}     | ${0}
-    ${'25% loss'}           | ${750}        | ${1000}     | ${-25}
-    ${'50% loss'}           | ${500}        | ${1000}     | ${-50}
-    ${'total loss'}         | ${0}          | ${1000}     | ${-100}
-    ${'300% gain'}          | ${4000}       | ${1000}     | ${300}
-    ${'small start equity'} | ${0.002}      | ${0.001}    | ${100}
+    description                                      | currentEquity | startEquity | expected
+    ${'100% gain'}                                   | ${2000}       | ${1000}     | ${100}
+    ${'50% gain'}                                    | ${1500}       | ${1000}     | ${50}
+    ${'no change'}                                   | ${1000}       | ${1000}     | ${0}
+    ${'25% loss'}                                    | ${750}        | ${1000}     | ${-25}
+    ${'50% loss'}                                    | ${500}        | ${1000}     | ${-50}
+    ${'total loss'}                                  | ${0}          | ${1000}     | ${-100}
+    ${'300% gain'}                                   | ${4000}       | ${1000}     | ${300}
+    ${'small start equity'}                          | ${0.002}      | ${0.001}    | ${100}
+    ${'0.02% gain, 0.01999999999999602 in binary'}   | ${1000.2}     | ${1000}     | ${0.02}
+    ${'0.01% loss, -0.010000000000005116 in binary'} | ${999.9}      | ${1000}     | ${-0.01}
+    ${'0.3% loss, -0.29999999999999716 in binary'}   | ${997}        | ${1000}     | ${-0.3}
   `('should return $expected for $description', ({ currentEquity, startEquity, expected }) => {
-    expect(calculateTotalReturnPct(currentEquity, startEquity)).toBeCloseTo(expected, 6);
+    expect(calculateTotalReturnPct(currentEquity, startEquity)).toBe(expected);
   });
 
   it('should throw error when startEquity is zero', () => {
@@ -68,15 +92,16 @@ describe('calculateTotalReturnPct', () => {
 
 describe('calculateAnnualizedReturnPct', () => {
   it.each`
-    description            | totalReturnPct | elapsedYears | expected
-    ${'1 year period'}     | ${50}          | ${1}         | ${50}
-    ${'2 year period'}     | ${100}         | ${2}         | ${50}
-    ${'half year period'}  | ${25}          | ${0.5}       | ${50}
-    ${'negative return'}   | ${-30}         | ${2}         | ${-15}
-    ${'very short period'} | ${10}          | ${0.1}       | ${100}
-    ${'long period'}       | ${100}         | ${10}        | ${10}
+    description                                           | totalReturnPct | elapsedYears | expected
+    ${'1 year period'}                                    | ${50}          | ${1}         | ${50}
+    ${'2 year period'}                                    | ${100}         | ${2}         | ${50}
+    ${'half year period'}                                 | ${25}          | ${0.5}       | ${50}
+    ${'negative return'}                                  | ${-30}         | ${2}         | ${-15}
+    ${'very short period'}                                | ${10}          | ${0.1}       | ${100}
+    ${'long period'}                                      | ${100}         | ${10}        | ${10}
+    ${'0.3% over 3 years, 0.09999999999999999 in binary'} | ${0.3}         | ${3}         | ${0.1}
   `('should return $expected for $description', ({ totalReturnPct, elapsedYears, expected }) => {
-    expect(calculateAnnualizedReturnPct(totalReturnPct, elapsedYears)).toBeCloseTo(expected, 6);
+    expect(calculateAnnualizedReturnPct(totalReturnPct, elapsedYears)).toBe(expected);
   });
 
   it('should throw error when elapsedYears is zero', () => {
@@ -90,16 +115,19 @@ describe('calculateAnnualizedReturnPct', () => {
 
 describe('calculateMarketReturnPct', () => {
   it.each`
-    description       | endPrice | startPrice | expected
-    ${'100% gain'}    | ${200}   | ${100}     | ${100}
-    ${'50% gain'}     | ${150}   | ${100}     | ${50}
-    ${'no change'}    | ${100}   | ${100}     | ${0}
-    ${'50% loss'}     | ${50}    | ${100}     | ${-50}
-    ${'total loss'}   | ${0}     | ${100}     | ${-100}
-    ${'small prices'} | ${0.002} | ${0.001}   | ${100}
-    ${'large prices'} | ${60000} | ${30000}   | ${100}
+    description                                                        | endPrice  | startPrice | expected
+    ${'100% gain'}                                                     | ${200}    | ${100}     | ${100}
+    ${'50% gain'}                                                      | ${150}    | ${100}     | ${50}
+    ${'no change'}                                                     | ${100}    | ${100}     | ${0}
+    ${'50% loss'}                                                      | ${50}     | ${100}     | ${-50}
+    ${'total loss'}                                                    | ${0}      | ${100}     | ${-100}
+    ${'small prices'}                                                  | ${0.002}  | ${0.001}   | ${100}
+    ${'large prices'}                                                  | ${60000}  | ${30000}   | ${100}
+    ${'a stablecoin from 1 to 1.0001, 0.009999999999998899 in binary'} | ${1.0001} | ${1}       | ${0.01}
+    ${'a stablecoin from 1 to 0.999, -0.10000000000000009 in binary'}  | ${0.999}  | ${1}       | ${-0.1}
+    ${'7% loss, -7.000000000000001 in binary'}                         | ${93}     | ${100}     | ${-7}
   `('should return $expected for $description', ({ endPrice, startPrice, expected }) => {
-    expect(calculateMarketReturnPct(endPrice, startPrice)).toBeCloseTo(expected, 6);
+    expect(calculateMarketReturnPct(endPrice, startPrice)).toBe(expected);
   });
 
   it('should throw error when startPrice is zero', () => {
@@ -113,28 +141,45 @@ describe('calculateMarketReturnPct', () => {
 
 describe('calculateAlpha', () => {
   it.each`
-    description           | totalReturnPct | marketReturnPct | expected
-    ${'positive alpha'}   | ${50}          | ${30}           | ${20}
-    ${'negative alpha'}   | ${20}          | ${50}           | ${-30}
-    ${'zero alpha'}       | ${50}          | ${50}           | ${0}
-    ${'large alpha'}      | ${100}         | ${-20}          | ${120}
-    ${'both negative'}    | ${-10}         | ${-30}          | ${20}
-    ${'strategy at loss'} | ${-20}         | ${10}           | ${-30}
+    description                                               | totalReturnPct       | marketReturnPct      | expected
+    ${'positive alpha'}                                       | ${50}                | ${30}                | ${20}
+    ${'negative alpha'}                                       | ${20}                | ${50}                | ${-30}
+    ${'zero alpha'}                                           | ${50}                | ${50}                | ${0}
+    ${'large alpha'}                                          | ${100}               | ${-20}               | ${120}
+    ${'both negative'}                                        | ${-10}               | ${-30}               | ${20}
+    ${'strategy at loss'}                                     | ${-20}               | ${10}                | ${-30}
+    ${'0.3 over 0.1, 0.19999999999999998 in binary'}          | ${0.3}               | ${0.1}               | ${0.2}
+    ${'returns 1.3e-14 apart, the noise of their arithmetic'} | ${5.156953387307055} | ${5.156953387307069} | ${0}
+    ${'a millionth of a point, a real difference'}            | ${100.000001}        | ${100}               | ${0.000001}
   `('should return $expected for $description', ({ totalReturnPct, marketReturnPct, expected }) => {
     expect(calculateAlpha(totalReturnPct, marketReturnPct)).toBe(expected);
   });
+
+  // The return of a portfolio holding the benchmark asset alone, worked out from its equities, is the market return in exact arithmetic
+  it.each`
+    btc        | startPrice  | endPrice    | startEquity      | endEquity        | returns
+    ${0.22368} | ${79290.42} | ${83379.39} | ${17735.6811456} | ${18650.3019552} | ${'1.3e-14 apart in binary'}
+    ${0.02}    | ${66428.59} | ${32158.72} | ${1328.5718}     | ${643.1744}      | ${'1e-13 apart to 15 significant digits'}
+  `(
+    'should return an alpha of 0 for $btc BTC held from $startPrice to $endPrice, returns $returns',
+    ({ startPrice, endPrice, startEquity, endEquity }) => {
+      const totalReturnPct = calculateTotalReturnPct(endEquity, startEquity);
+      expect(calculateAlpha(totalReturnPct, calculateMarketReturnPct(endPrice, startPrice))).toBe(0);
+    },
+  );
 });
 
 describe('calculateExposurePct', () => {
   it.each`
-    description           | exposureMs  | totalMs     | expected
-    ${'100% exposure'}    | ${86400000} | ${86400000} | ${100}
-    ${'50% exposure'}     | ${43200000} | ${86400000} | ${50}
-    ${'0% exposure'}      | ${0}        | ${86400000} | ${0}
-    ${'25% exposure'}     | ${21600000} | ${86400000} | ${25}
-    ${'minimal exposure'} | ${1}        | ${1000000}  | ${0.0001}
+    description                                             | exposureMs  | totalMs     | expected
+    ${'100% exposure'}                                      | ${86400000} | ${86400000} | ${100}
+    ${'50% exposure'}                                       | ${43200000} | ${86400000} | ${50}
+    ${'0% exposure'}                                        | ${0}        | ${86400000} | ${0}
+    ${'25% exposure'}                                       | ${21600000} | ${86400000} | ${25}
+    ${'minimal exposure, 0.00009999999999999999 in binary'} | ${1}        | ${1000000}  | ${0.0001}
+    ${'30.24 s of a day, 0.034999999999999996 in binary'}   | ${30240}    | ${86400000} | ${0.035}
   `('should return $expected for $description', ({ exposureMs, totalMs, expected }) => {
-    expect(calculateExposurePct(exposureMs, totalMs)).toBeCloseTo(expected, 6);
+    expect(calculateExposurePct(exposureMs, totalMs)).toBe(expected);
   });
 
   it('should throw error when totalMs is zero', () => {
@@ -147,25 +192,21 @@ describe('calculateExposurePct', () => {
 });
 
 describe('calculateWinRate', () => {
+  // toBe, not toBeCloseTo, which reads null as 0: a null win rate for round trips that all lose, written N/A in the reports, passed it
   it.each`
-    description       | winningTrades | totalTrades | expected
-    ${'all wins'}     | ${10}         | ${10}       | ${100}
-    ${'all losses'}   | ${0}          | ${10}       | ${0}
-    ${'50% win rate'} | ${5}          | ${10}       | ${50}
-    ${'75% win rate'} | ${75}         | ${100}      | ${75}
-    ${'33.33% rate'}  | ${1}          | ${3}        | ${33.333333}
-    ${'single win'}   | ${1}          | ${1}        | ${100}
-    ${'single loss'}  | ${0}          | ${1}        | ${0}
+    description                                       | winningTrades | totalTrades | expected
+    ${'all wins'}                                     | ${10}         | ${10}       | ${100}
+    ${'all losses'}                                   | ${0}          | ${10}       | ${0}
+    ${'50% win rate'}                                 | ${5}          | ${10}       | ${50}
+    ${'75% win rate'}                                 | ${75}         | ${100}      | ${75}
+    ${'29 wins in 100, 28.999999999999996 in binary'} | ${29}         | ${100}      | ${29}
+    ${'a win in 3, to 15 significant digits'}         | ${1}          | ${3}        | ${33.3333333333333}
+    ${'single win'}                                   | ${1}          | ${1}        | ${100}
+    ${'single loss'}                                  | ${0}          | ${1}        | ${0}
+    ${'no trades'}                                    | ${0}          | ${0}        | ${null}
+    ${'a negative number of trades'}                  | ${5}          | ${-1}       | ${null}
   `('should return $expected for $description', ({ winningTrades, totalTrades, expected }) => {
-    expect(calculateWinRate(winningTrades, totalTrades)).toBeCloseTo(expected, 4);
-  });
-
-  it('should return null when no trades', () => {
-    expect(calculateWinRate(0, 0)).toBeNull();
-  });
-
-  it('should return null when totalTrades is negative', () => {
-    expect(calculateWinRate(5, -1)).toBeNull();
+    expect(calculateWinRate(winningTrades, totalTrades)).toBe(expected);
   });
 });
 
@@ -329,31 +370,22 @@ describe('calculateSortinoRatio', () => {
 
 describe('calculateMaxDrawdown', () => {
   it.each`
-    description                                      | balances                   | initialBalance | expected
-    ${'return 0 for empty balances array'}           | ${[]}                      | ${1000}        | ${0}
-    ${'return 0 when initialBalance is 0'}           | ${[100, 200]}              | ${0}           | ${0}
-    ${'return 0 when initialBalance is negative'}    | ${[100, 200]}              | ${-100}        | ${0}
-    ${'return 0 when balances only increase'}        | ${[1100, 1200, 1300]}      | ${1000}        | ${0}
-    ${'return 0 when balances stay constant'}        | ${[1000, 1000, 1000]}      | ${1000}        | ${0}
-    ${'calculate drawdown from initial balance'}     | ${[900]}                   | ${1000}        | ${10}
-    ${'calculate drawdown from new peak'}            | ${[1100, 990]}             | ${1000}        | ${10}
-    ${'return max drawdown among multiple declines'} | ${[1100, 1000, 1200, 900]} | ${1000}        | ${25}
-    ${'handle 100% drawdown'}                        | ${[1000, 0]}               | ${1000}        | ${100}
-    ${'handle small fractional changes'}             | ${[100.5, 100.0, 100.2]}   | ${100}         | ${0.4975124378109453}
-  `('should $description', ({ balances, initialBalance, expected }) => {
-    const result = calculateMaxDrawdown(balances, initialBalance);
-    if (expected === 0) {
-      expect(result).toBe(0);
-    } else {
-      expect(result).toBeCloseTo(expected, 5);
-    }
-  });
-
-  it('should track peak correctly through multiple ups and downs', () => {
-    // Peak at 1500, then drop to 1000, that's 33.33% drawdown
-    const balances = [1000, 1200, 1500, 1200, 1000, 1300];
-    const result = calculateMaxDrawdown(balances, 1000);
-    expect(result).toBeCloseTo(33.333333, 4);
+    description                                                   | balances                                | initialBalance | expected
+    ${'no balance'}                                               | ${[]}                                   | ${1000}        | ${0}
+    ${'an initial balance of 0'}                                  | ${[100, 200]}                           | ${0}           | ${0}
+    ${'a negative initial balance'}                               | ${[100, 200]}                           | ${-100}        | ${0}
+    ${'balances that only increase'}                              | ${[1100, 1200, 1300]}                   | ${1000}        | ${0}
+    ${'balances that stay constant'}                              | ${[1000, 1000, 1000]}                   | ${1000}        | ${0}
+    ${'a drawdown from the initial balance'}                      | ${[900]}                                | ${1000}        | ${10}
+    ${'a drawdown from a new peak'}                               | ${[1100, 990]}                          | ${1000}        | ${10}
+    ${'the largest of several declines'}                          | ${[1100, 1000, 1200, 900]}              | ${1000}        | ${25}
+    ${'a 100% drawdown'}                                          | ${[1000, 0]}                            | ${1000}        | ${100}
+    ${'small fractional changes, to 15 significant digits'}       | ${[100.5, 100.0, 100.2]}                | ${100}         | ${0.497512437810945}
+    ${'a peak of 1500 through ups and downs, a third of it lost'} | ${[1000, 1200, 1500, 1200, 1000, 1300]} | ${1000}        | ${33.3333333333333}
+    ${'999.7 from 1000, 0.029999999999995454 in binary'}          | ${[999.7]}                              | ${1000}        | ${0.03}
+    ${'a NaN balance, which is skipped'}                          | ${[1000, NaN, 900]}                     | ${1000}        | ${10}
+  `('should return $expected for $description', ({ balances, initialBalance, expected }) => {
+    expect(calculateMaxDrawdown(balances, initialBalance)).toBe(expected);
   });
 
   it('should not mutate input array', () => {
