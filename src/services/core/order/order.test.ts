@@ -564,12 +564,13 @@ describe('order', () => {
       expect(testOrder['isTransientFailure'](failure, 'poll')).toBe(expected);
     });
 
+    // The failure without its tag, as describeError writes it: the warning has a tag of its own, and showed two
     it('logs a warning naming the action and the status the order keeps for an ExchangeNetworkError', () => {
       testOrder['setStatus']('open');
       testOrder['isTransientFailure'](new ExchangeNetworkError('timeout'), 'cancelation');
       expect(logger.warning).toHaveBeenCalledWith(
         'order',
-        '[ee21e130-48bc-405f-be0c-46e9bf17b52e] BUY STICKY order cancelation failed on the network, it stays open: [EXCHANGE] timeout',
+        '[ee21e130-48bc-405f-be0c-46e9bf17b52e] BUY STICKY order cancelation failed on the network, it stays open: timeout',
       );
     });
 
@@ -592,8 +593,8 @@ describe('order', () => {
 
     it.each`
       kind                         | failure                                                                                                                   | reason
-      ${'an ExchangeNetworkError'} | ${new ExchangeNetworkError('timeout')}                                                                                    | ${'([EXCHANGE] timeout)'}
-      ${'an OrderOutcomeUnknown'}  | ${new OrderOutcomeUnknown('Order 42 was created on binance for BTC/USDT, but its state could not be read back: timeout')} | ${'([EXCHANGE] Order 42 was created on binance for BTC/USDT, but its state could not be read back: timeout)'}
+      ${'an ExchangeNetworkError'} | ${new ExchangeNetworkError('timeout')}                                                                                    | ${'(timeout)'}
+      ${'an OrderOutcomeUnknown'}  | ${new OrderOutcomeUnknown('Order 42 was created on binance for BTC/USDT, but its state could not be read back: timeout')} | ${'(Order 42 was created on binance for BTC/USDT, but its state could not be read back: timeout)'}
     `('says the outcome of a creation that failed with $kind is unknown, the order maybe live', ({ failure, reason }) => {
       testOrder['orderErroredAtCreation'](failure);
       expect(listener.mock.calls).toEqual([
@@ -607,11 +608,13 @@ describe('order', () => {
       expect(orderErroredSpy.mock.calls[0][0].cause).toBe(networkError);
     });
 
+    // Its reason is the failure without its tag (see describeError): the Trader's error line and the Telegram notification have a tag of
+    // their own, and showed two
     it.each`
       kind                   | failure                                                                              | reason
       ${'an Error'}          | ${new Error('Invalid API key')}                                                      | ${'Invalid API key'}
-      ${'a GekkoError'}      | ${new GekkoError('exchange', 'Market order not sent: ticker unavailable (timeout)')} | ${'[EXCHANGE] Market order not sent: ticker unavailable (timeout)'}
-      ${'an OrderNotFound'}  | ${new OrderNotFound('unknown order')}                                                | ${'[EXCHANGE] unknown order'}
+      ${'a GekkoError'}      | ${new GekkoError('exchange', 'Market order not sent: ticker unavailable (timeout)')} | ${'Market order not sent: ticker unavailable (timeout)'}
+      ${'an OrderNotFound'}  | ${new OrderNotFound('unknown order')}                                                | ${'unknown order'}
       ${'a non-Error value'} | ${'Invalid API key'}                                                                 | ${'Invalid API key'}
     `('ends the order with the reason of $kind, which placed nothing', ({ failure, reason }) => {
       testOrder['orderErroredAtCreation'](failure);

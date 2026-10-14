@@ -6,6 +6,7 @@ import {
   ORDER_PARTIALLY_FILLED_EVENT,
   ORDER_STATUS_CHANGED_EVENT,
 } from '@constants/event.const';
+import { describeError, toError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Watch } from '@models/configuration.types';
 import { OrderSide, OrderState, OrderType } from '@models/order.types';
@@ -21,7 +22,7 @@ import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { OrderCancelDetails, OrderCancelEventPayload, OrderErrorEventPayload, OrderStatus, OrderSummary, Transaction } from './order.types';
-import { createOrderSummary, getWeightedAverage, toError } from './order.utils';
+import { createOrderSummary, getWeightedAverage } from './order.utils';
 
 export abstract class Order extends EventEmitter {
   private status: OrderStatus;
@@ -177,16 +178,21 @@ export abstract class Order extends EventEmitter {
   }
 
   /**
-   * Ends the order in error. `mayBeLive` tells the strategies whether it may still be live on the exchange, where nothing follows it
-   * any more, the Trader forgetting an order once it errored: placed again, it may be doubled. GridBot could tell it only from the
-   * words of a creation lost on the network, and placed again an order whose poll had failed for good while it was open. By default,
-   * whether the current transaction was open as the exchange last reported it, as when a poll, a cancelation or the read-back of one
-   * fails for good. A creation that failed says it itself (see orderErroredAtCreation), and a STICKY order whose relaunch failed before
-   * it was placed has none open.
+   * Ends the order in error. Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so
+   * an order reports a failure here and never throws: a thrown value that is not an Error is wrapped in one (see toError) rather than
+   * dropped, so that the order still ends with ORDER_ERRORED_EVENT. Its reason is the failure as describeError writes it, a GekkoError
+   * without its tag: the Trader's error line and the Telegram notification each have a tag of their own, and showed two.
+   * `mayBeLive` tells the strategies whether it may still be live on the exchange, where nothing follows it any more, the Trader
+   * forgetting an order once it errored: placed again, it may be doubled. GridBot could tell it only from the words of a creation lost on
+   * the network, and placed again an order whose poll had failed for good while it was open. By default, whether the current
+   * transaction was open as the exchange last reported it, as when a poll, a cancelation or the read-back of one fails for good. A
+   * creation that failed says it itself (see orderErroredAtCreation), and a STICKY order whose relaunch failed before it was placed has
+   * none open.
    */
   protected orderErrored(error: Error, mayBeLive = this.isTransactionOpen()) {
-    this.setStatus('error', error.message);
-    this.emit<OrderErrorEventPayload>(ORDER_ERRORED_EVENT, { reason: error.message, mayBeLive });
+    const reason = describeError(error);
+    this.setStatus('error', reason);
+    this.emit<OrderErrorEventPayload>(ORDER_ERRORED_EVENT, { reason, mayBeLive });
   }
 
   /** Whether the current transaction of the order is open on the exchange, as its last state reported it: placed, and not over */
@@ -307,7 +313,7 @@ export abstract class Order extends EventEmitter {
     const status = this.getStatus();
     warning(
       'order',
-      `[${this.gekkoOrderId}] ${this.side} ${this.type} order ${action} failed on the network, it stays ${status}: ${err.message}`,
+      `[${this.gekkoOrderId}] ${this.side} ${this.type} order ${action} failed on the network, it stays ${status}: ${describeError(err)}`,
     );
     return true;
   }
@@ -320,7 +326,7 @@ export abstract class Order extends EventEmitter {
    */
   protected orderErroredAtCreation(err: unknown) {
     if (!(err instanceof ExchangeNetworkError || err instanceof OrderOutcomeUnknown)) return this.orderErrored(toError(err), false);
-    const reason = `Outcome unknown: the order may be live on the exchange, check it before placing it again (${err.message})`;
+    const reason = `Outcome unknown: the order may be live on the exchange, check it before placing it again (${describeError(err)})`;
     this.orderErrored(new Error(reason, { cause: err }), true);
   }
 

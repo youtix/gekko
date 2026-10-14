@@ -25,10 +25,6 @@ export const getAssetBalance = (portfolio: Portfolio, asset: Asset): BalanceDeta
   return portfolio.get(asset) ?? { ...ZERO_BALANCE };
 };
 
-export const updateAssetBalance = (portfolio: Portfolio, asset: Asset, balance: BalanceDetail): void => {
-  portfolio.set(asset, balance);
-};
-
 /**
  * Whether a portfolio was read from the exchange. The end of an order carries the portfolio the Trader read last, which is the empty
  * one it starts with (createEmptyPortfolio) until one of its synchronizations succeeds, while the balance of an exchange lists the asset

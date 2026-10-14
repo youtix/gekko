@@ -114,7 +114,8 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
  * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT): from the BUY that opened a position while flat to the SELL that
  * left it flat again, the BUYs and SELLs in between included. One still open when the warmup completed counts from the start of the
  * period: its entry date, price and equity are then those of the start. Its equities are pair equities, in currency: the asset held,
- * valued at a price, plus the currency held (see calculatePairEquity).
+ * valued at a price, plus the currency held (see calculatePairEquity). Its P&L and its profit are unknown, NaN, when no portfolio read
+ * valued its entry or its exit: the RoundTripAnalyzer leaves it out of the win rate and the ratios, and the outputs write "unknown".
  */
 export type RoundTrip = {
   /** Its number, counted from 0 in the order the round trips of the run close */
@@ -123,13 +124,17 @@ export type RoundTrip = {
   entryAt: number;
   /** The mean price of its BUYs, weighted by their amounts, in currency */
   entryPrice: number;
-  /** The pair equity before the BUY that opened it: after it, at its price, with its fee given back (0 when unknown) */
+  /**
+   * The pair equity before the BUY that opened it: after it, at its price, with its fee given back (an unknown fee counting as 0). When
+   * that BUY filled before the Trader had read any portfolio, worked out from the first portfolio an order ended with afterwards (see
+   * PendingEntry); NaN when none came before the round trip closed
+   */
   entryEquity: number;
   /** When the SELL that closed it filled */
   exitAt: number;
   /** The mean price of its SELLs, weighted by their amounts, in currency */
   exitPrice: number;
-  /** The pair equity after the SELL that closed it, at its price, its fee paid */
+  /** The pair equity after the SELL that closed it, at its price, its fee paid; NaN when the Trader had read no portfolio when it filled */
   exitEquity: number;
   /** exitAt less entryAt, in milliseconds */
   duration: number;
@@ -138,11 +143,15 @@ export type RoundTrip = {
    * below it. Measured after the warmup only.
    */
   maxAdverseExcursion: number;
-  /** The return from the entry equity to the exit equity, in % (5 for 5 %), 0 when the entry equity is 0 */
+  /**
+   * The return from the entry equity to the exit equity, in % (5 for 5 %), worked out in decimal: 0 for a break-even, equities less than
+   * a booked unit apart (see BOOKED_CURRENCY_UNIT) or within a billionth of each other; NaN when the entry equity is not above 0 or
+   * either equity is unknown
+   */
   profit: number;
   /**
    * The exit equity less the entry equity, in currency: net of the fees its orders took from the pair, that of the BUY that opened it
-   * when known (see entryEquity)
+   * when known (see entryEquity). 0 for a break-even and NaN when unknown, as profit
    */
   pnl: number;
 };

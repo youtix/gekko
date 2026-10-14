@@ -1,4 +1,4 @@
-import { ONE_MINUTE } from '@constants/time.const';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { chatIdSchema } from '@services/bots/telegram/telegram.schema';
 import { z } from 'zod';
 
@@ -6,7 +6,7 @@ import { z } from 'zod';
 const MAX_TIMER_DELAY = 2_147_483_647;
 
 /** The checks run at most once a second: a period of a few milliseconds would keep the bot busy measuring itself and flood Telegram */
-const MIN_CHECK_INTERVAL = 1000;
+const MIN_CHECK_INTERVAL = ONE_SECOND;
 
 /** A check period handed to setInterval, bounded like the exchange polling periods */
 const checkIntervalSchema = (field: string) => {
@@ -29,15 +29,15 @@ export const supervisionSchema = z.strictObject({
   chatId: chatIdSchema.optional(),
   cpuThreshold: z.number().positive().default(80),
   memoryThreshold: z.number().positive().default(1024),
-  cpuCheckInterval: checkIntervalSchema('cpuCheckInterval').default(10000),
-  memoryCheckInterval: checkIntervalSchema('memoryCheckInterval').default(10000),
-  logMonitoringInterval: checkIntervalSchema('logMonitoringInterval').default(60000),
+  cpuCheckInterval: checkIntervalSchema('cpuCheckInterval').default(10 * ONE_SECOND),
+  memoryCheckInterval: checkIntervalSchema('memoryCheckInterval').default(10 * ONE_SECOND),
+  logMonitoringInterval: checkIntervalSchema('logMonitoringInterval').default(ONE_MINUTE),
   /** How often the candle check looks at the age of the last 1-minute bucket received */
-  candleCheckInterval: checkIntervalSchema('candleCheckInterval').default(60000),
+  candleCheckInterval: checkIntervalSchema('candleCheckInterval').default(ONE_MINUTE),
   /** Age of the last 1-minute bucket beyond which the candle check alerts that the candles stopped coming */
   candleStaleThreshold: z
     .number(CANDLE_STALE_THRESHOLD_MESSAGE)
     .int(CANDLE_STALE_THRESHOLD_MESSAGE)
     .gt(ONE_MINUTE, CANDLE_STALE_THRESHOLD_MESSAGE)
-    .default(180000),
+    .default(3 * ONE_MINUTE),
 });

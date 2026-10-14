@@ -3,6 +3,7 @@ import { Candle } from '@models/candle.types';
 import { warning } from '@services/logger';
 import { getCandleTimeOffset } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
+import { pluralize } from '@utils/string/string.utils';
 import { CandleSize } from './candleBatcher.types';
 
 /**
@@ -109,7 +110,7 @@ export class FastCandleBatcher {
       warning(
         'core',
         [
-          `Skipped ${this.skippedMinutes} one-minute candle(s) from ${toISOString(this.firstSkippedStart)}:`,
+          `Skipped ${this.skippedMinutes} one-minute ${pluralize('candle', this.skippedMinutes)} from ${toISOString(this.firstSkippedStart)}:`,
           `the first ${this.candleSize}-minute candle starts on the first boundary, ${toISOString(candle.start)}`,
         ].join(' '),
       );

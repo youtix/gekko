@@ -13,13 +13,6 @@ import { UUID } from 'node:crypto';
 import { OrderSummary, Transaction } from './order.types';
 
 /**
- * Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so an order reports a failure
- * through orderErrored and never throws: a thrown value that is not an Error is wrapped in one rather than dropped, so that the order
- * still ends with ORDER_ERRORED_EVENT. The order classes import it from here.
- */
-export { toError } from '@errors/error.utils';
-
-/**
  * The mean of `values` weighted by `weights`, worked out in decimal: the products and the sums exactly (see multiplyPrecise and
  * addPrecise), the one division to 15 significant digits (see toSignificantDigits). Values all the same give that value. Worked out
  * in binary, the mean of a single price came out off it (104.44 for 2.5 gave 104.44000000000001), and so did a mean as short as the

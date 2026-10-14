@@ -110,11 +110,18 @@ describe('FastCandleBatcher', () => {
       expect(feed(60, fromMinute57)[62]?.start).toBe(T0 + 60 * ONE_MINUTE);
     });
 
-    it('should warn once about the candles skipped', () => {
-      feed(60, fromMinute57);
+    it.each`
+      from  | skipped
+      ${59} | ${'1 one-minute candle'}
+      ${57} | ${'3 one-minute candles'}
+    `('should warn once about the candles skipped: $skipped', ({ from, skipped }) => {
+      feed(
+        60,
+        range(from, 120).map(minute => candleAt(minute)),
+      );
       expect(warning).toHaveBeenCalledExactlyOnceWith(
         'core',
-        `Skipped 3 one-minute candle(s) from ${toISOString(T0 + 57 * ONE_MINUTE)}: the first 60-minute candle starts on the first boundary, ${toISOString(T0 + 60 * ONE_MINUTE)}`,
+        `Skipped ${skipped} from ${toISOString(T0 + from * ONE_MINUTE)}: the first 60-minute candle starts on the first boundary, ${toISOString(T0 + 60 * ONE_MINUTE)}`,
       );
     });
 

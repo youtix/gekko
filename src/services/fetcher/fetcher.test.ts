@@ -108,11 +108,13 @@ describe('fetcher', () => {
       await expect(send(0)).rejects.toThrow(message);
     });
 
+    // The failure is described as every log line describes one (see describeError), by its message: interpolated, it was written by
+    // String(), which throws for a value without a prototype from the very catch meant to report it
     it.each`
       outcome                  | reply                                        | message
-      ${'an HTML body'}        | ${() => unparsable(401, 'Unauthorized')}     | ${'HTTP 401 Unauthorized: unreadable body (SyntaxError: '}
-      ${'an empty body'}       | ${() => unparsable(401, 'Unauthorized', '')} | ${'HTTP 401 Unauthorized: unreadable body (SyntaxError: '}
-      ${'a body read timeout'} | ${() => timeoutInAnswer(502, 'Bad Gateway')} | ${'HTTP 502 Bad Gateway: unreadable body (TimeoutError: '}
+      ${'an HTML body'}        | ${() => unparsable(401, 'Unauthorized')}     | ${'HTTP 401 Unauthorized: unreadable body ('}
+      ${'an empty body'}       | ${() => unparsable(401, 'Unauthorized', '')} | ${'HTTP 401 Unauthorized: unreadable body ('}
+      ${'a body read timeout'} | ${() => timeoutInAnswer(502, 'Bad Gateway')} | ${'HTTP 502 Bad Gateway: unreadable body (The operation timed out.)'}
     `('rejects an answer with $outcome with its status: "$message"', async ({ reply, message }) => {
       fetchMock.mockImplementation(async () => reply());
       await expect(send(0)).rejects.toThrow(message);
@@ -190,6 +192,13 @@ describe('fetcher', () => {
       expect(await settle(send())).toBe('offline');
     });
 
+    // Only an Error was logged: a rejection of any other value was rethrown without a word
+    it('logs a rejection that is not an Error it gives up on, at debug level', async () => {
+      fetchMock.mockImplementation(() => Promise.reject('offline'));
+      await settle(send());
+      expect(debug).toHaveBeenCalledExactlyOnceWith('fetcher', 'offline');
+    });
+
     it.each`
       outcome                               | reply
       ${'a server error'}                   | ${() => failure(500, 'Internal Server Error')}
@@ -208,16 +217,13 @@ describe('fetcher', () => {
     fetchMock.mockImplementation(async () => timeoutInAnswer());
     expect(await settle(fetcher.post({ url, payload }))).toHaveProperty(
       'message',
-      'HTTP 200 OK: unreadable body (TimeoutError: The operation timed out.). The request may have been delivered, so it is not retried',
+      'HTTP 200 OK: unreadable body (The operation timed out.). The request may have been delivered, so it is not retried',
     );
   });
 
   it('rejects a GET whose 200 answer cannot be read, once its retries are spent, with the error of the last one', async () => {
     fetchMock.mockImplementation(async () => timeoutInAnswer());
-    expect(await settle(fetcher.get({ url }))).toHaveProperty(
-      'message',
-      'HTTP 200 OK: unreadable body (TimeoutError: The operation timed out.)',
-    );
+    expect(await settle(fetcher.get({ url }))).toHaveProperty('message', 'HTTP 200 OK: unreadable body (The operation timed out.)');
   });
 
   describe('timeout', () => {

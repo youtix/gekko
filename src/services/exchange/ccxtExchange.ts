@@ -1,4 +1,3 @@
-import { tz } from '@date-fns/tz';
 import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
@@ -8,12 +7,11 @@ import { Trade } from '@models/trade.types';
 import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { debug, error, warning } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
+import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
 import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/market.utils';
 import { addPrecise } from '@utils/math/math.utils';
 import { formatEveryDecimal, pluralize } from '@utils/string/string.utils';
 import ccxt, { Exchange as CCXT, Order as CCXTOrder, Trade as CCXTTrade } from 'ccxt';
-import { formatDuration, intervalToDuration } from 'date-fns';
 import { first, isNil, last, partition } from 'lodash-es';
 import { z } from 'zod';
 import type { binanceExchangeSchema } from './binance/binance.schema';
@@ -186,7 +184,7 @@ export class CCXTExchange implements Exchange {
     const start = first(candles)?.start;
     const end = last(candles)?.start;
     if (isNil(start) || isNil(end)) return fetched;
-    const duration = formatDuration(intervalToDuration({ start, end }, { in: tz('UTC') }));
+    const duration = formatDurationUTC(start, end);
     return `${fetched} From ${toISOString(start)} to ${toISOString(end)}${duration ? ` (${duration})` : ''}`;
   }
 

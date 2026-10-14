@@ -11,14 +11,15 @@ import {
 } from '@models/event.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
 import { TradingPair } from '@models/utility.types';
+import { PERCENT_ROUNDING } from '@plugins/analyzers/analyzer.const';
 import { Plugin } from '@plugins/plugin';
+import { LAST_FLUSH_TIMEOUT } from '@services/bots/telegram/telegram.const';
 import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
-import { round } from '@utils/math/round.utils';
+import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { getAssetBalance } from '@utils/portfolio/portfolio.utils';
-import { formatAmount, pluralize } from '@utils/string/string.utils';
-import { formatDuration, intervalToDuration } from 'date-fns';
+import { formatAmount, formatPercent, pluralize } from '@utils/string/string.utils';
 import { bindAll, filter, isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { eventSubscriberSchema } from './eventSubscriber.schema';
@@ -32,12 +33,6 @@ import { Event, EVENT_NAMES, EventSubscriberConfig } from './eventSubscriber.typ
  * N order_init and its logs in one flush. Their texts are short, so a full queue costs little memory.
  */
 const MAX_PENDING_NOTIFICATIONS = 1000;
-
-/**
- * How long the finalisation waits for the pending notifications, and so holds the exit. The value of Supervision's last flush, which
- * runs at the same time (the plugins are finalised together): the exit waits that long at most for both.
- */
-const LAST_FLUSH_TIMEOUT = 15 * ONE_SECOND;
 
 /** A message waiting for its turn, with the event it notifies of, which the logs name */
 type PendingNotification = { event: Event; text: string };
@@ -243,14 +238,15 @@ export class EventSubscriber extends Plugin {
       const currentPrice = this.prices.get(symbol);
       // The Trader places an advice of any type at its price, or without one at the market price (see Trader.onStrategyCreateOrder):
       // a LIMIT advice with a price shows it as the limit it requests, any other advice that price it is placed at, as its target
+      const target = price ?? currentPrice;
       const priceLine =
         type === 'LIMIT' && !isNil(price)
-          ? `Requested limit price: ${price} ${currency}`
-          : `Target price: ${price ?? currentPrice ?? 'unknown'} ${currency}`;
+          ? `Requested limit price: ${formatAmount(price)} ${currency}`
+          : `Target price: ${isNil(target) ? 'unknown' : formatAmount(target)} ${currency}`;
       return [
         `Order Id: ${id}`,
         `Received ${type} ${side} advice for ${symbol}`,
-        `Requested amount: ${amount ?? 'auto'}`,
+        `Requested amount: ${isNil(amount) ? 'auto' : formatAmount(amount)}`,
         `At time: ${toISOString(orderCreationDate)}`,
         priceLine,
         '------',
@@ -264,13 +260,15 @@ export class EventSubscriber extends Plugin {
       const { id, amount, side, type, price, orderCreationDate, symbol } = order;
       const [asset, currency] = symbol.split('/');
       const currentPrice = this.prices.get(symbol) ?? 0;
-      const priceLine = price ? `Requested limit price: ${price} ${currency}` : `Target price: ${currentPrice} ${currency}`;
+      const priceLine = price
+        ? `Requested limit price: ${formatAmount(price)} ${currency}`
+        : `Target price: ${formatAmount(currentPrice)} ${currency}`;
       const assetBalance = getAssetBalance(portfolio, asset);
       const currencyBalance = getAssetBalance(portfolio, currency);
       return [
         `${side} ${type} order created (${id}) for ${symbol}`,
-        `Requested amount: ${amount}`,
-        `Current symbol portfolio: ${assetBalance.total} ${asset} / ${currencyBalance.total} ${currency}`,
+        `Requested amount: ${formatAmount(amount)}`,
+        `Current symbol portfolio: ${formatAmount(assetBalance.total)} ${asset} / ${formatAmount(currencyBalance.total)} ${currency}`,
         priceLine,
         `At time: ${toISOString(orderCreationDate)}`,
         '------',
@@ -283,12 +281,18 @@ export class EventSubscriber extends Plugin {
       const { id, amount, side, type, price, orderCancelationDate, filled, remaining, symbol } = order;
       const [asset, currency] = symbol.split('/');
       const currentPrice = this.prices.get(symbol) ?? 0;
-      const priceLine = price ? `Requested limit price: ${price} ${currency}` : `Current price: ${currentPrice} ${currency}`;
+      const priceLine = price
+        ? `Requested limit price: ${formatAmount(price)} ${currency}`
+        : `Current price: ${formatAmount(currentPrice)} ${currency}`;
       // An order leaves both amounts out when no answer of the exchange reported a fill (see OrderCanceledEvent): printed as they were,
       // they read "undefined"
-      const fillLines = isNil(filled)
-        ? [`Filled amount: not reported / ${amount} ${asset}`]
-        : [`Filled amount: ${filled} / ${amount} ${asset}`, `Remaining amount: ${remaining} ${asset}`];
+      const fillLines =
+        isNil(filled) || isNil(remaining)
+          ? [`Filled amount: not reported / ${formatAmount(amount)} ${asset}`]
+          : [
+              `Filled amount: ${formatAmount(filled)} / ${formatAmount(amount)} ${asset}`,
+              `Remaining amount: ${formatAmount(remaining)} ${asset}`,
+            ];
       return [
         `${side} ${type} order canceled (${id}) for ${symbol}`,
         `At time: ${toISOString(orderCancelationDate)}`,
@@ -310,8 +314,8 @@ export class EventSubscriber extends Plugin {
         // The Trader follows it no more: only a look at the exchange tells whether it is there, and what it executed
         ...(mayBeLive ? ['It may still be live on the exchange, where Gekko follows it no more: check it there'] : []),
         `At time: ${toISOString(orderErrorDate)}`,
-        `Requested amount: ${amount}`,
-        `Current price: ${currentPrice} ${currency}`,
+        `Requested amount: ${formatAmount(amount)}`,
+        `Current price: ${formatAmount(currentPrice)} ${currency}`,
         '------',
       ].join('\n');
     });
@@ -326,15 +330,18 @@ export class EventSubscriber extends Plugin {
       const currencyBalance = getAssetBalance(portfolio, currency);
       // Without a fee rate (no trade of the order reported one), the Trader assumes no fee (computeOrderPricing): it sends a fee of 0
       // and the bare trade price as the effective price, which must not read as a free trade at a price fee included
-      const isFeeKnown = Number.isFinite(feePercent);
+      const isFeeKnown = isFiniteNumber(feePercent);
       return [
         `${side} ${type} order completed (${id}) for ${symbol}`,
-        `Amount: ${amount} ${asset}`,
-        isFeeKnown ? `Price: ${effectivePrice} ${currency}` : `Price (excluding fee): ${effectivePrice} ${currency}`,
-        `Fee percent: ${isFeeKnown ? `${feePercent}%` : 'unknown'}`,
-        `Fee: ${isFeeKnown ? `${fee} ${currency}` : 'unknown'}`,
+        `Amount: ${formatAmount(amount)} ${asset}`,
+        isFeeKnown
+          ? `Price: ${formatAmount(effectivePrice)} ${currency}`
+          : `Price (excluding fee): ${formatAmount(effectivePrice)} ${currency}`,
+        // A rate keeps its decimals, as the amounts do: 0.075 % rounded to 2 decimals would read 0.07 %
+        `Fee percent: ${isFeeKnown ? `${formatAmount(feePercent)}%` : 'unknown'}`,
+        `Fee: ${isFeeKnown ? `${formatAmount(fee)} ${currency}` : 'unknown'}`,
         `At time: ${toISOString(orderExecutionDate)}`,
-        `Current portfolio: ${assetBalance.total} ${asset} / ${currencyBalance.total} ${currency}`,
+        `Current portfolio: ${formatAmount(assetBalance.total)} ${asset} / ${formatAmount(currencyBalance.total)} ${currency}`,
         '------',
       ].join('\n');
     });
@@ -349,20 +356,24 @@ export class EventSubscriber extends Plugin {
   }
 
   public onRoundtripCompleted(payloads: RoundTrip[]) {
-    this.notify('roundtrip_complete', payloads, ({ pnl, profit, duration, entryPrice, exitPrice, maxAdverseExcursion, exitAt }) => {
-      const durationStr = formatDuration(intervalToDuration({ start: 0, end: duration }));
-      return [
+    this.notify('roundtrip_complete', payloads, ({ pnl, profit, duration, entryPrice, exitPrice, maxAdverseExcursion, exitAt }) =>
+      [
         'Roundtrip completed',
-        `PnL: ${formatAmount(pnl)}`,
-        `Profit: ${round(profit, 2)}%`,
-        `Duration: ${durationStr}`,
-        `Entry Price: ${entryPrice}`,
-        `Exit Price: ${exitPrice}`,
-        `Max Adverse Excursion: ${round(maxAdverseExcursion, 2)}%`,
+        // A round trip that no portfolio read valued has neither (see RoundTrip): written as they come, they read NaN
+        `PnL: ${isFiniteNumber(pnl) ? formatAmount(pnl) : 'unknown'}`,
+        // Rounded as the console table rounds them (see PERCENT_ROUNDING): rounded half up here, a round trip of 2.345 % read 2.35 %,
+        // and 2.34 % on the console
+        `Profit: ${isFiniteNumber(profit) ? formatPercent(profit, PERCENT_ROUNDING.profit) : 'unknown'}`,
+        // On the UTC calendar from epoch 0: on the host's, a round trip of 120 days read "3 months 30 days 1 hour" in New York
+        `Duration: ${formatDurationUTC(0, duration)}`,
+        // Written as the amounts are: the mean price of the SELLs read 0.10000000000000002
+        `Entry Price: ${formatAmount(entryPrice)}`,
+        `Exit Price: ${formatAmount(exitPrice)}`,
+        `Max Adverse Excursion: ${formatPercent(maxAdverseExcursion, PERCENT_ROUNDING.maxAdverseExcursion)}`,
         `At time: ${toISOString(exitAt)}`,
         '------',
-      ].join('\n');
-    });
+      ].join('\n'),
+    );
   }
 
   // --- END LISTENERS ---

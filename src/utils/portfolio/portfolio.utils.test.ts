@@ -10,7 +10,6 @@ import {
   getAssetBalance,
   initializePortfolio,
   isFetchedPortfolio,
-  updateAssetBalance,
 } from './portfolio.utils';
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -78,26 +77,6 @@ describe('getAssetBalance', () => {
     const portfolio = createEmptyPortfolio();
     getAssetBalance(portfolio, 'UNKNOWN').free = 5;
     expect(getAssetBalance(portfolio, 'UNKNOWN')).toEqual(balance(0, 0, 0));
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// updateAssetBalance
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('updateAssetBalance', () => {
-  it('adds a new balance to the portfolio if it did not exist', () => {
-    const portfolio: Portfolio = new Map();
-    updateAssetBalance(portfolio, 'BTC', balance(5, 0, 5));
-
-    expect(portfolio.get('BTC')).toEqual({ free: 5, used: 0, total: 5 });
-  });
-
-  it('overwrites an existing balance in the portfolio', () => {
-    const portfolio: Portfolio = new Map([['BTC', balance(1, 0, 1)]]);
-    updateAssetBalance(portfolio, 'BTC', balance(10, 2, 12));
-
-    expect(portfolio.get('BTC')).toEqual({ free: 10, used: 2, total: 12 });
   });
 });
 

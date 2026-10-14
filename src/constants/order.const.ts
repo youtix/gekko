@@ -16,3 +16,19 @@ export const EMPTY_ORDER_SUMMARY = {
   feePercent: undefined,
   orderExecutionDate: NaN,
 } as const;
+/**
+ * The decimals the exchanges book the currency of an order to, as Binance keeps every balance: the simulator books the cost of a BUY,
+ * its fee on top, and the proceeds of a SELL, its fee taken off, rounded to them. Booked whole, amount × price × (1 ± fee) had more
+ * digits than a double holds beside a balance (up to 20 decimals for the documented market, whose amounts and prices have 8, at a fee of
+ * 0.0004), and the currency balances could not be added up in decimal.
+ */
+export const COST_DECIMALS = 8;
+/**
+ * The smallest amount of currency the exchanges book, a unit of the last of the COST_DECIMALS: they book the cost of an order rounded
+ * to it, while an equity values a holding at amount × price, which has more decimals on a pair such as ETH/BTC (4-decimal amounts at
+ * 5-decimal prices). Valued at the price it was bought at, a holding came out up to half a unit, 5e-9, above or below what it cost: a
+ * round trip sold back at that price without a fee was a win or a loss, and a peak the sale never regained opened a drawdown that
+ * lasted to the end of the run. Two equities less than a unit apart are one amount (see calculateDrawdowns, calculateReturns and the
+ * P&L of a round trip, measureRoundTrip).
+ */
+export const BOOKED_CURRENCY_UNIT = 10 ** -COST_DECIMALS;

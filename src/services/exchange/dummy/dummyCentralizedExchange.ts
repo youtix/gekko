@@ -1,3 +1,4 @@
+import { COST_DECIMALS } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
@@ -17,7 +18,6 @@ import { round, shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, initializePortfolio } from '@utils/portfolio/portfolio.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
 import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
-import { COST_DECIMALS } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
 import { roundToMarketPrecision } from './dummyCentralizedExchange.utils';
 

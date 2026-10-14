@@ -6,6 +6,8 @@ import {
   STRATEGY_INFO_EVENT,
 } from '@constants/event.const';
 import { GekkoError } from '@errors/gekko.error';
+import type { PipelineContext } from '@models/pipeline.types';
+import * as allPlugin from '@plugins/index';
 import { config } from '@services/configuration/configuration';
 import * as injecter from '@services/injecter/injecter';
 import { warning } from '@services/logger';
@@ -14,8 +16,6 @@ import { useTimeZone } from '@utils/date/date.mock';
 import { SequentialEventEmitter } from '@utils/event/sequentialEventEmitter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
-import { PipelineContext } from '../../../models/pipeline.types';
-import * as allPlugin from '../../../plugins/index';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import * as pipelineModule from './pipeline';
 import { PluginsEmitSameEventError } from './pipeline.error';

@@ -1,9 +1,11 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { AdviceOrder } from '@models/advice.types';
 import { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent, RoundTrip } from '@models/event.types';
 import { BalanceDetail } from '@models/portfolio.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
 import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { toTimestamp } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { UUID } from 'node:crypto';
@@ -894,6 +896,96 @@ describe('EventSubscriber', () => {
       onOrderCompleted(plugin, { order: { feePercent, effectivePrice, fee } });
       await settle();
       expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+    });
+
+    // The amounts, prices and balances of a notification are written as those of the other outputs (see formatAmount): their thousands
+    // grouped, up to 8 decimals, never with an exponent. Written by String, a dust amount read 1.2e-7, and a sum its binary noise. A fee
+    // rate keeps its decimals too: rounded to 2 as the percentages of a report are, 0.075 % would read 0.07 %.
+    describe('figures written as amounts', () => {
+      const dust = 0.00000012;
+      const balances = new Map<string, BalanceDetail>([
+        ['BTC', { free: dust, used: 0, total: dust }],
+        ['USD', { free: 47500, used: 0, total: 47500 }],
+      ]);
+
+      it.each`
+        event               | notify                                                                                             | line
+        ${'strat_create'}   | ${(p: EventSubscriber) => onStrategyCreateOrder(p, { amount: dust })}                              | ${'Requested amount: 0.00000012'}
+        ${'strat_create'}   | ${(p: EventSubscriber) => onStrategyCreateOrder(p, { type: 'LIMIT', price: 42500 })}               | ${'Requested limit price: 42,500 USD'}
+        ${'strat_create'}   | ${(p: EventSubscriber) => onStrategyCreateOrder(p, { type: 'MARKET', price: 0.1 + 0.2 })}          | ${'Target price: 0.3 USD'}
+        ${'order_init'}     | ${(p: EventSubscriber) => onOrderInitiated(p, { order: { amount: dust } })}                        | ${'Requested amount: 0.00000012'}
+        ${'order_init'}     | ${(p: EventSubscriber) => onOrderInitiated(p, { exchange: { portfolio: balances } })}              | ${'Current symbol portfolio: 0.00000012 BTC / 47,500 USD'}
+        ${'order_cancel'}   | ${(p: EventSubscriber) => onOrderCanceled(p, { order: { filled: dust, remaining: 1 } })}           | ${'Filled amount: 0.00000012 / 1 BTC'}
+        ${'order_error'}    | ${(p: EventSubscriber) => p.onOrderErrored([makeOrderErroredEvent({ order: { amount: 47500 } })])} | ${'Requested amount: 47,500'}
+        ${'order_complete'} | ${(p: EventSubscriber) => onOrderCompleted(p, { order: { amount: dust } })}                        | ${'Amount: 0.00000012 BTC'}
+        ${'order_complete'} | ${(p: EventSubscriber) => onOrderCompleted(p, { order: { effectivePrice: 42542.5 } })}             | ${'Price: 42,542.5 USD'}
+        ${'order_complete'} | ${(p: EventSubscriber) => onOrderCompleted(p, { order: { feePercent: 0.075 } })}                   | ${'Fee percent: 0.075%'}
+        ${'order_complete'} | ${(p: EventSubscriber) => onOrderCompleted(p, { exchange: { portfolio: balances } })}              | ${'Current portfolio: 0.00000012 BTC / 47,500 USD'}
+      `('writes "$line" in the $event notification', async ({ event, notify, line }) => {
+        plugin['handleCommand'](`/sub_${event}`);
+        notify(plugin);
+        await settle();
+        expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+      });
+    });
+
+    // A round trip is written as the console table of the RoundTripAnalyzer writes it: its prices as amounts, its percentages rounded
+    // down to 2 decimals (see PERCENT_ROUNDING), its duration on the UTC calendar. Its P&L and profit are unknown (NaN) when no
+    // portfolio read valued it: written as they came, they read "PnL: NaN" and "Profit: NaN%".
+    describe('the message of a round trip', () => {
+      const notifyRoundTrip = async (fields: Partial<RoundTrip>) => {
+        plugin['handleCommand']('/sub_roundtrip_complete');
+        plugin.onRoundtripCompleted([makeRoundTrip(fields)]);
+        await settle();
+      };
+
+      it('lists its figures', async () => {
+        await notifyRoundTrip({ exitAt: toTimestamp(firstExit) });
+        expect(fakeBot.sendMessage).toHaveBeenCalledExactlyOnceWith(
+          [
+            'Roundtrip completed',
+            'PnL: 100',
+            'Profit: 10%',
+            'Duration: 1 second',
+            'Entry Price: 100',
+            'Exit Price: 110',
+            'Max Adverse Excursion: 0%',
+            `At time: ${firstExit}`,
+            '------',
+          ].join('\n'),
+        );
+      });
+
+      it.each`
+        description                                | fields                                | line
+        ${'an unknown P&L'}                        | ${{ pnl: NaN }}                       | ${'PnL: unknown'}
+        ${'an unknown profit'}                     | ${{ profit: NaN }}                    | ${'Profit: unknown'}
+        ${'a P&L with its thousands grouped'}      | ${{ pnl: -1234.5678 }}                | ${'PnL: -1,234.5678'}
+        ${'a loss rounded down'}                   | ${{ profit: -5.001 }}                 | ${'Profit: -5.01%'}
+        ${'a profit on a tie rounded down'}        | ${{ profit: 3.125 }}                  | ${'Profit: 3.12%'}
+        ${'an adverse excursion rounded down'}     | ${{ maxAdverseExcursion: 1.005 }}     | ${'Max Adverse Excursion: 1%'}
+        ${'an adverse excursion on a tie'}         | ${{ maxAdverseExcursion: 3.125 }}     | ${'Max Adverse Excursion: 3.12%'}
+        ${'a mean price without its binary noise'} | ${{ exitPrice: 0.10000000000000002 }} | ${'Exit Price: 0.1'}
+        ${'a price of a fraction of a cent'}       | ${{ entryPrice: 0.00000012 }}         | ${'Entry Price: 0.00000012'}
+      `('writes $description: $line', async ({ fields, line }) => {
+        await notifyRoundTrip(fields);
+        expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+      });
+
+      // From epoch 0, on the UTC calendar: on the host's, New York moved its clocks in 1970, and 120 days read "3 months 30 days 1 hour"
+      describe.each`
+        timeZone
+        ${'UTC'}
+        ${'Europe/Paris'}
+        ${'America/New_York'}
+      `('on a host in $timeZone', ({ timeZone }) => {
+        useTimeZone(timeZone);
+
+        it('writes a round trip of 120 days as lasting 4 months', async () => {
+          await notifyRoundTrip({ duration: 120 * 24 * 60 * ONE_MINUTE });
+          expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining('\nDuration: 4 months\n'));
+        });
+      });
     });
   });
 

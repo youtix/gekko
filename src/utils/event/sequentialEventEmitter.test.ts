@@ -58,17 +58,6 @@ const deliverPortfolios = async (count: number, listen: (index: number, payloads
   await broadcastAll(emitter);
 };
 
-/** Queues the payload under 'a', which nobody listens to */
-const queueAlone = (emitter: SequentialEventEmitter, payload: unknown) => emitter.addDeferredEmit('a', payload);
-
-/** Queues a payload under 'a' for a listener, removes it, then queues the payload, nobody listening: both in one group */
-const queueAfterListenedPayload = (emitter: SequentialEventEmitter, payload: unknown) => {
-  emitter.on('a', noop);
-  emitter.addDeferredEmit('a', { value: 1 });
-  emitter.off('a', noop);
-  emitter.addDeferredEmit('a', payload);
-};
-
 /** An emitter whose first listener of 'a' throws, and whose second records the payloads it receives */
 const createEmitterWithFailingListener = () => {
   const emitter = new SequentialEventEmitter('test');
@@ -142,29 +131,6 @@ describe('SequentialEventEmitter', () => {
       await emitter.emit('test', payload);
 
       expect(received[index]).toBe(payload);
-    });
-  });
-
-  describe('off', () => {
-    it('should stop calling the listener removed, and only it', async () => {
-      const emitter = new SequentialEventEmitter('test');
-      const calls: string[] = [];
-      const removed = () => {
-        calls.push('removed');
-      };
-      emitter.on('test', removed);
-      emitter.on('test', () => {
-        calls.push('kept');
-      });
-
-      emitter.off('test', removed);
-      await emitter.emit('test');
-
-      expect(calls).toEqual(['kept']);
-    });
-
-    it('should do nothing for an event without listener', () => {
-      expect(() => new SequentialEventEmitter('test').off('unknown', noop)).not.toThrow();
     });
   });
 
@@ -272,25 +238,18 @@ describe('SequentialEventEmitter', () => {
     });
 
     // Queued for nobody, the payload is the emitter's own object, not a copy: the listener added since gets a copy of its own
-    it.each`
-      queued                                                             | queue
-      ${'alone'}                                                         | ${queueAlone}
-      ${'after a payload queued for a listener since removed, in a row'} | ${queueAfterListenedPayload}
-    `(
-      'should leave a payload queued for nobody $queued as it was when a listener added before its delivery writes to it',
-      async ({ queue }: { queue: (emitter: SequentialEventEmitter, payload: { value: number }) => void }) => {
-        const emitter = new SequentialEventEmitter('test');
-        const payload = { value: 2 };
-        queue(emitter, payload);
-        emitter.on('a', (payloads: { value: number }[]) => {
-          payloads.at(-1)!.value = 0;
-        });
+    it('should leave a payload queued for nobody as it was when a listener added before its delivery writes to it', async () => {
+      const emitter = new SequentialEventEmitter('test');
+      const payload = { value: 2 };
+      emitter.addDeferredEmit('a', payload);
+      emitter.on('a', (payloads: { value: number }[]) => {
+        payloads.at(-1)!.value = 0;
+      });
 
-        await broadcastAll(emitter);
+      await broadcastAll(emitter);
 
-        expect(payload).toEqual({ value: 2 });
-      },
-    );
+      expect(payload).toEqual({ value: 2 });
+    });
 
     it('should deliver a listener added once a payload queued for nobody is broadcast only the payloads queued after it', async () => {
       const emitter = new SequentialEventEmitter('test');
@@ -520,15 +479,6 @@ describe('SequentialEventEmitter', () => {
       for (const [event, payload] of queued) emitter.addDeferredEmit(event, payload);
 
       expect(Array.from(emitter.countUndeliveredPayloads())).toEqual(counts);
-    });
-
-    it('should not count an event whose listeners were all removed', () => {
-      const emitter = new SequentialEventEmitter('test');
-      emitter.on('a', noop);
-      emitter.off('a', noop);
-      emitter.addDeferredEmit('a', 'a1');
-
-      expect(emitter.countUndeliveredPayloads().size).toBe(0);
     });
 
     it('should count nothing once the queue is broadcast', async () => {

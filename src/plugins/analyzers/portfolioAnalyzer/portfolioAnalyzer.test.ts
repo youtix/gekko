@@ -1,4 +1,5 @@
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@constants/event.const';
+import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -37,12 +38,11 @@ vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => {
   return { ...actual, calculatePortfolioTotalValue: vi.fn(actual.calculatePortfolioTotalValue) };
 });
 
-const MINUTE = 60_000;
 /** The bucket of a minute, or the timeframe bucket of a 1m timeframe, its candles closing at the given prices */
 const bucketAt = (minute: number, btc: number, eth = 10) => {
   const bucket = new Map() as CandleBucket;
-  bucket.set('BTC/USDT', { start: minute * MINUTE, open: btc, high: btc, low: btc, close: btc, volume: 1 });
-  bucket.set('ETH/USDT', { start: minute * MINUTE, open: eth, high: eth, low: eth, close: eth, volume: 1 });
+  bucket.set('BTC/USDT', { start: minute * ONE_MINUTE, open: btc, high: btc, low: btc, close: btc, volume: 1 });
+  bucket.set('ETH/USDT', { start: minute * ONE_MINUTE, open: eth, high: eth, low: eth, close: eth, volume: 1 });
   return bucket;
 };
 /** A portfolio holding these amounts and nothing else */
@@ -315,8 +315,8 @@ describe('PortfolioAnalyzer', () => {
       analyzer.onTimeframeCandle([bucketAt(1, 100)]);
       runMinute(2, 200);
       expect(deferredEmitSpy.mock.calls).toEqual([
-        [EQUITY_SNAPSHOT_EVENT, { date: 2 * MINUTE, totalValue: 100 }],
-        [EQUITY_SNAPSHOT_EVENT, { date: 3 * MINUTE, totalValue: 200 }],
+        [EQUITY_SNAPSHOT_EVENT, { date: 2 * ONE_MINUTE, totalValue: 100 }],
+        [EQUITY_SNAPSHOT_EVENT, { date: 3 * ONE_MINUTE, totalValue: 200 }],
       ]);
     });
 
@@ -514,7 +514,7 @@ describe('PortfolioAnalyzer', () => {
     // On a 1h timeframe, the bucket of minute 119 completes the warmup: it closes, at minute 120, the hourly candles that started at
     // minute 60. The events come in the order the pipeline delivers them (see PluginsStream).
     const COMPLETING_MINUTE = 119;
-    const CANDLE_CLOSE = 120 * MINUTE;
+    const CANDLE_CLOSE = 120 * ONE_MINUTE;
     const hourlyCandlesBucket = () => bucketAt(60, 100);
     const completeWarmup = (timeframeBucket: CandleBucket) => {
       (analyzer as any).processOneMinuteBucket(bucketAt(COMPLETING_MINUTE, 100));
@@ -539,10 +539,10 @@ describe('PortfolioAnalyzer', () => {
     });
 
     it.each`
-      buckets | duration       | run
-      ${0}    | ${0}           | ${'ends with the warmup'}
-      ${1}    | ${MINUTE}      | ${'goes on for a minute'}
-      ${60}   | ${60 * MINUTE} | ${'goes on for an hour'}
+      buckets | duration           | run
+      ${0}    | ${0}               | ${'ends with the warmup'}
+      ${1}    | ${ONE_MINUTE}      | ${'goes on for a minute'}
+      ${60}   | ${60 * ONE_MINUTE} | ${'goes on for an hour'}
     `('should last $duration ms when the run $run', ({ buckets, duration }) => {
       const { periodStartAt, periodEndAt } = reportAfter(buckets);
       expect(periodEndAt - periodStartAt).toBe(duration);
@@ -636,10 +636,10 @@ describe('PortfolioAnalyzer', () => {
     it('should add a point at the close of every timeframe candle, the latest portfolio valued at its closes', () => {
       holdWhileDoubling();
       expect((analyzer as any).equityCurve).toEqual([
-        { date: 2 * MINUTE, totalValue: 100 },
-        { date: 3 * MINUTE, totalValue: 100 },
-        { date: 4 * MINUTE, totalValue: 150 },
-        { date: 5 * MINUTE, totalValue: 200 },
+        { date: 2 * ONE_MINUTE, totalValue: 100 },
+        { date: 3 * ONE_MINUTE, totalValue: 100 },
+        { date: 4 * ONE_MINUTE, totalValue: 150 },
+        { date: 5 * ONE_MINUTE, totalValue: 200 },
       ]);
     });
 
@@ -651,7 +651,7 @@ describe('PortfolioAnalyzer', () => {
       ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'exposurePct'}       | ${100}
       ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'marketReturnPct'}   | ${100}
       ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'maxDrawdownPct'}    | ${50}
-      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'longestDrawdownMs'} | ${2 * MINUTE}
+      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'longestDrawdownMs'} | ${2 * ONE_MINUTE}
       ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'exposurePct'}       | ${50}
       ${'selling all of it but dust after a dip'} | ${tradeAroundDipLeavingDust} | ${'exposurePct'}       | ${50}
       ${'holding the currency only'}              | ${holdCurrency}              | ${'exposurePct'}       | ${0}
@@ -753,7 +753,7 @@ describe('PortfolioAnalyzer', () => {
     it('should add no point with a portfolio change, which the next timeframe candle marks', () => {
       startWith(holding(1));
       receive(holding(2));
-      expect((analyzer as any).equityCurve).toEqual([{ date: 2 * MINUTE, totalValue: 100 }]);
+      expect((analyzer as any).equityCurve).toEqual([{ date: 2 * ONE_MINUTE, totalValue: 100 }]);
     });
 
     describe('when the portfolioUpdates filter of the Trader holds back the portfolio change of a fill', () => {
@@ -801,7 +801,7 @@ describe('PortfolioAnalyzer', () => {
       `('should add no point to the curve with $event, which the next timeframe candle marks', ({ deliver }) => {
         startWith(holding(0, 0, 100));
         deliver();
-        expect((analyzer as any).equityCurve).toEqual([{ date: 2 * MINUTE, totalValue: 100 }]);
+        expect((analyzer as any).equityCurve).toEqual([{ date: 2 * ONE_MINUTE, totalValue: 100 }]);
       });
 
       it.each`
@@ -866,8 +866,8 @@ describe('PortfolioAnalyzer', () => {
       receive(holding(1));
       runMinute(2, 200);
       expect((analyzer as any).equityCurve).toEqual([
-        { date: 2 * MINUTE, totalValue: 100 },
-        { date: 3 * MINUTE, totalValue: 200 },
+        { date: 2 * ONE_MINUTE, totalValue: 100 },
+        { date: 3 * ONE_MINUTE, totalValue: 200 },
       ]);
     });
 
@@ -890,7 +890,7 @@ describe('PortfolioAnalyzer', () => {
         ({ closesTimeframeCandle }) => {
           startWith(holding(1));
           runMinute(2, 200, closesTimeframeCandle);
-          expect(finalReport().equityCurve.at(-1)).toEqual({ date: 3 * MINUTE, totalValue: 200 });
+          expect(finalReport().equityCurve.at(-1)).toEqual({ date: 3 * ONE_MINUTE, totalValue: 200 });
         },
       );
 
@@ -899,8 +899,8 @@ describe('PortfolioAnalyzer', () => {
         runMinute(2, 200);
         receive(holding(0, 0, 199)); // sold at 200, with a fee of 1
         expect(finalReport().equityCurve).toEqual([
-          { date: 2 * MINUTE, totalValue: 100 },
-          { date: 3 * MINUTE, totalValue: 199 },
+          { date: 2 * ONE_MINUTE, totalValue: 100 },
+          { date: 3 * ONE_MINUTE, totalValue: 199 },
         ]);
       });
 

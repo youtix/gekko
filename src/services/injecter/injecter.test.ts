@@ -1,8 +1,8 @@
 import { GekkoError } from '@errors/gekko.error';
 import { Watch } from '@models/configuration.types';
+import { config } from '@services/configuration/configuration';
 import { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { config } from '../configuration/configuration';
 import { inject } from './injecter';
 
 const { BinanceExchangeMock, DummyCentralizedExchangeMock, PaperTradingBinanceExchangeMock } = vi.hoisted(() => ({

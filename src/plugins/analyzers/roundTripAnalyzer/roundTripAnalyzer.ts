@@ -1,4 +1,5 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
+import { BOOKED_CURRENCY_UNIT } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { describeError } from '@errors/error.utils';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@models/event.types';
@@ -10,7 +11,7 @@ import { toISOString } from '@utils/date/date.utils';
 import { calculateMarketReturnPct, calculateTotalReturnPct, calculateWinRate, extractTopMAEs } from '@utils/finance/stats.utils';
 import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
 import { calculatePairEquity, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
-import { formatAmount, formatSignedPercent } from '@utils/string/string.utils';
+import { formatAmount, formatSignedPercent, pluralize } from '@utils/string/string.utils';
 import { first, isNil, sumBy } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
@@ -18,7 +19,7 @@ import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
 import { calculatePerformanceStatistics } from '../analyzer.utils';
 import { DateRange, Fill, OpenRoundTrip, OrderFill, Start, TradingReport } from './roundTrip.types';
-import { BOOKED_CURRENCY_UNIT, EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
+import { EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 
 /** A mean price weighted by amounts, once one more price is added with its amount */
@@ -248,7 +249,9 @@ export class RoundTripAnalyzer extends Plugin {
    */
   private leaveOutWarmupTrading(startPrice: number): void {
     if (this.tradeCount > 0) {
-      const warmupTrading = `the ${this.tradeCount} trade(s) of the warmup, and the ${this.roundTrips.length} round trip(s) they closed`;
+      const trades = `${this.tradeCount} ${pluralize('trade', this.tradeCount)}`;
+      const roundTrips = `${this.roundTrips.length} ${pluralize('round trip', this.roundTrips.length)}`;
+      const warmupTrading = `the ${trades} of the warmup, and the ${roundTrips} they closed`;
       info(
         'roundtrip analyzer',
         `The report measures the period from ${toISOString(this.dates.start)} on: ${warmupTrading}, are left out.`,

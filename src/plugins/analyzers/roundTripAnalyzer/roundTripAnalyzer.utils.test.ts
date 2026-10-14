@@ -70,13 +70,18 @@ describe('roundTripAnalyzer.utils', () => {
       expect(printedRow()['P&L']).toBe(expected);
     });
 
-    // A round trip that no portfolio read valued has neither a P&L nor a profit (NaN): written as they come, they read as figures
+    // A round trip that no portfolio read valued has neither a P&L nor a profit (NaN): written as they come, they read as figures. Its
+    // percentages are rounded down to 2 decimals, as on Telegram (see PERCENT_ROUNDING)
     it.each`
-      field       | fields              | expected
-      ${'P&L'}    | ${{ pnl: NaN }}     | ${'unknown'}
-      ${'profit'} | ${{ profit: NaN }}  | ${'unknown'}
-      ${'profit'} | ${{ profit: 0.42 }} | ${'0.42%'}
-      ${'profit'} | ${{ profit: -0.5 }} | ${'-0.5%'}
+      field       | fields                            | expected
+      ${'P&L'}    | ${{ pnl: NaN }}                   | ${'unknown'}
+      ${'profit'} | ${{ profit: NaN }}                | ${'unknown'}
+      ${'profit'} | ${{ profit: 0.42 }}               | ${'0.42%'}
+      ${'profit'} | ${{ profit: -0.5 }}               | ${'-0.5%'}
+      ${'profit'} | ${{ profit: -5.001 }}             | ${'-5.01%'}
+      ${'profit'} | ${{ profit: 3.125 }}              | ${'3.12%'}
+      ${'MAE'}    | ${{ maxAdverseExcursion: 3.125 }} | ${'3.12%'}
+      ${'MAE'}    | ${{ maxAdverseExcursion: 1.005 }} | ${'1%'}
     `('should print $field $expected for a round trip with $fields', ({ field, fields, expected }) => {
       logRoundtrip({ ...roundTrip, ...fields }, 'BTC', true);
 
@@ -88,17 +93,21 @@ describe('roundTripAnalyzer.utils', () => {
       ${'UTC'}
       ${'Europe/Paris'}
       ${'America/New_York'}
+      ${'America/Santiago'}
     `('on a host in $timeZone', ({ timeZone }) => {
       useTimeZone(timeZone);
 
       // Counted from epoch 0 on the UTC calendar: on the host's, New York moved its clocks on 1970-04-26, and every duration that
-      // reached past it gained an hour (Paris did not change its clocks in 1970)
+      // reached past it gained an hour (Paris did not change its clocks in 1970). Through the TZDate of @date-fns/tz for 'UTC', a
+      // duration ending on a UTC midnight that the host's zone skipped lost an hour: 283 days read "9 months 10 days -1 hours" in
+      // Santiago, which moved its clocks at midnight then
       it.each`
         duration                                       | expected
         ${60_000}                                      | ${'1 minute'}
         ${3 * 86_400_000 + 5 * 3_600_000 + 7 * 60_000} | ${'3 days 5 hours 7 minutes'}
         ${116 * 86_400_000}                            | ${'3 months 26 days'}
         ${200 * 86_400_000}                            | ${'6 months 19 days'}
+        ${283 * 86_400_000}                            | ${'9 months 10 days'}
         ${400 * 86_400_000}                            | ${'1 year 1 month 4 days'}
       `('should print an exposed duration of $duration ms as $expected', ({ duration, expected }) => {
         logRoundtrip({ ...roundTrip, duration }, 'BTC', true);
@@ -138,6 +147,29 @@ describe('roundTripAnalyzer.utils', () => {
       ${'no win rate without a round trip'}       | ${{ ...report, winRate: null }}                | ${'winRate'}             | ${'N/A'}
     `('should print $description under $field', ({ tradingReport, field, expected }) => {
       logFinalize(tradingReport, 'USDT');
+
+      expect(printedRow()[field]).toBe(expected);
+    });
+
+    // As the CSV writes them (see PERCENT_ROUNDING, formatRatio): a win rate of 3.125 % read 3.13 % here, rounded half up, and 3.12 %
+    // there; the downside deviation, a ratio there as the volatility is here, read 1.23 % for the 1.24 of the CSV
+    it.each`
+      field                    | fields                                     | expected
+      ${'marketReturnPct'}     | ${{ marketReturnPct: -5.001 }}             | ${'-5.01%'}
+      ${'marketReturnPct'}     | ${{ marketReturnPct: 3.125 }}              | ${'3.12%'}
+      ${'alpha'}               | ${{ alpha: -5.001 }}                       | ${'-5.01%'}
+      ${'alpha'}               | ${{ alpha: 3.125 }}                        | ${'3.12%'}
+      ${'annualizedNetProfit'} | ${{ annualizedReturnPct: -5.001 }}         | ${'85,617.247 USDT (-5.01%)'}
+      ${'annualizedNetProfit'} | ${{ annualizedReturnPct: 3.125 }}          | ${'85,617.247 USDT (3.12%)'}
+      ${'exposurePct'}         | ${{ exposurePct: -5.001 }}                 | ${'-5% of time exposed'}
+      ${'exposurePct'}         | ${{ exposurePct: 3.125 }}                  | ${'3.12% of time exposed'}
+      ${'winRate'}             | ${{ winRate: -5.001 }}                     | ${'-5%'}
+      ${'winRate'}             | ${{ winRate: 3.125 }}                      | ${'3.12%'}
+      ${'downsideDeviation'}   | ${{ downsideDeviation: 1.239 }}            | ${'1.24'}
+      ${'volatility'}          | ${{ volatility: 1.239 }}                   | ${'1.24'}
+      ${'topMAEs'}             | ${{ topMAEs: [3.125, 1.005, 0.00000012] }} | ${'3.12%, 1%, 0%'}
+    `('should print $field $expected for a report with $fields', ({ field, fields, expected }) => {
+      logFinalize({ ...report, ...fields }, 'USDT');
 
       expect(printedRow()[field]).toBe(expected);
     });

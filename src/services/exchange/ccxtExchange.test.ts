@@ -349,14 +349,19 @@ describe('CCXTExchange', () => {
       });
 
       // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET. Counted on the host's calendar, a page across that night came out
-      // an hour short: 3 days 10 hours 19 minutes.
-      describe('on a host in Europe/Paris, a page across the end of DST', () => {
+      // an hour short: 3 days 10 hours 19 minutes. On 2023-03-26 it skips from 02:00 CET to 03:00 CEST: through the TZDate of
+      // @date-fns/tz for 'UTC', a page ending at 02:30Z that day, a wall-clock time Paris skips, came out at "1 day -1 hours".
+      describe('on a host in Europe/Paris', () => {
         useTimeZone('Europe/Paris');
 
-        it('logs the duration of 5000 candles from 2026-10-24T00:00Z on the UTC calendar: 3 days 11 hours 19 minutes', async () => {
-          (mapOhlcvToCandles as Mock).mockReturnValue(candlesFrom(Date.UTC(2026, 9, 24), 5000));
+        it.each`
+          description                         | start                           | count   | duration
+          ${'across the end of DST'}          | ${Date.UTC(2026, 9, 24)}        | ${5000} | ${'3 days 11 hours 19 minutes'}
+          ${'ending in the hour Paris skips'} | ${Date.UTC(2023, 2, 25, 2, 30)} | ${1441} | ${'1 day'}
+        `('logs the duration of a page $description on the UTC calendar: $duration', async ({ start, count, duration }) => {
+          (mapOhlcvToCandles as Mock).mockReturnValue(candlesFrom(start, count));
           await exchange.fetchOHLCV('BTC/USDT');
-          expect(logger.debug).toHaveBeenCalledWith('exchange', expect.stringMatching(/\(3 days 11 hours 19 minutes\)$/));
+          expect(logger.debug).toHaveBeenCalledWith('exchange', expect.stringMatching(new RegExp(`\\(${duration}\\)$`)));
         });
       });
     });

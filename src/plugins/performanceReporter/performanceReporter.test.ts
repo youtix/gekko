@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { Watch } from '@models/configuration.types';
 import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
@@ -54,7 +55,7 @@ const OLD_PORTFOLIO_HEADER =
 const OLD_TRADING_HEADER =
   'id;pair;net profit;total return;annualized return;win rate;market;alpha;sharpe ratio;sortino ratio;trade count;start time;end time;duration;exposure;start balance;final balance;start price;end price;standard deviation;downside deviation;top maes';
 
-const DAY = 86_400_000;
+const DAY = 24 * 60 * ONE_MINUTE;
 
 const baseConfig = {
   name: 'PerformanceReporter',
@@ -307,6 +308,34 @@ describe('PerformanceReporter', () => {
         reporter.onPerformanceReport({ ...sampleTradingReport, topMAEs });
 
         expect(cellOf(file.content, 'top maes')).toBe(value);
+      });
+    });
+
+    // Each percentage rounded to 2 decimals as its figure is wherever it is written (see PERCENT_ROUNDING): down for the returns, the
+    // alpha and the max drawdown, half to even for the win rate and the exposure (documentation/plugins.md)
+    describe('When the report holds percentages', () => {
+      it.each`
+        report                   | fields                             | column             | value
+        ${samplePortfolioReport} | ${{ totalReturnPct: -5.001 }}      | ${'total return'}  | ${'-5.01%'}
+        ${samplePortfolioReport} | ${{ totalReturnPct: 3.125 }}       | ${'total return'}  | ${'3.12%'}
+        ${sampleTradingReport}   | ${{ annualizedReturnPct: -5.001 }} | ${'yearly profit'} | ${'3650 (-5.01%)'}
+        ${sampleTradingReport}   | ${{ annualizedReturnPct: 3.125 }}  | ${'yearly profit'} | ${'3650 (3.12%)'}
+        ${sampleTradingReport}   | ${{ winRate: -5.001 }}             | ${'win rate'}      | ${'-5%'}
+        ${sampleTradingReport}   | ${{ winRate: 3.125 }}              | ${'win rate'}      | ${'3.12%'}
+        ${samplePortfolioReport} | ${{ marketReturnPct: -5.001 }}     | ${'market'}        | ${'-5.01%'}
+        ${samplePortfolioReport} | ${{ marketReturnPct: 3.125 }}      | ${'market'}        | ${'3.12%'}
+        ${sampleTradingReport}   | ${{ alpha: -5.001 }}               | ${'alpha'}         | ${'-5.01%'}
+        ${sampleTradingReport}   | ${{ alpha: 3.125 }}                | ${'alpha'}         | ${'3.12%'}
+        ${samplePortfolioReport} | ${{ maxDrawdownPct: -5.001 }}      | ${'max drawdown'}  | ${'-5.01%'}
+        ${samplePortfolioReport} | ${{ maxDrawdownPct: 3.125 }}       | ${'max drawdown'}  | ${'3.12%'}
+        ${samplePortfolioReport} | ${{ exposurePct: -5.001 }}         | ${'exposure'}      | ${'-5%'}
+        ${samplePortfolioReport} | ${{ exposurePct: 3.125 }}          | ${'exposure'}      | ${'3.12%'}
+      `('should write $value under $column for $fields', ({ report, fields, column, value }) => {
+        const file = useInMemoryFile();
+
+        reporter.onPerformanceReport({ ...report, ...fields });
+
+        expect(cellOf(file.content, column)).toBe(value);
       });
     });
 

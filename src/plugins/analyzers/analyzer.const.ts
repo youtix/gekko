@@ -1,7 +1,29 @@
+import type { RoundTrip } from '@models/event.types';
+import type { PercentRounding } from '@utils/string/string.utils';
 import { hoursToMilliseconds } from 'date-fns';
 import { PerformanceStatistics } from './analyzer.types';
+import type { PortfolioReport } from './portfolioAnalyzer/portfolioAnalyzer.types';
+import type { TradingReport } from './roundTripAnalyzer/roundTrip.types';
 
-export const ROUND = 8;
+/**
+ * How each percentage of the reports and of a round trip is rounded to its 2 decimals (see formatPercent), the same wherever it is
+ * written: the CSV of the PerformanceReporter (documentation/plugins.md), the console tables of the analyzers and the Telegram message
+ * of a round trip. Down for a return, the alpha, a drawdown and an adverse excursion; half to even for a share of the round trips or of
+ * the time. Each output rounded in its own way, and one figure read 0.01 apart from one to the other: a total return of -5.001 % was
+ * -5.00 % on the console and -5.01 % in the CSV, a win rate of 3.125 % 3.13 % and 3.12 %, a round trip of 2.345 % 2.35 % on Telegram
+ * and 2.34 % on the console.
+ */
+export const PERCENT_ROUNDING = {
+  totalReturnPct: 'down',
+  annualizedReturnPct: 'down',
+  marketReturnPct: 'down',
+  alpha: 'down',
+  maxDrawdownPct: 'down',
+  profit: 'down',
+  maxAdverseExcursion: 'down',
+  winRate: 'halfEven',
+  exposurePct: 'halfEven',
+} as const satisfies Partial<Record<keyof PortfolioReport | keyof TradingReport | keyof RoundTrip, PercentRounding>>;
 
 /**
  * The share of a position below which what is left of it is dust that no SELL can sell: an amount rounded down to the lot size of the
@@ -17,7 +39,8 @@ export const DUST_TOLERANCE = 0.01;
  * thousands of %, with Sharpe and Sortino ratios to match. A day holds a whole cycle of crypto markets, which trade around the clock,
  * and caps that factor at 366; a longer horizon would understate the annualized figures of the runs of a few days, common in realtime.
  * A shorter period is annualized as if its returns had been spread over the day from its start: its annualized return, its annualized
- * net profit and its ratios alike, so that they agree with one another (see calculatePerformanceStatistics).
+ * net profit and its ratios alike, so that they agree with one another (see calculatePerformanceStatistics). A day of the calendar, as
+ * the years it is set against are, and not 24 hours of ONE_MINUTE, which the realtime e2e flows shrink to speed their clock up.
  */
 export const MIN_ANNUALIZATION_HORIZON_MS = hoursToMilliseconds(24);
 

@@ -35,15 +35,6 @@ describe('SequentialEventEmitter Performance', () => {
     });
   });
 
-  describe('off', () => {
-    bench('off - unregister listener', () => {
-      const emitter = new SequentialEventEmitter('bench');
-      const listener = () => {};
-      emitter.on('test', listener);
-      emitter.off('test', listener);
-    });
-  });
-
   describe('emit', () => {
     bench('emit - single sync listener', async () => {
       const emitter = new SequentialEventEmitter('bench');
@@ -154,12 +145,10 @@ describe('SequentialEventEmitter Performance', () => {
   });
 
   describe('full workflow', () => {
-    bench('full workflow - register, emit, off', async () => {
+    bench('full workflow - register, emit', async () => {
       const emitter = new SequentialEventEmitter('bench');
-      const listener = () => {};
-      emitter.on('test', listener);
+      emitter.on('test', () => {});
       await emitter.emit('test', { data: 42 });
-      emitter.off('test', listener);
     });
   });
 });

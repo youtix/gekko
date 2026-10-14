@@ -1,4 +1,4 @@
-import { ONE_MINUTE } from '@constants/time.const';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
 import { assetsSchema, currencySchema } from '@models/schema/pairConfig.schema';
 import { TradingPair } from '@models/utility.types';
@@ -69,17 +69,17 @@ const MAX_BATCH_SIZE = 31 * 24 * 60;
 
 const warmupSchema = z
   .strictObject({
-    tickrate: integerAtLeast('warmup.tickrate', MIN_TICKRATE).default(1000),
+    tickrate: integerAtLeast('warmup.tickrate', MIN_TICKRATE).default(ONE_SECOND),
     candleCount: integerAtLeast('warmup.candleCount', 0).default(0),
   })
-  .default({ tickrate: 1000, candleCount: 0 });
+  .default({ tickrate: ONE_SECOND, candleCount: 0 });
 
 export const watchSchema = z
   .strictObject({
     assets: assetsSchema,
     currency: currencySchema,
     timeframe: z.enum(TIMEFRAMES).optional(),
-    tickrate: integerAtLeast('tickrate', MIN_TICKRATE).default(1000),
+    tickrate: integerAtLeast('tickrate', MIN_TICKRATE).default(ONE_SECOND),
     mode: z.enum(['realtime', 'backtest', 'importer']),
     warmup: warmupSchema,
     daterange: daterangeSchema.optional(),

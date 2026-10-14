@@ -88,6 +88,16 @@ export const formatEveryDecimal = (value: number): string => {
   return value < 0 ? `-${unsigned}` : unsigned;
 };
 
+/** How formatPercent rounds a percentage to its 2 decimals: down to the hundredth below, or half to even (see round) */
+export type PercentRounding = 'down' | 'halfEven';
+
+/**
+ * A percentage to 2 decimals, for a person and for a CSV cell alike: the number round gives, then '%' (-5.01% for -5.001 rounded down,
+ * 3.12% for 3.125 rounded half to even, 10.5% for 10.5). The rounding is that of the figure, the same wherever it is written: each
+ * output rounding in its own way, one figure read 0.01 apart from one to the other.
+ */
+export const formatPercent = (value: number, rounding: PercentRounding): string => `${round(value, 2, rounding)}%`;
+
 export const formatSignedPercent = (value: number | null | undefined) => {
   if (!isFiniteNumber(value)) return 'n/a';
   const roundedValue = round(value, 2, 'halfEven');

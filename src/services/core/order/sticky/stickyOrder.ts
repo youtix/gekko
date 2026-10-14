@@ -1,3 +1,4 @@
+import { describeError, toError } from '@errors/error.utils';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
@@ -10,7 +11,6 @@ import { bindAll } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { Order } from '../order';
 import { OrderCancelDetails } from '../order.types';
-import { toError } from '../order.utils';
 
 // One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order the
 // exchange no longer knows.
@@ -115,7 +115,7 @@ export class StickyOrder extends Order {
       // A cancelation asked during the poll, or during the move it started, is sent now, rather than at the next check
       if (this.isCanceling && !this.isOrderCompleted()) await this.cancel();
     } catch (err) {
-      error('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order check failed: ${toError(err).message}`);
+      error('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order check failed: ${describeError(err)}`);
     }
   }
 
@@ -192,7 +192,8 @@ export class StickyOrder extends Order {
   protected handleCreateOrderError(error: unknown) {
     if (error instanceof OrderOutOfRangeError && this.isOrderPartiallyFilled()) return Promise.resolve(this.orderFilled());
 
-    if (error instanceof InvalidOrder || error instanceof OrderOutOfRangeError) return Promise.resolve(this.orderRejected(error.message));
+    if (error instanceof InvalidOrder || error instanceof OrderOutOfRangeError)
+      return Promise.resolve(this.orderRejected(describeError(error)));
 
     return Promise.resolve(this.orderErroredAtCreation(error));
   }
@@ -249,7 +250,7 @@ export class StickyOrder extends Order {
     } catch (err) {
       // The order is live and placed: a ticker out of reach for now, whether the network failed or the data came back incomplete,
       // must not end it. It stays at its price, and the next check prices it again.
-      const reason = toError(err).message;
+      const reason = describeError(err);
       return warning('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order not moved, its new price is unknown: ${reason}`);
     }
     if (this.isOutpriced(price, ticker)) {
@@ -279,7 +280,8 @@ export class StickyOrder extends Order {
   protected orderErrored(error: Error, mayBeLive?: boolean) {
     this.endMove();
     const filled = this.getFilledAmount();
-    const reported = filled > 0 ? new Error(`${error.message} (${filled} of ${this.amount} already filled)`, { cause: error }) : error;
+    const reported =
+      filled > 0 ? new Error(`${describeError(error)} (${filled} of ${this.amount} already filled)`, { cause: error }) : error;
     super.orderErrored(reported, mayBeLive);
   }
 }

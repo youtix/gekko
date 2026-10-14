@@ -1,3 +1,4 @@
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { waitSync } from '@utils/process/process.utils';
 import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
@@ -17,8 +18,7 @@ vi.mock('@utils/process/process.utils', () => ({
   waitSync: vi.fn(),
 }));
 
-const SECOND = 1000;
-const HOUR = 3600 * SECOND;
+const HOUR = 60 * ONE_MINUTE;
 
 const errnoError = (code: string) => Object.assign(new Error(code), { code });
 
@@ -31,7 +31,7 @@ describe('lockSync', () => {
   /** A file created `ageMs` ago by `owner`, who writes its name in it so that a test can tell it from a file created later. */
   const leaveFile = (file: string, ageMs: number, owner: string) => {
     writeFileSync(file, owner);
-    const createdAt = (Date.now() - ageMs) / SECOND;
+    const createdAt = (Date.now() - ageMs) / ONE_SECOND;
     utimesSync(file, createdAt, createdAt);
   };
 
@@ -138,7 +138,7 @@ describe('lockSync', () => {
     });
 
     it('should give the age from which a lock is taken over in the error', () => {
-      expect(() => lockSync(target, { staleMs: 10 * SECOND })).toThrow('killed less than 10 s ago');
+      expect(() => lockSync(target, { staleMs: 10 * ONE_SECOND })).toThrow('killed less than 10 s ago');
     });
   });
 
@@ -146,18 +146,18 @@ describe('lockSync', () => {
     it.each`
       age   | staleMs
       ${31} | ${undefined}
-      ${11} | ${10 * SECOND}
+      ${11} | ${10 * ONE_SECOND}
     `('should take over, at the first attempt, a lock $age s old when staleMs is $staleMs', ({ age, staleMs }) => {
-      leaveLock(age * SECOND);
+      leaveLock(age * ONE_SECOND);
       expect(tryLock({ retries: 0, staleMs })).toBe('acquired');
     });
 
     it.each`
       age   | staleMs
       ${29} | ${undefined}
-      ${9}  | ${10 * SECOND}
+      ${9}  | ${10 * ONE_SECOND}
     `('should not take over a lock $age s old when staleMs is $staleMs', ({ age, staleMs }) => {
-      leaveLock(age * SECOND);
+      leaveLock(age * ONE_SECOND);
       expect(tryLock({ retries: 0, staleMs })).toBe('refused');
     });
 

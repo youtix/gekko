@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
@@ -111,7 +112,7 @@ export class SQLiteStorage extends Storage {
   public getCandleDateranges(symbol: TradingPair) {
     const query = this.db.query<CandleDateranges, SQLQueryBindings[]>(`
       WITH gaps AS (
-        SELECT start, start / 60000 - ROW_NUMBER() OVER (ORDER BY start) AS gap_group
+        SELECT start, start / ${ONE_MINUTE} - ROW_NUMBER() OVER (ORDER BY start) AS gap_group
         FROM ${this.getQuotedTable(symbol)}
     )
     SELECT MIN(start) AS daterange_start, MAX(start) AS daterange_end
@@ -126,7 +127,7 @@ export class SQLiteStorage extends Storage {
     const query = this.db.query<Candle, SQLQueryBindings[]>(`
       SELECT id,start,open,high,low,close,volume
       FROM ${this.getQuotedTable(symbol)}
-      WHERE start BETWEEN $start AND $end AND start % 60000 = 0
+      WHERE start BETWEEN $start AND $end AND start % ${ONE_MINUTE} = 0
       ORDER BY start ASC
     `);
     return query.all({ $start: start, $end: end });
@@ -135,9 +136,9 @@ export class SQLiteStorage extends Storage {
   /** The minutes of the interval with no candle. Its bounds must be starts of minutes, as the stored candles are. */
   public checkInterval(symbol: TradingPair, { start, end }: Interval<EpochTimeStamp, EpochTimeStamp>) {
     const query = this.db.query<MissingCandleCount, SQLQueryBindings[]>(`
-      SELECT ($end - $start) / 60000 + 1 - COUNT(*) AS missingCandleCount
+      SELECT ($end - $start) / ${ONE_MINUTE} + 1 - COUNT(*) AS missingCandleCount
       FROM ${this.getQuotedTable(symbol)}
-      WHERE start BETWEEN $start AND $end AND start % 60000 = 0
+      WHERE start BETWEEN $start AND $end AND start % ${ONE_MINUTE} = 0
     `);
     return query.get({ $start: start, $end: end });
   }

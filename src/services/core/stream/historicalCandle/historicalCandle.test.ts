@@ -74,6 +74,25 @@ describe('HistoricalCandleStream', () => {
     );
   });
 
+  // On the UTC calendar: on the host's, October 2024 read "30 days 23 hours" in Paris, which leaves summer time on the 27th, and
+  // "1 month 1 day" in New York, where it starts on September 30 at 20:00
+  describe.each`
+    timeZone
+    ${'UTC'}
+    ${'Europe/Paris'}
+    ${'America/New_York'}
+  `('on a host in $timeZone', ({ timeZone }) => {
+    useTimeZone(timeZone);
+
+    it('should log the length of the minutes of October 2024 as 1 month', () => {
+      new HistoricalCandleStream({ daterange: { start: Date.UTC(2024, 9, 1), end: Date.UTC(2024, 9, 31, 23, 59) }, tickrate: 0, symbol });
+      expect(info).toHaveBeenCalledWith(
+        'stream',
+        '[BTC/USDT] Fetching historical data from 2024-10-01T00:00:00.000Z to 2024-10-31T23:59:00.000Z (1 month)',
+      );
+    });
+  });
+
   // On 2026-10-25 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
   // Floored in local time, a range starting in it was fetched from an hour earlier: a warmup got an hour of candles too many.
   describe('on a host in Europe/Paris, with a range in the hour repeated when DST ends', () => {

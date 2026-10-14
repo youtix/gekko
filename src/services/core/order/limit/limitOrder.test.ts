@@ -893,7 +893,7 @@ describe('LimitOrder', () => {
       ${'handleCreateOrderError'} | ${'a non-Error value'}                    | ${'some string error'}        | ${'some string error'}
       ${'handleCancelOrderError'} | ${'an Error'}                             | ${new Error('Exchange down')} | ${'Exchange down'}
       ${'handleCancelOrderError'} | ${'a non-Error value'}                    | ${'some string error'}        | ${'some string error'}
-      ${'handleCancelOrderError'} | ${'an OrderNotFound before the order id'} | ${new OrderNotFound('gone')}  | ${'[EXCHANGE] gone'}
+      ${'handleCancelOrderError'} | ${'an OrderNotFound before the order id'} | ${new OrderNotFound('gone')}  | ${'gone'}
       ${'handleFetchOrderError'}  | ${'an Error'}                             | ${new Error('Exchange down')} | ${'Exchange down'}
       ${'handleFetchOrderError'}  | ${'a non-Error value'}                    | ${'some string error'}        | ${'some string error'}
     `('$handler given $kind', ({ handler, value, message }) => {

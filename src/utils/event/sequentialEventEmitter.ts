@@ -13,9 +13,9 @@ const NO_LISTENERS: readonly Listener[] = [];
 
 export class SequentialEventEmitter {
   /**
-   * The listeners of each event. An array stored here is never changed, on and off store a new one: an emit or a delivery goes through
-   * the listeners its event had when it started, whatever they add or remove meanwhile, without copying them each time. on pushed into
-   * the array stored, which emit walked as it grew: a listener added by a listener was called by the emit that added it.
+   * The listeners of each event. An array stored here is never changed, on stores a new one: an emit or a delivery goes through the
+   * listeners its event had when it started, whatever they add meanwhile, without copying them each time. on pushed into the array
+   * stored, which emit walked as it grew: a listener added by a listener was called by the emit that added it.
    */
   private listeners: Map<string, readonly Listener[]>;
   /**
@@ -34,16 +34,6 @@ export class SequentialEventEmitter {
 
   public on<T = unknown>(event: string, listener: Listener<T>): void {
     this.listeners.set(event, [...(this.listeners.get(event) ?? NO_LISTENERS), listener as Listener]);
-  }
-
-  public off<T = unknown>(event: string, listener: Listener<T>): void {
-    const eventListeners = this.listeners.get(event);
-    if (eventListeners) {
-      this.listeners.set(
-        event,
-        eventListeners.filter(l => l !== listener),
-      );
-    }
   }
 
   /**

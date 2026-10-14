@@ -6,6 +6,7 @@ import { Timeframe } from '@models/configuration.types';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
 import { Plugin } from '@plugins/plugin';
+import { LAST_FLUSH_TIMEOUT } from '@services/bots/telegram/telegram.const';
 import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { FastCandleBatcher } from '@services/core/batcher/candleBatcher/fastCandleBatcher';
 import { LIMITS } from '@services/exchange/exchange.const';
@@ -13,6 +14,7 @@ import { debug, getBufferedLogs, warning } from '@services/logger';
 import { BufferedLog } from '@services/logger.types';
 import { toISOString } from '@utils/date/date.utils';
 import { shallowObjectDiff } from '@utils/object/object.utils';
+import { pluralize } from '@utils/string/string.utils';
 import { filter, isEmpty } from 'lodash-es';
 import { supervisionSchema } from './supervision.schema';
 import { Subscription, SUBSCRIPTION_NAMES, SupervisionConfig } from './supervision.types';
@@ -28,12 +30,6 @@ const NATIVE_TIMEFRAMES: Record<string, Timeframe[]> = {
   'paper-binance': BINANCE_TIMEFRAMES,
   hyperliquid: ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d', '1w', '1M'],
 };
-
-/**
- * How long the last flush of the log monitoring may hold the finalisation of the plugins, and so the exit. Telegram unreachable
- * without an answer (a black-holed network) would hold them for every attempt of the fetcher, each up to its own timeout.
- */
-const LAST_FLUSH_TIMEOUT = 15 * ONE_SECOND;
 
 /** The answer to a subscription once processFinalize has started */
 const STOPPING_ANSWER = 'Gekko is stopping: no monitoring can start any more';
@@ -278,8 +274,9 @@ export class Supervision extends Plugin {
     const age = Date.now() - lastBucketReceivedAt;
     const isStale = age > this.candleStaleThreshold;
     if (isStale === this.candlesReportedStale) return;
+    const minutes = Math.floor(age / ONE_MINUTE);
     const message = isStale
-      ? `⚠️ No 1m candle received for ${Math.floor(age / ONE_MINUTE)} minute(s), last one @ ${toISOString(lastBucketReceivedAt)}`
+      ? `⚠️ No 1m candle received for ${minutes} ${pluralize('minute', minutes)}, last one @ ${toISOString(lastBucketReceivedAt)}`
       : `✅ 1m candles are coming again, last one @ ${toISOString(lastBucketReceivedAt)}`;
     this.candleAlertInFlight = this.sendCandleAlert(message, isStale).finally(() => {
       this.candleAlertInFlight = undefined;

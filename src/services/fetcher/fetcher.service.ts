@@ -1,7 +1,8 @@
+import { ONE_SECOND } from '@constants/time.const';
+import { describeError } from '@errors/error.utils';
 import { debug } from '@services/logger';
 import { getRetryDelay } from '@utils/fetch/fetch.utils';
 import { wait } from '@utils/process/process.utils';
-import { secondsToMilliseconds } from 'date-fns';
 import { isNumber } from 'lodash-es';
 import { FETCHER_MAX_RETRIES, FETCHER_MAX_RETRY_AFTER, FETCHER_TIMEOUT } from './fetcher.const';
 import { Fetcher, Request } from './fetcher.types';
@@ -12,7 +13,7 @@ import { Fetcher, Request } from './fetcher.types';
  */
 const getTimeout = (url: string) => {
   const longPoll = Number(new URL(url).searchParams.get('timeout')); // 0 without one, NaN when not a number: no wait added
-  return FETCHER_TIMEOUT + (longPoll > 0 ? secondsToMilliseconds(longPoll) : 0);
+  return FETCHER_TIMEOUT + (longPoll > 0 ? longPoll * ONE_SECOND : 0);
 };
 
 /**
@@ -22,7 +23,7 @@ const getTimeout = (url: string) => {
  */
 const getHttpRetryDelay = (attempt: number, code: number | undefined, retryAfter?: unknown) => {
   if (code === 429 && isNumber(retryAfter) && retryAfter >= 0) {
-    const delay = secondsToMilliseconds(retryAfter);
+    const delay = retryAfter * ONE_SECOND;
     return delay <= FETCHER_MAX_RETRY_AFTER ? delay : undefined;
   }
   if (code === 429 || (code !== undefined && code >= 500)) return getRetryDelay(attempt);
@@ -68,7 +69,7 @@ const request: Request = async ({ url, payload, attempt = 0, retries = FETCHER_M
     const isJson = contentType && contentType.includes('application/json');
     const data = await (isJson ? response.json() : response.text()).catch((err: unknown) => {
       const notRetried = mayHaveBeenDelivered ? '. The request may have been delivered, so it is not retried' : '';
-      throw new Error(`${httpStatus}: unreadable body (${err})${notRetried}`, { cause: err });
+      throw new Error(`${httpStatus}: unreadable body (${describeError(err)})${notRetried}`, { cause: err });
     });
 
     if (!response.ok || data.ok === false) {
@@ -84,7 +85,7 @@ const request: Request = async ({ url, payload, attempt = 0, retries = FETCHER_M
     if (retryDelay === undefined || attempt >= retries) {
       // At debug level: every caller logs what it could not fetch, at the level it deserves (a notification not sent, a poll
       // failed), and a bot blocked for hours would otherwise write one error line per request, which Supervision forwards
-      if (err instanceof Error) debug('fetcher', err.message);
+      debug('fetcher', describeError(err));
       throw err;
     }
 

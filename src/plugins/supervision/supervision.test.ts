@@ -455,9 +455,9 @@ describe('Supervision', () => {
         await vi.advanceTimersByTimeAsync(100);
       }
     };
-    /** The alert that no bucket came for `minutes`, the last one received at `lastAt` */
+    /** The alert that no bucket came for `minutes`, a number of them other than 1, the last one received at `lastAt` */
     const stopped = (minutes: number, lastAt = '2024-01-01T00:00:00.000Z') =>
-      `⚠️ No 1m candle received for ${minutes} minute(s), last one @ ${lastAt}`;
+      `⚠️ No 1m candle received for ${minutes} minutes, last one @ ${lastAt}`;
     /** The message that the buckets come again, the last one received at `lastAt` */
     const comingAgain = (lastAt: string) => `✅ 1m candles are coming again, last one @ ${lastAt}`;
     const sentMessages = () => fakeBot.sendMessage.mock.calls.map(([text]) => text);
@@ -497,6 +497,15 @@ describe('Supervision', () => {
       toggleSubscription();
       await vi.advanceTimersByTimeAsync(4 * ONE_MINUTE); // Stale at the check of the 4th minute only: 3 minutes is not older
       expect(sentMessages()).toEqual([stopped(4)]);
+    });
+
+    // Written "minute(s)" whatever the age
+    it('names an age of one whole minute in the singular', async () => {
+      plugin = new Supervision({ ...baseConfig, candleCheckInterval: ONE_MINUTE / 2, candleStaleThreshold: ONE_MINUTE });
+      plugin['bot'] = fakeBot as any;
+      toggleSubscription();
+      await vi.advanceTimersByTimeAsync(1.5 * ONE_MINUTE); // Stale at the check of 90 s only: 60 s is not older
+      expect(sentMessages()).toEqual(['⚠️ No 1m candle received for 1 minute, last one @ 2024-01-01T00:00:00.000Z']);
     });
 
     it('says once that the buckets come again, naming the one that came', async () => {

@@ -1,3 +1,4 @@
+import { describeError, toError } from '@errors/error.utils';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
@@ -7,7 +8,6 @@ import { debug, error, warning } from '@services/logger';
 import { bindAll } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { Order } from '../order';
-import { toError } from '../order.utils';
 
 // Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so a handler reports a
 // failure through orderErrored and never throws: a thrown error would be an unhandled rejection.
@@ -82,7 +82,7 @@ export class MarketOrder extends Order {
       // A cancelation asked during the poll is sent now, rather than at the next check
       if (this.isCanceling && !this.isOrderCompleted()) await this.cancel();
     } catch (err) {
-      error('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order check failed: ${toError(err).message}`);
+      error('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order check failed: ${describeError(err)}`);
     }
   }
 
@@ -104,7 +104,7 @@ export class MarketOrder extends Order {
     // market limits, and InvalidOrder when they refuse it otherwise (the simulated exchange: unknown pair, no ticker, insufficient
     // balance; a real exchange: what ccxt reports as InvalidOrder, InsufficientFunds or BadRequest). Both mean the order is refused,
     // not that it failed.
-    if (error instanceof InvalidOrder || error instanceof OrderOutOfRangeError) return this.orderRejected(error.message);
+    if (error instanceof InvalidOrder || error instanceof OrderOutOfRangeError) return this.orderRejected(describeError(error));
 
     this.orderErroredAtCreation(error);
   }

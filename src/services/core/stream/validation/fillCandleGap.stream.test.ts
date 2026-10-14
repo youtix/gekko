@@ -4,6 +4,7 @@ import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
 import { warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
+import { range } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
 import { MAX_GAP_FILL_MINUTES } from './fillCandleGap.const';
 import { FillCandleGapOptions, FillCandleGapStream } from './fillCandleGap.stream';
@@ -108,11 +109,15 @@ describe('FillCandleGapStream', () => {
       expect(warning).toHaveBeenCalledTimes(count);
     });
 
-    it('should tell how many leading minutes were dropped once every pair has had a candle', async () => {
-      await run([bucketAt(0, ETH), bucketAt(1, ETH), bucketAt(2, ETH, BTC)], { dropIncompleteLeadingBuckets: true });
+    it.each`
+      first | input                                                          | dropped
+      ${1}  | ${[bucketAt(0, ETH), bucketAt(1, ETH, BTC)]}                   | ${'1 leading minute dropped'}
+      ${2}  | ${[bucketAt(0, ETH), bucketAt(1, ETH), bucketAt(2, ETH, BTC)]} | ${'2 leading minutes dropped'}
+    `('should tell, once every pair has had a candle, that $dropped', async ({ first, input, dropped }) => {
+      await run(input, { dropIncompleteLeadingBuckets: true });
       expect(warning).toHaveBeenLastCalledWith(
         'stream',
-        `Every pair has had a candle by ${toISOString(at(2))}, the first minute pushed: 2 leading minute(s) dropped, so the warmup will end later than planned`,
+        `Every pair has had a candle by ${toISOString(at(first))}, the first minute pushed: ${dropped}, so the warmup will end later than planned`,
       );
     });
 
@@ -136,15 +141,27 @@ describe('FillCandleGapStream', () => {
       await run([bucketAt(0, ETH, BTC), bucketAt(1, ETH), bucketAt(2, ETH), bucketAt(3, ETH), bucketAt(4, ETH, BTC)]);
       expect(warnings()).toEqual([
         `Partial gap: no BTC/USDT candle at ${toISOString(at(1))}, filling with empty candles until it comes back`,
-        `Partial gap closed: BTC/USDT is back at ${toISOString(at(4))}, 3 minute(s) filled with empty candles from ${toISOString(at(1))}`,
+        `Partial gap closed: BTC/USDT is back at ${toISOString(at(4))}, 3 minutes filled with empty candles from ${toISOString(at(1))}`,
       ]);
+    });
+
+    it.each`
+      back | filled
+      ${2} | ${'1 minute filled'}
+      ${4} | ${'3 minutes filled'}
+    `('should tell, when a partial gap closes, that $filled', async ({ back, filled }) => {
+      await run([bucketAt(0, ETH, BTC), ...range(1, back).map(minute => bucketAt(minute, ETH)), bucketAt(back, ETH, BTC)]);
+      expect(warning).toHaveBeenLastCalledWith(
+        'stream',
+        `Partial gap closed: BTC/USDT is back at ${toISOString(at(back))}, ${filled} with empty candles from ${toISOString(at(1))}`,
+      );
     });
 
     it('should count the minutes of a total gap in the partial gap it interrupts', async () => {
       await run([bucketAt(0, ETH, BTC), bucketAt(1, ETH), bucketAt(4, ETH, BTC)]);
       expect(warning).toHaveBeenLastCalledWith(
         'stream',
-        `Partial gap closed: BTC/USDT is back at ${toISOString(at(4))}, 3 minute(s) filled with empty candles from ${toISOString(at(1))}`,
+        `Partial gap closed: BTC/USDT is back at ${toISOString(at(4))}, 3 minutes filled with empty candles from ${toISOString(at(1))}`,
       );
     });
 
@@ -179,11 +196,15 @@ describe('FillCandleGapStream', () => {
       const buckets = await run([bucketAt(0, ETH, BTC), bucketAt(1, ETH), bucketAt(3, ETH, BTC)]);
       expect(describeBuckets(buckets)).toEqual(['ETH0 BTC0', 'ETH1 BTC1~', 'ETH2~ BTC2~', 'ETH3 BTC3']);
     });
-    it('should warn once about a total gap', async () => {
-      await run([bucketAt(0, ETH, BTC), bucketAt(4, ETH, BTC)]);
+    it.each`
+      next | filling
+      ${2} | ${'1 minute'}
+      ${4} | ${'3 minutes'}
+    `('should warn once about a total gap, filling $filling', async ({ next, filling }) => {
+      await run([bucketAt(0, ETH, BTC), bucketAt(next, ETH, BTC)]);
       expect(warning).toHaveBeenCalledExactlyOnceWith(
         'stream',
-        `Total gap detected: filling 3 minute(s) for all assets from ${toISOString(at(1))}`,
+        `Total gap detected: filling ${filling} for all assets from ${toISOString(at(1))}`,
       );
     });
 

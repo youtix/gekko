@@ -6,6 +6,7 @@ import { TradingPair } from '@models/utility.types';
 import { warning } from '@services/logger';
 import { createEmptyCandle, getBucketTimestamp } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
+import { pluralize } from '@utils/string/string.utils';
 import { Transform, TransformCallback } from 'node:stream';
 import { MAX_GAP_FILL_MINUTES } from './fillCandleGap.const';
 
@@ -67,7 +68,10 @@ export class FillCandleGapStream extends Transform {
               ].join(' '),
             );
           }
-          warning('stream', `Total gap detected: filling ${gapMinutes} minute(s) for all assets from ${toISOString(expectedTimestamp)}`);
+          warning(
+            'stream',
+            `Total gap detected: filling ${gapMinutes} ${pluralize('minute', gapMinutes)} for all assets from ${toISOString(expectedTimestamp)}`,
+          );
 
           let fillTimestamp = expectedTimestamp;
           while (fillTimestamp < currentTimestamp) {
@@ -135,7 +139,7 @@ export class FillCandleGapStream extends Transform {
     const minutes = (timestamp - gapStart) / ONE_MINUTE;
     warning(
       'stream',
-      `Partial gap closed: ${pair} is back at ${toISOString(timestamp)}, ${minutes} minute(s) filled with empty candles from ${toISOString(gapStart)}`,
+      `Partial gap closed: ${pair} is back at ${toISOString(timestamp)}, ${minutes} ${pluralize('minute', minutes)} filled with empty candles from ${toISOString(gapStart)}`,
     );
   }
 
@@ -170,7 +174,7 @@ export class FillCandleGapStream extends Transform {
         'stream',
         [
           `Every pair has had a candle by ${toISOString(timestamp)}, the first minute pushed:`,
-          `${this.droppedLeadingMinutes} leading minute(s) dropped, so the warmup will end later than planned`,
+          `${this.droppedLeadingMinutes} leading ${pluralize('minute', this.droppedLeadingMinutes)} dropped, so the warmup will end later than planned`,
         ].join(' '),
       );
       this.droppedLeadingMinutes = 0;

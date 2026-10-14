@@ -1,5 +1,5 @@
+import { ONE_SECOND } from '@constants/time.const';
 import { waitSync } from '@utils/process/process.utils';
-import { secondsToMilliseconds } from 'date-fns';
 import { closeSync, constants, openSync, statSync, unlinkSync } from 'fs';
 import { LockSync } from './fs.types';
 
@@ -8,7 +8,7 @@ import { LockSync } from './fs.types';
  * gone. Only a run whose machine slept (or whose clock jumped) for longer inside its critical section is taken for one, and
  * what the lock protects, an append, is small.
  */
-const DEFAULT_STALE_MS = secondsToMilliseconds(30);
+const DEFAULT_STALE_MS = 30 * ONE_SECOND;
 
 const getLockFileName = (targetPath: string): string => `${targetPath}.lock`;
 
@@ -66,7 +66,7 @@ export const lockSync: LockSync = (targetPath, { retries = 3, retryDelayMs = 50,
     if (removeStaleLock(lockFile, staleMs)) continue;
     if (++failedAttempts > retries) {
       throw new Error(
-        `Could not acquire the lock of ${targetPath} after ${failedAttempts} attempts: ${lockFile} is held by another run, or was left behind by a run that was killed less than ${staleMs / 1000} s ago; delete it if no other run is writing ${targetPath}`,
+        `Could not acquire the lock of ${targetPath} after ${failedAttempts} attempts: ${lockFile} is held by another run, or was left behind by a run that was killed less than ${staleMs / ONE_SECOND} s ago; delete it if no other run is writing ${targetPath}`,
       );
     }
     waitSync(retryDelayMs);

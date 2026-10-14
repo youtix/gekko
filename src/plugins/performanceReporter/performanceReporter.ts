@@ -1,4 +1,5 @@
 import { describeError } from '@errors/error.utils';
+import { PERCENT_ROUNDING } from '@plugins/analyzers/analyzer.const';
 import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '@plugins/analyzers/roundTripAnalyzer/roundTrip.types';
 import { Plugin } from '@plugins/plugin';
@@ -6,8 +7,7 @@ import { lockSync as defaultLockSync } from '@services/fs/fs.service';
 import { Fs } from '@services/fs/fs.types';
 import { error } from '@services/logger';
 import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
-import { round } from '@utils/math/round.utils';
-import { formatRatio, toPlainNumber } from '@utils/string/string.utils';
+import { formatPercent, formatRatio, toPlainNumber } from '@utils/string/string.utils';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
 import { random } from 'lodash-es';
 import path from 'path';
@@ -50,23 +50,31 @@ export class PerformanceReporter extends Plugin {
     { header: 'timeframe', value: () => this.timeframe ?? '' },
     // The amounts and the prices are written for a program to read, the same whatever the locale of the machine (see toPlainNumber).
     { header: 'net profit', value: report => toPlainNumber(report.netProfit) },
-    { header: 'total return', value: report => `${round(report.totalReturnPct, 2, 'down')}%` },
+    // Each percentage rounded as its figure is wherever it is written (see PERCENT_ROUNDING)
+    { header: 'total return', value: report => formatPercent(report.totalReturnPct, PERCENT_ROUNDING.totalReturnPct) },
     {
       header: 'yearly profit',
-      value: report => `${toPlainNumber(report.annualizedNetProfit)} (${round(report.annualizedReturnPct, 2, 'down')}%)`,
+      value: report =>
+        `${toPlainNumber(report.annualizedNetProfit)} (${formatPercent(report.annualizedReturnPct, PERCENT_ROUNDING.annualizedReturnPct)})`,
     },
-    { header: 'win rate', value: tradingOnly(({ winRate }) => (winRate !== null ? `${round(winRate, 2, 'halfEven')}%` : 'N/A')) },
-    { header: 'market', value: report => `${round(report.marketReturnPct, 2, 'down')}%` },
-    { header: 'alpha', value: report => `${round(report.alpha, 2, 'down')}%` },
+    {
+      header: 'win rate',
+      value: tradingOnly(({ winRate }) => (winRate !== null ? formatPercent(winRate, PERCENT_ROUNDING.winRate) : 'N/A')),
+    },
+    { header: 'market', value: report => formatPercent(report.marketReturnPct, PERCENT_ROUNDING.marketReturnPct) },
+    { header: 'alpha', value: report => formatPercent(report.alpha, PERCENT_ROUNDING.alpha) },
     { header: 'sharpe ratio', value: report => formatRatio(report.sharpeRatio) },
     { header: 'sortino ratio', value: report => formatRatio(report.sortinoRatio) },
-    { header: 'max drawdown', value: portfolioOnly(({ maxDrawdownPct }) => `${round(maxDrawdownPct, 2, 'down')}%`) },
+    {
+      header: 'max drawdown',
+      value: portfolioOnly(({ maxDrawdownPct }) => formatPercent(maxDrawdownPct, PERCENT_ROUNDING.maxDrawdownPct)),
+    },
     { header: 'total changes', value: portfolioOnly(({ portfolioChangeCount }) => portfolioChangeCount) },
     { header: 'trade count', value: tradingOnly(({ tradeCount }) => tradeCount) },
     { header: 'start time', value: report => toISOString(report.periodStartAt) },
     { header: 'end time', value: report => toISOString(report.periodEndAt) },
     { header: 'duration', value: report => report.formattedDuration },
-    { header: 'exposure', value: report => `${round(report.exposurePct, 2, 'halfEven')}%` },
+    { header: 'exposure', value: report => formatPercent(report.exposurePct, PERCENT_ROUNDING.exposurePct) },
     {
       header: 'start balance',
       value: report => toPlainNumber(report.id === 'PORTFOLIO PROFIT REPORT' ? report.startEquity : report.startBalance),

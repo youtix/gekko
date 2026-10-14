@@ -1,3 +1,4 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { warning } from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
 import { describe, expect, it, vi } from 'vitest';
@@ -6,7 +7,7 @@ import { calculatePerformanceStatistics } from './analyzer.utils';
 
 vi.mock('@services/logger', () => ({ warning: vi.fn() }));
 
-const HOUR = 3_600_000;
+const HOUR = 60 * ONE_MINUTE;
 const DAY = 24 * HOUR;
 // 2023 has 365 days: a day is 1/365 of a year in it
 const START = Date.UTC(2023, 0, 1);

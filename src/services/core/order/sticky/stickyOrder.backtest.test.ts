@@ -1,4 +1,5 @@
 import { ORDER_CANCELED_EVENT, ORDER_COMPLETED_EVENT, ORDER_ERRORED_EVENT, ORDER_INVALID_EVENT } from '@constants/event.const';
+import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
 import { OrderCompletedEvent } from '@models/event.types';
 import { OrderState } from '@models/order.types';
@@ -26,7 +27,6 @@ vi.mock('@services/injecter/injecter', () => ({ inject: { exchange: () => inject
 const SYMBOL: TradingPair = 'BTC/USDT';
 const ORDER_ID = 'ee21e130-48bc-405f-be0c-46e9bf17b52e';
 const START = Date.UTC(2024, 0, 1);
-const ONE_MINUTE = 60_000;
 const TERMINAL_EVENTS = [ORDER_COMPLETED_EVENT, ORDER_CANCELED_EVENT, ORDER_ERRORED_EVENT, ORDER_INVALID_EVENT];
 // A STICKY order is placed price.min beyond the ticker, which the simulated exchange quotes at the last close for bid and ask
 const marketData: MarketData = { price: { min: 0.01 }, amount: { min: 0.001 }, cost: { min: 1 }, fee: { maker: 0.001, taker: 0.002 } };

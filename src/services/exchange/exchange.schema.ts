@@ -1,3 +1,4 @@
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { Asset } from '@models/utility.types';
 import { keepDuplicates } from '@utils/collection/array.utils';
 import z from 'zod';
@@ -6,7 +7,7 @@ import z from 'zod';
 const MAX_TIMER_DELAY = 2_147_483_647;
 
 /** The order and portfolio polling run at most once a second, which keeps clear of the exchanges' rate limits */
-const MIN_SYNCH_INTERVAL = 1000;
+const MIN_SYNCH_INTERVAL = ONE_SECOND;
 
 /** A polling period handed to setInterval: 0, a negative or an overflowing delay would poll the exchange every millisecond */
 const synchIntervalSchema = (field: string) => {
@@ -53,6 +54,6 @@ export const simulationBalanceSchema = z
 /** Its strictness carries over to every exchange schema extending it: a misspelt key (sandobx: true) is refused, not dropped */
 export const exchangeSchema = z.strictObject({
   name: z.string(),
-  exchangeSynchInterval: synchIntervalSchema('exchangeSynchInterval').default(10 * 60 * 1000),
-  orderSynchInterval: synchIntervalSchema('orderSynchInterval').default(20 * 1000),
+  exchangeSynchInterval: synchIntervalSchema('exchangeSynchInterval').default(10 * ONE_MINUTE),
+  orderSynchInterval: synchIntervalSchema('orderSynchInterval').default(20 * ONE_SECOND),
 });

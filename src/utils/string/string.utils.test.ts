@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { formatAmount, formatEveryDecimal, formatRatio, formatSignedPercent, pluralize, toCamelCase, toPlainNumber } from './string.utils';
+import {
+  formatAmount,
+  formatEveryDecimal,
+  formatPercent,
+  formatRatio,
+  formatSignedPercent,
+  pluralize,
+  toCamelCase,
+  toPlainNumber,
+} from './string.utils';
 
 describe('toCamelCase', () => {
   it.each`
@@ -125,6 +134,23 @@ describe('formatEveryDecimal', () => {
     ${'-Infinity'}                                                    | ${-Infinity}             | ${'-Infinity'}
   `('should write $description as $expected', ({ value, expected }) => {
     expect(formatEveryDecimal(value)).toBe(expected);
+  });
+});
+
+describe('formatPercent', () => {
+  it.each`
+    description                                  | value     | rounding      | expected
+    ${'a loss rounded down, away from 0'}        | ${-5.001} | ${'down'}     | ${'-5.01%'}
+    ${'a tie rounded down'}                      | ${3.125}  | ${'down'}     | ${'3.12%'}
+    ${'a value on its hundredth, as it is'}      | ${10.5}   | ${'down'}     | ${'10.5%'}
+    ${'a binary value under its decimal, down'}  | ${8.2}    | ${'down'}     | ${'8.2%'}
+    ${'0, without a sign'}                       | ${0}      | ${'down'}     | ${'0%'}
+    ${'a loss rounded half to even, toward 0'}   | ${-5.001} | ${'halfEven'} | ${'-5%'}
+    ${'a tie rounded half to even, down to 2'}   | ${3.125}  | ${'halfEven'} | ${'3.12%'}
+    ${'a tie rounded half to even, up to 4'}     | ${3.135}  | ${'halfEven'} | ${'3.14%'}
+    ${'a small loss rounded half to even, to 0'} | ${-0.001} | ${'halfEven'} | ${'0%'}
+  `('should write $description: $value as $expected ($rounding)', ({ value, rounding, expected }) => {
+    expect(formatPercent(value, rounding)).toBe(expected);
   });
 });
 

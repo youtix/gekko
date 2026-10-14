@@ -6,9 +6,9 @@ import { HistoricalCandleError } from '@services/core/stream/historicalCandle/hi
 import { Exchange } from '@services/exchange/exchange.types';
 import { inject } from '@services/injecter/injecter';
 import { info, warning } from '@services/logger';
-import { startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
+import { formatDurationUTC, startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
-import { formatDuration, Interval, intervalToDuration, isAfter } from 'date-fns';
+import { Interval, isAfter } from 'date-fns';
 import { last } from 'lodash-es';
 import { Readable } from 'stream';
 
@@ -68,7 +68,8 @@ export class HistoricalCandleStream extends Readable {
         [
           `[${symbol}] Fetching historical data from ${toISOString(this.initialStartDate)}`,
           `to ${toISOString(this.endDate)}`,
-          `(${formatDuration(intervalToDuration({ start: this.initialStartDate, end: this.endDate + ONE_MINUTE }))})`,
+          // On the UTC calendar: on the host's, a range across a change of daylight saving time read an hour off ("30 days 23 hours")
+          `(${formatDurationUTC(this.initialStartDate, this.endDate + ONE_MINUTE)})`,
         ].join(' '),
       );
   }

@@ -42,15 +42,15 @@ describe('logPortfolioReport', () => {
     expect(consoleTable).toHaveBeenCalledWith({
       'Net Profit': '100.5 USD',
       'Annualized Net Profit': '0 USD',
-      'Total Return %': '10.50%',
-      'Annualized Return %': '0.00%',
-      'Market Return %': '0.00%',
-      'Max Drawdown %': '5.20%',
-      Alpha: '0.0000',
-      'Sharpe Ratio': '1.5000',
-      'Sortino Ratio': '0.0000',
-      Volatility: '0.0000',
-      'Downside Deviation': '0.0000',
+      'Total Return %': '10.5%',
+      'Annualized Return %': '0%',
+      'Market Return %': '0%',
+      'Max Drawdown %': '5.2%',
+      Alpha: '0%',
+      'Sharpe Ratio': '1.50',
+      'Sortino Ratio': '0.00',
+      Volatility: '0.00',
+      'Downside Deviation': '0.00',
       'Start Equity': '0 USD',
       'End Equity': '0 USD',
       'Start Price': '0 USD',
@@ -58,8 +58,34 @@ describe('logPortfolioReport', () => {
       Benchmark: 'BTC',
       Changes: 0,
       Duration: '',
-      'Exposure %': '0.00%',
+      'Exposure %': '0%',
     });
+  });
+
+  // As the CSV writes them (see PERCENT_ROUNDING, formatRatio): rounded to nearest by toFixed, a total return of -5.001 % read -5.00 %
+  // here and -5.01 % there, a Sharpe ratio of 1.23456 read 1.2346 and 1.23, and the alpha, in percentage points, had no '%'
+  it.each`
+    field                    | fields                             | expected
+    ${'Total Return %'}      | ${{ totalReturnPct: -5.001 }}      | ${'-5.01%'}
+    ${'Total Return %'}      | ${{ totalReturnPct: 3.125 }}       | ${'3.12%'}
+    ${'Annualized Return %'} | ${{ annualizedReturnPct: -5.001 }} | ${'-5.01%'}
+    ${'Annualized Return %'} | ${{ annualizedReturnPct: 3.125 }}  | ${'3.12%'}
+    ${'Market Return %'}     | ${{ marketReturnPct: -5.001 }}     | ${'-5.01%'}
+    ${'Market Return %'}     | ${{ marketReturnPct: 3.125 }}      | ${'3.12%'}
+    ${'Max Drawdown %'}      | ${{ maxDrawdownPct: -5.001 }}      | ${'-5.01%'}
+    ${'Max Drawdown %'}      | ${{ maxDrawdownPct: 3.125 }}       | ${'3.12%'}
+    ${'Alpha'}               | ${{ alpha: -5.001 }}               | ${'-5.01%'}
+    ${'Alpha'}               | ${{ alpha: 3.125 }}                | ${'3.12%'}
+    ${'Exposure %'}          | ${{ exposurePct: -5.001 }}         | ${'-5%'}
+    ${'Exposure %'}          | ${{ exposurePct: 3.125 }}          | ${'3.12%'}
+    ${'Sharpe Ratio'}        | ${{ sharpeRatio: 1.23456 }}        | ${'1.23'}
+    ${'Sortino Ratio'}       | ${{ sortinoRatio: -1.239 }}        | ${'-1.24'}
+    ${'Volatility'}          | ${{ volatility: 1.239 }}           | ${'1.24'}
+    ${'Downside Deviation'}  | ${{ downsideDeviation: 1.239 }}    | ${'1.24'}
+  `('should print $expected under $field for a report with $fields', ({ field, fields, expected }) => {
+    logPortfolioReport({ ...mockReport, ...fields }, 'USD');
+
+    expect(consoleTable.mock.lastCall?.[0][field]).toBe(expected);
   });
 
   // Amounts and prices keep up to 8 decimals: a price of a fraction of a cent or a profit in BTC is not printed as 0.

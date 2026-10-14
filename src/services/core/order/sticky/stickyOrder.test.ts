@@ -912,12 +912,12 @@ describe('StickyOrder', () => {
       });
     });
 
-    // CCXTExchange throws a GekkoError for a ticker without data
+    // CCXTExchange throws a GekkoError for a ticker without data. The warning quotes it without its tag, having one of its own
     const incompleteTicker = new GekkoError('exchange', 'Fetch ticker failed to return data for BTC/USDT');
     describe.each`
       kind                         | failure                                | message
-      ${'an ExchangeNetworkError'} | ${new ExchangeNetworkError('timeout')} | ${'[EXCHANGE] timeout'}
-      ${'a GekkoError'}            | ${incompleteTicker}                    | ${incompleteTicker.message}
+      ${'an ExchangeNetworkError'} | ${new ExchangeNetworkError('timeout')} | ${'timeout'}
+      ${'a GekkoError'}            | ${incompleteTicker}                    | ${'Fetch ticker failed to return data for BTC/USDT'}
       ${'an Error'}                | ${new Error('Price fail')}             | ${'Price fail'}
       ${'a non-Error value'}       | ${'ticker unavailable'}                | ${'ticker unavailable'}
     `('when the ticker fetch of the poll of an open order fails with $kind', ({ failure, message }) => {
@@ -1206,9 +1206,9 @@ describe('StickyOrder', () => {
     const failTicker = () => fakeExchange.fetchTicker.mockRejectedValueOnce(new ExchangeNetworkError('timeout'));
     const failCreation = () => fakeExchange.createLimitOrder.mockRejectedValueOnce(new ExchangeNetworkError('timeout'));
     describe.each`
-      step                  | failRelaunch    | reason                                                                        | mayBeLive
-      ${'the ticker fetch'} | ${failTicker}   | ${/^\[EXCHANGE\] timeout \(2 of 5 already filled\)$/}                         | ${false}
-      ${'the creation'}     | ${failCreation} | ${/^Outcome unknown: .+ \(\[EXCHANGE\] timeout\) \(2 of 5 already filled\)$/} | ${true}
+      step                  | failRelaunch    | reason                                                           | mayBeLive
+      ${'the ticker fetch'} | ${failTicker}   | ${/^timeout \(2 of 5 already filled\)$/}                         | ${false}
+      ${'the creation'}     | ${failCreation} | ${/^Outcome unknown: .+ \(timeout\) \(2 of 5 already filled\)$/} | ${true}
     `('when $step of the relaunch of a move fails', ({ failRelaunch, reason, mayBeLive }) => {
       let erroredListener: Mock;
 
@@ -1254,7 +1254,7 @@ describe('StickyOrder', () => {
       });
 
       it('emits ORDER_INVALID_EVENT once, saying it filled part of what it ordered', () => {
-        expect(invalidListener.mock.calls).toEqual([[{ status: 'rejected', filled: true, reason: '[EXCHANGE] Filter failure: NOTIONAL' }]]);
+        expect(invalidListener.mock.calls).toEqual([[{ status: 'rejected', filled: true, reason: 'Filter failure: NOTIONAL' }]]);
       });
 
       it('reports the 2 its canceled transaction filled', () => {
