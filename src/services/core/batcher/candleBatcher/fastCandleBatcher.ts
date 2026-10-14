@@ -1,58 +1,17 @@
-import { GekkoError } from '@errors/gekko.error';
+import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
 import { warning } from '@services/logger';
 import { getCandleTimeOffset } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { CandleSize } from './candleBatcher.types';
 
-/** Tells whether the 1-minute candle starting at `start` is the last one of a timeframe candle of `candleSize` minutes. */
-export const isTimeframeCandleClose = (candleSize: CandleSize, start: EpochTimeStamp): boolean => {
-  const date = new Date(start);
-  const minute = date.getUTCMinutes();
-  switch (candleSize) {
-    case 1:
-    case 2:
-    case 3:
-    case 5:
-    case 10:
-    case 15:
-    case 30:
-      return minute % candleSize === candleSize - 1;
-    case 60:
-    case 120:
-    case 240:
-    case 360:
-    case 480:
-    case 720: {
-      const hours = candleSize / 60;
-      return minute === 59 && date.getUTCHours() % hours === hours - 1;
-    }
-    case 1440:
-      return isDayEnd(date);
-    case 10080:
-      return date.getUTCDay() === 0 && isDayEnd(date);
-    case 43200:
-      return isMonthEnd(date);
-    case 129600:
-      return date.getUTCMonth() % 3 === 2 && isMonthEnd(date);
-    case 259200:
-      return date.getUTCMonth() % 6 === 5 && isMonthEnd(date);
-    case 518400:
-      return date.getUTCMonth() === 11 && isMonthEnd(date);
-    default: {
-      // A size added to TIMEFRAME_TO_MINUTES without a case here fails to compile
-      const unsupported: never = candleSize;
-      throw new GekkoError('core', `Unsupported candle size: ${unsupported} minutes`);
-    }
-  }
-};
-
-const isDayEnd = (date: Date): boolean => date.getUTCHours() === 23 && date.getUTCMinutes() === 59;
-
-const isMonthEnd = (date: Date): boolean => {
-  const lastDay = new Date(Date.UTC(date.getUTCFullYear(), date.getUTCMonth() + 1, 0)).getUTCDate();
-  return date.getUTCDate() === lastDay && isDayEnd(date);
-};
+/**
+ * Tells whether the 1-minute candle starting at `start` is the last one of a timeframe candle of `candleSize` minutes: the next minute
+ * starts a timeframe candle. Read on the calendar of getCandleTimeOffset, the one getCandleStart places the warmup and the backtest
+ * candles on: a second copy of it here could be changed alone, and the batcher would then close its candles off their boundaries.
+ */
+export const isTimeframeCandleClose = (candleSize: CandleSize, start: EpochTimeStamp): boolean =>
+  getCandleTimeOffset(candleSize, start + ONE_MINUTE) === 0;
 
 /** Most decimals a volume is summed with: beyond, the scaled sum would exceed the integers a double holds exactly */
 const MAX_VOLUME_DECIMALS = 15;

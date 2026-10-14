@@ -1,4 +1,5 @@
 import { ONE_MINUTE } from '@constants/time.const';
+import { MONTHS_PER_CANDLE } from '@constants/timeframe.const';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
@@ -19,14 +20,25 @@ export const createEmptyCandle = (lastCandle: Candle): Candle => ({
   synthetic: true,
 });
 
+/** The sizes of the candles that span whole UTC months: the keys of MONTHS_PER_CANDLE */
+type CalendarCandleSize = keyof typeof MONTHS_PER_CANDLE;
+
+// Checked on every minute the TradingAdvisor batches: a Set finds a number two to five times faster under Bun than `in` or Object.hasOwn
+const CALENDAR_CANDLE_SIZES: ReadonlySet<number> = new Set(Object.keys(MONTHS_PER_CANDLE).map(Number));
+
+const isCalendarCandleSize = (candleSize: CandleSize): candleSize is CalendarCandleSize => CALENDAR_CANDLE_SIZES.has(candleSize);
+
 /** Minutes from the start of the timeframe candle of `candleSize` minutes holding `start` (0 on a timeframe boundary). */
 export const getCandleTimeOffset = (candleSize: CandleSize, start: EpochTimeStamp): number => {
   const date = new Date(start);
-  const year = date.getUTCFullYear();
-  const month = date.getUTCMonth();
-  const minutesSinceMidnight = date.getUTCHours() * 60 + date.getUTCMinutes();
-  const minutesSince = (periodStart: EpochTimeStamp) => Math.floor((start - periodStart) / ONE_MINUTE);
+  if (isCalendarCandleSize(candleSize)) {
+    // The candles start on the first of a month, every MONTHS_PER_CANDLE months from January
+    const month = date.getUTCMonth();
+    const candleStart = Date.UTC(date.getUTCFullYear(), month - (month % MONTHS_PER_CANDLE[candleSize]), 1);
+    return Math.floor((start - candleStart) / ONE_MINUTE);
+  }
 
+  const minutesSinceMidnight = date.getUTCHours() * 60 + date.getUTCMinutes();
   switch (candleSize) {
     case 1:
     case 2:
@@ -47,33 +59,22 @@ export const getCandleTimeOffset = (candleSize: CandleSize, start: EpochTimeStam
       return minutesSinceMidnight;
     case 10080:
       return ((date.getUTCDay() + 6) % 7) * 1440 + minutesSinceMidnight; // Weeks start on Monday
-    case 43200:
-      return minutesSince(Date.UTC(year, month, 1));
-    case 129600:
-      return minutesSince(Date.UTC(year, month - (month % 3), 1));
-    case 259200:
-      return minutesSince(Date.UTC(year, month - (month % 6), 1));
-    case 518400:
-      return minutesSince(Date.UTC(year, 0, 1));
     default: {
-      // A size added to TIMEFRAME_TO_MINUTES without a case here fails to compile
+      // A size added to TIMEFRAME_TO_MINUTES without a case here, or its months in MONTHS_PER_CANDLE, fails to compile
       const unsupported: never = candleSize;
       throw new GekkoError('utils', `Unsupported candle size: ${unsupported} minutes`);
     }
   }
 };
 
-// 1M, 3M, 6M and 1y candles span whole UTC months, so their length in minutes varies
-const MONTHS_PER_CANDLE: Partial<Record<number, number>> = { 43200: 1, 129600: 3, 259200: 6, 518400: 12 };
-
 /** Start of the candle `count` candles before the one holding `minute` (a minute start), on the candle batcher's boundaries. */
 export const getCandleStart = (candleSize: CandleSize, minute: EpochTimeStamp, count: number) => {
   const candleStart = minute - getCandleTimeOffset(candleSize, minute) * ONE_MINUTE;
-  const months = MONTHS_PER_CANDLE[candleSize];
-  if (!months) return candleStart - count * candleSize * ONE_MINUTE;
+  if (!isCalendarCandleSize(candleSize)) return candleStart - count * candleSize * ONE_MINUTE;
 
+  // Whole months, whose length varies: stepped on the calendar
   const date = new Date(candleStart);
-  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - count * months, 1);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth() - count * MONTHS_PER_CANDLE[candleSize], 1);
 };
 
 const peekCandle = (bucket: CandleBucket): Candle | undefined => bucket.values().next().value;

@@ -1,6 +1,7 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
 import { Candle } from '@models/candle.types';
+import { TIMEFRAMES } from '@services/configuration/configuration.const';
 import { CandleSize } from '@services/core/batcher/candleBatcher/candleBatcher.types';
 import { FastCandleBatcher, isTimeframeCandleClose } from '@services/core/batcher/candleBatcher/fastCandleBatcher';
 import { range, sortedUniq } from 'lodash-es';
@@ -39,27 +40,29 @@ describe('candle utils', () => {
     });
   });
 
+  // The prices and the means are exact in binary, so they are compared exactly: toBeCloseTo, at its default 2 digits, let a divisor of
+  // 3.001 or 4.001 through
   describe('hlc3', () => {
     it.each`
-      high   | low    | close | expected
-      ${5}   | ${3}   | ${4}  | ${4}
-      ${6}   | ${2}   | ${4}  | ${4}
-      ${1.5} | ${0.5} | ${2}  | ${1.3333333333333333}
+      high | low    | close | expected
+      ${5} | ${3}   | ${4}  | ${4}
+      ${6} | ${2}   | ${4}  | ${4}
+      ${4} | ${0.5} | ${3}  | ${2.5}
     `('returns $expected for high=$high, low=$low and close=$close', ({ high, low, close, expected }) => {
       const candle = { ...defaultCandle, high, low, close };
-      expect(hlc3(candle)).toBeCloseTo(expected);
+      expect(hlc3(candle)).toBe(expected);
     });
   });
 
   describe('ohlc4', () => {
     it.each`
-      open   | high   | low    | close  | expected
-      ${1}   | ${5}   | ${3}   | ${4}   | ${3.25}
-      ${10}  | ${4}   | ${2}   | ${8}   | ${6}
-      ${1.5} | ${3.5} | ${0.5} | ${2.5} | ${(1.5 + 3.5 + 0.5 + 2.5) / 4}
+      open   | high   | low    | close   | expected
+      ${1}   | ${5}   | ${3}   | ${4}    | ${3.25}
+      ${10}  | ${4}   | ${2}   | ${8}    | ${6}
+      ${1.5} | ${3.5} | ${0.5} | ${2.25} | ${1.9375}
     `('returns $expected for open=$open, high=$high, low=$low and close=$close', ({ open, high, low, close, expected }) => {
       const candle = { ...defaultCandle, open, high, low, close };
-      expect(ohlc4(candle)).toBeCloseTo(expected);
+      expect(ohlc4(candle)).toBe(expected);
     });
   });
 
@@ -124,6 +127,27 @@ describe('candle utils', () => {
       expect(getCandleTimeOffset(size, toTimestamp('2025-06-22T19:53:30Z'))).toBe(expected);
     });
 
+    // A candle of whole months starts on the first of a month, its periods counted from January, and lasts as long as its months do
+    it.each`
+      size      | minute                    | expected
+      ${43200}  | ${'2024-02-01T00:00:00Z'} | ${0}
+      ${43200}  | ${'2024-02-29T23:59:00Z'} | ${29 * 1440 - 1}
+      ${43200}  | ${'2024-03-01T00:00:00Z'} | ${0}
+      ${43200}  | ${'2023-02-28T23:59:00Z'} | ${28 * 1440 - 1}
+      ${129600} | ${'2024-01-01T00:00:00Z'} | ${0}
+      ${129600} | ${'2024-03-31T23:59:00Z'} | ${(31 + 29 + 31) * 1440 - 1}
+      ${129600} | ${'2024-04-01T00:00:00Z'} | ${0}
+      ${129600} | ${'2023-03-31T23:59:00Z'} | ${(31 + 28 + 31) * 1440 - 1}
+      ${259200} | ${'2024-06-30T23:59:00Z'} | ${(31 + 29 + 31 + 30 + 31 + 30) * 1440 - 1}
+      ${259200} | ${'2024-07-01T00:00:00Z'} | ${0}
+      ${259200} | ${'2024-12-31T23:59:00Z'} | ${(31 + 31 + 30 + 31 + 30 + 31) * 1440 - 1}
+      ${518400} | ${'2024-12-31T23:59:00Z'} | ${366 * 1440 - 1}
+      ${518400} | ${'2025-01-01T00:00:00Z'} | ${0}
+      ${518400} | ${'2025-12-31T23:59:00Z'} | ${365 * 1440 - 1}
+    `('should return $expected minutes into the $size-minute candle holding $minute', ({ size, minute, expected }) => {
+      expect(getCandleTimeOffset(size, toTimestamp(minute))).toBe(expected);
+    });
+
     it('should throw on a candle size that is not a timeframe', () => {
       expect(() => getCandleTimeOffset(45 as CandleSize, defaultCandle.start)).toThrow('[UTILS] Unsupported candle size: 45 minutes');
     });
@@ -181,22 +205,11 @@ describe('candle utils', () => {
         };
       };
 
-      it.each`
-        timeframe
-        ${'1m'}
-        ${'5m'}
-        ${'1h'}
-        ${'4h'}
-        ${'1d'}
-        ${'1w'}
-        ${'1M'}
-        ${'3M'}
-        ${'6M'}
-        ${'1y'}
-      `(
-        'should start on a $timeframe candle boundary from which exactly count candles close before the one in progress, at any date',
-        ({ timeframe }) => {
-          const size = TIMEFRAME_TO_MINUTES[timeframe as keyof typeof TIMEFRAME_TO_MINUTES];
+      // Every timeframe, read from TIMEFRAMES rather than written as a table, so that one added to TIMEFRAME_TO_MINUTES is replayed too
+      it.each(TIMEFRAMES)(
+        'should start on a %s candle boundary from which exactly count candles close before the one in progress, at any date',
+        timeframe => {
+          const size = TIMEFRAME_TO_MINUTES[timeframe];
           const failures = [0, 1, 2, 3].flatMap(count =>
             minutes
               .map(minute => ({
