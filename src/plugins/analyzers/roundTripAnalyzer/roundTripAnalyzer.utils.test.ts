@@ -1,5 +1,6 @@
 import { RoundTrip } from '@models/event.types';
 import { info } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { TradingReport } from './roundTrip.types';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
@@ -67,6 +68,43 @@ describe('roundTripAnalyzer.utils', () => {
       logRoundtrip({ ...roundTrip, pnl }, currency, true);
 
       expect(printedRow()['P&L']).toBe(expected);
+    });
+
+    // A round trip that no portfolio read valued has neither a P&L nor a profit (NaN): written as they come, they read as figures
+    it.each`
+      field       | fields              | expected
+      ${'P&L'}    | ${{ pnl: NaN }}     | ${'unknown'}
+      ${'profit'} | ${{ profit: NaN }}  | ${'unknown'}
+      ${'profit'} | ${{ profit: 0.42 }} | ${'0.42%'}
+      ${'profit'} | ${{ profit: -0.5 }} | ${'-0.5%'}
+    `('should print $field $expected for a round trip with $fields', ({ field, fields, expected }) => {
+      logRoundtrip({ ...roundTrip, ...fields }, 'BTC', true);
+
+      expect(printedRow()[field]).toBe(expected);
+    });
+
+    describe.each`
+      timeZone
+      ${'UTC'}
+      ${'Europe/Paris'}
+      ${'America/New_York'}
+    `('on a host in $timeZone', ({ timeZone }) => {
+      useTimeZone(timeZone);
+
+      // Counted from epoch 0 on the UTC calendar: on the host's, New York moved its clocks on 1970-04-26, and every duration that
+      // reached past it gained an hour (Paris did not change its clocks in 1970)
+      it.each`
+        duration                                       | expected
+        ${60_000}                                      | ${'1 minute'}
+        ${3 * 86_400_000 + 5 * 3_600_000 + 7 * 60_000} | ${'3 days 5 hours 7 minutes'}
+        ${116 * 86_400_000}                            | ${'3 months 26 days'}
+        ${200 * 86_400_000}                            | ${'6 months 19 days'}
+        ${400 * 86_400_000}                            | ${'1 year 1 month 4 days'}
+      `('should print an exposed duration of $duration ms as $expected', ({ duration, expected }) => {
+        logRoundtrip({ ...roundTrip, duration }, 'BTC', true);
+
+        expect(printedRow().exposedDuration).toBe(expected);
+      });
     });
 
     it('should not print a table when the console table is disabled', () => {

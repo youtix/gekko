@@ -1,13 +1,13 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
+import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
-import { debug, info, warning } from '@services/logger';
+import { debug, error, info, warning } from '@services/logger';
 import * as statsUtils from '@utils/finance/stats.utils';
-import { stdev } from '@utils/math/math.utils';
 import { calculatePairEquity, getAssetBalance } from '@utils/portfolio/portfolio.utils';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
-import { TradingReport } from './roundTrip.types';
+import { OpenRoundTrip, TradingReport } from './roundTrip.types';
 import { RoundTripAnalyzer } from './roundTripAnalyzer';
 import { EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
@@ -15,15 +15,7 @@ import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 // Mocks
 vi.mock('@services/logger');
 vi.mock('@utils/finance/stats.utils');
-// stdev only, which the tests drive: the formatters of the log lines read isFiniteNumber, and the decimal helpers stay actual
-vi.mock('@utils/math/math.utils', async importOriginal => ({
-  ...(await importOriginal<typeof import('@utils/math/math.utils')>()),
-  stdev: vi.fn(),
-}));
-vi.mock('@utils/math/round.utils', async importOriginal => ({
-  ...(await importOriginal<typeof import('@utils/math/round.utils')>()),
-  round: (val: number) => val,
-}));
+// The math helpers stay actual, round included: the decimal ones work out the equities and the P&L, as in a run
 // The two the tests drive; isFetchedPortfolio stays actual, an automock would read every portfolio as one the Trader never fetched
 vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => ({
   ...(await importOriginal<typeof import('@utils/portfolio/portfolio.utils')>()),
@@ -62,6 +54,10 @@ const DAY = 24 * 60 * MINUTE;
  * an empty one only before it has fetched any (see isFetchedPortfolio).
  */
 const PORTFOLIO: Portfolio = new Map([['BTC', { free: 1, used: 0, total: 1 }]]);
+/** The empty portfolio the Trader starts with, which the end of an order carries until one of its synchronizations succeeds */
+const NOT_READ: Portfolio = new Map();
+/** The same event, carrying the empty portfolio of a Trader that has read none yet */
+const unread = (event: any) => ({ ...event, exchange: { portfolio: NOT_READ } });
 /** A completed order executed at the given minute, with its fee in currency (undefined when the test leaves it out) */
 const completed = (side: 'BUY' | 'SELL', minute: number, price: number, amount: number, fee?: number) =>
   ({
@@ -94,10 +90,9 @@ describe('RoundTripAnalyzer', () => {
   let analyzer: RoundTripAnalyzer;
   const mockConfig = { name: PLUGIN_NAME, riskFreeReturn: 2, enableConsoleTable: true };
 
-  beforeEach(() => {
+  beforeEach(async () => {
     (calculatePairEquity as any).mockReturnValue({ total: 1000, free: 500, used: 500 });
     (getAssetBalance as any).mockReturnValue({ total: 1.5, free: 1.5, used: 0 });
-    (stdev as any).mockReturnValue(0.05);
 
     Object.keys(statsUtils).forEach(key => {
       // @ts-expect-error iterating over all exports
@@ -106,6 +101,9 @@ describe('RoundTripAnalyzer', () => {
         (statsUtils[key] as any).mockReturnValue(0);
       }
     });
+    // The profit of a round trip is its total return (see measureRoundTrip): actual, as the decimal helpers are
+    const actualStats = await vi.importActual<typeof import('@utils/finance/stats.utils')>('@utils/finance/stats.utils');
+    vi.mocked(statsUtils.calculateTotalReturnPct).mockImplementation(actualStats.calculateTotalReturnPct);
 
     vi.mocked(warning).mockClear();
     vi.mocked(logFinalize).mockClear();
@@ -646,12 +644,11 @@ describe('RoundTripAnalyzer', () => {
     });
 
     // The Trader sends the portfolio it knows: the empty one it starts with until one of its synchronizations succeeds
-    const notFetched = (event: any) => ({ ...event, exchange: { portfolio: new Map() } });
     it.each`
       event                        | deliver
-      ${'an order completed'}      | ${() => analyzer.onOrderCompleted([notFetched(buy(2, 100, 1))])}
-      ${'an order canceled'}       | ${() => analyzer.onOrderCanceled([notFetched(canceled('BUY', 2, 0))])}
-      ${'an order ended in error'} | ${() => analyzer.onOrderErrored([notFetched(errored(2))])}
+      ${'an order completed'}      | ${() => analyzer.onOrderCompleted([unread(buy(2, 100, 1))])}
+      ${'an order canceled'}       | ${() => analyzer.onOrderCanceled([unread(canceled('BUY', 2, 0))])}
+      ${'an order ended in error'} | ${() => analyzer.onOrderErrored([unread(errored(2))])}
     `('should keep the latest portfolio when $event carries the empty portfolio of a Trader that has fetched none yet', ({ deliver }) => {
       analyzer.onPortfolioChange([CHANGED]);
       deliver();
@@ -679,10 +676,12 @@ describe('RoundTripAnalyzer', () => {
 
   describe('logOpenRoundTrip', () => {
     it.each`
-      entryEquity | currentEquity | pnl
-      ${100}      | ${200}        | ${'unrealized P&L of 100 USDT (+100%)'}
-      ${100}      | ${50}         | ${'unrealized P&L of -50 USDT (-50%)'}
-      ${0}        | ${50}         | ${'unrealized P&L of 50 USDT (0%)'}
+      entryEquity | currentEquity  | pnl
+      ${100}      | ${200}         | ${'unrealized P&L of 100 USDT (+100%)'}
+      ${100}      | ${50}          | ${'unrealized P&L of -50 USDT (-50%)'}
+      ${1}        | ${1.000000005} | ${'unrealized P&L of 0 USDT (0%)'}
+      ${NaN}      | ${50}          | ${'unrealized P&L unknown, no portfolio having valued its entry'}
+      ${0}        | ${50}          | ${'unrealized P&L unknown, no portfolio having valued its entry'}
     `('should log $pnl from an entry equity of $entryEquity to $currentEquity', ({ entryEquity, currentEquity, pnl }) => {
       analyzer['currentEquity'] = currentEquity;
       analyzer['logOpenRoundTrip']({ ...OPEN_ROUND_TRIP, entryEquity });
@@ -1006,18 +1005,18 @@ describe('RoundTripAnalyzer', () => {
       };
 
       it.each`
-        fee          | field            | expected                       | description
-        ${1}         | ${'entryEquity'} | ${1001}                        | ${'the pair equity before the BUY: after it, plus its fee'}
-        ${1}         | ${'exitEquity'}  | ${1000.5}                      | ${'the pair equity after the SELL'}
-        ${1}         | ${'pnl'}         | ${-0.5}                        | ${'a loss: the round trip gained less than the fee of its BUY'}
-        ${1}         | ${'profit'}      | ${(100 * 1000.5) / 1001 - 100} | ${'that loss, in % of the entry equity'}
-        ${0}         | ${'entryEquity'} | ${1000}                        | ${'without a fee, the pair equity after the BUY'}
-        ${0}         | ${'pnl'}         | ${0.5}                         | ${'without a fee, a gain'}
-        ${undefined} | ${'entryEquity'} | ${1000}                        | ${'an unknown fee counts as 0'}
-        ${NaN}       | ${'entryEquity'} | ${1000}                        | ${'a fee that is not a number counts as 0'}
+        fee          | field            | expected             | description
+        ${1}         | ${'entryEquity'} | ${1001}              | ${'the pair equity before the BUY: after it, plus its fee'}
+        ${1}         | ${'exitEquity'}  | ${1000.5}            | ${'the pair equity after the SELL'}
+        ${1}         | ${'pnl'}         | ${-0.5}              | ${'a loss: the round trip gained less than the fee of its BUY'}
+        ${1}         | ${'profit'}      | ${-0.04995004995005} | ${'that loss in % of the entry equity, in decimal: -0.049950049950055586 in binary'}
+        ${0}         | ${'entryEquity'} | ${1000}              | ${'without a fee, the pair equity after the BUY'}
+        ${0}         | ${'pnl'}         | ${0.5}               | ${'without a fee, a gain'}
+        ${undefined} | ${'entryEquity'} | ${1000}              | ${'an unknown fee counts as 0'}
+        ${NaN}       | ${'entryEquity'} | ${1000}              | ${'a fee that is not a number counts as 0'}
       `('should record $field $expected when the BUY paid a fee of $fee: $description', ({ fee, field, expected }) => {
         closeRoundTrip(fee);
-        expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBeCloseTo(expected, 10);
+        expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBe(expected);
       });
 
       it.each`
@@ -1061,10 +1060,139 @@ describe('RoundTripAnalyzer', () => {
         expect(analyzer['currentEquity']).toBe(1234);
       });
     });
+
+    describe('when the Trader had read no portfolio yet', () => {
+      // The empty portfolio the Trader starts with holds none of the account's balances: valued, it made the pair equity after the
+      // fill 0. A portfolio read is worth 1000 here.
+      beforeEach(() => {
+        vi.mocked(calculatePairEquity).mockImplementation(portfolio => {
+          const total = portfolio.size ? 1000 : 0;
+          return { total, free: total, used: 0 };
+        });
+      });
+
+      it('should not value the pair equity after the fill', () => {
+        analyzer.onOrderCompleted([unread(buy(1, 100, 2, 0.5))]);
+        expect(calculatePairEquity).not.toHaveBeenCalled();
+      });
+
+      it('should leave the current equity as it was after a SELL', () => {
+        analyzer['currentEquity'] = 500;
+        analyzer.onOrderCompleted([unread(buy(1, 100, 2)), unread(sell(3, 110, 1))]);
+        expect(analyzer['currentEquity']).toBe(500);
+      });
+
+      describe('a BUY of 2 at 100, with a fee of 0.5, that opens a round trip', () => {
+        beforeEach(() => {
+          analyzer.onOrderCompleted([unread(buy(1, 100, 2, 0.5))]);
+        });
+
+        it('should open it without an entry equity, waiting for a portfolio, the fee of that BUY first to give back', () => {
+          expect(analyzer['openRoundTrip']).toEqual({
+            ...OPEN_ROUND_TRIP,
+            entryAt: MINUTE,
+            entryEquity: NaN,
+            pendingEntry: { orderId: 'BUY-1', price: 100, change: -0.5 },
+            bought: 2,
+          });
+        });
+
+        it.each`
+          fill                           | change   | description
+          ${unread(buy(2, 120, 1, 0.3))} | ${-20.8} | ${'its fee, and 1 BTC worth 100 bought for 120'}
+          ${unread(sell(3, 130, 1))}     | ${29.5}  | ${'1 BTC worth 100 sold for 130, without a fee'}
+        `('should count a fill whose portfolio was not read either in the change to give back: $description', ({ fill, change }) => {
+          analyzer.onOrderCompleted([fill]);
+          expect(analyzer['openRoundTrip']?.pendingEntry?.change).toBe(change);
+        });
+
+        it('should not value its entry equity with a portfolio change, which can show a fill whose end comes after it', () => {
+          analyzer.onPortfolioChange([PORTFOLIO]);
+          expect(analyzer['openRoundTrip']?.entryEquity).toBeNaN();
+        });
+
+        it.each`
+          end                          | deliver                                                    | entryEquity
+          ${'a completed BUY'}         | ${() => analyzer.onOrderCompleted([buy(2, 120, 1, 0.3)])}  | ${1020.8}
+          ${'a canceled order'}        | ${() => analyzer.onOrderCanceled([canceled('BUY', 2, 0)])} | ${1000.5}
+          ${'an order ended in error'} | ${() => analyzer.onOrderErrored([errored(2)])}             | ${1000.5}
+        `(
+          'should value its entry equity at $entryEquity with the portfolio $end carries: the pair equity it shows, less the change',
+          ({ deliver, entryEquity }) => {
+            deliver();
+            expect(analyzer['openRoundTrip']?.entryEquity).toBe(entryEquity);
+          },
+        );
+
+        it('should value the portfolio read after it at the price of the BUY', () => {
+          analyzer.onOrderErrored([errored(2)]);
+          expect(calculatePairEquity).toHaveBeenCalledExactlyOnceWith(PORTFOLIO, 'BTC/USDT', 100);
+        });
+
+        it('should no longer wait for a portfolio once one valued its entry equity', () => {
+          analyzer.onOrderErrored([errored(2)]);
+          expect(analyzer['openRoundTrip']?.pendingEntry).toBeUndefined();
+        });
+
+        it('should say that the first portfolio read after the BUY gave its entry equity', () => {
+          analyzer.onOrderErrored([errored(2)]);
+          expect(info).toHaveBeenCalledWith(
+            'roundtrip analyzer',
+            'BUY order BUY-1 filled before the Trader read any portfolio: its round trip enters with 1,000.5 USDT, from the first portfolio read after it.',
+          );
+        });
+
+        describe('then closed by a SELL whose portfolio was not read either', () => {
+          beforeEach(() => {
+            analyzer.onOrderCompleted([unread(sell(3, 110, 2))]);
+          });
+
+          it.each`
+            field
+            ${'entryEquity'}
+            ${'exitEquity'}
+            ${'pnl'}
+            ${'profit'}
+          `('should record the round trip with $field unknown (NaN)', ({ field }) => {
+            expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBeNaN();
+          });
+
+          it('should warn that the round trip is left out of the win rate and the ratios, naming the orders between which nothing was read', () => {
+            expect(warning).toHaveBeenCalledWith(
+              'roundtrip analyzer',
+              'Round trip 0 left out of the win rate and the ratios, its P&L unknown: the Trader read no portfolio from BUY order BUY-1, which opened it, to SELL order SELL-3, which closed it.',
+            );
+          });
+
+          describe('in the report', () => {
+            beforeEach(() => {
+              analyzer['start'] = { equity: 1000, portfolio: PORTFOLIO };
+              analyzer['startPrice'] = 100;
+              analyzer['dates'] = { start: 0, end: 10 * MINUTE };
+              analyzer['calculateReportStatistics']();
+            });
+
+            it('should count no round trip in the win rate', () => {
+              expect(statsUtils.calculateWinRate).toHaveBeenCalledWith(0, 0);
+            });
+
+            it('should pass no return to the deviations and the ratios', () => {
+              expect(statsUtils.calculateDownsideDeviation).toHaveBeenCalledWith([]);
+            });
+
+            it('should count its time in the exposure', () => {
+              expect(statsUtils.calculateExposurePct).toHaveBeenCalledWith(2 * MINUTE, 10 * MINUTE);
+            });
+          });
+        });
+      });
+    });
   });
 
   describe('handleCompletedRoundtrip', () => {
-    const roundTrip = { ...OPEN_ROUND_TRIP, sold: 1, exitPrice: 110, maxAdverseExcursion: 5 };
+    const roundTrip: OpenRoundTrip = { ...OPEN_ROUND_TRIP, sold: 1, exitPrice: 110, maxAdverseExcursion: 5 };
+    /** The SELL that closes the round trip at `date`, and the pair equity after it */
+    const closingSell = (date: number, equity: number) => ({ id: 'SELL-3', date, price: 110, amount: 1, fee: 0, equity }) as any;
 
     it.each`
       field                    | expected
@@ -1080,31 +1208,75 @@ describe('RoundTripAnalyzer', () => {
       ${'maxAdverseExcursion'} | ${5}
       ${'duration'}            | ${2000}
     `('should record the round trip with $field $expected', ({ field, expected }) => {
-      analyzer['handleCompletedRoundtrip'](roundTrip, 3000, 1100);
+      analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
       expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBe(expected);
     });
 
     it('should log the roundtrip', () => {
-      analyzer['handleCompletedRoundtrip'](roundTrip, 3000, 1100);
+      analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
       expect(logRoundtrip).toHaveBeenCalledWith(analyzer['roundTrips'][0], 'USDT', true);
     });
 
     it('should number successive round trips', () => {
-      analyzer['handleCompletedRoundtrip'](roundTrip, 3000, 1100);
-      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryAt: 5000 }, 9000, 1200);
+      analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
+      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryAt: 5000 }, closingSell(9000, 1200));
       expect(analyzer['roundTrips'][1].id).toBe(1);
     });
 
     it('should add the durations of successive round trips to the exposure', () => {
       analyzer['dates'] = { start: 0, end: 10_000 };
-      analyzer['handleCompletedRoundtrip'](roundTrip, 3000, 1100);
-      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryAt: 5000 }, 9000, 1200);
+      analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
+      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryAt: 5000 }, closingSell(9000, 1200));
       expect(analyzer['calculateExposureMs']()).toBe(6000);
     });
 
-    it('should report a profit of 0 when the entry equity is 0', () => {
-      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryEquity: 0 }, 3000, 1100);
-      expect(analyzer['roundTrips'][0].profit).toBe(0);
+    // Prices to 1e-6 and amounts to 1e-4 (ETH/BTC): the exchange books amount × price rounded to 8 decimals, the round trip values its
+    // position at amount × price, so a round trip sold back at its own price without a fee ends up to half a unit of the 8th decimal
+    // off its entry equity
+    it.each`
+      entryEquity    | exitEquity        | field       | expected             | description
+      ${1}           | ${1.000000005}    | ${'pnl'}    | ${0}                 | ${'half a unit of the 8th decimal apart, the rounding of a cost: a break-even'}
+      ${1}           | ${1.000000005}    | ${'profit'} | ${0}                 | ${'half a unit of the 8th decimal apart, the rounding of a cost: a break-even'}
+      ${1}           | ${1.00000001}     | ${'pnl'}    | ${1e-8}              | ${'a unit of the 8th decimal apart, an amount the exchange booked'}
+      ${1}           | ${1.00000001}     | ${'profit'} | ${0.000001}          | ${'a unit of the 8th decimal apart, an amount the exchange booked'}
+      ${100_000_000} | ${100_000_000.05} | ${'pnl'}    | ${0}                 | ${'within a billionth of the equity (see compareWithTolerance): a break-even'}
+      ${100_000_000} | ${100_000_000.2}  | ${'pnl'}    | ${0.2}               | ${'beyond a billionth of the equity'}
+      ${1001}        | ${1000.5}         | ${'profit'} | ${-0.04995004995005} | ${'in decimal: (100 * 1000.5) / 1001 - 100 is -0.049950049950055586'}
+      ${0}           | ${1100}           | ${'pnl'}    | ${NaN}               | ${'no entry equity to measure from: unknown, not a gain of 1100'}
+      ${0}           | ${1100}           | ${'profit'} | ${NaN}               | ${'no entry equity to measure from: unknown, not 0'}
+      ${NaN}         | ${1100}           | ${'pnl'}    | ${NaN}               | ${'an entry equity no portfolio valued'}
+      ${1000}        | ${NaN}            | ${'profit'} | ${NaN}               | ${'an exit equity no portfolio valued'}
+    `(
+      'should record $field $expected from an entry equity of $entryEquity to an exit equity of $exitEquity: $description',
+      ({ entryEquity, exitEquity, field, expected }) => {
+        analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryEquity }, closingSell(3000, exitEquity));
+        expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBe(expected);
+      },
+    );
+
+    it.each`
+      exitEquity     | wins | outcome
+      ${1.000000005} | ${0} | ${'a break-even, half a unit of the 8th decimal off'}
+      ${1.00000001}  | ${1} | ${'a win, a unit of the 8th decimal up'}
+    `('should count a round trip from 1 to $exitEquity as $outcome in the win rate', ({ exitEquity, wins }) => {
+      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryEquity: 1 }, closingSell(3000, exitEquity));
+      analyzer['start'] = { equity: 1000, portfolio: PORTFOLIO };
+      analyzer['startPrice'] = 100;
+      analyzer['calculateReportStatistics']();
+      expect(statsUtils.calculateWinRate).toHaveBeenCalledWith(wins, 1);
+    });
+
+    it('should warn that a round trip whose P&L is unknown is left out of the win rate and the ratios', () => {
+      analyzer['handleCompletedRoundtrip']({ ...roundTrip, entryEquity: 0 }, closingSell(3000, 1100));
+      expect(warning).toHaveBeenCalledWith(
+        'roundtrip analyzer',
+        'Round trip 0 left out of the win rate and the ratios, its P&L unknown: no portfolio valued its entry or its exit (SELL order SELL-3).',
+      );
+    });
+
+    it('should not warn of a round trip whose P&L is known', () => {
+      analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
+      expect(warning).not.toHaveBeenCalled();
     });
   });
 
@@ -1160,7 +1332,7 @@ describe('RoundTripAnalyzer', () => {
       const candle = { start: 1000, close: 100, low: 90 } as any;
       const bucket = new Map([['BTC/USDT', candle]]) as CandleBucket;
       analyzer['processOneMinuteBucket'](bucket);
-      expect(analyzer['dates'].end).toBe(1000 + 60000); // addMinutes(1)
+      expect(analyzer['dates'].end).toBe(1000 + 60000); // the end of its minute
     });
 
     it('should update maxAdverseExcursion if in trade and candle low drops further', () => {
@@ -1198,50 +1370,86 @@ describe('RoundTripAnalyzer', () => {
   });
 
   describe('processFinalize', () => {
-    it('should calculate report and emit it directly', () => {
+    it('should calculate report and emit it directly', async () => {
       const emitSpy = vi.spyOn(analyzer as any, 'emit');
       const calcSpy = vi.spyOn(analyzer as any, 'calculateReportStatistics');
       const mockReport = { id: 'TRADING REPORT' } as any;
       calcSpy.mockReturnValue(mockReport);
 
-      analyzer['processFinalize']();
+      await analyzer['processFinalize']();
       expect(emitSpy).toHaveBeenCalledWith(PERFORMANCE_REPORT_EVENT, mockReport);
     });
 
-    it('should say why the run was interrupted in the report', () => {
+    it('should say why the run was interrupted in the report', async () => {
       const emitSpy = vi.spyOn(analyzer as any, 'emit');
       vi.spyOn(analyzer as any, 'calculateReportStatistics').mockReturnValue({ id: 'TRADING REPORT' });
 
-      analyzer['processFinalize'](new Error('circuit breaker'));
+      await analyzer['processFinalize'](new Error('circuit breaker'));
       expect(emitSpy).toHaveBeenCalledWith(PERFORMANCE_REPORT_EVENT, { id: 'TRADING REPORT', interruption: 'circuit breaker' });
     });
 
-    it('should log final report when console table enabled', () => {
+    it('should log final report when console table enabled', async () => {
       const calcSpy = vi.spyOn(analyzer as any, 'calculateReportStatistics');
       const mockReport = { id: 'TRADING REPORT' } as any;
       calcSpy.mockReturnValue(mockReport);
       analyzer['enableConsoleTable'] = true;
 
-      analyzer['processFinalize']();
+      await analyzer['processFinalize']();
       expect(logFinalize).toHaveBeenCalledWith(mockReport, 'USDT'); // NOTE: Removed third argument mapping
     });
 
-    it('should log final report through info when console table disabled', () => {
+    it('should log final report through info when console table disabled', async () => {
       vi.spyOn(analyzer as any, 'calculateReportStatistics').mockReturnValue(EMPTY_TRADING_REPORT);
       analyzer['enableConsoleTable'] = false;
 
-      analyzer['processFinalize']();
+      await analyzer['processFinalize']();
       expect(info).toHaveBeenCalledWith('roundtrip analyzer', EMPTY_TRADING_REPORT);
+    });
+
+    // Described as describeError writes a failure: a GekkoError without its tag, which the line has one of its own already
+    describe.each`
+      thrown                                                   | described
+      ${new Error('disk full')}                                | ${'disk full'}
+      ${new GekkoError('performance reporter', 'report lost')} | ${'report lost'}
+      ${{ errno: -13 }}                                        | ${'{ errno: -13 }'}
+    `('when a listener of the report throws $thrown', ({ thrown, described }) => {
+      beforeEach(() => {
+        analyzer.on(PERFORMANCE_REPORT_EVENT, async () => {
+          throw thrown;
+        });
+      });
+
+      it('should resolve all the same: the report was produced and logged', async () => {
+        await expect(analyzer['processFinalize']()).resolves.toBeUndefined();
+      });
+
+      it(`should log the failure at error level: ${described}`, async () => {
+        await analyzer['processFinalize']();
+        expect(error).toHaveBeenCalledWith('roundtrip analyzer', `A listener failed on the performance report: ${described}`);
+      });
+    });
+
+    it('should resolve only once the listeners of the report are done with it', async () => {
+      let release = () => {};
+      analyzer.on(PERFORMANCE_REPORT_EVENT, () => new Promise<void>(resolve => (release = resolve)));
+      const finalized = vi.fn();
+      const finalization = analyzer['processFinalize']().then(finalized);
+      // A timer runs once the microtasks queued before it have: processFinalize would have resolved by then had it not waited
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const finalizedBeforeRelease = finalized.mock.calls.length;
+      release();
+      await finalization;
+      expect(finalizedBeforeRelease).toBe(0);
     });
   });
 
   describe('calculateReportStatistics', () => {
     describe.each`
-      missing                  | start                                     | startPrice
-      ${'the start equity'}    | ${{ equity: 0, portfolio: new Map() }}    | ${100}
-      ${'the start portfolio'} | ${{ equity: 1000, portfolio: null }}      | ${100}
-      ${'the start price'}     | ${{ equity: 1000, portfolio: new Map() }} | ${null}
-    `('without $missing', ({ start, startPrice }) => {
+      missing                  | start                                     | startPrice | message
+      ${'a start equity'}      | ${{ equity: 0, portfolio: new Map() }}    | ${100}     | ${'Start equity of 0 USDT: no return to measure. Emitting empty report.'}
+      ${'the start portfolio'} | ${{ equity: 1000, portfolio: null }}      | ${100}     | ${'No portfolio data received. Emitting empty report.'}
+      ${'the start price'}     | ${{ equity: 1000, portfolio: new Map() }} | ${null}    | ${'The warmup never completed: no period to measure. Emitting empty report.'}
+    `('without $missing', ({ start, startPrice, message }) => {
       let report: TradingReport;
       beforeEach(() => {
         analyzer['start'] = start;
@@ -1253,9 +1461,16 @@ describe('RoundTripAnalyzer', () => {
         expect(report).toEqual(EMPTY_TRADING_REPORT);
       });
 
-      it('should warn that no portfolio data was received', () => {
-        expect(warning).toHaveBeenCalledWith('roundtrip analyzer', expect.stringContaining('No portfolio data'));
+      it(`should warn: ${message}`, () => {
+        expect(warning).toHaveBeenCalledExactlyOnceWith('roundtrip analyzer', message);
       });
+    });
+
+    it('should report the win rate as calculateWinRate gives it, for the printers to round once: 40 wins of 103, 38.83 % and not 38.84 %', () => {
+      analyzer['start'] = { equity: 1000, portfolio: PORTFOLIO };
+      analyzer['startPrice'] = 100;
+      vi.mocked(statsUtils.calculateWinRate).mockReturnValue(38.8349514563107);
+      expect(analyzer['calculateReportStatistics']().winRate).toBe(38.8349514563107);
     });
 
     it('should warn that a period shorter than a day is annualized over a day', () => {
@@ -1390,10 +1605,8 @@ describe('RoundTripAnalyzer', () => {
     beforeEach(async () => {
       const actualPortfolio = await vi.importActual<typeof import('@utils/portfolio/portfolio.utils')>('@utils/portfolio/portfolio.utils');
       const actualStats = await vi.importActual<typeof import('@utils/finance/stats.utils')>('@utils/finance/stats.utils');
-      const actualMath = await vi.importActual<typeof import('@utils/math/math.utils')>('@utils/math/math.utils');
       vi.mocked(calculatePairEquity).mockImplementation(actualPortfolio.calculatePairEquity);
       vi.mocked(getAssetBalance).mockImplementation(actualPortfolio.getAssetBalance);
-      vi.mocked(stdev).mockImplementation(actualMath.stdev);
       for (const [name, implementation] of Object.entries(actualStats))
         if (typeof implementation === 'function')
           vi.mocked(statsUtils[name as keyof typeof statsUtils] as any).mockImplementation(implementation);
@@ -1607,6 +1820,94 @@ describe('RoundTripAnalyzer', () => {
         ${'netProfit'}  | ${40}    | ${'that of the round trip'}
       `('should report $field $expected: $description', ({ field, expected }) => {
         expect(report[field as keyof TradingReport]).toBe(expected);
+      });
+    });
+
+    describe('when a BUY that names its amount fills before any read of the Trader succeeds', () => {
+      // Realtime: the TradingAdvisor read the balance at start-up, 1,000 USDT, then every read of the Trader fails for a while. The
+      // warmup of 0 candles ends with the first bucket, at 100. A BUY of 1 BTC at 100, with a fee of 0.1 USDT, fills meanwhile: its end
+      // carries the empty portfolio the Trader starts with. The reads come back: a portfolio change shows 1 BTC and 899.9 USDT. The
+      // strategy sells the BTC at 110, with a fee of 0.11 USDT: the change of the read its report waits for comes first, 1,009.79 USDT,
+      // then its end.
+      let report: TradingReport;
+      beforeEach(() => {
+        runMinute(0, 100, { completesWarmup: true });
+        analyzer.onOrderCompleted([filled('BUY', 1, 100, 1, 0.1, NOT_READ)]);
+        runMinute(1, 100);
+        analyzer.onPortfolioChange([holding(1, 899.9)]);
+        runMinute(2, 110);
+        analyzer.onPortfolioChange([holding(0, 1_009.79)]);
+        analyzer.onOrderCompleted([filled('SELL', 3, 110, 1, 0.11, holding(0, 1_009.79))]);
+        runMinute(3, 110);
+        report = finalReport();
+      });
+
+      it.each`
+        field            | expected    | description
+        ${'entryEquity'} | ${1_000}    | ${'the pair equity after the SELL at 100, less what the BUY and the SELL changed it by: not 0.1, the fee of the BUY'}
+        ${'exitEquity'}  | ${1_009.79} | ${'1,009.79 USDT'}
+        ${'pnl'}         | ${9.79}     | ${'10 on the BTC, less 0.21 of fees: not a loss of 0.1, valued with the change that showed the SELL already'}
+        ${'profit'}      | ${0.979}    | ${'not +1,009,690 %'}
+      `('should emit its round trip with $field $expected: $description', ({ field, expected }) => {
+        expect(emittedRoundTrips()[0][field as keyof RoundTrip]).toBe(expected);
+      });
+
+      it('should report a win rate of 100: one round trip, a win', () => {
+        expect(report.winRate).toBe(100);
+      });
+    });
+
+    describe('when a BUY canceled after a partial fill ends before any read of the Trader succeeds', () => {
+      // A BUY of 10 BTC at 100 fills 1 before its cancelation, at the close of minute 1, whose end carries the empty portfolio the
+      // Trader starts with. The reads come back, and the strategy sells the BTC at 110 without a fee: 1,010 USDT.
+      beforeEach(() => {
+        runMinute(0, 100, { completesWarmup: true });
+        analyzer.onOrderCanceled([canceledAfterFill('BUY', 1, 100, 1, NOT_READ)]);
+        runMinute(1, 110);
+        analyzer.onOrderCompleted([filled('SELL', 2, 110, 1, 0, holding(0, 1_010))]);
+      });
+
+      it.each`
+        field            | expected | description
+        ${'entryEquity'} | ${1_000} | ${'not 0, valued with the empty portfolio'}
+        ${'pnl'}         | ${10}    | ${'1 BTC bought at 100, sold at 110: not a gain of 1,010'}
+        ${'profit'}      | ${1}     | ${'not 0, for an entry equity of 0'}
+      `('should emit the round trip of the part filled with $field $expected: $description', ({ field, expected }) => {
+        expect(emittedRoundTrips()[0][field as keyof RoundTrip]).toBe(expected);
+      });
+    });
+
+    it('should keep a round trip open after a SELL of part of it whose end carries no portfolio read, which holds no BTC', () => {
+      runMinute(0, 100, { completesWarmup: true });
+      analyzer.onOrderCompleted([filled('BUY', 1, 100, 2, 0, NOT_READ), filled('SELL', 2, 110, 1, 0, NOT_READ)]);
+      expect(analyzer['openRoundTrip']?.sold).toBe(1);
+    });
+
+    describe('when a round trip is sold back at its own price without a fee, its cost booked to 8 decimals', () => {
+      // Prices to 1e-6 and amounts to 1e-4, as on ETH/BTC. From 1 unit of the currency, a BUY of 0.0123 at 0.051234 costs 0.0006301782,
+      // which the exchange books as 0.00063018; sold back at 0.051234 for the same 0.00063018, it leaves 1 again: it made nothing. Its
+      // entry equity, the position after the BUY valued at 0.051234, is 0.9999999982.
+      let report: TradingReport;
+      beforeEach(() => {
+        runMinute(0, 0.051234, { completesWarmup: true });
+        analyzer.onPortfolioChange([holding(0, 1)]);
+        analyzer.onOrderCompleted([filled('BUY', 1, 0.051234, 0.0123, 0, holding(0.0123, 0.99936982))]);
+        runMinute(1, 0.051234);
+        analyzer.onOrderCompleted([filled('SELL', 2, 0.051234, 0.0123, 0, holding(0, 1))]);
+        runMinute(2, 0.051234);
+        report = finalReport();
+      });
+
+      it.each`
+        field
+        ${'pnl'}
+        ${'profit'}
+      `('should emit its round trip with $field 0, not 1.8e-9 off', ({ field }) => {
+        expect(emittedRoundTrips()[0][field as keyof RoundTrip]).toBe(0);
+      });
+
+      it('should count it neither as a win nor as a loss: a win rate of 0', () => {
+        expect(report.winRate).toBe(0);
       });
     });
   });

@@ -10,7 +10,10 @@ export interface TradingReport extends Report {
   finalBalance: number;
   /** Type of the report */
   id: 'TRADING REPORT';
-  /** Percentage of profitable round-trips relative to total trades (Win Rate) */
+  /**
+   * The share of the round trips closed during the period that ended in profit, in % (60 for 60 %), counted over those whose P&L is
+   * known (see RoundTrip.pnl); null without one. Not rounded: the printers round it, once.
+   */
   winRate: number | null;
   /** Initial portfolio balance at the start of the period */
   startBalance: number;
@@ -47,9 +50,12 @@ export type OpenRoundTrip = {
    * Pair equity before its first BUY, at the price of that BUY: the pair equity after it plus its fee, which the BUY took from the
    * pair, in currency or in the asset bought. The exit equity is read after the SELL that ends the round trip, its fee paid, so that
    * the pnl and the profit of the round trip are net of the fees of all its orders: those of its later BUYs (scale-in) and of its
-   * other SELLs are in the exit equity already. An unknown fee counts as 0 (see Fill).
+   * other SELLs are in the exit equity already. An unknown fee counts as 0 (see Fill). NaN while unknown: the first BUY filled before
+   * the Trader had read any portfolio, and no order has ended with one since (see pendingEntry).
    */
   entryEquity: number;
+  /** Set while the entry equity is unknown: what values it once an order ends with a portfolio read (see PendingEntry) */
+  pendingEntry?: PendingEntry;
   /** Amount of asset its BUYs bought */
   bought: number;
   /** Amount of asset its SELLs have sold so far */
@@ -60,26 +66,50 @@ export type OpenRoundTrip = {
   maxAdverseExcursion: number;
 };
 
+/**
+ * What the entry equity of a round trip is worked out from when the BUY that opened it filled before the Trader had read any portfolio:
+ * its event carried the empty portfolio the Trader starts with, which holds none of the account's balances (see isFetchedPortfolio).
+ * The first portfolio an order ends with afterwards was read after every fill heard so far: the pair equity it shows at the price of
+ * that BUY, less what those fills changed it by, is the pair equity before the BUY (see RoundTripAnalyzer.valueEntryEquity).
+ */
+export type PendingEntry = {
+  /** The BUY that opened the round trip */
+  orderId: UUID;
+  /** Its price: the price the entry equity is valued at */
+  price: number;
+  /**
+   * What the fills of the round trip have changed the pair equity by, valued at that price, in currency: each one its fee, and the
+   * asset it moved valued at that price less the currency it moved for it (see getEquityChange). Valued at its own price, a fill
+   * changes the pair equity by its fee alone.
+   */
+  change: number;
+};
+
 /** What an order filled, as the Trader reports it: a completed order, or the part of a canceled one that filled */
 export type OrderFill = {
   id: UUID;
   side: OrderSide;
   /** When it filled: the execution date of a completed order, the cancelation date of a canceled one */
   date: EpochTimeStamp;
-  /** Missing, or NaN, when neither the exchange nor the Trader knows it */
+  /**
+   * The price it filled at: that of a completed order, which the Trader always sets (optional in the event type only); for a canceled
+   * one, its own price, else the last close (see RoundTripAnalyzer.onOrderCanceled)
+   */
   price?: number;
   amount: number;
-  /** Its fee in currency, NaN when unknown */
+  /** Its fee in currency: a completed order's, 0 when the exchange gives no fee rate; NaN for a canceled one, whose fee is unknown */
   fee: number;
 };
 
 /** An order fill with a valid price and amount, and the pair equity right after it, at its price (see registerRoundtripPart) */
 export type Fill = {
+  id: UUID;
   date: EpochTimeStamp;
   price: number;
   amount: number;
   /** Its fee in currency, 0 when unknown */
   fee: number;
+  /** NaN when its event carried the empty portfolio of a Trader that had read none yet (see PendingEntry) */
   equity: number;
 };
 

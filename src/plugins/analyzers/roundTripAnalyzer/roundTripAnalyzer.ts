@@ -1,14 +1,16 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
+import { ONE_MINUTE } from '@constants/time.const';
+import { describeError } from '@errors/error.utils';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@models/event.types';
+import { OrderSide } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
 import { Asset, TradingPair } from '@models/utility.types';
-import { debug, info, warning } from '@services/logger';
+import { debug, error, info, warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
-import { calculateMarketReturnPct, calculateWinRate, extractTopMAEs } from '@utils/finance/stats.utils';
-import { round } from '@utils/math/round.utils';
+import { calculateMarketReturnPct, calculateTotalReturnPct, calculateWinRate, extractTopMAEs } from '@utils/finance/stats.utils';
+import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
 import { calculatePairEquity, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { formatAmount, formatSignedPercent } from '@utils/string/string.utils';
-import { addMinutes, differenceInMilliseconds } from 'date-fns';
 import { first, isNil, sumBy } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
@@ -16,12 +18,35 @@ import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
 import { calculatePerformanceStatistics } from '../analyzer.utils';
 import { DateRange, Fill, OpenRoundTrip, OrderFill, Start, TradingReport } from './roundTrip.types';
-import { EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
+import { BOOKED_CURRENCY_UNIT, EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 
 /** A mean price weighted by amounts, once one more price is added with its amount */
 const addToMeanPrice = (meanPrice: number, amount: number, price: number, addedAmount: number) =>
   (meanPrice * amount + price * addedAmount) / (amount + addedAmount);
+
+/**
+ * What a fill changes the pair equity by, valued at `price`, in currency: the asset it moves valued at that price, less the currency it
+ * moves for it at its own price, less its fee (see PendingEntry). Worked out in decimal, as the pair equity it is taken off is (see
+ * valueEntryEquity).
+ */
+const getEquityChange = (side: OrderSide, { price: fillPrice, amount, fee }: Fill, price: number) =>
+  addPrecise(multiplyPrecise(side === 'BUY' ? amount : -amount, addPrecise(price, -fillPrice)), -fee);
+
+/**
+ * The P&L and the profit of a round trip, from its entry equity to its exit equity, in decimal: the profit as the total return of a
+ * report is computed (see calculateTotalReturnPct), where (100 * exit) / entry - 100 left ±1.42e-14 on a round trip that made nothing.
+ * Two equities less than BOOKED_CURRENCY_UNIT apart, or equal within compareWithTolerance once past what the decimal helpers keep
+ * exact, broke even: P&L and profit 0, no win. Unknown (NaN) without an entry equity above 0 or without an exit equity: valued with the
+ * empty portfolio of a Trader that had read none, a BUY of 1 BTC at 100 entered at its fee, 0.1 USDT, and its round trip made
+ * +1,009,690 % (see PendingEntry).
+ */
+const measureRoundTrip = (entryEquity: number, exitEquity: number): Pick<RoundTrip, 'pnl' | 'profit'> => {
+  if (!(entryEquity > 0) || !isFiniteNumber(exitEquity)) return { pnl: NaN, profit: NaN };
+  const pnl = addPrecise(exitEquity, -entryEquity);
+  if (Math.abs(pnl) < BOOKED_CURRENCY_UNIT || compareWithTolerance(exitEquity, entryEquity) === 0) return { pnl: 0, profit: 0 };
+  return { pnl, profit: calculateTotalReturnPct(exitEquity, entryEquity) };
+};
 
 export class RoundTripAnalyzer extends Plugin {
   /**
@@ -139,10 +164,11 @@ export class RoundTripAnalyzer extends Plugin {
 
   public onOrderCompleted(events: OrderCompletedEvent[]): void {
     for (const { order, exchange } of events) {
-      // The portfolio after the fill is the latest, whether the fill counts in a round trip or not (see latestPortfolio)
-      this.refreshLatestPortfolio(exchange.portfolio);
       const { id, side, price, amount, fee, orderExecutionDate } = order;
       this.registerTrade({ id, side, date: orderExecutionDate, price, amount, fee }, exchange.portfolio);
+      // The portfolio after the fill is the latest, whether the fill counts in a round trip or not (see latestPortfolio): taken once
+      // the fill is counted, which that portfolio shows (see valueEntryEquity)
+      this.refreshLatestPortfolio(exchange.portfolio);
     }
   }
 
@@ -155,16 +181,17 @@ export class RoundTripAnalyzer extends Plugin {
    */
   public onOrderCanceled(events: OrderCanceledEvent[]): void {
     for (const { order, exchange } of events) {
-      this.refreshLatestPortfolio(exchange.portfolio);
       const { id, side, price, filled, orderCancelationDate } = order;
       // No fill reported (undefined) counts for nothing, as 0 does
-      if (isNil(filled) || !(filled > 0)) continue;
-      const fillPrice = price ?? this.lastPriceUpdate;
-      debug(
-        'roundtrip analyzer',
-        `${side} order ${id} canceled after a partial fill: its ${filled} filled count at ${fillPrice}, fee unknown.`,
-      );
-      this.registerTrade({ id, side, date: orderCancelationDate, price: fillPrice, amount: filled, fee: NaN }, exchange.portfolio);
+      if (!isNil(filled) && filled > 0) {
+        const fillPrice = price ?? this.lastPriceUpdate;
+        debug(
+          'roundtrip analyzer',
+          `${side} order ${id} canceled after a partial fill: its ${filled} filled count at ${fillPrice}, fee unknown.`,
+        );
+        this.registerTrade({ id, side, date: orderCancelationDate, price: fillPrice, amount: filled, fee: NaN }, exchange.portfolio);
+      }
+      this.refreshLatestPortfolio(exchange.portfolio);
     }
   }
 
@@ -181,9 +208,33 @@ export class RoundTripAnalyzer extends Plugin {
 
   // --- BEGIN INTERNALS ---
 
-  /** Takes the portfolio an order event carries as the latest (see latestPortfolio), unless the Trader had fetched none yet */
+  /**
+   * Takes the portfolio an order event carries as the latest (see latestPortfolio), unless the Trader had fetched none yet, and values
+   * with it the entry equity of a round trip opened before any (see valueEntryEquity)
+   */
   private refreshLatestPortfolio(portfolio: Portfolio): void {
-    if (isFetchedPortfolio(portfolio)) this.latestPortfolio = portfolio;
+    if (!isFetchedPortfolio(portfolio)) return;
+    this.latestPortfolio = portfolio;
+    this.valueEntryEquity(portfolio);
+  }
+
+  /**
+   * Values the entry equity of the open round trip whose BUY filled before the Trader had read any portfolio (see PendingEntry), with the
+   * first portfolio an order ends with since, once the fill of that order is counted: the pair equity it shows at the price of that BUY,
+   * less what the fills of the round trip changed it by. That portfolio was read after every fill heard so far: the report of an order
+   * waits for the reads started before its order ended. Not a portfolio change: the Trader sends the change of the read a report waits
+   * for before the end of its order, which the change shows already and the round trip has not counted yet.
+   */
+  private valueEntryEquity(portfolio: Portfolio): void {
+    const roundTrip = this.openRoundTrip;
+    if (!roundTrip?.pendingEntry) return;
+    const { orderId, price, change } = roundTrip.pendingEntry;
+    roundTrip.entryEquity = addPrecise(calculatePairEquity(portfolio, this.symbol, price).total, -change);
+    roundTrip.pendingEntry = undefined;
+    info(
+      'roundtrip analyzer',
+      `BUY order ${orderId} filled before the Trader read any portfolio: its round trip enters with ${formatAmount(roundTrip.entryEquity)} ${this.currency}, from the first portfolio read after it.`,
+    );
   }
 
   /**
@@ -219,7 +270,9 @@ export class RoundTripAnalyzer extends Plugin {
     );
     roundTrip.entryAt = this.dates.start;
     roundTrip.entryPrice = startPrice;
+    // 0 without a start taken yet, which leaves its P&L unknown (see measureRoundTrip): it no longer waits for a portfolio either
     roundTrip.entryEquity = this.start.equity;
+    roundTrip.pendingEntry = undefined;
   }
 
   /**
@@ -246,38 +299,49 @@ export class RoundTripAnalyzer extends Plugin {
    * the same portfolio, read after both, so the entry or the exit equity the first one gives already includes the second.
    */
   private registerRoundtripPart({ id, side, date, price, amount, fee }: OrderFill, portfolio: Portfolio): void {
-    // Both are NaN in the summary of an order whose trades could not be found (and NaN > 0 is false)
+    // The Trader sets the price and the amount of every fill it reports, estimating those of an order whose trades it cannot read: what
+    // is skipped here is a fill priced at the last close before any bucket (0), or a price the event type leaves optional
     if (isNil(price) || !(price > 0) || !(amount > 0)) {
       warning('roundtrip analyzer', `Order ${id} filled without a valid price or amount. Skipping roundtrip update.`);
       return;
     }
 
-    const fill = {
+    // The empty portfolio of a Trader that had read none yet holds none of the account's balances (see isFetchedPortfolio): valued, it
+    // made the equity after the fill 0, and the account held nothing after a SELL
+    const isFetched = isFetchedPortfolio(portfolio);
+    const fill: Fill = {
+      id,
       date,
       price,
       amount,
       // An unknown fee counts as 0, as the Trader reports it when the exchange gives no fee rate: exact for a fee paid in BNB, which
       // the pair equity leaves out, too low for one the pair paid. A fee that is not a number would make the round trip NaN.
       fee: Number.isFinite(fee) ? fee : 0,
-      equity: calculatePairEquity(portfolio, this.symbol, price).total,
+      equity: isFetched ? calculatePairEquity(portfolio, this.symbol, price).total : NaN,
     };
+    // A round trip that waits for a portfolio to value its entry counts the fill first: the portfolio after it shows it (see PendingEntry)
+    const pendingEntry = this.openRoundTrip?.pendingEntry;
+    if (pendingEntry) pendingEntry.change = addPrecise(pendingEntry.change, getEquityChange(side, fill, pendingEntry.price));
+    if (isFetched) this.valueEntryEquity(portfolio);
     if (side === 'BUY') return this.registerBuy(fill);
 
-    this.currentEquity = fill.equity;
+    if (isFetched) this.currentEquity = fill.equity;
     // A SELL after a round trip has ended, or after a BUY skipped for its price, sells nothing a round trip bought
     if (!this.openRoundTrip) return debug('roundtrip analyzer', `SELL order ${id} filled while no round trip is open: skipped.`);
-    this.registerSell(this.openRoundTrip, fill, getAssetBalance(portfolio, this.asset).total);
+    this.registerSell(this.openRoundTrip, fill, isFetched ? getAssetBalance(portfolio, this.asset).total : Infinity);
   }
 
   /** A BUY opens a round trip while flat, and adds to the position of the open one otherwise (scale-in) */
-  private registerBuy({ date, price, amount, fee, equity }: Fill): void {
+  private registerBuy({ id, date, price, amount, fee, equity }: Fill): void {
     const roundTrip = this.openRoundTrip;
     if (!roundTrip) {
       this.openRoundTrip = {
         entryAt: date,
         entryPrice: price,
-        // The pair equity before the BUY, its fee given back (see OpenRoundTrip)
-        entryEquity: equity + fee,
+        // The pair equity before the BUY, its fee given back (see OpenRoundTrip). Unknown without the portfolio after it: the first
+        // portfolio an order ends with gives it then, the fee of this BUY being the first change it undoes (see PendingEntry).
+        entryEquity: isFiniteNumber(equity) ? addPrecise(equity, fee) : NaN,
+        ...(!isFiniteNumber(equity) && { pendingEntry: { orderId: id, price, change: -fee } }),
         bought: amount,
         sold: 0,
         exitPrice: 0,
@@ -292,22 +356,27 @@ export class RoundTripAnalyzer extends Plugin {
 
   /**
    * A SELL reduces the position of the round trip, and ends the round trip once flat again (see DUST_TOLERANCE). What is left of the
-   * position is what its BUYs bought and its SELLs have not sold back, but no more than the account still holds. The amounts traded
-   * leave out what the account held before the round trip; the balance catches a fill that went unseen (that of an order which ended
-   * in error, or a SELL made outside Gekko).
+   * position is what its BUYs bought and its SELLs have not sold back, but no more than the account still holds (`held`, unknown and
+   * Infinity without a portfolio read). The amounts traded leave out what the account held before the round trip; the balance catches
+   * a fill that went unseen (that of an order which ended in error, or a SELL made outside Gekko).
    */
-  private registerSell(roundTrip: OpenRoundTrip, { date, price, amount, equity }: Fill, held: number): void {
-    roundTrip.exitPrice = addToMeanPrice(roundTrip.exitPrice, roundTrip.sold, price, amount);
-    roundTrip.sold += amount;
+  private registerSell(roundTrip: OpenRoundTrip, fill: Fill, held: number): void {
+    roundTrip.exitPrice = addToMeanPrice(roundTrip.exitPrice, roundTrip.sold, fill.price, fill.amount);
+    roundTrip.sold += fill.amount;
     const remaining = Math.min(roundTrip.bought - roundTrip.sold, held);
     if (remaining > DUST_TOLERANCE * roundTrip.bought) return;
 
     this.openRoundTrip = null;
-    this.handleCompletedRoundtrip(roundTrip, date, equity);
+    this.handleCompletedRoundtrip(roundTrip, fill);
   }
 
-  private handleCompletedRoundtrip(roundTrip: OpenRoundTrip, exitAt: EpochTimeStamp, exitEquity: number): void {
-    const { entryAt, entryPrice, entryEquity, exitPrice, maxAdverseExcursion } = roundTrip;
+  /**
+   * Records the round trip the SELL `fill` ended, and emits it. Its P&L is unknown when no portfolio read valued its entry or its exit
+   * (see measureRoundTrip): it counts in the exposure and in the MAEs, which need none, not in the win rate nor in the ratios, which
+   * would read it as a loss or divide by it.
+   */
+  private handleCompletedRoundtrip(roundTrip: OpenRoundTrip, { id: sellId, date: exitAt, equity: exitEquity }: Fill): void {
+    const { entryAt, entryPrice, entryEquity, exitPrice, maxAdverseExcursion, pendingEntry } = roundTrip;
     const roundtrip: RoundTrip = {
       id: this.nextRoundTripId++,
 
@@ -319,13 +388,18 @@ export class RoundTripAnalyzer extends Plugin {
       exitPrice,
       exitEquity,
 
-      pnl: exitEquity - entryEquity,
-      profit: entryEquity ? (100 * exitEquity) / entryEquity - 100 : 0,
+      ...measureRoundTrip(entryEquity, exitEquity),
       maxAdverseExcursion,
 
-      duration: differenceInMilliseconds(exitAt, entryAt),
+      duration: exitAt - entryAt,
     };
 
+    if (!isFiniteNumber(roundtrip.pnl)) {
+      const missing = pendingEntry
+        ? `the Trader read no portfolio from BUY order ${pendingEntry.orderId}, which opened it, to SELL order ${sellId}, which closed it`
+        : `no portfolio valued its entry or its exit (SELL order ${sellId})`;
+      warning('roundtrip analyzer', `Round trip ${roundtrip.id} left out of the win rate and the ratios, its P&L unknown: ${missing}.`);
+    }
     this.roundTrips.push(roundtrip);
 
     logRoundtrip(roundtrip, this.currency, this.enableConsoleTable);
@@ -347,11 +421,25 @@ export class RoundTripAnalyzer extends Plugin {
   }
 
   private calculateReportStatistics(): TradingReport {
-    if (!this.start.equity || !this.start.portfolio || !this.startPrice) {
+    // Said apart: the three read alike as "No portfolio data received", a start worth 0 included, which sent the user looking for a
+    // Trader or an exchange that had sent one
+    if (!this.startPrice) {
+      warning('roundtrip analyzer', 'The warmup never completed: no period to measure. Emitting empty report.');
+      return EMPTY_TRADING_REPORT;
+    }
+    if (!this.start.portfolio) {
       warning('roundtrip analyzer', 'No portfolio data received. Emitting empty report.');
       return EMPTY_TRADING_REPORT;
     }
+    // The returns are relative to the start equity: a pair worth nothing when the period started has none
+    if (!(this.start.equity > 0)) {
+      warning('roundtrip analyzer', `Start equity of ${this.start.equity} ${this.currency}: no return to measure. Emitting empty report.`);
+      return EMPTY_TRADING_REPORT;
+    }
 
+    // The round trips whose P&L is known: one valued without a portfolio is in the exposure and the MAEs alone (see
+    // handleCompletedRoundtrip)
+    const measured = this.roundTrips.filter(({ pnl }) => isFiniteNumber(pnl));
     const statistics = calculatePerformanceStatistics(
       {
         periodStartAt: this.dates.start,
@@ -359,14 +447,13 @@ export class RoundTripAnalyzer extends Plugin {
         startEquity: this.start.equity,
         endEquity: this.currentEquity,
         // The profits of the round trips closed, in % of their entry equity: the one still open at the end is in none
-        returns: this.roundTrips.map(r => r.profit),
+        returns: measured.map(r => r.profit),
         marketReturnPct: calculateMarketReturnPct(this.endPrice, this.startPrice),
         exposureMs: this.calculateExposureMs(),
         riskFreeReturn: this.riskFreeReturn,
       },
       'roundtrip analyzer',
     );
-    const winRate = calculateWinRate(this.roundTrips.filter(rt => rt.pnl > 0).length, this.roundTrips.length);
 
     return {
       id: 'TRADING REPORT',
@@ -375,7 +462,8 @@ export class RoundTripAnalyzer extends Plugin {
       endPrice: this.endPrice,
       startBalance: this.start.equity,
       finalBalance: this.currentEquity,
-      winRate: winRate !== null ? round(winRate, 4) : null,
+      // Rounded once, by the printers: rounded to 4 decimals here first, 40 wins of 103 (38.83495 %) were written 38.84 %
+      winRate: calculateWinRate(measured.filter(({ pnl }) => pnl > 0).length, measured.length),
       topMAEs: extractTopMAEs(this.roundTrips.map(rt => rt.maxAdverseExcursion)),
       tradeCount: this.tradeCount,
     };
@@ -383,17 +471,19 @@ export class RoundTripAnalyzer extends Plugin {
 
   /**
    * A position still open at the end is in the final balance, at the last close, and in the exposure, but in no round trip: the win
-   * rate, the ratios and the MAEs leave it out. Its P&L is measured as that of a round trip: the pair equity at the last close less its
-   * entry equity, with the fees paid so far, without that of the SELL that would close it.
+   * rate, the ratios and the MAEs leave it out. Its P&L is measured as that of a round trip (see measureRoundTrip): the pair equity at
+   * the last close less its entry equity, with the fees paid so far, without that of the SELL that would close it.
    */
   private logOpenRoundTrip({ entryAt, entryPrice, entryEquity }: OpenRoundTrip): void {
-    const pnl = this.currentEquity - entryEquity;
-    const profit = entryEquity ? (100 * this.currentEquity) / entryEquity - 100 : 0;
+    const { pnl, profit } = measureRoundTrip(entryEquity, this.currentEquity);
+    const unrealized = isFiniteNumber(pnl)
+      ? `unrealized P&L of ${formatAmount(pnl)} ${this.currency} (${formatSignedPercent(profit)})`
+      : 'unrealized P&L unknown, no portfolio having valued its entry';
     info(
       'roundtrip analyzer',
       [
         `Position still open at the end of the period, entered at ${formatAmount(entryPrice)} ${this.currency} on ${toISOString(entryAt)}:`,
-        `unrealized P&L of ${formatAmount(pnl)} ${this.currency} (${formatSignedPercent(profit)}) at the last close,`,
+        `${unrealized} at the last close,`,
         `${formatAmount(this.endPrice)} ${this.currency}. The final balance and the exposure include it; the win rate, the ratios`,
         'and the MAEs leave it out.',
       ].join(' '),
@@ -416,7 +506,8 @@ export class RoundTripAnalyzer extends Plugin {
       return;
     }
     this.lastPriceUpdate = candle.close;
-    this.currentTimestamp = addMinutes(candle.start, 1).getTime();
+    // In epoch milliseconds: date-fns' addMinutes built two Dates on every bucket for this sum
+    this.currentTimestamp = candle.start + ONE_MINUTE;
     if (this.warmupCompleted) {
       this.dates.end = this.currentTimestamp;
       this.endPrice = candle.close;
@@ -428,7 +519,7 @@ export class RoundTripAnalyzer extends Plugin {
     }
   }
 
-  protected processFinalize(failure?: Error): void {
+  protected async processFinalize(failure?: Error): Promise<void> {
     // The end is marked to market too: the last bucket may have closed no timeframe candle, and orders may have filled since the last
     // close that did
     this.markToMarket();
@@ -438,8 +529,14 @@ export class RoundTripAnalyzer extends Plugin {
     else info('roundtrip analyzer', report);
     if (this.openRoundTrip) this.logOpenRoundTrip(this.openRoundTrip);
 
-    // Emit directly: processFinalize is the final lifecycle hook.
-    this.emit<TradingReport>(PERFORMANCE_REPORT_EVENT, report);
+    // Emit directly: processFinalize is the final lifecycle hook. Awaited, so that the run ends once the listeners are done with the
+    // report, and caught: the report is logged above whatever a listener does with it. Neither awaited nor caught, a listener that
+    // failed rejected a promise nobody held, and a backtest that ended normally exited with code 1.
+    try {
+      await this.emit<TradingReport>(PERFORMANCE_REPORT_EVENT, report);
+    } catch (err) {
+      error('roundtrip analyzer', `A listener failed on the performance report: ${describeError(err)}`);
+    }
   }
 
   public static getStaticConfiguration() {
