@@ -18,9 +18,24 @@ import { shiftDecimalPoint } from '@utils/math/round.utils';
 // TYPES
 // ============================================================================
 
-/** Input for downside deviation calculation */
-export interface DownsideDeviationInput {
-  profits: number[];
+/** What an annualized ratio weighs (see calculateAnnualizedRatio) */
+export interface RatioParams {
+  /** The returns of the period, in %: one per round trip or per timeframe candle */
+  returns: number[];
+  /** The annualized return of the period, in % */
+  yearlyProfit: number;
+  /** The yearly return of a riskless investment, in % (e.g., 1 for 1 %) */
+  riskFreeReturn: number;
+  /** The period, in years */
+  elapsedYears: number;
+}
+
+/** The drawdowns of an equity curve (see calculateDrawdowns) */
+export interface Drawdowns {
+  /** The largest fall from a peak, in % of the peak */
+  maxDrawdownPct: number;
+  /** The longest time from a peak to the sample that gets back to it, or to the last sample, in milliseconds */
+  longestDrawdownMs: number;
 }
 
 // ============================================================================
@@ -181,6 +196,28 @@ export const calculateWinRate = (winningTrades: number, totalTrades: number): nu
 // ============================================================================
 
 /**
+ * Calculates the volatility of the returns: their population standard deviation (see stdev), 0 without a return, and 0 for returns all
+ * equal within compareWithTolerance. Their deviation was noise then, from lodash's mean (0.10000000000000002 for 0.1, 0.1 and 0.1) or
+ * from the arithmetic that made them (0.1 and 0.09999999999999763 for equities of 1000, 1001 and 1002.001), and a Sharpe ratio divided
+ * by it came out at 6.2e17.
+ *
+ * @param returns - Array of percentage returns per trade/period
+ * @returns Standard deviation of the returns, in percentage points; NaN for a return that is not a number
+ */
+export const calculateVolatility = (returns: number[]): number => {
+  if (!returns.length) return 0;
+
+  // Math.min and Math.max, not comparisons, which a NaN return fails: it would be passed over, and the others found equal
+  let lowest = returns[0];
+  let highest = returns[0];
+  for (const value of returns) {
+    lowest = Math.min(lowest, value);
+    highest = Math.max(highest, value);
+  }
+  return compareWithTolerance(highest, lowest) === 0 ? 0 : stdev(returns);
+};
+
+/**
  * Calculates downside deviation (volatility of negative returns only).
  * Uses root mean square of negative returns.
  *
@@ -209,125 +246,117 @@ export const extractTopMAEs = (maes: number[], limit: number = 10): number[] => 
     .slice(0, limit);
 };
 
-export interface RatioParams {
-  returns: number[];
-  yearlyProfit: number;
-  riskFreeReturn: number;
-  elapsedYears: number;
-}
-
 /**
- * Calculates the annualized Sharpe ratio.
- * Sharpe ratio measures risk-adjusted return using standard deviation of all returns.
+ * Calculates an annualized ratio: the yearly profit in excess of the risk-free return, over a deviation of the returns annualized by
+ * sqrt(observations per year), the observations per year being the number of returns over the elapsed years. The Sharpe ratio weighs
+ * the volatility of the returns (calculateVolatility), the Sortino ratio their downside deviation (calculateDownsideDeviation).
  *
+ * @param deviation - The deviation of params.returns the ratio weighs
  * @param params.returns - Array of percentage returns per trade/period
  * @param params.yearlyProfit - Annualized profit percentage
  * @param params.riskFreeReturn - Risk-free rate of return (e.g., 1 for 1%)
  * @param params.elapsedYears - Total elapsed time in years
- * @returns Annualized Sharpe ratio
+ * @returns Annualized ratio, or 0 when there is no return, no elapsed time or no deviation (0, or NaN): the ratio is undefined then,
+ * and 0 is reported instead
  */
-export const calculateSharpeRatio = ({ returns, yearlyProfit, riskFreeReturn, elapsedYears }: RatioParams): number => {
+export const calculateAnnualizedRatio = (
+  deviation: number,
+  { returns, yearlyProfit, riskFreeReturn, elapsedYears }: RatioParams,
+): number => {
   if (!returns.length || elapsedYears <= 0) return 0;
 
-  const volatility = stdev(returns);
-  const standardDeviation = Number.isNaN(volatility) ? 0 : volatility;
-
-  // Annualize volatility: multiply by sqrt(observations per year)
-  const observationsPerYear = returns.length / elapsedYears;
-  const annualizedStdDev = standardDeviation * Math.sqrt(observationsPerYear);
-
-  return !annualizedStdDev ? 0 : (yearlyProfit - riskFreeReturn) / annualizedStdDev;
+  const annualizedDeviation = deviation * Math.sqrt(returns.length / elapsedYears);
+  return annualizedDeviation ? (yearlyProfit - riskFreeReturn) / annualizedDeviation : 0;
 };
 
 /**
- * Calculates the annualized Sortino ratio.
- * Sortino ratio measures risk-adjusted return using only the downside deviation of the returns (see calculateDownsideDeviation):
- * the root mean square of the losses over all the returns, gains counting as zero, so that only losses are penalised.
- * It is annualized like the standard deviation of the Sharpe ratio, by sqrt(observations per year).
+ * Calculates the annualized Sharpe ratio (see calculateAnnualizedRatio).
+ * Sharpe ratio measures risk-adjusted return using the volatility of all the returns (see calculateVolatility): their population
+ * standard deviation, 0 for returns all equal.
  *
- * @param params.returns - Array of percentage returns per trade/period
- * @param params.yearlyProfit - Annualized profit percentage
- * @param params.riskFreeReturn - Risk-free rate of return (e.g., 1 for 1%)
- * @param params.elapsedYears - Total elapsed time in years
+ * @param params - The returns, the annualized profit, the risk-free return and the elapsed years (see RatioParams)
+ * @returns Annualized Sharpe ratio, or 0 when there is no return, no elapsed time or no volatility
+ */
+export const calculateSharpeRatio = (params: RatioParams): number => calculateAnnualizedRatio(calculateVolatility(params.returns), params);
+
+/**
+ * Calculates the annualized Sortino ratio (see calculateAnnualizedRatio).
+ * Sortino ratio measures risk-adjusted return using only the downside deviation of the returns (see calculateDownsideDeviation):
+ * the root mean square of the losses over all the returns, gains counting as zero, so that only losses are penalised. Not the spread
+ * of the losses around their own mean: that is 0 for one loss or equal losses, and ignores how large they are.
+ *
+ * @param params - The returns, the annualized profit, the risk-free return and the elapsed years (see RatioParams)
  * @returns Annualized Sortino ratio, or 0 when there is no return, no elapsed time or no losing return
  * (without downside risk the ratio is undefined, and 0 is reported instead)
  */
-export const calculateSortinoRatio = ({ returns, yearlyProfit, riskFreeReturn, elapsedYears }: RatioParams): number => {
-  if (!returns.length || elapsedYears <= 0) return 0;
+export const calculateSortinoRatio = (params: RatioParams): number =>
+  calculateAnnualizedRatio(calculateDownsideDeviation(params.returns), params);
 
-  // Not the spread of the losses around their own mean: that is 0 for one loss or equal losses, and ignores how large they are
-  const downsideDeviation = calculateDownsideDeviation(returns);
+/**
+ * Calculates the drawdowns of an equity curve, in one walk of its running peak. The start equity is the first peak, dated with the first
+ * sample. A sample at or above the peak is the new peak, and ends the drawdown in progress; a sample below it is in drawdown.
+ * - maxDrawdownPct: the largest fall from a peak, in % of the peak (above 100 for a negative equity).
+ * - longestDrawdownMs: the longest time from a peak to the sample that gets back to it, or to the last sample for a drawdown still in
+ *   progress.
+ *
+ * @param samples - The equity curve, in chronological order
+ * @param initialBalance - The start equity, before the first sample
+ * @returns Both drawdowns, 0 without a sample or for an initial balance of 0 or less
+ */
+export const calculateDrawdowns = (samples: EquitySnapshot[], initialBalance: number): Drawdowns => {
+  if (!samples.length || initialBalance <= 0) return { maxDrawdownPct: 0, longestDrawdownMs: 0 };
 
-  // Annualize downside deviation: multiply by sqrt(observations per year)
-  const observationsPerYear = returns.length / elapsedYears;
-  const annualizedDownsideDev = downsideDeviation * Math.sqrt(observationsPerYear);
+  let peak = initialBalance;
+  let peakDate = samples[0].date;
+  let inDrawdown = false;
+  let longestDrawdownMs = 0;
+  // Each drawdown is compared as a binary quotient, cheap on every sample, and only the largest is measured in decimal, from its peak
+  // and trough: in binary, (1000 - 999.7) / 1000 was 0.029999999999995454 %, written 0.02 %
+  let largest = { peak, trough: peak, drawdown: 0 };
+  for (const { date, totalValue } of samples) {
+    if (totalValue < peak) {
+      inDrawdown = true;
+      const drawdown = (peak - totalValue) / peak;
+      if (drawdown > largest.drawdown) largest = { peak, trough: totalValue, drawdown };
+    } else if (totalValue >= peak) {
+      // Not a plain else: a NaN value fails both comparisons, and is passed over. Taken for a peak, it ended the drawdown in progress
+      // at its date, and nothing compares below NaN: the next value became the peak, whatever it was
+      if (inDrawdown && date - peakDate > longestDrawdownMs) longestDrawdownMs = date - peakDate;
+      peak = totalValue;
+      peakDate = date;
+      inDrawdown = false;
+    }
+  }
+  // A drawdown still in progress lasts to the last sample
+  const lastDate = samples[samples.length - 1].date;
+  if (inDrawdown && lastDate - peakDate > longestDrawdownMs) longestDrawdownMs = lastDate - peakDate;
 
-  return !annualizedDownsideDev ? 0 : (yearlyProfit - riskFreeReturn) / annualizedDownsideDev;
+  return {
+    maxDrawdownPct: largest.drawdown > 0 ? toPercent(addPrecise(largest.peak, -largest.trough), largest.peak) : 0,
+    longestDrawdownMs,
+  };
 };
 
 /**
- * Calculates the maximum drawdown (MDD) as a percentage.
- * Maximum drawdown measures the largest peak-to-trough decline in portfolio value
- * before a new peak is reached.
+ * Calculates the maximum drawdown (MDD) as a percentage: the largest fall from a peak of the balances (see calculateDrawdowns).
  *
  * @param balances - Array of balance values in chronological order
  * @param initialBalance - The starting balance before the first sample
  * @returns Maximum drawdown as a positive percentage (0-100)
  */
-export const calculateMaxDrawdown = (balances: number[], initialBalance: number): number => {
-  if (!balances.length || initialBalance <= 0) return 0;
-
-  // Each drawdown is compared as a binary quotient, cheap on every sample, and only the largest is measured in decimal, from its peak
-  // and trough: in binary, (1000 - 999.7) / 1000 was 0.029999999999995454 %, written 0.02 %
-  let peak = initialBalance;
-  let largest = { peak, trough: peak, drawdown: 0 };
-  for (const balance of balances) {
-    if (balance > peak) peak = balance;
-    const drawdown = (peak - balance) / peak;
-    if (drawdown > largest.drawdown) largest = { peak, trough: balance, drawdown };
-  }
-
-  return largest.drawdown > 0 ? toPercent(addPrecise(largest.peak, -largest.trough), largest.peak) : 0;
-};
+export const calculateMaxDrawdown = (balances: number[], initialBalance: number): number =>
+  // The dates weigh on the longest drawdown only
+  calculateDrawdowns(
+    balances.map(totalValue => ({ date: 0, totalValue })),
+    initialBalance,
+  ).maxDrawdownPct;
 
 /**
- * Calculates the longest drawdown duration in milliseconds.
- * This is the longest time it takes for the portfolio to recover from a peak.
+ * Calculates the longest drawdown duration in milliseconds (see calculateDrawdowns).
  *
  * @param samples - Array of EquitySnapshot samples in chronological order
  * @param initialBalance - The starting balance
  * @returns Longest drawdown duration in milliseconds
  */
-export const calculateLongestDrawdownDuration = (samples: EquitySnapshot[], initialBalance: number): number => {
-  if (!samples.length || initialBalance <= 0) return 0;
-
-  let peak = initialBalance;
-  let peakDate = samples[0]?.date ?? 0;
-  let longestDuration = 0;
-  let wasInDrawdown = false;
-
-  for (const { date, totalValue } of samples) {
-    if (totalValue < peak) {
-      // We're in a drawdown
-      wasInDrawdown = true;
-    } else if (totalValue >= peak) {
-      // New peak or recovery - calculate duration only if we were in a drawdown
-      if (wasInDrawdown) {
-        const duration = date - peakDate;
-        if (duration > longestDuration) longestDuration = duration;
-      }
-      peak = totalValue;
-      peakDate = date;
-      wasInDrawdown = false;
-    }
-  }
-
-  // Check if we're still in a drawdown at the end
-  const lastSample = samples.at(-1);
-  if (lastSample && wasInDrawdown) {
-    const duration = lastSample.date - peakDate;
-    if (duration > longestDuration) longestDuration = duration;
-  }
-
-  return longestDuration;
-};
+export const calculateLongestDrawdownDuration = (samples: EquitySnapshot[], initialBalance: number): number =>
+  calculateDrawdowns(samples, initialBalance).longestDrawdownMs;

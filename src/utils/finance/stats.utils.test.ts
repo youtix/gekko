@@ -2,8 +2,10 @@ import { useTimeZone } from '@utils/date/date.mock';
 import { describe, expect, it } from 'vitest';
 import {
   calculateAlpha,
+  calculateAnnualizedRatio,
   calculateAnnualizedReturnPct,
   calculateDownsideDeviation,
+  calculateDrawdowns,
   calculateElapsedYears,
   calculateExposurePct,
   calculateLongestDrawdownDuration,
@@ -13,9 +15,15 @@ import {
   calculateSharpeRatio,
   calculateSortinoRatio,
   calculateTotalReturnPct,
+  calculateVolatility,
   calculateWinRate,
   extractTopMAEs,
 } from './stats.utils';
+
+/** An equity curve of these values, a second apart */
+const curveOfValues = (values: number[]) => values.map((totalValue, index) => ({ date: index * 1000, totalValue }));
+/** An equity curve of these [date, totalValue] points */
+const curveOfPoints = (points: [number, number][]) => points.map(([date, totalValue]) => ({ date, totalValue }));
 
 describe('calculateElapsedYears', () => {
   // Counted in UTC from an anniversary of the start to the next, the same on every host. Counted in local time, as date-fns counted
@@ -81,12 +89,12 @@ describe('calculateTotalReturnPct', () => {
     expect(calculateTotalReturnPct(currentEquity, startEquity)).toBe(expected);
   });
 
-  it('should throw error when startEquity is zero', () => {
-    expect(() => calculateTotalReturnPct(1000, 0)).toThrow('startEquity must be greater than zero');
-  });
-
-  it('should throw error when startEquity is negative', () => {
-    expect(() => calculateTotalReturnPct(1000, -100)).toThrow('startEquity must be greater than zero');
+  it.each`
+    startEquity
+    ${0}
+    ${-100}
+  `('should throw for a startEquity of $startEquity', ({ startEquity }) => {
+    expect(() => calculateTotalReturnPct(1000, startEquity)).toThrow('startEquity must be greater than zero');
   });
 });
 
@@ -104,12 +112,12 @@ describe('calculateAnnualizedReturnPct', () => {
     expect(calculateAnnualizedReturnPct(totalReturnPct, elapsedYears)).toBe(expected);
   });
 
-  it('should throw error when elapsedYears is zero', () => {
-    expect(() => calculateAnnualizedReturnPct(50, 0)).toThrow('elapsedYears must be greater than zero');
-  });
-
-  it('should throw error when elapsedYears is negative', () => {
-    expect(() => calculateAnnualizedReturnPct(50, -1)).toThrow('elapsedYears must be greater than zero');
+  it.each`
+    elapsedYears
+    ${0}
+    ${-1}
+  `('should throw for $elapsedYears elapsed years', ({ elapsedYears }) => {
+    expect(() => calculateAnnualizedReturnPct(50, elapsedYears)).toThrow('elapsedYears must be greater than zero');
   });
 });
 
@@ -130,12 +138,12 @@ describe('calculateMarketReturnPct', () => {
     expect(calculateMarketReturnPct(endPrice, startPrice)).toBe(expected);
   });
 
-  it('should throw error when startPrice is zero', () => {
-    expect(() => calculateMarketReturnPct(100, 0)).toThrow('startPrice must be greater than zero');
-  });
-
-  it('should throw error when startPrice is negative', () => {
-    expect(() => calculateMarketReturnPct(100, -50)).toThrow('startPrice must be greater than zero');
+  it.each`
+    startPrice
+    ${0}
+    ${-50}
+  `('should throw for a startPrice of $startPrice', ({ startPrice }) => {
+    expect(() => calculateMarketReturnPct(100, startPrice)).toThrow('startPrice must be greater than zero');
   });
 });
 
@@ -182,12 +190,12 @@ describe('calculateExposurePct', () => {
     expect(calculateExposurePct(exposureMs, totalMs)).toBe(expected);
   });
 
-  it('should throw error when totalMs is zero', () => {
-    expect(() => calculateExposurePct(1000, 0)).toThrow('totalMs must be greater than zero');
-  });
-
-  it('should throw error when totalMs is negative', () => {
-    expect(() => calculateExposurePct(1000, -1000)).toThrow('totalMs must be greater than zero');
+  it.each`
+    totalMs
+    ${0}
+    ${-1000}
+  `('should throw for a period of $totalMs ms', ({ totalMs }) => {
+    expect(() => calculateExposurePct(1000, totalMs)).toThrow('totalMs must be greater than zero');
   });
 });
 
@@ -210,83 +218,54 @@ describe('calculateWinRate', () => {
   });
 });
 
+describe('calculateVolatility', () => {
+  // The population standard deviation: the square root of the mean of the squared deviations from the mean, over all n returns.
+  // Returns all equal within compareWithTolerance have none: the deviation lodash's mean left them, 1.4e-17 for 0.1, 0.1 and 0.1, made
+  // a Sharpe ratio of 6.2e17.
+  it.each`
+    description                                                        | returns                  | volatility | expected
+    ${'no return'}                                                     | ${[]}                    | ${'0'}     | ${0}
+    ${'a single return'}                                               | ${[5]}                   | ${'0'}     | ${0}
+    ${'two returns 1.5 from their mean of 0.5'}                        | ${[2, -1]}               | ${'1.5'}   | ${1.5}
+    ${'returns of mean 2.5, sqrt((6.25 + 42.25 + 90.25 + 30.25) / 4)'} | ${[5, -4, 12, -3]}       | ${'6.5'}   | ${6.5}
+    ${'returns 2^-26 apart, 1.5e-8 of them, above the tolerance'}      | ${[1, 1 + 2 ** -26]}     | ${'2^-27'} | ${2 ** -27}
+    ${'equal returns, 1.4e-17 from the mean lodash gives them'}        | ${[0.1, 0.1, 0.1]}       | ${'0'}     | ${0}
+    ${'returns equal but for an ulp, 0.1 + 0.2 and 0.3'}               | ${[0.1 + 0.2, 0.3, 0.3]} | ${'0'}     | ${0}
+    ${'a NaN return, among equal ones'}                                | ${[1, NaN, 1]}           | ${'NaN'}   | ${NaN}
+  `('should return $volatility for $description', ({ returns, expected }) => {
+    expect(calculateVolatility(returns)).toBe(expected);
+  });
+});
+
 describe('calculateDownsideDeviation', () => {
-  it('should return 0 for empty array', () => {
-    expect(calculateDownsideDeviation([])).toBe(0);
-  });
-
-  it('should return 0 when all profits are positive', () => {
-    expect(calculateDownsideDeviation([10, 20, 30, 5])).toBe(0);
-  });
-
-  it('should return 0 when all profits are zero', () => {
-    expect(calculateDownsideDeviation([0, 0, 0])).toBe(0);
-  });
-
-  it('should calculate correctly for all negative profits', () => {
-    // All losses: [-10, -20, -30]
-    // Squared: [100, 400, 900]
-    // Sum: 1400, divided by 3 = 466.67, sqrt = 21.60
-    const profits = [-10, -20, -30];
-    expect(calculateDownsideDeviation(profits)).toBeCloseTo(21.602, 2);
-  });
-
-  it('should calculate correctly for mixed profits', () => {
-    // Losses only: [-10, -5]
-    // Squared: [100, 25]
-    // Sum: 125, divided by 4 (total count) = 31.25, sqrt = 5.59
-    const profits = [10, -10, 15, -5];
-    expect(calculateDownsideDeviation(profits)).toBeCloseTo(5.59, 2);
-  });
-
-  it('should handle single negative profit', () => {
-    // Squared: 25, divided by 1 = 25, sqrt = 5
-    expect(calculateDownsideDeviation([-5])).toBe(5);
-  });
-
-  it('should handle single positive profit', () => {
-    expect(calculateDownsideDeviation([5])).toBe(0);
+  // The root mean square of the losses over all the n profits, gains counting as 0: sqrt(sum of squared losses / n)
+  it.each`
+    description                               | profits              | deviation           | expected
+    ${'no profit'}                            | ${[]}                | ${'0'}              | ${0}
+    ${'gains only'}                           | ${[10, 20, 30, 5]}   | ${'0'}              | ${0}
+    ${'profits of 0'}                         | ${[0, 0, 0]}         | ${'0'}              | ${0}
+    ${'a single gain'}                        | ${[5]}               | ${'0'}              | ${0}
+    ${'a single loss'}                        | ${[-5]}              | ${'sqrt(25 / 1)'}   | ${5}
+    ${'losses only'}                          | ${[-10, -20, -30]}   | ${'sqrt(1400 / 3)'} | ${Math.sqrt(1400 / 3)}
+    ${'losses among gains, over all profits'} | ${[10, -10, 15, -5]} | ${'sqrt(125 / 4)'}  | ${Math.sqrt(125 / 4)}
+  `('should return $deviation for $description', ({ profits, expected }) => {
+    expect(calculateDownsideDeviation(profits)).toBe(expected);
   });
 });
 
 describe('extractTopMAEs', () => {
-  it('should return empty array for empty input', () => {
-    expect(extractTopMAEs([])).toEqual([]);
-  });
-
-  it('should return all MAEs when fewer than limit', () => {
-    const maes = [5, 10, 3];
-    expect(extractTopMAEs(maes)).toEqual([10, 5, 3]);
-  });
-
-  it('should return top 10 MAEs by default (sorted descending)', () => {
-    const maes = [1, 12, 5, 8, 15, 3, 9, 2, 11, 7, 4, 6, 14, 13, 10];
-    expect(extractTopMAEs(maes)).toEqual([15, 14, 13, 12, 11, 10, 9, 8, 7, 6]);
-  });
-
-  it('should respect custom limit', () => {
-    const maes = [10, 20, 5, 15, 8];
-    expect(extractTopMAEs(maes, 3)).toEqual([20, 15, 10]);
-  });
-
-  it('should filter out negative values', () => {
-    const maes = [10, -5, 20, -10, 15];
-    expect(extractTopMAEs(maes)).toEqual([20, 15, 10]);
-  });
-
-  it('should filter out NaN values', () => {
-    const maes = [10, NaN, 20, NaN, 15];
-    expect(extractTopMAEs(maes)).toEqual([20, 15, 10]);
-  });
-
-  it('should filter out Infinity values', () => {
-    const maes = [10, Infinity, 20, -Infinity, 15];
-    expect(extractTopMAEs(maes)).toEqual([20, 15, 10]);
-  });
-
-  it('should include zero values', () => {
-    const maes = [5, 0, 10, 0];
-    expect(extractTopMAEs(maes)).toEqual([10, 5, 0, 0]);
+  it.each`
+    description                                   | maes                                                   | limit        | expected
+    ${'no MAE'}                                   | ${[]}                                                  | ${undefined} | ${[]}
+    ${'fewer MAEs than the limit'}                | ${[5, 10, 3]}                                          | ${undefined} | ${[10, 5, 3]}
+    ${'the 10 largest by default, largest first'} | ${[1, 12, 5, 8, 15, 3, 9, 2, 11, 7, 4, 6, 14, 13, 10]} | ${undefined} | ${[15, 14, 13, 12, 11, 10, 9, 8, 7, 6]}
+    ${'a limit of 3'}                             | ${[10, 20, 5, 15, 8]}                                  | ${3}         | ${[20, 15, 10]}
+    ${'negative MAEs left out'}                   | ${[10, -5, 20, -10, 15]}                               | ${undefined} | ${[20, 15, 10]}
+    ${'NaN MAEs left out'}                        | ${[10, NaN, 20, NaN, 15]}                              | ${undefined} | ${[20, 15, 10]}
+    ${'infinite MAEs left out'}                   | ${[10, Infinity, 20, -Infinity, 15]}                   | ${undefined} | ${[20, 15, 10]}
+    ${'MAEs of 0 kept'}                           | ${[5, 0, 10, 0]}                                       | ${undefined} | ${[10, 5, 0, 0]}
+  `('should return $expected for $description', ({ maes, limit, expected }) => {
+    expect(extractTopMAEs(maes, limit)).toEqual(expected);
   });
 
   it('should not mutate the input array', () => {
@@ -297,180 +276,181 @@ describe('extractTopMAEs', () => {
   });
 });
 
+describe('calculateAnnualizedRatio', () => {
+  // (yearlyProfit - riskFreeReturn) / (deviation * sqrt(n / elapsedYears)), n the number of returns, whatever their values:
+  // (16 - 1) / (2 * sqrt(4 / 1)) = 3.75
+  it.each`
+    description                       | deviation | returns         | elapsedYears | expected
+    ${'four returns over a year'}     | ${2}      | ${[1, 2, 3, 4]} | ${1}         | ${3.75}
+    ${'four returns over four years'} | ${2}      | ${[1, 2, 3, 4]} | ${4}         | ${7.5}
+    ${'four returns over a quarter'}  | ${2}      | ${[1, 2, 3, 4]} | ${0.25}      | ${1.875}
+    ${'no return'}                    | ${2}      | ${[]}           | ${1}         | ${0}
+    ${'zero elapsed years'}           | ${2}      | ${[1, 2, 3, 4]} | ${0}         | ${0}
+    ${'negative elapsed years'}       | ${2}      | ${[1, 2, 3, 4]} | ${-1}        | ${0}
+    ${'a deviation of 0'}             | ${0}      | ${[1, 2, 3, 4]} | ${1}         | ${0}
+    ${'a NaN deviation'}              | ${NaN}    | ${[1, 2, 3, 4]} | ${1}         | ${0}
+  `('should return $expected for $description', ({ deviation, returns, elapsedYears, expected }) => {
+    expect(calculateAnnualizedRatio(deviation, { returns, yearlyProfit: 16, riskFreeReturn: 1, elapsedYears })).toBe(expected);
+  });
+});
+
 describe('calculateSharpeRatio', () => {
+  // The mean of the n returns, their population standard deviation (the square root of the mean of the squared deviations from that
+  // mean, n in the denominator) annualized by sqrt(n / years), and the yearly profit less the risk-free return over it. So annualized,
+  // the deviation is sqrt(sum of squared deviations / years):
+  // - small losses among large gains, [5, -4, 12, -3] over a year: mean 2.5, sqrt(6.25 + 42.25 + 90.25 + 30.25) = 13, 15 / 13
+  // - [3, -1], mean 1: over half a year sqrt((4 + 4) / 0.5) = 4, (21 - 1) / 4 = 5; over two years sqrt(8 / 2) = 2, 20 / 2 = 10
+  // - a negative mean, [-5, 1, -2] over two years: mean -2, sqrt((9 + 9 + 0) / 2) = 3, (-4 - 2) / 3 = -2
+  // - [2, -1, 3, -0.5, 2.5, 1] over a year: mean 7 / 6, squared deviations (25 + 169 + 121 + 100 + 64 + 1) / 36 = 40 / 3, a profit of
+  //   15 then of 0.5 over a risk-free return of 2
+  // Without the square root of the observations per year, the first row came out 15 / 26; with the sample deviation (n - 1), 0.9993.
   it.each`
-    description                                  | returns         | yearlyProfit | riskFreeReturn | elapsedYears | expected
-    ${'return 0 for empty returns array'}        | ${[]}           | ${10}        | ${1}           | ${1}         | ${0}
-    ${'return 0 for zero elapsed years'}         | ${[1, 2, 3]}    | ${10}        | ${1}           | ${0}         | ${0}
-    ${'return 0 for negative elapsed years'}     | ${[1, 2, 3]}    | ${10}        | ${1}           | ${-1}        | ${0}
-    ${'return 0 when all returns are identical'} | ${[5, 5, 5, 5]} | ${10}        | ${1}           | ${1}         | ${0}
-  `('should $description', ({ returns, yearlyProfit, riskFreeReturn, elapsedYears, expected }) => {
-    expect(calculateSharpeRatio({ returns, yearlyProfit, riskFreeReturn, elapsedYears })).toBe(expected);
-  });
-
-  it.each`
-    description                                           | returns                     | yearlyProfit | riskFreeReturn | elapsedYears | comparison
-    ${'calculate positive ratio for profitable strategy'} | ${[2, -1, 3, -0.5, 2.5, 1]} | ${15}        | ${2}           | ${1}         | ${'positive'}
-    ${'calculate negative ratio when below risk-free'}    | ${[2, -1, 3, -0.5, 2.5, 1]} | ${0.5}       | ${2}           | ${1}         | ${'negative'}
-  `('should $description', ({ returns, yearlyProfit, riskFreeReturn, elapsedYears, comparison }) => {
-    const result = calculateSharpeRatio({ returns, yearlyProfit, riskFreeReturn, elapsedYears });
-    if (comparison === 'positive') expect(result).toBeGreaterThan(0);
-    else expect(result).toBeLessThan(0);
-  });
-
-  it('should scale correctly with elapsed years', () => {
-    const params = {
-      returns: [2, -1, 3, -0.5, 2.5, 1, 0.5, -0.3, 1.5, 2, -1, 0.8],
-      yearlyProfit: 10,
-      riskFreeReturn: 1,
-      elapsedYears: 1,
-    };
-    const oneYear = calculateSharpeRatio(params);
-    const twoYears = calculateSharpeRatio({ ...params, elapsedYears: 2 });
-    // Same number of observations over 2 years means fewer observations per year,
-    // so annualized volatility is lower, and sharpe should be higher
-    expect(twoYears).toBeGreaterThan(oneYear);
+    description                                                      | returns                       | yearlyProfit | riskFreeReturn | elapsedYears | sharpe                   | expected
+    ${'small losses among large gains'}                              | ${[5, -4, 12, -3]}            | ${16}        | ${1}           | ${1}         | ${'15 / 13'}             | ${15 / 13}
+    ${'two returns over half a year'}                                | ${[3, -1]}                    | ${21}        | ${1}           | ${0.5}       | ${'5'}                   | ${5}
+    ${'the same returns over two years'}                             | ${[3, -1]}                    | ${21}        | ${1}           | ${2}         | ${'10'}                  | ${10}
+    ${'returns of a negative mean'}                                  | ${[-5, 1, -2]}                | ${-4}        | ${2}           | ${2}         | ${'-2'}                  | ${-2}
+    ${'a profit above the risk-free return'}                         | ${[2, -1, 3, -0.5, 2.5, 1]}   | ${15}        | ${2}           | ${1}         | ${'13 / sqrt(40 / 3)'}   | ${13 / Math.sqrt(40 / 3)}
+    ${'a profit below the risk-free return'}                         | ${[2, -1, 3, -0.5, 2.5, 1]}   | ${0.5}       | ${2}           | ${1}         | ${'-1.5 / sqrt(40 / 3)'} | ${-1.5 / Math.sqrt(40 / 3)}
+    ${'no return'}                                                   | ${[]}                         | ${10}        | ${1}           | ${1}         | ${'0'}                   | ${0}
+    ${'zero elapsed years'}                                          | ${[1, 2, 3]}                  | ${10}        | ${1}           | ${0}         | ${'0'}                   | ${0}
+    ${'negative elapsed years'}                                      | ${[1, 2, 3]}                  | ${10}        | ${1}           | ${-1}        | ${'0'}                   | ${0}
+    ${'equal returns'}                                               | ${[5, 5, 5, 5]}               | ${10}        | ${1}           | ${1}         | ${'0'}                   | ${0}
+    ${'equal returns of 0.1, 6.2e17 over the noise of their mean'}   | ${[0.1, 0.1, 0.1]}            | ${16}        | ${1}           | ${1}         | ${'0'}                   | ${0}
+    ${'returns of 1000, 1001 and 1002.001, 0.1 % each, 8.9e15 then'} | ${[0.1, 0.09999999999999763]} | ${16}        | ${1}           | ${1}         | ${'0'}                   | ${0}
+    ${'a NaN return'}                                                | ${[1, NaN, 2]}                | ${16}        | ${1}           | ${1}         | ${'0'}                   | ${0}
+  `('should return $sharpe for $description', ({ returns, yearlyProfit, riskFreeReturn, elapsedYears, expected }) => {
+    expect(calculateSharpeRatio({ returns, yearlyProfit, riskFreeReturn, elapsedYears })).toBeCloseTo(expected, 12);
   });
 });
 
 describe('calculateSortinoRatio', () => {
   // Downside deviation over the n returns, gains counting as 0: sqrt(sum of squared losses / n). Annualized by sqrt(n / years),
-  // it simplifies to sqrt(sum of squared losses / years). All rows but the last earn 16 - 1 = 15 points over the risk-free return:
+  // it simplifies to sqrt(sum of squared losses / years). All rows but the last two earn 16 - 1 = 15 points over the risk-free return:
   // - single loss, [3, -4, 5] over 1 year: sqrt(16 / 1) = 4, 15 / 4 = 3.75
   // - equal losses, [-2, -2, -2, 5, 5] over 3 years: sqrt((4 + 4 + 4) / 3) = 2, 15 / 2 = 7.5
-  // - losses of 1 and 3, [5, -1, -3] over 1 year: sqrt(1 + 9) = 3.162278, 15 / 3.162278 = 4.74342 (rounded)
-  // - losses of 11 and 13, [5, -11, -13] over 1 year: sqrt(121 + 169) = 17.029386, 15 / 17.029386 = 0.88083 (rounded)
-  // - small losses among large gains, [5, -4, 12, -3] over 1 year: sqrt(16 + 9) = 5, 15 / 5 = 3. Its Sharpe ratio is only
-  //   15 / 13 = 1.15: mean 2.5, annualized standard deviation sqrt(6.25 + 42.25 + 90.25 + 30.25) = sqrt(169) = 13
+  // - losses of 1 and 3, [5, -1, -3] over 1 year: sqrt(1 + 9), 15 / sqrt(10)
+  // - losses of 11 and 13, [5, -11, -13] over 1 year: sqrt(121 + 169), 15 / sqrt(290)
+  // - small losses among large gains, [5, -4, 12, -3] over 1 year: sqrt(16 + 9) = 5, 15 / 5 = 3, where the Sharpe ratio is 15 / 13
   // - below the risk-free return, [3, -4, 5] over 1 year earning 1 - 3 = -2: -2 / 4 = -0.5
+  // - equal losses of 0.1, [-0.1, -0.1, -0.1] over 1 year earning -30 - 1 = -31: sqrt(0.01 + 0.01 + 0.01), -31 / sqrt(0.03). Equal
+  //   losses keep their downside deviation: unlike the volatility of equal returns, it is not measured from their mean
   // The stdev of the losses around their own mean, used before, gave 0 for the first two rows, 8.660254 for both of the next
-  // two and 15 for the small losses. Values have at most 5 decimals and toBeCloseTo(_, 4) allows a difference below 0.00005.
+  // two and 15 for the small losses.
   it.each`
-    description                                   | returns               | yearlyProfit | riskFreeReturn | elapsedYears | expected
-    ${'return 0 for an empty returns array'}      | ${[]}                 | ${16}        | ${1}           | ${1}         | ${0}
-    ${'return 0 for zero elapsed years'}          | ${[5, -1, -3]}        | ${16}        | ${1}           | ${0}         | ${0}
-    ${'return 0 for negative elapsed years'}      | ${[5, -1, -3]}        | ${16}        | ${1}           | ${-1}        | ${0}
-    ${'return 0 when no return is a loss'}        | ${[1, 0, 3]}          | ${16}        | ${1}           | ${1}         | ${0}
-    ${'count a single loss as downside risk'}     | ${[3, -4, 5]}         | ${16}        | ${1}           | ${1}         | ${3.75}
-    ${'count equal losses as downside risk'}      | ${[-2, -2, -2, 5, 5]} | ${16}        | ${1}           | ${3}         | ${7.5}
-    ${'weigh losses of 1 and 3 by their size'}    | ${[5, -1, -3]}        | ${16}        | ${1}           | ${1}         | ${4.74342}
-    ${'weigh losses of 11 and 13 by their size'}  | ${[5, -11, -13]}      | ${16}        | ${1}           | ${1}         | ${0.88083}
-    ${'not count the gains as risk'}              | ${[5, -4, 12, -3]}    | ${16}        | ${1}           | ${1}         | ${3}
-    ${'turn negative below the risk-free return'} | ${[3, -4, 5]}         | ${1}         | ${3}           | ${1}         | ${-0.5}
-  `('should $description', ({ returns, yearlyProfit, riskFreeReturn, elapsedYears, expected }) => {
-    expect(calculateSortinoRatio({ returns, yearlyProfit, riskFreeReturn, elapsedYears })).toBeCloseTo(expected, 4);
+    description                                   | returns               | yearlyProfit | riskFreeReturn | elapsedYears | sortino               | expected
+    ${'return 0 for an empty returns array'}      | ${[]}                 | ${16}        | ${1}           | ${1}         | ${'0'}                | ${0}
+    ${'return 0 for zero elapsed years'}          | ${[5, -1, -3]}        | ${16}        | ${1}           | ${0}         | ${'0'}                | ${0}
+    ${'return 0 for negative elapsed years'}      | ${[5, -1, -3]}        | ${16}        | ${1}           | ${-1}        | ${'0'}                | ${0}
+    ${'return 0 when no return is a loss'}        | ${[1, 0, 3]}          | ${16}        | ${1}           | ${1}         | ${'0'}                | ${0}
+    ${'count a single loss as downside risk'}     | ${[3, -4, 5]}         | ${16}        | ${1}           | ${1}         | ${'3.75'}             | ${3.75}
+    ${'count equal losses as downside risk'}      | ${[-2, -2, -2, 5, 5]} | ${16}        | ${1}           | ${3}         | ${'7.5'}              | ${7.5}
+    ${'weigh losses of 1 and 3 by their size'}    | ${[5, -1, -3]}        | ${16}        | ${1}           | ${1}         | ${'15 / sqrt(10)'}    | ${15 / Math.sqrt(10)}
+    ${'weigh losses of 11 and 13 by their size'}  | ${[5, -11, -13]}      | ${16}        | ${1}           | ${1}         | ${'15 / sqrt(290)'}   | ${15 / Math.sqrt(290)}
+    ${'not count the gains as risk'}              | ${[5, -4, 12, -3]}    | ${16}        | ${1}           | ${1}         | ${'3'}                | ${3}
+    ${'turn negative below the risk-free return'} | ${[3, -4, 5]}         | ${1}         | ${3}           | ${1}         | ${'-0.5'}             | ${-0.5}
+    ${'count equal losses of 0.1 in full'}        | ${[-0.1, -0.1, -0.1]} | ${-30}       | ${1}           | ${1}         | ${'-31 / sqrt(0.03)'} | ${-31 / Math.sqrt(0.03)}
+  `('should $description: $sortino', ({ returns, yearlyProfit, riskFreeReturn, elapsedYears, expected }) => {
+    expect(calculateSortinoRatio({ returns, yearlyProfit, riskFreeReturn, elapsedYears })).toBeCloseTo(expected, 12);
+  });
+});
+
+describe('calculateDrawdowns', () => {
+  it.each`
+    description                                               | points                                                                | initialBalance | maxDrawdownPct | longestDrawdownMs
+    ${'no sample'}                                            | ${[]}                                                                 | ${1000}        | ${0}           | ${0}
+    ${'an initial balance of 0'}                              | ${[[0, 900], [1000, 800]]}                                            | ${0}           | ${0}           | ${0}
+    ${'a negative initial balance'}                           | ${[[0, 900], [1000, 800]]}                                            | ${-100}        | ${0}           | ${0}
+    ${'a NaN initial balance, which no sample compares with'} | ${[[0, 900], [1000, 800]]}                                            | ${NaN}         | ${0}           | ${0}
+    ${'the deepest drawdown short, a shallower one long'}     | ${[[0, 1000], [1000, 800], [2000, 1000], [3000, 950], [20000, 1000]]} | ${1000}        | ${20}          | ${18000}
+  `(
+    'should return a max drawdown of $maxDrawdownPct % and a longest of $longestDrawdownMs ms for $description',
+    ({ points, initialBalance, maxDrawdownPct, longestDrawdownMs }) => {
+      expect(calculateDrawdowns(curveOfPoints(points), initialBalance)).toStrictEqual({ maxDrawdownPct, longestDrawdownMs });
+    },
+  );
+
+  describe('the largest drawdown', () => {
+    it.each`
+      description                                                   | balances                                | initialBalance | expected
+      ${'balances that only increase'}                              | ${[1100, 1200, 1300]}                   | ${1000}        | ${0}
+      ${'balances that stay constant'}                              | ${[1000, 1000, 1000]}                   | ${1000}        | ${0}
+      ${'a drawdown from the initial balance'}                      | ${[900]}                                | ${1000}        | ${10}
+      ${'a drawdown from a new peak'}                               | ${[1100, 990]}                          | ${1000}        | ${10}
+      ${'the largest of several declines'}                          | ${[1100, 1000, 1200, 900]}              | ${1000}        | ${25}
+      ${'a 100% drawdown'}                                          | ${[1000, 0]}                            | ${1000}        | ${100}
+      ${'small fractional changes, to 15 significant digits'}       | ${[100.5, 100.0, 100.2]}                | ${100}         | ${0.497512437810945}
+      ${'a peak of 1500 through ups and downs, a third of it lost'} | ${[1000, 1200, 1500, 1200, 1000, 1300]} | ${1000}        | ${33.3333333333333}
+      ${'999.7 from 1000, 0.029999999999995454 in binary'}          | ${[999.7]}                              | ${1000}        | ${0.03}
+      ${'a NaN balance, which is skipped'}                          | ${[1000, NaN, 900]}                     | ${1000}        | ${10}
+    `('should return $expected for $description', ({ balances, initialBalance, expected }) => {
+      expect(calculateDrawdowns(curveOfValues(balances), initialBalance).maxDrawdownPct).toBe(expected);
+    });
   });
 
-  it('should be higher than the sharpe ratio when the losses are small relative to the overall spread', () => {
-    // 3 against 15 / 13, see the small losses among large gains above
-    const params = { returns: [5, -4, 12, -3], yearlyProfit: 16, riskFreeReturn: 1, elapsedYears: 1 };
-    expect(calculateSortinoRatio(params)).toBeGreaterThan(calculateSharpeRatio(params));
+  describe('the longest drawdown', () => {
+    // From a peak to the sample that gets back to it, or to the last sample; the start equity, 1000, is the first peak, dated with the
+    // first sample. Kept, not replaced: a later drawdown shorter than the longest leaves it, recovered or not
+    it.each`
+      description                                                        | points                                                                   | expected
+      ${'a curve that never falls below its peak'}                       | ${[[1000, 1000], [2000, 1100]]}                                          | ${0}
+      ${'a single drawdown recovered'}                                   | ${[[1000, 1000], [2000, 900], [3000, 1000]]}                             | ${2000}
+      ${'a drawdown recovered to the peak exactly'}                      | ${[[1000, 1000], [2000, 800], [3000, 900], [4000, 950], [5000, 1000]]}   | ${4000}
+      ${'a drawdown from the start equity, dated with the first sample'} | ${[[1000, 900], [5000, 1000]]}                                           | ${4000}
+      ${'two drawdowns, each ended by a sample equal to the peak'}       | ${[[0, 1000], [1000, 900], [2000, 1000], [3000, 900], [4000, 1000]]}     | ${2000}
+      ${'a drawdown recovered, then a longer one'}                       | ${[[1000, 1000], [2000, 900], [3000, 1000], [4000, 800], [10000, 1000]]} | ${7000}
+      ${'a drawdown recovered, then a shorter one'}                      | ${[[0, 1000], [1000, 900], [9000, 1000], [10000, 950], [11000, 1000]]}   | ${9000}
+      ${'a single drawdown still in progress'}                           | ${[[1000, 1000], [2000, 900]]}                                           | ${1000}
+      ${'a drawdown recovered, then a longer one still in progress'}     | ${[[0, 1000], [1000, 900], [2000, 1000], [3000, 950], [10000, 950]]}     | ${8000}
+      ${'a drawdown recovered, then a shorter one still in progress'}    | ${[[0, 1000], [1000, 900], [9000, 1000], [10000, 950]]}                  | ${9000}
+      ${'a NaN sample, which is skipped'}                                | ${[[0, 1000], [5, 900], [7, NaN], [9, 1000]]}                            | ${9}
+    `('should return $expected ms for $description', ({ points, expected }) => {
+      expect(calculateDrawdowns(curveOfPoints(points), 1000).longestDrawdownMs).toBe(expected);
+    });
+  });
+
+  it('should leave the curve as it was', () => {
+    const curve = curveOfPoints([
+      [1000, 1000],
+      [2000, 900],
+    ]);
+    const copy = structuredClone(curve);
+    calculateDrawdowns(curve, 1000);
+    expect(curve).toEqual(copy);
   });
 });
 
 describe('calculateMaxDrawdown', () => {
-  it.each`
-    description                                                   | balances                                | initialBalance | expected
-    ${'no balance'}                                               | ${[]}                                   | ${1000}        | ${0}
-    ${'an initial balance of 0'}                                  | ${[100, 200]}                           | ${0}           | ${0}
-    ${'a negative initial balance'}                               | ${[100, 200]}                           | ${-100}        | ${0}
-    ${'balances that only increase'}                              | ${[1100, 1200, 1300]}                   | ${1000}        | ${0}
-    ${'balances that stay constant'}                              | ${[1000, 1000, 1000]}                   | ${1000}        | ${0}
-    ${'a drawdown from the initial balance'}                      | ${[900]}                                | ${1000}        | ${10}
-    ${'a drawdown from a new peak'}                               | ${[1100, 990]}                          | ${1000}        | ${10}
-    ${'the largest of several declines'}                          | ${[1100, 1000, 1200, 900]}              | ${1000}        | ${25}
-    ${'a 100% drawdown'}                                          | ${[1000, 0]}                            | ${1000}        | ${100}
-    ${'small fractional changes, to 15 significant digits'}       | ${[100.5, 100.0, 100.2]}                | ${100}         | ${0.497512437810945}
-    ${'a peak of 1500 through ups and downs, a third of it lost'} | ${[1000, 1200, 1500, 1200, 1000, 1300]} | ${1000}        | ${33.3333333333333}
-    ${'999.7 from 1000, 0.029999999999995454 in binary'}          | ${[999.7]}                              | ${1000}        | ${0.03}
-    ${'a NaN balance, which is skipped'}                          | ${[1000, NaN, 900]}                     | ${1000}        | ${10}
-  `('should return $expected for $description', ({ balances, initialBalance, expected }) => {
-    expect(calculateMaxDrawdown(balances, initialBalance)).toBe(expected);
-  });
-
-  it('should not mutate input array', () => {
-    const balances = [1100, 1000, 1200];
-    const copy = [...balances];
-    calculateMaxDrawdown(balances, 1000);
-    expect(balances).toEqual(copy);
+  it('should return the largest drawdown of the balances, 25 from a peak of 1200 to 900', () => {
+    expect(calculateMaxDrawdown([1100, 1000, 1200, 900], 1000)).toBe(25);
   });
 });
 
 describe('calculateLongestDrawdownDuration', () => {
-  it.each`
-    description                                     | samples                                                                                                                                                                      | initialBalance | expected
-    ${'return 0 for empty samples'}                 | ${[]}                                                                                                                                                                        | ${1000}        | ${0}
-    ${'return 0 when initialBalance is 0'}          | ${[{ date: 1000, totalValue: 900 }]}                                                                                                                                         | ${0}           | ${0}
-    ${'return 0 when initialBalance is negative'}   | ${[{ date: 1000, totalValue: 900 }]}                                                                                                                                         | ${-100}        | ${0}
-    ${'return 0 if balance never drops below peak'} | ${[{ date: 1000, totalValue: 1000 }, { date: 2000, totalValue: 1100 }]}                                                                                                      | ${1000}        | ${0}
-    ${'calculate duration of single drawdown'}      | ${[{ date: 1000, totalValue: 1000 }, { date: 2000, totalValue: 900 }, { date: 3000, totalValue: 1000 }]}                                                                     | ${1000}        | ${2000}
-    ${'find longest among multiple drawdowns'}      | ${[{ date: 1000, totalValue: 1000 }, { date: 2000, totalValue: 900 }, { date: 3000, totalValue: 1000 }, { date: 4000, totalValue: 800 }, { date: 10000, totalValue: 1000 }]} | ${1000}        | ${7000}
-    ${'handle ongoing drawdown at end'}             | ${[{ date: 1000, totalValue: 1000 }, { date: 2000, totalValue: 900 }]}                                                                                                       | ${1000}        | ${1000}
-  `('should $description', ({ samples, initialBalance, expected }) => {
-    expect(calculateLongestDrawdownDuration(samples, initialBalance)).toBe(expected);
-  });
-
-  it('should track recovery to exact peak value', () => {
-    // Drop from 1000 to 800, then recover to exactly 1000 at date 5000
-    const samples = [
-      { date: 1000, totalValue: 1000 },
-      { date: 2000, totalValue: 800 },
-      { date: 3000, totalValue: 900 },
-      { date: 4000, totalValue: 950 },
-      { date: 5000, totalValue: 1000 },
-    ];
-    expect(calculateLongestDrawdownDuration(samples, 1000)).toBe(4000);
-  });
-
-  it('should not mutate input array', () => {
-    const samples = [
-      { date: 1000, totalValue: 1000 },
-      { date: 2000, totalValue: 900 },
-    ];
-    const copy = JSON.parse(JSON.stringify(samples));
-    calculateLongestDrawdownDuration(samples, 1000);
-    expect(samples).toEqual(copy);
+  it('should return the longest drawdown of the curve, 9000 ms before a shorter one', () => {
+    const curve = curveOfPoints([
+      [0, 1000],
+      [1000, 900],
+      [9000, 1000],
+      [10000, 950],
+      [11000, 1000],
+    ]);
+    expect(calculateLongestDrawdownDuration(curve, 1000)).toBe(9000);
   });
 });
 
 describe('calculateReturns', () => {
-  it('should return empty array for fewer than 2 snapshots', () => {
-    expect(calculateReturns([])).toEqual([]);
-    expect(calculateReturns([{ date: 1, totalValue: 100 }])).toEqual([]);
-  });
-
-  it('should calculate returns correctly', () => {
-    const snapshots = [
-      { date: 1, totalValue: 100 },
-      { date: 2, totalValue: 110 }, // +10%
-      { date: 3, totalValue: 99 }, // -10% from 110
-    ];
-    // 110/100 - 1 = 0.1 (10%)
-    // 99/110 - 1 = -0.1 (-10%)
-    const result = calculateReturns(snapshots);
-    expect(result).toHaveLength(2);
-    expect(result[0]).toBeCloseTo(10);
-    expect(result[1]).toBeCloseTo(-10);
-  });
-
-  it('should handle zero previous value (skip invalid returns)', () => {
-    const snapshots = [
-      { date: 1, totalValue: 0 },
-      { date: 2, totalValue: 100 },
-    ];
-    // Should skip calculation where prev is 0
-    expect(calculateReturns(snapshots)).toEqual([]);
-  });
-
-  it('should handle multiple zero values', () => {
-    const snapshots = [
-      { date: 1, totalValue: 100 },
-      { date: 2, totalValue: 0 }, // -100%
-      { date: 3, totalValue: 50 }, // skipped because prev is 0
-    ];
-    // 0/100 - 1 = -1 (-100%)
-    const result = calculateReturns(snapshots);
-    expect(result).toHaveLength(1);
-    expect(result[0]).toBeCloseTo(-100);
+  // The change from each value of the curve to the next, in % of the first: (110 - 100) / 100 * 100 = 10. A value of 0 or less starts no
+  // return
+  it.each`
+    description                             | values            | expected
+    ${'no snapshot'}                        | ${[]}             | ${[]}
+    ${'a single snapshot'}                  | ${[100]}          | ${[]}
+    ${'a gain of 10 % then a loss of 10 %'} | ${[100, 110, 99]} | ${[10, -10]}
+    ${'a start at 0'}                       | ${[0, 100]}       | ${[]}
+    ${'a fall to 0, then a value after it'} | ${[100, 0, 50]}   | ${[-100]}
+    ${'a negative value'}                   | ${[-100, 50]}     | ${[]}
+  `('should return $expected for $description', ({ values, expected }) => {
+    expect(calculateReturns(curveOfValues(values))).toEqual(expected);
   });
 });
