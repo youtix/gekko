@@ -1,6 +1,6 @@
 import { debug } from '@services/logger';
 import { isString, omit } from 'lodash-es';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import { FETCHER_MAX_RETRIES, FETCHER_TIMEOUT } from './fetcher.const';
 import { fetcher } from './fetcher.service';
 
@@ -14,7 +14,7 @@ vi.mock('@services/logger', () => ({
 const fetchMock = vi.fn<typeof fetch>();
 
 /** An answer of the Bot API, with a JSON body, or a text one when the body is a string. */
-const answer = (status: number, statusText: string, body: object | string) =>
+const answer = (status: number, statusText: string, body: object | string | null) =>
   new Response(isString(body) ? body : JSON.stringify(body), {
     status,
     statusText,
@@ -48,6 +48,7 @@ const unparsable = (status: number, statusText: string, body = `<html><body>${st
 // 2xx answers that tell of a failure in their body only
 const refusalIn200 = () => answer(200, 'OK', { ok: false, description: 'refused' });
 const rateLimitIn200 = (retryAfter = 5) => answer(200, 'OK', { ok: false, error_code: 429, parameters: { retry_after: retryAfter } });
+const failureIn200 = (errorCode: unknown) => answer(200, 'OK', { ok: false, error_code: errorCode });
 
 // When the attempts at a request that always fails are sent, in ms: the first one alone, or followed by FETCHER_MAX_RETRIES
 // retries, spaced by the backoff of getRetryDelay (1000, 1584.96 and 2000 ms, which setTimeout cuts to whole milliseconds) or by
@@ -88,21 +89,27 @@ describe('fetcher', () => {
     { method: 'post', send: (retries?: number) => fetcher.post({ url, payload, retries }), unreadable200: ONCE },
     { method: 'get', send: (retries?: number) => fetcher.get({ url, retries }), unreadable200: BACKOFF },
   ])('$method', ({ send, unreadable200 }) => {
+    // A body is read as it came: a JSON null, which says nothing of a failure, threw a TypeError where the fields of one were read
     it.each`
-      kind      | body                          | expected
-      ${'JSON'} | ${{ ok: true, result: 'ok' }} | ${{ ok: true, result: 'ok' }}
-      ${'text'} | ${'plain text'}               | ${'plain text'}
+      kind           | body                          | expected
+      ${'JSON'}      | ${{ ok: true, result: 'ok' }} | ${{ ok: true, result: 'ok' }}
+      ${'text'}      | ${'plain text'}               | ${'plain text'}
+      ${'JSON null'} | ${null}                       | ${null}
     `('returns the body of a $kind answer', async ({ body, expected }) => {
       fetchMock.mockResolvedValue(answer(200, 'OK', body));
       expect(await send()).toEqual(expected);
     });
 
+    // The failure of an answer whose body holds no description, or one that is not a string, is described by the JSON of its body: a
+    // null body threw a TypeError in its place, and a description that was an object was written [object Object]
     it.each`
       status | statusText        | body                                     | message
       ${400} | ${'Bad Request'}  | ${{ ok: false, description: 'error' }}   | ${'HTTP 400 Bad Request: error'}
       ${404} | ${'Not Found'}    | ${{ ok: false, description: 'missing' }} | ${'HTTP 404 Not Found: missing'}
       ${500} | ${'Server Error'} | ${{ ok: false }}                         | ${'HTTP 500 Server Error: {"ok":false}'}
       ${200} | ${'OK'}           | ${{ ok: false, description: 'refused' }} | ${'HTTP 200 OK: refused'}
+      ${500} | ${'Server Error'} | ${null}                                  | ${'HTTP 500 Server Error: null'}
+      ${400} | ${'Bad Request'}  | ${{ ok: false, description: {} }}        | ${'HTTP 400 Bad Request: {"ok":false,"description":{}}'}
     `('rejects an answer $status $statusText with "$message"', async ({ status, statusText, body, message }) => {
       fetchMock.mockResolvedValue(answer(status, statusText, body));
       await expect(send(0)).rejects.toThrow(message);
@@ -143,6 +150,7 @@ describe('fetcher', () => {
       ${'429 with a retry_after that is not a number'}     | ${() => rateLimit('5')}                              | ${BACKOFF}
       ${'200 OK with error_code 429'}                      | ${rateLimitIn200}                                    | ${RETRY_AFTER}
       ${'200 OK with error_code 429 and retry_after 3600'} | ${() => rateLimitIn200(3600)}                        | ${ONCE}
+      ${'200 OK with an error_code that is not a number'}  | ${() => failureIn200('500')}                         | ${ONCE}
       ${'401 with an HTML body'}                           | ${() => unparsable(401, 'Unauthorized')}             | ${ONCE}
       ${'401 with an empty body'}                          | ${() => unparsable(401, 'Unauthorized', '')}         | ${ONCE}
       ${'403 whose body read times out'}                   | ${() => timeoutInAnswer(403, 'Forbidden')}           | ${ONCE}
@@ -276,6 +284,19 @@ describe('fetcher', () => {
     it('rejects with the TimeoutError of the last attempt once the retries are spent', async () => {
       fetchMock.mockImplementation(noAnswer);
       expect(await settle(fetcher.post({ url, payload }))).toMatchObject({ name: 'TimeoutError' });
+    });
+  });
+
+  // Bun has no DOM. Without a lib in tsconfig.json, TypeScript loaded lib.dom: Response.json() resolved to any, which the fetcher
+  // handed its callers as whatever type they asked for, and a stray document, length or status type-checked, to throw under Bun.
+  // Checked by type:check: at run time, expectTypeOf checks nothing.
+  describe('types', () => {
+    it('types the JSON of an answer as unknown', () => {
+      expectTypeOf<ReturnType<Response['json']>>().resolves.toBeUnknown();
+    });
+
+    it('declares none of the DOM globals document, length and status', () => {
+      expectTypeOf<Extract<keyof typeof globalThis, 'document' | 'length' | 'status'>>().toBeNever();
     });
   });
 });

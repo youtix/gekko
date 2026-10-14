@@ -3,9 +3,9 @@ import { describeError } from '@errors/error.utils';
 import { debug } from '@services/logger';
 import { getRetryDelay } from '@utils/fetch/fetch.utils';
 import { wait } from '@utils/process/process.utils';
-import { isNumber } from 'lodash-es';
+import { isNumber, isObject, isString } from 'lodash-es';
 import { FETCHER_MAX_RETRIES, FETCHER_MAX_RETRY_AFTER, FETCHER_TIMEOUT } from './fetcher.const';
-import { Fetcher, Request } from './fetcher.types';
+import { BotApiAnswer, Fetcher, Request, ResponseParameters } from './fetcher.types';
 
 /**
  * How long an attempt may take: FETCHER_TIMEOUT, on top of the wait of a long poll. Telegram holds a getUpdates open for its
@@ -19,14 +19,15 @@ const getTimeout = (url: string) => {
 /**
  * The wait in ms before another attempt at a request that failed with this code, or undefined when there is no point in one. A
  * 429 waits the retry_after seconds that Telegram's flood control gives, or the backoff without a usable one (missing, not a
- * number, NaN or negative). A retry_after past FETCHER_MAX_RETRY_AFTER is not waited out: the 429 is thrown at once.
+ * number, NaN or negative). A retry_after past FETCHER_MAX_RETRY_AFTER is not waited out: the 429 is thrown at once. The code of a
+ * 2xx is the error_code of its body, which can hold anything: one that is not a number is no code, and the failure is thrown at once.
  */
-const getHttpRetryDelay = (attempt: number, code: number | undefined, retryAfter?: unknown) => {
+const getHttpRetryDelay = (attempt: number, code: unknown, retryAfter?: unknown) => {
   if (code === 429 && isNumber(retryAfter) && retryAfter >= 0) {
     const delay = retryAfter * ONE_SECOND;
     return delay <= FETCHER_MAX_RETRY_AFTER ? delay : undefined;
   }
-  if (code === 429 || (code !== undefined && code >= 500)) return getRetryDelay(attempt);
+  if (code === 429 || (isNumber(code) && code >= 500)) return getRetryDelay(attempt);
   return undefined;
 };
 
@@ -72,11 +73,15 @@ const request: Request = async ({ url, payload, attempt = 0, retries = FETCHER_M
       throw new Error(`${httpStatus}: unreadable body (${describeError(err)})${notRetried}`, { cause: err });
     });
 
-    if (!response.ok || data.ok === false) {
+    // Any JSON value or a text: the fields of a failure are read where it is an object. Typed any (by lib.dom), it was read as an
+    // object whatever it was, and a JSON null threw a TypeError here, in place of what the answer said
+    const answer: BotApiAnswer = isObject(data) ? data : {};
+    if (!response.ok || answer.ok === false) {
       // The body tells more: a 2xx carries the code of its failure there alone, as Telegram's error_code, and a 429 the
       // retry_after of the flood control
-      retryDelay = getHttpRetryDelay(attempt, response.ok ? data.error_code : response.status, data.parameters?.retry_after);
-      const errorDetails = data.description || JSON.stringify(data);
+      const parameters: ResponseParameters = isObject(answer.parameters) ? answer.parameters : {};
+      retryDelay = getHttpRetryDelay(attempt, response.ok ? answer.error_code : response.status, parameters.retry_after);
+      const errorDetails = isString(answer.description) && answer.description ? answer.description : JSON.stringify(data);
       throw new Error(`${httpStatus}: ${errorDetails}`);
     }
 

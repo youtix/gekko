@@ -1,10 +1,13 @@
 import { describeError } from '@errors/error.utils';
+import { GekkoError } from '@errors/gekko.error';
 import { fetcher } from '@services/fetcher/fetcher.service';
 import { debug, info, warning } from '@services/logger';
 import { pluralize } from '@utils/string/string.utils';
 import { isString } from 'lodash-es';
+import { z } from 'zod';
 import { Bot } from '../Bot';
 import { HandleCommand } from '../bots.types';
+import { getUpdatesAnswerSchema } from './telegram.schema';
 import { TelegramMessage, TelegramUpdate } from './telegram.types';
 
 // Bot API, sendMessage: a text of "1-4096 characters after entities parsing" (https://core.telegram.org/bots/api#sendmessage).
@@ -71,14 +74,19 @@ export class TelegramBot extends Bot {
   /**
    * Calls getUpdates with these parameters, and keeps the id of the last update returned as the offset. Telegram keeps an update,
    * 24 hours at most, until a getUpdates confirms it with a higher offset than its id (https://core.telegram.org/bots/api#getupdates).
+   * Throws, the offset kept, when the answer is not a list of updates the bot can read. The fetcher throws when Telegram says ok: false
+   * and hands any other body over unchecked: a page in its place (a proxy's) was read as no update, and null threw a TypeError.
    */
   private async getUpdates(parameters: string): Promise<TelegramUpdate[]> {
     const url = `${this.apiUrl}/getUpdates?${parameters}`;
-    const data = await fetcher.get<{ ok: boolean; result: TelegramUpdate[] }>({ url });
-    if (!data.ok) return [];
-    if (data.result.length > 0) this.offset = data.result[data.result.length - 1].update_id;
+    const answer = getUpdatesAnswerSchema.safeParse(await fetcher.get({ url }));
+    if (!answer.success) {
+      throw new GekkoError('bot', `Unreadable answer from Telegram to getUpdates:\n${z.prettifyError(answer.error)}`);
+    }
+    const updates = answer.data.result;
+    if (updates.length > 0) this.offset = updates[updates.length - 1].update_id;
 
-    return data.result;
+    return updates;
   }
 
   /** A long poll for the updates after the last one received, which it confirms */

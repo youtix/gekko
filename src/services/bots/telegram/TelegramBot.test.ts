@@ -41,10 +41,38 @@ describe('TelegramBot', () => {
     expect((bot as any).offset).toBe(2);
   });
 
-  it('fetchUpdates should return empty array when response not ok', async () => {
-    (fetcher.get as Mock).mockResolvedValue({ ok: false, result: [] });
-    const result = await (bot as any).fetchUpdates();
-    expect(result).toEqual([]);
+  // The fetcher throws when Telegram says ok: false, and hands any other body over as it came: one that is not a list of updates the
+  // bot can read fails the check, which the polling logs and backs off from. It was read as no update (a page in place of the JSON,
+  // an answer without ok), threw a TypeError (null, no result) or was taken as it came (after an update without an id, the next poll
+  // asked for offset NaN)
+  describe('with an answer it cannot read', () => {
+    const fetchUnreadable = () => (bot as any).fetchUpdates();
+
+    it.each`
+      description                         | answer
+      ${'an answer that does not say ok'} | ${{ ok: false, result: [] }}
+      ${'a page in place of the JSON'}    | ${'<html><body>502 Bad Gateway</body></html>'}
+      ${'null'}                           | ${null}
+      ${'an answer without result'}       | ${{ ok: true }}
+      ${'an update without an id'}        | ${{ ok: true, result: [{ message: { text: '/help', chat: { id: OWNER_CHAT } } }] }}
+      ${'a message without a chat'}       | ${{ ok: true, result: [{ update_id: 1, message: { text: '/help' } }] }}
+    `('rejects $description as unreadable', async ({ answer }) => {
+      (fetcher.get as Mock).mockResolvedValue(answer);
+      await expect(fetchUnreadable()).rejects.toThrow('[BOT] Unreadable answer from Telegram to getUpdates:\n');
+    });
+
+    it('names what it cannot read and where', async () => {
+      (fetcher.get as Mock).mockResolvedValue({ ok: true, result: [{ update_id: 1, message: { text: '/help' } }] });
+      await expect(fetchUnreadable()).rejects.toThrow(
+        'Unreadable answer from Telegram to getUpdates:\n✖ Invalid input: expected object, received undefined\n  → at result[0].message.chat',
+      );
+    });
+
+    it('keeps the offset at 0', async () => {
+      (fetcher.get as Mock).mockResolvedValue({ ok: true, result: [{ message: { text: '/help', chat: { id: OWNER_CHAT } } }] });
+      await fetchUnreadable().catch(() => undefined);
+      expect((bot as any).offset).toBe(0);
+    });
   });
 
   it('fetchUpdates should keep the offset when there is no update', async () => {
@@ -169,6 +197,16 @@ describe('TelegramBot', () => {
     const handle = vi.fn((command: string) => `answer to ${command}`);
     type Update = Omit<TelegramUpdate, 'update_id'>;
     const message = (chatId: number, text: string): Update => ({ message: { text, chat: { id: chatId } } });
+    // A command as Telegram sends it: with fields the bot does not read, besides those it reads
+    const TELEGRAM_MESSAGE = {
+      message: {
+        message_id: 7,
+        date: 1600000000,
+        from: { id: 5, is_bot: false, first_name: 'Ann', username: 'owner' },
+        chat: { id: OWNER_CHAT, first_name: 'Ann', username: 'owner', type: 'private' },
+        text: '/help',
+      },
+    };
     const answer = (updates: Update[]) => ({ ok: true, result: updates.map((update, i) => ({ update_id: i + 1, ...update })) });
     /**
      * Hands the bot a batch of updates, as getUpdates returns them. The first check of a bot without a chat starts by dropping the
@@ -193,6 +231,7 @@ describe('TelegramBot', () => {
         ${'ignores an update without a message'}                 | ${[{}]}                                                                  | ${[]}
         ${'ignores a message without a text'}                    | ${[{ message: { chat: { id: OWNER_CHAT } } }]}                           | ${[]}
         ${'handles a command after an update without a text'}    | ${[{}, message(OWNER_CHAT, '/help')]}                                    | ${[[OWNER_CHAT, 'answer to /help']]}
+        ${'answers a command with every field Telegram sends'}   | ${[TELEGRAM_MESSAGE]}                                                    | ${[[OWNER_CHAT, 'answer to /help']]}
       `('$scenario', async ({ updates, messages }) => {
         await receive(...updates);
         expect(sent()).toEqual(messages);
