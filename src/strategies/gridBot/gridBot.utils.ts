@@ -2,7 +2,7 @@ import { OrderSide } from '@models/order.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import { checkOrderPrice } from '@utils/market/market.utils';
-import { addPrecise } from '@utils/math/math.utils';
+import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { countDecimals, round } from '@utils/math/round.utils';
 import { minBy } from 'lodash-es';
 import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION, EMPTY_BALANCE } from './gridBot.const';
@@ -99,24 +99,29 @@ const getSignificantTick = (price: number, priceSignificantDigits?: number): num
 
 /**
  * The smallest amount of an order at `price` that the market takes: one amount step at least, amount.min and cost.min / price,
- * rounded up to the amount precision (see inferAmountPrecision). The simulator and CCXTExchange check the cost as amount × price in
- * floating point, which comes out one ulp under cost.min where the decimal product is exactly cost.min (0.00007 × 100000 is
- * 6.999999999999999): one step more is taken then.
+ * rounded up to the amount precision (see inferAmountPrecision). The order layer works the cost out in decimal (see
+ * assertOrderWithinLimits): 0.00007 is the minimum for a cost of 7 at 100000, though 0.00007 × 100000 is 6.999999999999999 in binary.
+ * The quotient is binary, and can come out an ulp above a whole number of steps, rounded up to a step more than the cost needs:
+ * 0.0001 / 0.000001 is 100.00000000000001, 101 DOGE where 100 cost the 0.0001 BTC that Binance takes at least on its pairs quoted in
+ * BTC. The step under is taken when its cost is enough.
  */
 export const getMinimumAmount = (price: number, marketData: MarketData): number => {
   const amountDecimals = inferAmountPrecision(marketData);
   const step = getDecimalStep(amountDecimals);
-  const minimumCost = toBound(marketData.cost?.min);
-  const atCost = minimumCost && price > 0 ? minimumCost / price : 0;
   // Rounded up as -(the negated value rounded down): round has no ceiling
-  const minimum = Math.max(step, -round(-Math.max(toBound(marketData.amount?.min) ?? 0, atCost), amountDecimals, 'down'));
-  return minimumCost && minimum * price < minimumCost ? addPrecise(minimum, step) : minimum;
+  const roundUp = (value: number) => -round(-value, amountDecimals, 'down');
+  const atLeast = Math.max(step, roundUp(toBound(marketData.amount?.min) ?? 0));
+  const minimumCost = toBound(marketData.cost?.min);
+  if (!minimumCost || !(price > 0)) return atLeast;
+  const minimum = Math.max(atLeast, roundUp(minimumCost / price));
+  const less = addPrecise(minimum, -step);
+  return less >= atLeast && multiplyPrecise(less, price) >= minimumCost ? less : minimum;
 };
 
 /**
  * The largest amount of an order at `price` that the market takes: amount.max and cost.max / price, rounded down to the amount
- * precision, one step less should the cost still come out over cost.max in floating point (0.00001 × 300000 is 3.0000000000000004).
- * Infinity when the market sets neither.
+ * precision. Infinity when the market sets neither. The order layer works the cost out in decimal (see assertOrderWithinLimits):
+ * 0.00001 is the maximum for a cost of 3 at 300000, though 0.00001 × 300000 is 3.0000000000000004 in binary.
  */
 export const getMaximumAmount = (price: number, marketData: MarketData): number => {
   const amountDecimals = inferAmountPrecision(marketData);
@@ -124,8 +129,7 @@ export const getMaximumAmount = (price: number, marketData: MarketData): number 
   const atCost = maximumCost && price > 0 ? maximumCost / price : Infinity;
   const limit = Math.min(toBound(marketData.amount?.max) ?? Infinity, atCost);
   if (!Number.isFinite(limit)) return Infinity;
-  const maximum = roundAmount(limit, amountDecimals);
-  return maximumCost && maximum * price > maximumCost ? addPrecise(maximum, -getDecimalStep(amountDecimals)) : maximum;
+  return roundAmount(limit, amountDecimals);
 };
 
 /**

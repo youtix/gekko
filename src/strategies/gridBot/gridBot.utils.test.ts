@@ -1,4 +1,7 @@
+import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { MarketData } from '@services/exchange/exchange.types';
+import { assertOrderWithinLimits } from '@utils/market/market.utils';
+import { addPrecise } from '@utils/math/math.utils';
 import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { GridBot } from './gridBot.strategy';
@@ -46,6 +49,8 @@ const tenthPercentFeeMarketData: MarketData = {
 // The documented block with Binance's BTC/USDT steps, an amount to 5 decimals and a price to the cent, which CCXTExchange truncates an
 // amount to
 const binanceStepsMarketData: MarketData = { ...documentedMarketData, precision: { price: 0.01, amount: 0.00001 } };
+// Binance's DOGE/BTC: whole coins, a price to the satoshi, and the minimum cost of its pairs quoted in BTC
+const dogeBtcMarketData: MarketData = { amount: { min: 1 }, cost: { min: 0.0001 }, precision: { price: 1e-8, amount: 1 } };
 
 describe('gridBot.utils', () => {
   describe('inferPricePrecision', () => {
@@ -689,44 +694,79 @@ describe('gridBot.utils', () => {
   // amount step, under cost.min again, and the exchange refused it
   describe('getMinimumAmount', () => {
     it.each`
-      price       | marketData                                                                       | description                                                                          | expected
-      ${100}      | ${{ precision: { amount: 0.01 } }}                                               | ${'no limit: one amount step'}                                                       | ${0.01}
-      ${100}      | ${{}}                                                                            | ${'no limit and no precision: one step of 8 decimals'}                               | ${1e-8}
-      ${100}      | ${{ amount: { min: 0, max: 0 }, cost: { min: 0 }, precision: { amount: 0.01 } }} | ${'limits of 0, which bound nothing: one amount step'}                               | ${0.01}
-      ${100}      | ${{ amount: { min: 0.1 }, precision: { amount: 0.01 } }}                         | ${'amount.min'}                                                                      | ${0.1}
-      ${100}      | ${{ amount: { min: 0.015 }, precision: { amount: 0.01 } }}                       | ${'amount.min off the amount step, rounded up to it'}                                | ${0.02}
-      ${58172.83} | ${{ cost: { min: 5 }, precision: { amount: 0.00001 } }}                          | ${'cost.min / price, 0.0000859507…, rounded up to the amount step'}                  | ${0.00009}
-      ${58172.83} | ${{ amount: { min: 0.0001 }, cost: { min: 5 }, precision: { amount: 0.00001 } }} | ${'the larger of amount.min and cost.min / price'}                                   | ${0.0001}
-      ${50000}    | ${{ cost: { min: 5 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.0001 × 50000 being 5 in floating point'}              | ${0.0001}
-      ${100000}   | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.00007 × 100000 being 6.999999999999999: a step more'} | ${0.00007001}
+      price       | marketData                                                                       | description                                                                        | expected
+      ${100}      | ${{ precision: { amount: 0.01 } }}                                               | ${'no limit: one amount step'}                                                     | ${0.01}
+      ${100}      | ${{}}                                                                            | ${'no limit and no precision: one step of 8 decimals'}                             | ${1e-8}
+      ${100}      | ${{ amount: { min: 0, max: 0 }, cost: { min: 0 }, precision: { amount: 0.01 } }} | ${'limits of 0, which bound nothing: one amount step'}                             | ${0.01}
+      ${100}      | ${{ amount: { min: 0.1 }, precision: { amount: 0.01 } }}                         | ${'amount.min'}                                                                    | ${0.1}
+      ${100}      | ${{ amount: { min: 0.015 }, precision: { amount: 0.01 } }}                       | ${'amount.min off the amount step, rounded up to it'}                              | ${0.02}
+      ${58172.83} | ${{ cost: { min: 5 }, precision: { amount: 0.00001 } }}                          | ${'cost.min / price, 0.0000859507…, rounded up to the amount step'}                | ${0.00009}
+      ${58172.83} | ${{ amount: { min: 0.0001 }, cost: { min: 5 }, precision: { amount: 0.00001 } }} | ${'the larger of amount.min and cost.min / price'}                                 | ${0.0001}
+      ${50000}    | ${{ cost: { min: 5 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.0001 × 50000 being 5 in floating point'}            | ${0.0001}
+      ${100000}   | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}                             | ${'cost.min / price exactly, 0.00007 × 100000 being 7 in decimal'}                 | ${0.00007}
+      ${0.000001} | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 100, though 0.0001 / 0.000001 is 100.00000000000001'} | ${100}
+      ${8e-7}     | ${dogeBtcMarketData}                                                             | ${'cost.min / price exactly, 125, though 0.0001 / 8e-7 is 125.00000000000001'}     | ${125}
+      ${0}        | ${{ cost: { min: 5 }, precision: { amount: 0.01 } }}                             | ${'a price of 0, which sets no amount from cost.min: one amount step'}             | ${0.01}
     `('is $expected for $description', ({ price, marketData, expected }) => {
       expect(getMinimumAmount(price, marketData)).toBe(expected);
     });
 
-    // As the simulator and CCXTExchange compute the cost of an order, amount × price, against cost.min
-    it.each`
-      price        | marketData
-      ${58172.83}  | ${binanceStepsMarketData}
-      ${61234.57}  | ${documentedMarketData}
-      ${100000}    | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}
-      ${800000}    | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }}
-      ${0.0001234} | ${{ cost: { min: 5 }, precision: { amount: 1 } }}
-    `('is an amount whose cost at $price is cost.min or more', ({ price, marketData }) => {
-      expect(getMinimumAmount(price, marketData) * price).toBeGreaterThanOrEqual(marketData.cost.min);
+    // As the order layer checks an order, its cost worked out in decimal (see assertOrderWithinLimits): the minimum is taken, and one
+    // step under it is not
+    describe.each`
+      price        | marketData                                           | step
+      ${58172.83}  | ${binanceStepsMarketData}                            | ${0.00001}
+      ${61234.57}  | ${documentedMarketData}                              | ${1e-8}
+      ${100000}    | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }} | ${1e-8}
+      ${800000}    | ${{ cost: { min: 7 }, precision: { amount: 1e-8 } }} | ${1e-8}
+      ${0.0001234} | ${{ cost: { min: 5 }, precision: { amount: 1 } }}    | ${1}
+      ${0.000001}  | ${dogeBtcMarketData}                                 | ${1}
+      ${8e-7}      | ${dogeBtcMarketData}                                 | ${1}
+    `('at $price', ({ price, marketData, step }) => {
+      it('is an amount the order layer takes', () => {
+        const amount = getMinimumAmount(price, marketData);
+        expect(() => assertOrderWithinLimits({ tag: 'strategy', amount, price, marketData })).not.toThrow();
+      });
+
+      it('is the smallest: the order layer refuses one step less', () => {
+        const amount = addPrecise(getMinimumAmount(price, marketData), -step);
+        expect(() => assertOrderWithinLimits({ tag: 'strategy', amount, price, marketData })).toThrow(OrderOutOfRangeError);
+      });
     });
   });
 
   describe('getMaximumAmount', () => {
     it.each`
-      price     | marketData                                                                  | description                                                                           | expected
-      ${100}    | ${{ precision: { amount: 0.01 } }}                                          | ${'no limit'}                                                                         | ${Infinity}
-      ${100}    | ${{ amount: { max: 0 }, cost: { max: 0 } }}                                 | ${'limits of 0, which bound nothing'}                                                 | ${Infinity}
-      ${100}    | ${{ amount: { max: 10 }, precision: { amount: 0.01 } }}                     | ${'amount.max'}                                                                       | ${10}
-      ${300}    | ${{ cost: { max: 1000 }, precision: { amount: 0.01 } }}                     | ${'cost.max / price, 3.333…, rounded down to the amount step'}                        | ${3.33}
-      ${300}    | ${{ amount: { max: 3 }, cost: { max: 1000 }, precision: { amount: 0.01 } }} | ${'the smaller of amount.max and cost.max / price'}                                   | ${3}
-      ${300000} | ${{ cost: { max: 3 }, precision: { amount: 1e-8 } }}                        | ${'cost.max / price exactly, 0.00001 × 300000 being 3.0000000000000004: a step less'} | ${0.00000999}
+      price     | marketData                                                                  | description                                                        | expected
+      ${100}    | ${{ precision: { amount: 0.01 } }}                                          | ${'no limit'}                                                      | ${Infinity}
+      ${100}    | ${{ amount: { max: 0 }, cost: { max: 0 } }}                                 | ${'limits of 0, which bound nothing'}                              | ${Infinity}
+      ${100}    | ${{ amount: { max: 10 }, precision: { amount: 0.01 } }}                     | ${'amount.max'}                                                    | ${10}
+      ${300}    | ${{ cost: { max: 1000 }, precision: { amount: 0.01 } }}                     | ${'cost.max / price, 3.333…, rounded down to the amount step'}     | ${3.33}
+      ${300}    | ${{ amount: { max: 3 }, cost: { max: 1000 }, precision: { amount: 0.01 } }} | ${'the smaller of amount.max and cost.max / price'}                | ${3}
+      ${300000} | ${{ cost: { max: 3 }, precision: { amount: 1e-8 } }}                        | ${'cost.max / price exactly, 0.00001 × 300000 being 3 in decimal'} | ${0.00001}
     `('is $expected for $description', ({ price, marketData, expected }) => {
       expect(getMaximumAmount(price, marketData)).toBe(expected);
+    });
+
+    // As the order layer checks an order, its cost worked out in decimal (see assertOrderWithinLimits): the maximum is taken, and one
+    // step over it is not
+    describe.each`
+      price       | marketData                                              | step
+      ${300}      | ${{ cost: { max: 1000 }, precision: { amount: 0.01 } }} | ${0.01}
+      ${300000}   | ${{ cost: { max: 3 }, precision: { amount: 1e-8 } }}    | ${1e-8}
+      ${61234.57} | ${documentedMarketData}                                 | ${1e-8}
+      ${58172.83} | ${binanceStepsMarketData}                               | ${0.00001}
+      ${100}      | ${{ amount: { max: 10 }, precision: { amount: 0.01 } }} | ${0.01}
+    `('at $price', ({ price, marketData, step }) => {
+      it('is an amount the order layer takes', () => {
+        const amount = getMaximumAmount(price, marketData);
+        expect(() => assertOrderWithinLimits({ tag: 'strategy', amount, price, marketData })).not.toThrow();
+      });
+
+      it('is the largest: the order layer refuses one step more', () => {
+        const amount = addPrecise(getMaximumAmount(price, marketData), step);
+        expect(() => assertOrderWithinLimits({ tag: 'strategy', amount, price, marketData })).toThrow(OrderOutOfRangeError);
+      });
     });
   });
 

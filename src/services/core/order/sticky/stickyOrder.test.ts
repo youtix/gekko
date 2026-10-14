@@ -1897,18 +1897,19 @@ describe('StickyOrder', () => {
       let placed: number[];
 
       // The exchange places an order as CCXTExchange does: its amount truncated to the step of 0.01, then checked against the limits
-      const placeAsTheExchange = (minimumAmount: number) =>
+      const placeAsTheExchange = (minimumAmount: number, minimumCost?: number) =>
         fakeExchange.createLimitOrder.mockImplementation(async (_symbol: string, _side: string, amount: number, price: number) => {
           const truncated = round(amount, 2, 'down');
-          assertOrderWithinLimits({ tag: 'exchange', amount: truncated, price, marketData: { amount: { min: minimumAmount } } });
+          const marketData = { amount: { min: minimumAmount }, cost: { min: minimumCost } };
+          assertOrderWithinLimits({ tag: 'exchange', amount: truncated, price, marketData });
           placed.push(truncated);
           return state(`order-${placed.length}`, 'open', { filled: 0, remaining: truncated, price });
         });
 
       // A BUY of `amount` is placed at 102, then for each fill: a poll reports the transaction placed last filled so much, open at 102
       // while the bid is at 200, and the order moves, the cancelation answered with that fill: what is left is placed again at 202
-      const moveAfterEachFill = async (amount: number, fills: number[], minimumAmount = 0.01) => {
-        placeAsTheExchange(minimumAmount);
+      const moveAfterEachFill = async (amount: number, fills: number[], minimumAmount = 0.01, minimumCost?: number) => {
+        placeAsTheExchange(minimumAmount, minimumCost);
         order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', amount);
         await order.launch();
         fakeExchange.fetchTicker.mockResolvedValue({ bid: 200, ask: 210 });
@@ -1949,6 +1950,22 @@ describe('StickyOrder', () => {
 
         it(`places the ${minimum} left on the exchange`, () => {
           expect(placed.at(-1)).toBe(minimum);
+        });
+
+        it('keeps the order open, not taken for filled', () => {
+          expect(order['getStatus']()).toBe('open');
+        });
+      });
+
+      // Costing exactly the market's minimum, what is left is placed: its cost worked out in binary, 0.3 at 202 cost 60.599999999999994,
+      // under a minimum of 60.6, and was refused as out of range, the order taken for filled without it (see handleCreateOrderError)
+      describe('when the 0.3 left of 2.5 once its transactions filled 2.2 costs the market minimum of 60.6 at 202', () => {
+        beforeEach(async () => {
+          await moveAfterEachFill(2.5, [2.2], 0.01, 60.6);
+        });
+
+        it('places the 0.3 left on the exchange', () => {
+          expect(placed.at(-1)).toBe(0.3);
         });
 
         it('keeps the order open, not taken for filled', () => {
