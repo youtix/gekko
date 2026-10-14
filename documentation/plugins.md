@@ -136,6 +136,15 @@ plugins:
 
 A partial fill or a status change of an order is only logged (`info` level), not emitted. Each order ends in one of `OrderCompleted`, `OrderCanceled` and `OrderErrored`, which no other plugin emits: a built-in strategy waits for that end before it advises again (see the TradingAdvisor).
 
+### Sizing
+
+The Trader sizes an order from the balances it read at its last synchronization, less what the orders it placed since take from them:
+
+- A SELL is capped to the free balance of its asset, with a warning, and an all-in SELL (one without an `amount`) sells that balance.
+- An all-in BUY spends the free currency, sized at the order's price with 5 % kept back for the fee, in decimal; a BUY with an `amount` is placed as asked.
+- A SELL, the trailing stop's included, and an all-in BUY are also capped at the most the market takes in one order of their type (the maximum of its amount range, narrowed for a `MARKET` order by Binance's MARKET_LOT_SIZE), with a warning (`[<id>] SELL MARKET order of 100 BTC above the maximum amount of a MARKET order on BTC/USDT: 86.27382215 BTC sent, the rest stays held`): the rest stays held, or unspent, for a later order, and `OrderCompleted` carries the amount executed. A BUY with an `amount` above that maximum is refused by the exchange.
+- An all-in order sized from nothing is warned of with its cause before the exchange refuses its amount of 0: `[<id>] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent, which the market refuses (0 USDT free at the last synchronization)`, or `(no balance read from the exchange yet)` while every synchronization has failed.
+
 ### Dependencies
 
 - Requires **exchange** injection for order execution
@@ -200,17 +209,18 @@ plugins:
 1. The period measured starts when the strategy's warmup completes, at the close of the timeframe candle that completes it (the end of its last minute), when the strategy starts to act. It ends with the last minute of the run.
 2. The start equity is the latest portfolio received from the Trader, valued at the closes of that minute, the prices the market return starts from too. If no portfolio has arrived by then, the first one received afterwards gives it, valued at the prices of that moment, with a warning when those are no longer the start prices.
 3. The portfolio valued is the latest one received, with a `portfolioChange`, an `orderCompleted`, an `orderCanceled` or an `orderErrored` (each order event carries the portfolio the Trader read after it, except the empty one it sends before any of its synchronizations succeeds, which is ignored): the Trader's `portfolioUpdates` filter can hold back the `portfolioChange` of a small fill. It is marked to market at the close of every timeframe candle, and once more at the end of the run.
-4. At the end of the run, the report is computed, logged at the `info` level (start Gekko with `GEKKO_LOG_LEVEL=info` to see it) or printed as a table with `enableConsoleTable`, and emitted as `performanceReport` for the PerformanceReporter. It is sent from `processFinalize`, so it is emitted directly: a handler gets the report itself, not an array of payloads.
+4. At the end of the run, the report is computed, logged at the `info` level (start Gekko with `GEKKO_LOG_LEVEL=info` to see it) or printed as a table with `enableConsoleTable`, and emitted as `performanceReport` for the PerformanceReporter. The table rounds its percentages to 2 decimals by the rule of each figure, as the CSV does (see [CSV Output Format](#csv-output-format)): down for the returns, the alpha and the drawdown, half to even for the win rate and the exposure (`PERCENT_ROUNDING`, `src/plugins/analyzers/analyzer.const.ts`), and down for the adverse excursions, which the CSV writes to 8 decimals; Alpha has its `%` in both tables. Its ratios and deviations have 2 decimals, as in the CSV, and its amounts are grouped by thousands. It is sent from `processFinalize`, so it is emitted directly: a handler gets the report itself, not an array of payloads. The analyzer waits for the handlers; one that throws is logged at the `error` level (`A listener failed on the performance report: …`) and does not change the exit code. When it cannot measure the period, the analyzer emits an empty report and a warning says why: for the RoundTripAnalyzer, the warmup never completed, no portfolio was received, or the start equity is 0 or less (`Start equity of 0 USDT: no return to measure`); for the PortfolioAnalyzer, no start equity or no point of the curve (`Insufficient data for report generation.`), or a start equity of 0 or less.
 
 ### RoundTripAnalyzer
 
 It watches a single pair: with more than one asset in `watch.assets`, Gekko stops at start-up. It values the pair alone (the asset at the pair's price, plus the currency) and follows the orders the Trader fills:
 
 - A BUY completed while flat opens a round trip. Its entry equity is the pair equity just before that BUY: the equity right after it, plus its fee. More BUYs add to the position, and the entry price is the mean of the BUY prices weighted by their amounts.
+- When the BUY's end carries the empty portfolio of a Trader that has read none yet (in realtime, its balance reads failing since start-up), the entry equity is worked out from the first portfolio an order ends with afterwards: the pair equity it shows at the BUY's price, less what the round trip's fills changed it by (their fees, and the gap between their prices and the BUY's, on their amounts), logged at the `info` level. A round trip that ends before any portfolio is read has an unknown P&L and profit (NaN in its `roundtripCompleted` payload and its info line, `unknown` in the console table and on Telegram): it counts in the trades, the exposure and the MAEs, not in the win rate nor in the ratios, and a warning names its orders.
 - SELLs reduce the position, and the exit price is the mean of their prices weighted by their amounts. The round trip ends once what is left of the position (bought, not sold yet and still held) is at most 1 % of the amount bought (`DUST_TOLERANCE`): the dust left by an amount rounded to the exchange's lot size, or by a fee taken in the asset, does not keep it open.
 - A BUY or a SELL canceled after a partial fill counts for the part that filled, as a trade dated at the cancelation and priced at the order's price (the last close for an order without a price, such as a MARKET order), its fee unknown and counted as 0.
 - A SELL while flat ends no round trip. Before the first trade of the period, such as one that sells an asset held before it, it is not counted as a trade either.
-- Its `pnl` is the pair equity after the SELL that ends it minus its entry equity, and its `profit` the same in % of the entry equity: both are net of the fees of all its orders. Its maximum adverse excursion (MAE) is the deepest fall of a 1-minute low below its entry price (the weighted mean of its BUYs so far), from the end of the warmup until it ends, in % of the entry price.
+- Its `pnl` is the pair equity after the SELL that ends it minus its entry equity, and its `profit` the same in % of the entry equity: both are net of the fees of all its orders, and worked out in decimal, as the equities are valued and the report's total return is. A round trip whose exit equity is less than a unit of the 8th decimal (0.00000001, the smallest amount the simulator and Binance book) from its entry equity, or within a billionth of it, broke even: `pnl` and `profit` 0, neither a win nor a loss. So a round trip sold back at its buy price without a fee has a `pnl` and a `profit` of 0, though the exchange books the cost of an order rounded to 8 decimals while the round trip values its position at amount × price: on a pair such as ETH/BTC, the two can be up to 0.000000005 apart. Its maximum adverse excursion (MAE) is the deepest fall of a 1-minute low below its entry price (the weighted mean of its BUYs so far), from the end of the warmup until it ends, in % of the entry price.
 - Each round trip is logged at the `info` level (and printed as a table with `enableConsoleTable`) and emitted as `roundtripCompleted`, which the EventSubscriber can relay to Telegram.
 - The report covers the period only, and no trade comes before it: until the warmup is over, the strategy cannot create an order (`tools.createOrder` stops Gekko with an error, even from `init`).
 - The exposure is the time spent in round trips during the period, the one still open at the end included.
@@ -234,7 +244,7 @@ It values the whole portfolio, on one pair or several: the currency plus every w
 
 - The equity curve gets a point at the close of every timeframe candle after the warmup, the one that completes it included: the latest portfolio valued at that candle's closes. Each of these points is emitted as `equitySnapshot`, once per timeframe candle (no built-in plugin listens to it; a custom one can, with `onEquitySnapshot`). At the end of the run, the latest portfolio at the last prices ends the curve: it replaces the value of the last point when the run ends at the close of a timeframe candle, and is added otherwise; it is not emitted.
 - It listens to `orderCompleted`, `orderCanceled` and `orderErrored` only to refresh the portfolio it values (see step 3 above: the Trader's `portfolioUpdates` filter can hold back the `portfolioChange` of a small fill): none of them adds a point to the curve, nor counts as a portfolio change.
-- The returns of the curve, one per timeframe candle, give the volatility and the ratios. The curve also gives the max drawdown (the largest fall from a peak, the start equity being the first peak) and the longest drawdown (the longest time from a peak to the point that gets back to it, or to the end of the run).
+- The returns of the curve, one per timeframe candle, give the volatility and the ratios. The curve also gives the max drawdown (the largest fall from a peak, the start equity being the first peak) and the longest drawdown (the longest time from a peak to the point that gets back to it, or to the end of the run). The equities are computed in decimal, as the exchanges book the balances, and two equities less than 0.00000001 of the currency apart, the smallest amount the simulator and Binance book, count as equal: a portfolio back at its peak value ends its drawdown, and a change smaller than that is a return of 0.
 - The exposure is the share of the period during which the portfolio held an asset other than the currency worth at least 1 % of the portfolio, at the latest prices, counted one timeframe at a time. Neither the dust left by a SELL nor a position deliberately kept under 1 % of the equity counts.
 - The market return is that of the benchmark asset: BTC when it is watched, otherwise the first asset of `watch.assets`. The start and end prices of the report are its prices.
 
@@ -254,43 +264,45 @@ It values the whole portfolio, on one pair or several: the currency plus every w
 
 The report holds the fields of `Report` (`src/models/event.types.ts`), and those of its analyzer. The PerformanceReporter writes it as a row of CSV (see its columns below).
 
-| Field                                        | Analyzer  | Description                                                                                                                                                |
-|----------------------------------------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `id`                                         | Both      | `TRADING REPORT` (RoundTripAnalyzer) or `PORTFOLIO PROFIT REPORT` (PortfolioAnalyzer)                                                                      |
-| `periodStartAt`, `periodEndAt`               | Both      | Start and end of the period (epoch milliseconds)                                                                                                           |
-| `formattedDuration`                          | Both      | Length of the period, such as `3 months 2 days`                                                                                                            |
-| `netProfit`                                  | Both      | End equity minus start equity, in quote currency                                                                                                           |
-| `totalReturnPct`                             | Both      | Return over the period (%)                                                                                                                                 |
-| `annualizedNetProfit`, `annualizedReturnPct` | Both      | Net profit and return per year (see below)                                                                                                                 |
-| `marketReturnPct`                            | Both      | Return of holding the asset, or the benchmark asset, over the period (%)                                                                                   |
-| `alpha`                                      | Both      | Total return minus market return, in percentage points                                                                                                     |
-| `exposurePct`                                | Both      | Share of the period spent exposed (%)                                                                                                                      |
-| `volatility`                                 | Both      | Standard deviation of the returns (%)                                                                                                                      |
-| `downsideDeviation`                          | Both      | Root mean square of the negative returns, the positive ones counting as 0 (%)                                                                              |
-| `sharpeRatio`, `sortinoRatio`                | Both      | Risk-adjusted returns, annualized (see below)                                                                                                              |
-| `startPrice`, `endPrice`                     | Both      | Price of the asset, or of the benchmark asset, at the start and at the end                                                                                 |
-| `interruption`                               | Both      | Message of the error that stopped the run before its end (a crash, missing candles, the circuit breaker), absent when it completed                         |
-| `startBalance`, `finalBalance`               | RoundTrip | Pair equity at the start and at the end, a position still open included                                                                                    |
-| `winRate`                                    | RoundTrip | Share of the closed round trips with a positive P&L (%), `null` without any                                                                                |
-| `tradeCount`                                 | RoundTrip | Trades of the period: orders completed and canceled ones that filled in part, from the first BUY on                                                        |
-| `topMAEs`                                    | RoundTrip | The 10 largest maximum adverse excursions (%), largest first                                                                                               |
-| `startEquity`, `endEquity`                   | Portfolio | Portfolio value at the start and at the end                                                                                                                |
-| `equityCurve`                                | Portfolio | The points of the equity curve, `{ date, totalValue }`                                                                                                     |
-| `maxDrawdownPct`                             | Portfolio | Largest fall from a peak of the equity curve (%)                                                                                                           |
-| `longestDrawdownMs`                          | Portfolio | Longest drawdown (milliseconds)                                                                                                                            |
-| `portfolioChangeCount`                       | Portfolio | Portfolio changes received                                                                                                                                 |
-| `benchmarkAsset`                             | Portfolio | Asset whose price gives the market return                                                                                                                  |
+| Field                                        | Analyzer  | Description                                                                                                                                                                     |
+|----------------------------------------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `id`                                         | Both      | `TRADING REPORT` (RoundTripAnalyzer) or `PORTFOLIO PROFIT REPORT` (PortfolioAnalyzer)                                                                                           |
+| `periodStartAt`, `periodEndAt`               | Both      | Start and end of the period (epoch milliseconds)                                                                                                                                |
+| `formattedDuration`                          | Both      | Length of the period, such as `3 months 2 days`, counted on the UTC calendar, the same on every machine                                                                         |
+| `netProfit`                                  | Both      | End equity minus start equity, in quote currency, computed in decimal as the equities are                                                                                       |
+| `totalReturnPct`                             | Both      | Return over the period (%)                                                                                                                                                      |
+| `annualizedNetProfit`, `annualizedReturnPct` | Both      | Net profit and return per year (see below)                                                                                                                                      |
+| `marketReturnPct`                            | Both      | Return of holding the asset, or the benchmark asset, over the period (%)                                                                                                        |
+| `alpha`                                      | Both      | Total return minus market return, in percentage points                                                                                                                          |
+| `exposurePct`                                | Both      | Share of the period spent exposed (%)                                                                                                                                           |
+| `volatility`                                 | Both      | Standard deviation of the returns (%): the population one, over their number, not their number less one; 0 for returns all equal (within a relative 1e-9)                       |
+| `downsideDeviation`                          | Both      | Root mean square of the negative returns, the positive ones counting as 0 (%)                                                                                                   |
+| `sharpeRatio`, `sortinoRatio`                | Both      | Risk-adjusted returns, annualized (see below)                                                                                                                                   |
+| `startPrice`, `endPrice`                     | Both      | Price of the asset, or of the benchmark asset, at the start and at the end                                                                                                      |
+| `interruption`                               | Both      | Message of the error that stopped the run before its end (a crash, missing candles, the circuit breaker), absent when it completed                                              |
+| `startBalance`, `finalBalance`               | RoundTrip | Pair equity at the start and at the end, a position still open included                                                                                                         |
+| `winRate`                                    | RoundTrip | Share of the closed round trips with a positive P&L (%), among those whose P&L is known, `null` without any; not rounded (the console table and the CSV round it to 2 decimals) |
+| `tradeCount`                                 | RoundTrip | Trades of the period: orders completed and canceled ones that filled in part, from the first BUY on                                                                             |
+| `topMAEs`                                    | RoundTrip | The 10 largest maximum adverse excursions (%), largest first                                                                                                                    |
+| `startEquity`, `endEquity`                   | Portfolio | Portfolio value at the start and at the end                                                                                                                                     |
+| `equityCurve`                                | Portfolio | The points of the equity curve, `{ date, totalValue }`                                                                                                                          |
+| `maxDrawdownPct`                             | Portfolio | Largest fall from a peak of the equity curve (%)                                                                                                                                |
+| `longestDrawdownMs`                          | Portfolio | Longest drawdown (milliseconds)                                                                                                                                                 |
+| `portfolioChangeCount`                       | Portfolio | Portfolio changes received                                                                                                                                                      |
+| `benchmarkAsset`                             | Portfolio | Asset whose price gives the market return                                                                                                                                       |
 
-A `roundtripCompleted` payload (`RoundTrip`) holds the round trip's `id` (0 for the first one of the run), `entryAt`, `entryPrice`, `entryEquity`, `exitAt`, `exitPrice`, `exitEquity`, `duration` (milliseconds), `pnl`, `profit` (%) and `maxAdverseExcursion` (%). An `equitySnapshot` payload is a `{ date, totalValue }` point of the equity curve.
+A `roundtripCompleted` payload (`RoundTrip`) holds the round trip's `id` (0 for the first one of the run), `entryAt`, `entryPrice`, `entryEquity`, `exitAt`, `exitPrice`, `exitEquity`, `duration` (milliseconds), `pnl`, `profit` (%) and `maxAdverseExcursion` (%): `entryEquity`, `exitEquity`, `pnl` and `profit` are NaN when no portfolio the Trader read valued the round trip. An `equitySnapshot` payload is a `{ date, totalValue }` point of the equity curve.
 
 ### How the Statistics Are Computed
 
 Both analyzers compute them the same way, each from its own returns: the profit of each closed round trip for the RoundTripAnalyzer, the change of the equity curve at each timeframe candle for the PortfolioAnalyzer. The annualized figures (net profit, return, Sharpe and Sortino ratios) share one horizon: the period, or a day for a run shorter than a day, as if its returns had been spread over that day, and a warning says so then: annualized over its own length, a run of a few minutes would turn the moves of a few candles into a yearly return of thousands of %.
 
-- **Annualized net profit and return** (`yearly profit` in the CSV): the net profit and the total return divided by the horizon in years. The annualization is linear, without compounding: +5 % over half a year is +10 % a year.
-- **Sharpe ratio:** the annualized return minus `riskFreeReturn`, divided by the standard deviation of the returns annualized by √(returns per year), the returns per year being their number divided by the horizon in years. It is 0 without a return or without volatility.
+- **Annualized net profit and return** (`yearly profit` in the CSV): the net profit and the total return divided by the horizon in years. The annualization is linear, without compounding: +5 % over half a year is +10 % a year. The horizon is counted in years of the calendar, in UTC, the same on every machine: the whole years from the start to its last anniversary (a start on Feb 29 has its anniversaries on Feb 28 in other years), plus the time left over the length of the year from that anniversary to the next, 365 or 366 days. Half of 2024 is 182/366 of a year.
+- **Sharpe ratio:** the annualized return minus `riskFreeReturn`, divided by the standard deviation of the returns annualized by √(returns per year), the returns per year being their number divided by the horizon in years. It is 0 without a return or without volatility: returns all equal, or equal but for the rounding of the arithmetic that made them (within a relative 1e-9), have none.
 - **Sortino ratio:** the same, with the downside deviation in place of the standard deviation: the root mean square of the negative returns, the positive ones counting as 0. It is 0 when no return is negative.
-- **Alpha:** the total return minus the market return.
+- **Alpha:** the total return minus the market return, 0 when the two differ only by the rounding of the arithmetic, as for a portfolio holding the benchmark asset alone.
+
+The percentages of the report (the total, annualized and market returns, the alpha, the max drawdown, the exposure and the win rate) are computed in decimal: a change is worked out exactly, and each percentage comes of one division rid of the noise of binary arithmetic, so that a figure on a hundredth, such as a market return of 0.01 % from 1.0000 to 1.0001, is written as it is once rounded.
 
 ### Understanding the Metrics
 
@@ -345,7 +357,7 @@ The reports of the PortfolioAnalyzer and of the RoundTripAnalyzer share one head
 
 Cells are separated by `;`. A cell that holds a `;`, a double quote or a line break (a strategy parameter, for example) is enclosed in double quotes, and its own double quotes are doubled: the usual CSV quoting, which spreadsheets read back as the original value.
 
-Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`, `final balance`, `start price`, `end price`) are plain numbers, written the same whatever the locale of the machine: a `.` decimal separator, no thousands separator and up to 8 decimals, so that a price of a fraction of a cent or a profit in BTC keeps its value (e.g., `1234.5678`, `0.0000012`). A value that is not a number leaves its cell empty. Percentages are rounded to 2 decimals: down for `total return`, the return in `yearly profit`, `market`, `alpha` and `max drawdown` (so `-1.234` is written `-1.24%`), to the nearest for `win rate` and `exposure`. The ratios and deviations (`sharpe ratio`, `sortino ratio`, `standard deviation`, `downside deviation`) are written with 2 decimals, such as `1.50` (`0.00` for any value between -0.005 and 0.005). `top maes` is a JSON array of the unrounded values, largest first (e.g., `[4.218765432098766,1.5]`). Rows written by earlier versions can hold amounts rounded to 3 decimals and grouped in the machine's locale (`1,234.568`, or `1 234,568` on a French machine).
+Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`, `final balance`, `start price`, `end price`) are plain numbers, written the same whatever the locale of the machine: a `.` decimal separator, no thousands separator and up to 8 decimals, so that a price of a fraction of a cent or a profit in BTC keeps its value (e.g., `1234.5678`, `0.0000012`). A value that is not a number leaves its cell empty. Percentages are computed in decimal (see [How the Statistics Are Computed](#how-the-statistics-are-computed)), then rounded to 2 decimals: down for `total return`, the return in `yearly profit`, `market`, `alpha` and `max drawdown` (so `-1.234` is written `-1.24%`), to the nearest for `win rate` and `exposure`. The ratios and deviations (`sharpe ratio`, `sortino ratio`, `standard deviation`, `downside deviation`) are written with 2 decimals, such as `1.50` (`0.00` for any value between -0.005 and 0.005); one that is missing, not a number or infinite leaves its cell empty. `top maes` is a JSON array of the values written as the amounts are, up to 8 decimals and never with an exponent, largest first (e.g., `[4.21876543,1.5]`). Rows written by earlier versions can hold the unrounded values there (`4.218765432098766`, `1.000000338535756e-8`), and amounts rounded to 3 decimals and grouped in the machine's locale (`1,234.568`, or `1 234,568` on a French machine).
 
 | Column                      | Description                                                                                                                                                  |
 |-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
@@ -356,7 +368,7 @@ Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`
 | `net profit`                | Profit in quote currency                                                                                                                                     |
 | `total return`              | Return over the period (%)                                                                                                                                   |
 | `yearly profit`             | Annualized net profit, with the annualized return (%): over the period, or a day for a shorter run                                                           |
-| `win rate`                  | Share of profitable round trips (%), `N/A` without any, *Trading only*                                                                                       |
+| `win rate`                  | Share of profitable round trips (%), among those whose P&L is known, `N/A` without any, *Trading only*                                                       |
 | `market`                    | Buy-and-hold return (%)                                                                                                                                      |
 | `alpha`                     | Excess return vs market (%)                                                                                                                                  |
 | `sharpe ratio`              | Sharpe ratio, annualized over the same horizon as `yearly profit`                                                                                            |
@@ -366,7 +378,7 @@ Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`
 | `trade count`               | Number of trades of the period (orders completed, canceled ones that filled in part), from the first BUY on, *Trading only*                                  |
 | `start time`                | Start of the period, when the warmup completed (ISO 8601)                                                                                                    |
 | `end time`                  | End of the period, the end of the last minute (ISO 8601)                                                                                                     |
-| `duration`                  | Length of the period (e.g., `3 months 2 days`)                                                                                                               |
+| `duration`                  | Length of the period (e.g., `3 months 2 days`), counted on the UTC calendar, the same on every machine                                                       |
 | `exposure`                  | Share of the period in a position (%): in round trips, the open one included (*Trading*); holding an asset worth at least 1 % of the portfolio (*Portfolio*) |
 | `start balance`             | Value at start in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                          |
 | `final balance`             | Value at end in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                            |
@@ -374,7 +386,7 @@ Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`
 | `end price`                 | Asset price at end (of the benchmark asset, *Portfolio*)                                                                                                     |
 | `standard deviation`        | Standard deviation of the returns: of the round trips (*Trading*), of the timeframe candles (*Portfolio*)                                                    |
 | `downside deviation`        | Root mean square of the negative returns, the positive ones counting as 0                                                                                    |
-| `longest drawdown duration` | Duration of the longest drawdown, *Portfolio only*                                                                                                           |
+| `longest drawdown duration` | Duration of the longest drawdown, counted from 1970-01-01T00:00Z on the UTC calendar (59 days are written `2 months`, 30 days `30 days`), *Portfolio only*   |
 | `benchmark asset`           | Asset whose price gives the market return, *Portfolio only*                                                                                                  |
 | `top maes`                  | The 10 largest maximum adverse excursions (%), as a JSON array, *Trading only*                                                                               |
 | `status`                    | `completed`, or `interrupted: <reason>` when the run stopped before its end (the message of the error that stopped it, quoted when it holds a `;`)           |
@@ -501,7 +513,7 @@ Control your subscriptions via Telegram commands:
 | `order_cancel`       | Order cancellation confirmed, with what it filled first: `Filled amount: not reported` when the exchange reported no fill                    |
 | `order_error`        | Order execution failed, with a line saying so when the order may still be live on the exchange, to be checked there                          |
 | `order_complete`     | Order fully executed                                                                                                                         |
-| `roundtrip_complete` | Round trip closed, with its PnL (needs the `RoundTripAnalyzer`)                                                                              |
+| `roundtrip_complete` | Round trip closed, with its PnL and profit, `unknown` when no portfolio read valued it (needs the `RoundTripAnalyzer`)                       |
 
 ### Example Notifications
 
@@ -509,15 +521,30 @@ Control your subscriptions via Telegram commands:
 ```
 BUY MARKET order completed (abc-123-def) for BTC/USDT
 Amount: 0.5 BTC
-Price: 42542.5 USDT
+Price: 42,542.5 USDT
 Fee percent: 0.1%
 Fee: 21.25 USDT
 At time: 2024-01-15T14:30:00.000Z
-Current portfolio: 0.5 BTC / 47500 USDT
+Current portfolio: 0.5 BTC / 47,500 USDT
 ------
 ```
 
-`Price` includes the fee. When no trade of the order reported a fee rate, it reads `Price (excluding fee): 42500 USDT`, with `Fee percent: unknown` and `Fee: unknown`.
+`Price` includes the fee. When no trade of the order reported a fee rate, it reads `Price (excluding fee): 42,500 USDT`, with `Fee percent: unknown` and `Fee: unknown`.
+
+**Roundtrip Completed** (a BUY of 1 BTC at 40,000 and its SELL at 41,000, a 0.1 % fee each, from a pair equity of 100,000 USDT, the price down to 39,500 in between):
+```
+Roundtrip completed
+PnL: 919
+Profit: 0.91%
+Duration: 3 days 4 hours
+Entry Price: 40,000
+Exit Price: 41,000
+Max Adverse Excursion: 1.25%
+At time: 2024-01-18T18:30:00.000Z
+------
+```
+
+Amounts, prices, balances and fees are written as in the console tables: thousands grouped, up to 8 decimals and never an exponent (`47,500`, `0.00000012`). A fee rate keeps its decimals (`0.075%`). A round trip's profit and adverse excursion are rounded down to 2 decimals, as its console table rounds them (0.919 % is `0.91%`), and its duration is counted on the UTC calendar. Its `PnL` and `Profit` read `unknown` when no portfolio the Trader read valued the round trip. An order error says why after `Due to`, the reason the strategy gets as `order.reason`, without the tag of the failure: `Due to Order 'cost' with value 4.8987648 is out of range. Expected a value between 5 and 9000000.`, not `Due to [EXCHANGE] Order 'cost' …`.
 
 > [!TIP]
 > Create a Telegram bot by messaging [@BotFather](https://t.me/BotFather) and following the instructions. Keep your token secure!
@@ -634,7 +661,7 @@ volume: 1234.5 | 1234.7
 
 **Candle Stall** (then one message when the candles come again):
 ```
-⚠️ No 1m candle received for 3 minute(s), last one @ 2024-01-15T14:00:00.000Z
+⚠️ No 1m candle received for 3 minutes, last one @ 2024-01-15T14:00:00.000Z
 ✅ 1m candles are coming again, last one @ 2024-01-15T14:05:00.000Z
 ```
 

@@ -94,7 +94,7 @@ watch:
     candleCount: 100
   daterange:
     start: 2024-01-01
-    end: 2024-12-31
+    end: 2024-12-31T23:59:00Z
 
 exchange:
   name: dummy-cex
@@ -142,7 +142,9 @@ plugins:
     enableConsoleTable: true
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+A `daterange` bound is a day, read as its midnight UTC (`2024-01-01`), or a day and a time with `Z` or an offset (`2024-12-31T23:59:00Z`, `2024-01-01T02:00:00+02:00`), quoted or not. Both bounds are included, so the range above ends with the last minute of 2024: `end: 2024-12-31` would read only the first minute of December 31st. A day that does not exist (`2023-02-29`), or a time without `Z` or an offset, is refused at start-up.
+
+The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
 
 ### 3. Run Your Strategy
 
@@ -221,7 +223,7 @@ The snippets of this section are methods of one class, which follows two EMAs of
 
 ### `init` — Strategy Initialization
 
-Called **once**, at start-up, on the first one-minute candle, before any timeframe candle: in realtime the first minute of the warmup history (with no history to replay, the first live minute, once it closes), in a backtest the first minute of `watch.daterange`. Its `candle` holds that minute's candle of every watched pair, in the order of `watch.assets`: take your pairs from its keys, not a price (a price to trade from comes with the first candle after the warmup).
+Called **once**, at start-up, on the first one-minute candle, before any timeframe candle: in realtime the first minute of the warmup history (with no history to replay, the first live minute, once it closes), in a backtest the first minute of `watch.daterange`. Its `candle` holds that minute's candle of every watched pair, in the order of `watch.assets`: take your pairs from its keys, not a price (a price to trade from comes with the first candle after the warmup). In a backtest, these one-minute candles also carry an `id`, their row in the candle database; a candle read live from the exchange, one Gekko made up for a missing minute, and every timeframe candle have none: do not rely on it.
 
 Register your indicators here: `addIndicator(name, symbol, params)` is only available in `init`. Kept and called later, it throws `[STRATEGY] Impossible to add the SMA indicator on BTC/USDT: addIndicator is available in init only`, which stops Gekko. These stop Gekko at start-up, with an error naming the problem:
 
@@ -342,11 +344,11 @@ onOrderCanceled({ order, tools }: OnOrderCanceledEventParams<MyParams>): void {
 
 ### `onOrderErrored` — Order Failed
 
-Called when an order of yours fails or is refused by the exchange, `order.reason` saying why. An amount the market's step truncates to 0, or whose cost then falls under `cost.min`, is refused so, in backtest and paper trading as live (`Order 'cost' with value 4.8987648 is out of range. Expected a value between 5 and 9000000.`). It may have executed part of its amount first: `order.filled` is what the exchange reported it filled, 0 when it reported nothing.
+Called when an order of yours fails or is refused by the exchange, `order.reason` saying why. An amount the market's step truncates to 0, or whose cost then falls under `cost.min`, is refused so, in backtest and paper trading as live (`Order 'cost' with value 4.8987648 is out of range. Expected a value between 5 and 9000000.`). An amount or a price the step rounds to nothing is reported as the order asked for it, with the step: 0.0000099 BTC on Binance's BTC/USDT reads `Order 'amount' with value 0.0000099 rounds to 0 on the amount step 0.00001 of the market. Expected a value between 0.00001 and 9000.` It may have executed part of its amount first: `order.filled` is what the exchange reported it filled, 0 when it reported nothing.
 
-`order.mayBeLive` is `true` when the order may still be live on the exchange, where Gekko follows it no more: its creation's answer was lost on the network, the order was created but its state could not be read back, the exchange failed the creation without refusing it (an internal error, such as Binance's "execution status unknown"), or a poll or a cancelation failed for good while it was open. It may then have executed more than `order.filled`, or execute later, and no event will tell: placed again, it may be doubled, so check it on the exchange first. `false` when the exchange refused it, or nothing of it was left open: what it executed is `order.filled`. When the order is the SELL of a trailing stop, the stop is active again either way, unless the portfolio after it shows nothing left to protect (see [Trailing Stops](#trailing-stops)).
+`order.mayBeLive` is `true` when the order may still be live on the exchange, where Gekko follows it no more: its creation's answer was lost on the network, the order was created but its state could not be read back, the exchange failed the creation without refusing it (an internal error, such as Binance's "execution status unknown"), or a poll or a cancelation failed for good while it was open. It may then have executed more than `order.filled`, or execute later, and no event will tell: placed again, it may be doubled, so check it on the exchange first. `false` when the exchange refused it, or nothing of it was left open: what it executed is `order.filled`. When the order is the SELL of a trailing stop, the stop is active again either way for what that SELL did not sell, unless nothing it can sell is left for it to protect (see [Trailing Stops](#trailing-stops)).
 
-`maxConsecutiveErrors` order errors in a row (a [TradingAdvisor option](#tradingadvisor-plugin-configuration), 5 by default, `-1` to disable it) stop Gekko with `[CORE] Max consecutive order errors reached (5)` and exit code 0: the circuit breaker. A completed or canceled order resets the count. Your `onOrderErrored` still runs for the error that trips it, before the stop, but an order it creates then is never sent.
+`maxConsecutiveErrors` order errors in a row (a [TradingAdvisor option](#tradingadvisor-plugin-configuration), 5 by default, `-1` to disable it) stop Gekko with `[STRATEGY] Max consecutive order errors reached (5)` and exit code 0: the circuit breaker. A completed or canceled order resets the count. Your `onOrderErrored` still runs for the error that trips it, before the stop, but an order it creates then is never sent.
 
 ```typescript
 onOrderErrored({ order, tools }: OnOrderErroredEventParams<MyParams>): void {
@@ -457,6 +459,7 @@ type StrategyOrder = {
 - **`price` left out**: the last price of the pair, the close of the last one-minute candle or the bid read at the Trader's last synchronization, whichever came last. It is the limit of a `LIMIT` order, and what an all-in BUY is sized at.
 - **A SELL is capped to the free balance** of its asset, as the Trader read it at its last synchronization, less what the SELLs it placed since take from it, with a warning (`[<id>] SELL MARKET order of 0.3 BTC above the free balance: 0.2992 BTC sent, all that can be sold (…)`). An all-in SELL is sized from that remainder.
 - **An all-in BUY is sized from what the BUYs before it leave** of the free currency as the Trader read it at its last synchronization: each BUY placed since counts for its cost at its price plus the 5 % kept back for its fee, an all-in BUY for all it was sized from. The Trader warns (`[<id>] All-in BUY MARKET order sized from 500 USDT: 4.75 BTC sent (1000 USDT free at the last synchronization, less 500 USDT for the BUYs placed since, the 5 % kept back for their fee included)`). So the second of two all-in BUYs sent on one candle is sized to 0 and refused: an `onOrderErrored` that counts towards `maxConsecutiveErrors`. Send one. A BUY with an `amount` is placed as asked.
+- **A SELL, and an all-in BUY, is capped at the most the market takes in one order** of its type: the maximum of its amount range, narrowed for a `MARKET` order by that of a market order (Binance's MARKET_LOT_SIZE, tens of BTC on BTC/USDT), with a warning (`[<id>] SELL MARKET order of 100 BTC above the maximum amount of a MARKET order on BTC/USDT: 86.27382215 BTC sent, the rest stays held`). The SELL of a trailing stop is capped so too. `onOrderCompleted` gets the amount executed, and the rest stays held, or unspent, for a later order. A BUY with an `amount` above the maximum is refused by the exchange.
 
 `createOrder` checks the order before it sends anything. The order takes no key but the six of `StrategyOrder` above: any other, a misspelt `prise` or a `quantity` for instance, is refused whatever its value, as the Trader would ignore it (a LIMIT would go at the last price of the pair, an order all-in). `symbol` must be a watched pair. `side` must be `'BUY'` or `'SELL'` and `type` `'MARKET'`, `'STICKY'` or `'LIMIT'`, in upper case. `amount` and `price` must be numbers above 0, or left out: `0`, a negative number, `NaN`, `Infinity` and a quoted number such as `'0.5'` are refused. `trailing` goes on a BUY only, with no key but `percentage`, above 0 and below 100, and `trigger`, above 0 or left out. Anything else throws a `GekkoError` naming the field and what it accepts, for example `[STRATEGY] Impossible to create the buy MARKET order on BTC/USDT: side must be one of 'BUY', 'SELL', got 'buy'`. The order is not sent and Gekko stops (exit code 1), even for an amount your strategy computed as 0. A TypeScript strategy cannot pass a lower-case side or type, or a quoted number, without a cast; a JavaScript one, which Bun loads without type-checking, can. TypeScript refuses an unknown key in an object literal only, not in a variable or a spread, such as the order of an event: the keys check catches what the compiler lets through.
 
@@ -485,7 +488,7 @@ A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows th
 - **Activated**: a stop without `trigger` is active as soon as it is armed, and `onTrailingStopActivated(state, tools)` is called then, right after `onOrderCompleted`, its peak and its stop price still 0. It takes its first peak from the open of the next one-minute candle, not from the price the BUY filled at: the price can fall more than `percentage` below that price before the stop triggers. A stop with a `trigger` waits until the high of a one-minute candle reaches it. Its peak is then that candle's open when the open reached the trigger, else its high, and `onTrailingStopActivated` is called before the rest of that candle is trailed.
 - **Trailed**: each one-minute candle is met as open, low, high, close, each price tested against the stop price, `peak × (1 − percentage / 100)`, before it raises the peak. So a candle that rises more than `percentage` from its open does not trigger the stop on its own low. The candle that activates a stop with a trigger is met from its open when the open reached the trigger; otherwise only its close is tested, after its high.
 - **Triggered**: a price at or below the stop price makes Gekko create a MARKET SELL of the stop's amount, then call `onTrailingStopTriggered(orderId, state, tools)`, `state` holding the peak and the stop price of that moment. That SELL is an order of your strategy's from then on: its outcome comes through `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored`, under `orderId`. A strategy that tracks its position adopts it as its pending SELL (see [Tracking Your Position](#tracking-your-position)); otherwise it stays long once the stop has sold everything, and its next SELL is refused, nothing being left to sell.
-- **Selling**: the stop (`state.status` `'selling'`, `state.sellOrderId` its SELL) sells until that SELL ends. Completed, the stop is over. Errored or canceled, it is active again, with a warning, for what that SELL did not sell, from the peak and the stop price it triggered at: the next price at or below that stop price triggers it again, and `onTrailingStopTriggered` announces its new SELL under a new id, to adopt as the first one. But when the portfolio after that SELL shows too little of the asset free to sell at the minimums of the market, while no SELL of yours is pending on the pair, nothing is left to protect: the stop is removed instead, with a warning. A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in `onOrderErrored`: its answer lost, the exchange busy or overloaded) makes the stop active again all the same, with a warning to check that SELL on the exchange (`Trailing stop of BUY <id> kept: its SELL <id> errored, …, and may still have gone through on the exchange, …`). A MARKET SELL rests on no book: it may only have executed. If it did, the portfolio after it shows the asset gone and the stop is removed, or the stop's next SELL is refused for lack of anything to sell and that refusal removes it; unless your account holds other coins of the asset free, which that next SELL sells, up to the stop's amount. If it did not, the stop still protects your position. A SELL refused every time with the asset still free is sent again on each such minute, each refusal counting towards `maxConsecutiveErrors`.
+- **Selling**: the stop (`state.status` `'selling'`, `state.sellOrderId` its SELL) sells until that SELL ends. Completed for all of the stop's amount, the stop is over. Completed for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the exchange truncates its amount to the market's step), errored or canceled, it is active again for what that SELL did not sell, from the peak and the stop price it triggered at, with a warning (`Trailing stop of BUY <id> active again: its SELL <id> completed after selling 0.3 of its 0.5 BTC …`): the next price at or below that stop price triggers it again, and `onTrailingStopTriggered` announces its new SELL under a new id, to adopt as the first one. The stop is over instead when nothing it can sell is left to protect: when that rest is too little to sell at the minimums of the market, whatever else your account holds (`Trailing stop of BUY <id> over: …, and the rest, 0.0001 BTC, is too little to sell at the minimums of the market`, at info level), or when the portfolio after that SELL shows too little of the asset free to sell, while no SELL of yours is pending on the pair (at info level after a SELL that completed, such as one whose BUY's fee the exchange took from the asset bought; with a warning, `… removed: …`, after one that errored or was canceled). A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in `onOrderErrored`: its answer lost, the exchange busy or overloaded) makes the stop active again all the same for a rest it can sell, with a warning to check that SELL on the exchange (`Trailing stop of BUY <id> kept: its SELL <id> errored, …, and may still have gone through on the exchange, …`). A MARKET SELL rests on no book: it may only have executed. If it did, the portfolio after it shows the asset gone and the stop is removed, or the stop's next SELL is refused for lack of anything to sell and that refusal removes it; unless your account holds other coins of the asset free, which that next SELL sells, up to the stop's amount. If it did not, the stop still protects your position. A SELL refused every time with the asset still free (an API key refused, a cost above the maximum of the market) is sent again on each such minute, each refusal counting towards `maxConsecutiveErrors`.
 - **Your own SELLs**: while a SELL your strategy created is pending on a pair, the stops of that pair keep trailing but do not trigger (`[STRATEGY] Trailing stop of BUY <id> held back: …`, once per stop, at info level): the exchange reserves the asset for your SELL, and the stop's SELL would be refused. Completed, your SELL cancels every stop armed on the pair, whatever the amount sold, with an info line: a strategy that scales out loses its stops at its first SELL. Canceled or errored, with no other SELL of yours pending there, it releases them (`… resumes: …`), and the next price at or below a stop price triggers that stop. So a take-profit LIMIT SELL left pending leaves the position without a working stop for as long as it pends, the part it does not reserve included. The SELL a stop sends cancels no other stop, and a stop whose BUY has not completed yet is kept.
 - **Canceled by you**: `tools.cancelTrailingOrder(state.id)`, `state.id` being the BUY's id, at any time. From `onTrailingStopActivated`, the stop is gone before the rest of its activation candle is trailed. To take over from a stop that is selling, cancel the stop, not its SELL: a canceled SELL makes the stop active again.
 
@@ -498,7 +501,7 @@ A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows th
 `createOrder` returns before the exchange has seen the order, and Gekko relays every order you create: a strategy that advises a BUY on every candle of an uptrend sends an all-in BUY on each, each sized from what the ones before left, until they are refused for want of currency and the circuit breaker stops the bot. So a strategy that trades all-in keeps its position and its pending order, and moves them only on the outcome of its orders:
 
 - it buys only when flat and sells only when long, never while an order of its own is pending;
-- a completed BUY makes it long, a completed SELL flat;
+- a completed BUY makes it long, a completed SELL flat, unless it sold less than it asked for (an all-in SELL asks for all of the asset free, and the Trader caps a SELL at the most the market takes in one order): the portfolio after it then tells, long when what is left free is enough to sell;
 - an order canceled or errored may have executed before it ended, in part or in full: the position is read from what its event reports, rather than left as it was. The portfolio after the order (`exchange.portfolio`) tells what is left of the asset, a position when it is enough to sell at the minimums of the market (`tools.marketData`);
 - the SELL a trailing stop sends is the strategy's own from `onTrailingStopTriggered` on: it adopts that id as a pending SELL;
 - it starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that ended without completing while the account held the asset.
@@ -549,7 +552,7 @@ export class MyTrackedStrategy implements Strategy<MyParams> {
 }
 ```
 
-For an order canceled or errored, the tracker reads the fill a cancelation reports, else the free balance of the asset in the portfolio after the order, truncated to the lot step of the market and checked against its minimum amount and cost, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` and `playSteps` helpers of `src/strategies/positionTracker.mock.ts`.
+For an order canceled or errored, the tracker reads the fill a cancelation reports, else the free balance of the asset in the portfolio after the order, truncated to the lot step of the market and checked against its minimum amount and cost, the cost worked out in decimal, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. It reads a completed SELL from that free balance too when the SELL sold less than it asked for, as it reads every all-in SELL and every adopted one, which ask for all of the asset free or for an amount it does not know: long when enough is left to sell, logged then. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` and `playSteps` helpers of `src/strategies/positionTracker.mock.ts`.
 
 A strategy loaded through `strategyPath` cannot import the PositionTracker (see [Where Your Strategy Lives](#where-your-strategy-lives)): the [Complete Example](#complete-example) keeps the same bookkeeping by hand.
 
@@ -698,6 +701,7 @@ const emaCrossoverSchema = z.strictObject({
 
 type EMACrossoverParams = z.infer<typeof emaCrossoverSchema>;
 type UnfinishedOrderParams = OnOrderCanceledEventParams<EMACrossoverParams> | OnOrderErroredEventParams<EMACrossoverParams>;
+type EndedOrderParams = OnOrderCompletedEventParams<EMACrossoverParams> | UnfinishedOrderParams;
 
 export class EMACrossover implements Strategy<EMACrossoverParams> {
   static schema = emaCrossoverSchema;
@@ -751,11 +755,13 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
     }
   }
 
-  onOrderCompleted({ order }: OnOrderCompletedEventParams<EMACrossoverParams>): void {
-    const side = this.pendingOrders.get(order.id);
+  onOrderCompleted(params: OnOrderCompletedEventParams<EMACrossoverParams>): void {
+    const side = this.pendingOrders.get(params.order.id);
     if (!side) return;
-    this.pendingOrders.delete(order.id);
-    this.isLong = side === 'BUY';
+    this.pendingOrders.delete(params.order.id);
+    // A SELL, all-in here, may have sold less than the position: the Trader caps a SELL at the most the market takes in one order. The
+    // strategy is still long when the portfolio after it holds enough of the asset to sell
+    this.isLong = side === 'BUY' || this.holdsSellable(params) === true;
   }
 
   onOrderCanceled(params: OnOrderCanceledEventParams<EMACrossoverParams>): void {
@@ -772,25 +778,34 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
     this.pendingOrders.set(orderId, 'SELL');
   }
 
-  // Canceled or errored, an order may have executed first, in part or in full: the position is read from the portfolio after it,
-  // long when the free balance of the asset, cut to the amount step of the market, passes its minimum amount and minimum cost
-  private settleUnfinished({ order, exchange, tools }: UnfinishedOrderParams): void {
-    if (!this.pendingOrders.delete(order.id)) return;
+  // Canceled or errored, an order may have executed first, in part or in full: the position is read from the portfolio after it
+  private settleUnfinished(params: UnfinishedOrderParams): void {
+    if (!this.pendingOrders.delete(params.order.id)) return;
+    // undefined without a balance read yet: nothing tells, the position stays as it was
+    this.isLong = this.holdsSellable(params) ?? this.isLong;
+  }
+
+  // Whether the free balance of the asset in the portfolio after an order, cut to the amount step of the market, passes its minimum
+  // amount and minimum cost; undefined when no balance was read yet. Worked out in decimal, as the exchange works it out: rounded to
+  // 15 significant digits, a quotient or a product loses the noise of binary arithmetic (0.29 / 0.01 is 28.999999999999996, which
+  // would cut 0.29 to 0.28, and 0.00007 × 100000 is 6.999999999999999, under a minimum cost of 7)
+  private holdsSellable({ order, exchange, tools }: EndedOrderParams): boolean | undefined {
     const [asset] = order.symbol.split('/');
     const free = exchange.portfolio.get(asset)?.free;
-    if (free === undefined) return; // No balance read yet: nothing tells, the position stays as it was
+    if (free === undefined) return undefined;
     const { amount, cost, precision } = tools.marketData.get(order.symbol) ?? {};
     const step = precision?.amount;
-    const sellable = step ? Math.floor(free / step) * step : free;
-    const isCostEnough = exchange.price <= 0 || sellable * exchange.price >= (cost?.min ?? 0);
-    this.isLong = sellable > 0 && sellable >= (amount?.min ?? 0) && isCostEnough;
+    const decimal = (value: number) => Number(value.toPrecision(15));
+    const sellable = step ? decimal(Math.floor(decimal(free / step)) * step) : free;
+    const isCostEnough = exchange.price <= 0 || decimal(sellable * exchange.price) >= (cost?.min ?? 0);
+    return sellable > 0 && sellable >= (amount?.min ?? 0) && isCostEnough;
   }
 
   // The other hooks are optional, and left out
 }
 ```
 
-`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: completed, from its side; canceled or errored, from the portfolio after it, since such an order may have executed first. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)).
+`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)).
 
 ### Configuration File: `ema-crossover-config.yaml`
 
@@ -806,7 +821,7 @@ watch:
     candleCount: 200
   daterange:
     start: 2024-01-01
-    end: 2024-12-31
+    end: 2024-12-31T23:59:00Z # Both bounds included: a day alone, 2024-12-31, would be its first minute only
 
 exchange:
   name: dummy-cex
@@ -856,7 +871,7 @@ plugins:
     enableConsoleTable: true
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
 
 ### Run the Backtest
 
@@ -942,12 +957,10 @@ With `warmup.candleCount: N`, the warmup takes the first N timeframe candles, an
 | DEMA                               | 2n − 1                         | 2n − 2                 |
 | ADX                                | 2n                             | 2n − 1                 |
 | TEMA                               | 3n − 2                         | 3n − 3                 |
-
-Bollinger Bands follow the kind of their middle: n with the default sma, 2n − 1 with a dema. [Indicators at a Glance](./indicators.md#-indicators-at-a-glance) gives the first complete candle of every indicator.
 | TRIX                               | 3n − 1                         | 3n − 2                 |
 | MACD (12, 26, 9)                   | 34                             | 33                     |
 
-The [Indicators Documentation](./indicators.md) gives the first complete candle of each indicator. A strategy that compares a value with the one of the candle before needs one candle more.
+Bollinger Bands follow the kind of their middle: n with the default sma, 2n − 1 with a dema. [Indicators at a Glance](./indicators.md#-indicators-at-a-glance) gives the first complete candle of every indicator. A strategy that compares a value with the one of the candle before needs one candle more.
 
 ```yaml
 watch:
@@ -997,9 +1010,15 @@ Your strategy called `createOrder` before the warmup was over: from `init`, or f
 - `amount` and `price` must be numbers above 0, or left out: check a computed amount, which may be 0 or `NaN` when a balance or a price is.
 - `trailing` goes on a BUY only, and takes `percentage` and `trigger` only: mind the spelling.
 
-### "All-in BUY … sized from 0 USDT: 0 BTC sent (…)"
+### "All-in BUY … sized from 0 USDT: 0 BTC sent …"
 
-Followed by `Order 'amount' with value 0 is invalid`: your strategy sent an all-in BUY after other BUYs (two entry conditions on one candle, two pairs of one currency) before the Trader read the balance again, and the first took all the currency (see [Order Parameters](#order-parameters)). Send one BUY per candle, the second entry as an `else if`.
+Followed by `Order 'amount' with value 0 is invalid`, the exchange refusing the order. The end of the warning says why nothing was left to spend:
+
+- `(1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since, …)`: your strategy sent an all-in BUY after other BUYs (two entry conditions on one candle, two pairs of one currency) before the Trader read the balance again, and the first took all the currency (see [Order Parameters](#order-parameters)). Send one BUY per candle, the second entry as an `else if`.
+- `which the market refuses (0 USDT free at the last synchronization)`: the account holds none of the currency. In a backtest or paper trading, `simulationBalance` gives it none.
+- `which the market refuses (no balance read from the exchange yet)`: every synchronization of the Trader failed so far.
+
+An all-in SELL sized from nothing says so the same way, `All-in SELL … sized from 0 BTC: 0 BTC sent, which the market refuses (…)`: your strategy sold all-in while holding nothing free (a position already sold, by hand or by a trailing stop), or a SELL sent just before took it all.
 
 ### "Impossible to add the … indicator on …" or "… indicator not found."
 
@@ -1019,18 +1038,19 @@ The circuit breaker: `maxConsecutiveErrors` order errors in a row stopped Gekko,
 
 Gekko logs what happens to your stops, under the `strategy` tag:
 
-| Line                                                                         | Level | Meaning                                                                                                                                        |
-|------------------------------------------------------------------------------|-------|------------------------------------------------------------------------------------------------------------------------------------------------|
-| `Trailing stop of BUY <id> held back: …`                                     | info  | A price reached its stop price while a SELL of yours is pending on the pair: the stop sends no SELL until that one ends                        |
-| `Trailing stop of BUY <id> resumes: …`                                       | info  | Your SELL was canceled or errored, and no other is pending on the pair: the stop may trigger again                                             |
-| `Trailing stop of BUY <id> canceled: the strategy sold on <pair> …`          | info  | Your SELL completed: it closed the position the stop protected                                                                                 |
-| `Trailing stop of BUY <id> active again: its SELL <id> …`                    | warn  | The stop's SELL errored or was canceled: it sells what is left once a price reaches its stop price again                                       |
-| `Trailing stop of BUY <id> kept: its SELL <id> …`                            | warn  | The stop's SELL errored and may still have gone through on the exchange: the stop stays armed. Check that SELL there                           |
-| `Trailing stop of BUY <id> removed: …`                                       | warn  | The stop's SELL failed and the portfolio shows too little of the asset free to sell: nothing is left to protect                                |
-| `BUY <id> errored after it filled …`                                         | warn  | The BUY errored after a reported fill: its stop is armed for that part. When the BUY may still be live, the rest of it may fill without a stop |
-| `Trailing stop of BUY <id> not armed: …`                                     | warn  | The BUY errored with no fill reported: nothing filled when the exchange refused it; when it may still be live, what it bought has no stop      |
-| `Strategy ended with N active trailing stop(s) that never triggered.`        | warn  | At the end of the run: stops still armed                                                                                                       |
-| `Strategy ended with N triggered trailing stop(s) whose SELL had not ended.` | warn  | At the end of the run: stops whose SELL had no outcome yet                                                                                     |
+| Line                                                                       | Level | Meaning                                                                                                                                             |
+|----------------------------------------------------------------------------|-------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
+| `Trailing stop of BUY <id> held back: …`                                   | info  | A price reached its stop price while a SELL of yours is pending on the pair: the stop sends no SELL until that one ends                             |
+| `Trailing stop of BUY <id> resumes: …`                                     | info  | Your SELL was canceled or errored, and no other is pending on the pair: the stop may trigger again                                                  |
+| `Trailing stop of BUY <id> canceled: the strategy sold on <pair> …`        | info  | Your SELL completed: it closed the position the stop protected                                                                                      |
+| `Trailing stop of BUY <id> active again: its SELL <id> …`                  | warn  | The stop's SELL completed for less than the stop's amount, errored or was canceled: it sells what is left once a price reaches its stop price again |
+| `Trailing stop of BUY <id> over: …`                                        | info  | The stop's SELL left too little to sell at the minimums of the market, or completed with too little of the asset free: nothing is left to protect   |
+| `Trailing stop of BUY <id> kept: its SELL <id> …`                          | warn  | The stop's SELL errored and may still have gone through on the exchange: the stop stays armed. Check that SELL there                                |
+| `Trailing stop of BUY <id> removed: …`                                     | warn  | The stop's SELL errored or was canceled, and the portfolio shows too little of the asset free to sell: nothing is left to protect                   |
+| `BUY <id> errored after it filled …`                                       | warn  | The BUY errored after a reported fill: its stop is armed for that part. When the BUY may still be live, the rest of it may fill without a stop      |
+| `Trailing stop of BUY <id> not armed: …`                                   | warn  | The BUY errored with no fill reported: nothing filled when the exchange refused it; when it may still be live, what it bought has no stop           |
+| `Strategy ended with N active trailing stops that never triggered.`        | warn  | At the end of the run: stops still armed                                                                                                            |
+| `Strategy ended with N triggered trailing stops whose SELL had not ended.` | warn  | At the end of the run: stops whose SELL had no outcome yet                                                                                          |
 
 ### "Unknown log level … in tools.log"
 

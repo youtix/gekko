@@ -58,14 +58,16 @@ plugins:
 
 ### Key Configuration Options
 
-| Option                    | Description                                             | Example Values                                         |
-|---------------------------|---------------------------------------------------------|--------------------------------------------------------|
-| `assets`                  | The base assets to import                               | `[BTC, ETH, SOL]`                                      |
-| `currency`                | The quote currency                                      | `USDT`, `EUR`, `BTC`                                   |
-| `tickrate`                | Delay between API calls (ms)                            | `500` (recommended)                                    |
-| `daterange.start`         | Start date for import                                   | ISO 8601 format                                        |
-| `daterange.end`           | End date for import                                     | ISO 8601 format                                        |
-| `storage.insertThreshold` | Optional: minutes of candles buffered before each write | `1` to `1440` (a day); default `1000`, `1` in realtime |
+| Option                    | Description                                                      | Example Values                                                                           |
+|---------------------------|------------------------------------------------------------------|------------------------------------------------------------------------------------------|
+| `assets`                  | The base assets to import, in upper case                         | `[BTC, ETH, SOL]`                                                                        |
+| `currency`                | The quote currency, in upper case                                | `USDT`, `EUR`, `BTC`                                                                     |
+| `tickrate`                | Delay between API calls (ms)                                     | `500` (recommended)                                                                      |
+| `daterange.start`         | First minute of the range, included                              | `2024-01-01` (its midnight UTC), `'2024-01-01T00:00:00Z'`, `'2024-01-01T02:00:00+02:00'` |
+| `daterange.end`           | Last minute of the range, included (equal bounds are one minute) | The same forms                                                                           |
+| `storage.insertThreshold` | Optional: minutes of candles buffered before each write          | `1` to `1440` (a day); default `1000`, `1` in realtime                                   |
+
+A `daterange` bound is a day, read as its midnight UTC, or a day and a time with `Z` or an offset, quoted or not: `end: 2024-12-31` reads only the first minute of December 31st, `2024-12-31T23:59:00Z` the whole day. A day that does not exist (`2023-02-29`), a time without `Z` or an offset, and a range that ends before the minute it starts in are refused at start-up. Write assets and the currency as the exchange lists them, in upper case (`BTC`, `1INCH`): `btc` is refused.
 
 ### Important Notes
 
@@ -141,7 +143,7 @@ exchange:
         fee:
           maker: 0.0004
           taker: 0.0007
-  simulationBalance:         # Starting balances
+  simulationBalance:         # Starting balances: the watched assets and the currency only, each once
     - assetName: BTC
       balance: 0
     - assetName: USDT
@@ -153,7 +155,7 @@ storage:
 
 strategy:
   name: RSI
-  src: ohlc4                 # Price source: open, high, low, close, ohlc4, hlc3
+  src: ohlc4                 # Price source: open, high, low, close, hl2, hlc3 or ohlc4
   period: 21
   thresholds:
     high: 70
@@ -170,7 +172,9 @@ plugins:
     enableConsoleTable: true # Display results in terminal table
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+
+Write assets, the currency and symbols in upper case, as the exchange lists them (`BTC`, `1INCH`, `BTC/USDT`). Each `marketData` symbol, and each `initialTicker` one, appears once. `simulationBalance` lists only the watched assets and the currency, each once and spelt as in `watch`: a balance of any other asset (`usdt`, an asset not watched) is refused, the simulator never holding it.
 
 ### Key Configuration Options
 
@@ -252,7 +256,7 @@ watch:
 # and use real unauthenticated data (fetchCandles, etc.)
 exchange:
   name: paper-binance
-  simulationBalance:             # Simulated balances, required by paper-binance
+  simulationBalance:             # Simulated balances, required by paper-binance: the watched assets and the currency only
     - assetName: BTC
       balance: 1
     - assetName: USDT
@@ -363,6 +367,8 @@ plugins:
     enableConsoleTable: true
 ```
 
+`simulationBalance` lists only the watched assets and the currency, each once and spelt as in `watch`: a balance of any other asset is refused, the simulator never holding it, and a watched one left out starts at 0. At start-up Gekko logs the portfolio the simulator starts with, at the `info` level: `Initial portfolio: 1 BTC, 10,000 USDT`.
+
 | Feature              | Sandbox (`sandbox: true`)       | Paper Trading (`paper-binance`) |
 |----------------------|---------------------------------|---------------------------------|
 | Market data source   | Binance Testnet                 | Binance Mainnet (real prices)   |
@@ -416,6 +422,9 @@ plugins:
 
 [I understand that Gekko only automates MY OWN trading strategies]: true
 ```
+
+> [!NOTE]
+> An exchange takes a limited amount in one order: on Binance, a `MARKET` order is held to MARKET_LOT_SIZE, tens of BTC on BTC/USDT, far below what `LIMIT` and `STICKY` orders can buy. The Trader caps a SELL, and an all-in BUY, at that maximum with a warning (`… above the maximum amount of a MARKET order on BTC/USDT: … sent, the rest stays held`), and the rest waits for a later order (see the Trader's [Sizing](./plugins.md#sizing)).
 
 #### 5. Supervision Mode
 

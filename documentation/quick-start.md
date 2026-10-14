@@ -149,7 +149,9 @@ plugins:
     enableConsoleTable: true
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+
+Write assets, the currency and symbols in upper case, as the exchange lists them (`BTC`, `1INCH`, `BTC/USDT`), each `marketData` symbol once. `simulationBalance` lists only the watched assets and the currency, each once and spelt as in `watch`: a balance of any other asset is refused, the simulator never holding it.
 
 **Run the backtest:**
 
@@ -178,7 +180,7 @@ watch:
 
 exchange:
   name: paper-binance        # Real Binance prices, simulated orders: no API key
-  simulationBalance:         # Simulated balances, required by paper-binance
+  simulationBalance:         # Simulated balances, required by paper-binance: the watched assets and the currency only
     - assetName: BTC
       balance: 1
     - assetName: USDT
