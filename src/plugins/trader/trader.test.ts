@@ -1274,6 +1274,45 @@ describe('Trader', () => {
       });
     });
 
+    // The same for an all-in SELL: placed for 0 and refused for it, with a reason that names the amount, not its cause: none of the
+    // asset free, the SELLs placed since the last synchronization taking what was, or no balance read from the exchange yet
+    describe('when an all-in SELL is sized from no asset at all', () => {
+      const allInSell = buildAdvice({ id: '00000000-0000-4000-8000-000000000050', side: 'SELL', type: 'MARKET' });
+      const sellOf3 = buildAdvice({ id: '00000000-0000-4000-8000-000000000051', side: 'SELL', type: 'MARKET', amount: 3 });
+      const usdt: BalanceDetail = { free: 1000, used: 0, total: 1000 };
+
+      it.each`
+        description                                   | portfolio                                                             | before       | cause
+        ${'0 BTC free'}                               | ${new Map([['BTC', { free: 0, used: 0, total: 0 }], ['USDT', usdt]])} | ${[]}        | ${'0 BTC free at the last synchronization'}
+        ${'no BTC on the account'}                    | ${new Map([['USDT', usdt]])}                                          | ${[]}        | ${'0 BTC free at the last synchronization'}
+        ${'a SELL placed since takes the 3 BTC free'} | ${new Map([['BTC', { free: 3, used: 0, total: 3 }], ['USDT', usdt]])} | ${[sellOf3]} | ${'3 BTC free at the last synchronization, less 3 BTC for the SELLs placed since'}
+        ${'no balance read yet'}                      | ${new Map()}                                                          | ${[]}        | ${'no balance read from the exchange yet'}
+      `('warns of it with its cause when $description', async ({ portfolio, before, cause }) => {
+        trader['portfolio'] = portfolio;
+        await trader.onStrategyCreateOrder([...before, allInSell]);
+        expect(logger.warning).toHaveBeenCalledWith(
+          'trader',
+          `[${allInSell.id}] All-in SELL MARKET order sized from 0 BTC: 0 BTC sent, which the market refuses (${cause})`,
+        );
+      });
+
+      it('places it for 0, for the exchange to refuse', async () => {
+        trader['portfolio'] = new Map();
+        await trader.onStrategyCreateOrder([allInSell]);
+        expect(getPlacedAmount(allInSell)).toBe(0);
+      });
+
+      // Placed as asked whatever the balance: the exchange refuses what cannot be sold, with a reason that says so
+      it('does not warn of a SELL with an amount while no BTC is free', async () => {
+        trader['portfolio'] = new Map([
+          ['BTC', { free: 0, used: 0, total: 0 }],
+          ['USDT', usdt],
+        ]);
+        await trader.onStrategyCreateOrder([buildAdvice({ side: 'SELL', type: 'MARKET', amount: 0.5 })]);
+        expect(logger.warning).not.toHaveBeenCalled();
+      });
+    });
+
     it('creates limit order with requested price', async () => {
       const advice = buildAdvice({ type: 'LIMIT', side: 'BUY', price: 95 });
 

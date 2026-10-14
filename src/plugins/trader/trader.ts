@@ -268,11 +268,20 @@ export class Trader extends Plugin {
    *
    * An amount that is not a finite number is left as asked for: refused as before, rather than turned into the sale of every unit held,
    * or of the most the market takes.
+   *
+   * An all-in SELL sized from nothing (none of the asset free at the last synchronization, the SELLs placed since taking what was, or
+   * no balance read yet) is sent for 0, which the limits of the market refuse, as they refuse an all-in BUY sized from no currency. It
+   * is said at warn level, as for that BUY: the refusal names the amount of 0, not its cause.
    */
   private sizeSell(advice: AdviceOrder, balance: FreeBalanceLeft) {
     const { id, type, symbol } = advice;
     const [assetName] = symbol.split('/');
     const { read, taken, free } = balance;
+    if (isNil(advice.amount) && !(free > 0)) {
+      const sized = `[${id}] All-in SELL ${type} order sized from ${free} ${assetName}: ${free} ${assetName} sent`;
+      warning('trader', `${sized}, which the market refuses (${this.getEmptyBalanceCause(balance, assetName, 'SELLs')})`);
+      return free;
+    }
     const requestedAmount = advice.amount ?? free;
     const isFiniteAmount = Number.isFinite(requestedAmount);
     const isAboveBalance = isFiniteAmount && free > 0 && requestedAmount > free;
@@ -327,9 +336,7 @@ export class Trader extends Plugin {
       const left = `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
       warning('trader', `${sized}: ${amount} ${assetName} sent (${left})`);
     } else if (!(read > 0)) {
-      // Before any synchronization succeeded, the portfolio is the empty one the Trader starts with (see isFetchedPortfolio)
-      const isRead = isFetchedPortfolio(this.portfolio);
-      const cause = isRead ? `${read} ${currencyName} free at the last synchronization` : 'no balance read from the exchange yet';
+      const cause = this.getEmptyBalanceCause(currency, currencyName, 'BUYs');
       warning('trader', `${sized}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
     }
     return { amount, taken: free };
@@ -343,6 +350,17 @@ export class Trader extends Plugin {
     const read = getAssetBalance(this.portfolio, assetName).free;
     const taken = filter([...this.unreadOrders.values()], { assetName }).reduce((sum, { amount }) => addPrecise(sum, amount), 0);
     return { read, taken, free: taken > 0 ? Math.max(addPrecise(read, -taken), 0) : read };
+  }
+
+  /**
+   * Why an all-in order has nothing to be sized from, which its refusal for an amount of 0 does not say: no balance read from the
+   * exchange yet, none of the asset free at the last synchronization, or the orders of its side placed since taking what was
+   */
+  private getEmptyBalanceCause({ read, taken }: FreeBalanceLeft, assetName: string, placedSince: 'BUYs' | 'SELLs') {
+    // Before any synchronization succeeded, the portfolio is the empty one the Trader starts with (see isFetchedPortfolio)
+    if (!isFetchedPortfolio(this.portfolio)) return 'no balance read from the exchange yet';
+    const free = `${read} ${assetName} free at the last synchronization`;
+    return taken > 0 ? `${free}, less ${taken} ${assetName} for the ${placedSince} placed since` : free;
   }
 
   /**
