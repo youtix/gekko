@@ -4,10 +4,11 @@ export default {
   test: {
     mockReset: true,
     restoreMocks: true,
-    include: ['src/**/*.test.ts'],
+    // scripts/release holds the release's own semantic-release plugin
+    include: ['src/**/*.test.ts', 'scripts/**/*.test.ts'],
     coverage: {
       reporter: ['text'],
-      include: ['src/**/*.ts'],
+      include: ['src/**/*.ts', 'scripts/**/*.cjs'],
       exclude: [
         'src/**/*.{schema,mock,types,error,const}.ts',
         'src/**/*.bench.ts',

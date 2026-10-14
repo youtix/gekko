@@ -22,7 +22,9 @@ export default [
       'object-curly-spacing': ['error', 'always'],
       'import/no-cycle': 'error',
       'import/no-unresolved': 'error',
-      'import/no-unused-modules': 'error',
+      // import/no-unused-modules is left out: without options it checks nothing, and its unusedExports option crashes under ESLint 10,
+      // which eslint-plugin-import 2.32 does not support. A dead export is found with TypeScript's find-references instead.
+
       // Registries are read by a computed name (indicators[name], strategies[...], pluginList[...]): the plugin cannot check one, and
       // TypeScript types the key. A plain member that does not exist is still reported.
       'import/namespace': ['error', { allowComputed: true }],
@@ -46,6 +48,13 @@ export default [
     // under the same name.
     files: ['src/strategies/index.ts'],
     rules: { 'import/export': 'off' },
+  },
+  {
+    // The CommonJS files, which Node runs (the release and commitlint configurations, the release's plugin): typescript-eslint
+    // parses every file as an ES module, where require and module are undefined
+    files: ['**/*.cjs'],
+    languageOptions: { sourceType: 'commonjs', globals: globals.node },
+    rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
   {
     files: ['**/*.test.ts', '**/*.bench.ts', '**/test/e2e/**/*.ts'],
