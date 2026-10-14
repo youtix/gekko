@@ -1,4 +1,5 @@
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@constants/event.const';
+import { describeError } from '@errors/error.utils';
 import {
   CandleBucket,
   EquitySnapshot,
@@ -9,15 +10,10 @@ import {
 } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { Asset, TradingPair } from '@models/utility.types';
-import { info, warning } from '@services/logger';
+import { error, info, warning } from '@services/logger';
 import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
-import {
-  calculateLongestDrawdownDuration,
-  calculateMarketReturnPct,
-  calculateMaxDrawdown,
-  calculateReturns,
-} from '@utils/finance/stats.utils';
+import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '@utils/finance/stats.utils';
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { addMinutes } from 'date-fns';
 import { first, isNil, omit } from 'lodash-es';
@@ -35,6 +31,7 @@ export class PortfolioAnalyzer extends Plugin {
   private readonly riskFreeReturn: number;
   private readonly enableConsoleTable: boolean;
   private readonly benchmarkAsset: Asset;
+  private readonly benchmarkPair: TradingPair;
 
   // State
   /**
@@ -69,7 +66,7 @@ export class PortfolioAnalyzer extends Plugin {
   /**
    * The time of the period during which the portfolio held an asset other than the currency, worth more than dust at the latest prices
    * (see holdsAsset). It is counted a timeframe at a time: the span between two marks counts in full when the portfolio marked at its
-   * end, the one held through it, holds such an asset (see countExposureUntil).
+   * end, the one held through it, holds such an asset (see markLatestPortfolio).
    */
   private exposureMs: number = 0;
   /** The end of the last span counted in exposureMs: the last mark, the start of the period before the first one */
@@ -84,6 +81,7 @@ export class PortfolioAnalyzer extends Plugin {
     this.riskFreeReturn = riskFreeReturn ?? 5;
     this.enableConsoleTable = enableConsoleTable ?? false;
     this.benchmarkAsset = this.assets.includes(DEFAULT_BENCHMARK_ASSET) ? DEFAULT_BENCHMARK_ASSET : this.assets[0];
+    this.benchmarkPair = `${this.benchmarkAsset}/${this.currency}`;
   }
 
   // --- BEGIN LISTENERS ---
@@ -100,7 +98,7 @@ export class PortfolioAnalyzer extends Plugin {
     // The equity curve is marked on the timeframe candles (see equityCurve). The start equity is taken when the warmup completes (see
     // startEquity), unless no portfolio could be valued then.
     if (!this.warmupCompleted || !isNil(this.startEquity)) return;
-    this.takeLateStartEquity(calculatePortfolioTotalValue(portfolio, this.latestPrices, this.currency, this.assets));
+    this.takeLateStartEquity(this.valuePortfolio(portfolio));
   }
 
   /** Refreshes the latest portfolio with the one after the fill (see latestPortfolio): a fill adds no point to the curve (equityCurve) */
@@ -128,13 +126,12 @@ export class PortfolioAnalyzer extends Plugin {
     this.warmupCompleted = true;
 
     // Initialize benchmark tracking BTC if available, otherwise use first asset
-    const benchmarkPair = `${this.benchmarkAsset}/${this.currency}` as TradingPair;
-    const benchmarkCandle = timeframeBucket.get(benchmarkPair);
+    const benchmarkCandle = timeframeBucket.get(this.benchmarkPair);
 
     if (benchmarkCandle) {
       this.startBenchmarkPrice = benchmarkCandle.close;
     } else {
-      warning('portfolio analyzer', `Missing benchmark candle for ${benchmarkPair} during warmup completion.`);
+      warning('portfolio analyzer', `Missing benchmark candle for ${this.benchmarkPair} during warmup completion.`);
     }
 
     // The period starts at the close of the timeframe candle that completed the warmup, the end of the bucket that completed it: the
@@ -146,8 +143,7 @@ export class PortfolioAnalyzer extends Plugin {
     // The latest portfolio, valued at the closes of the bucket that completed the warmup: processOneMinuteBucket recorded them before
     // this event was delivered (see startEquity). Without one yet, the next portfolio received gives the start equity.
     this.startPricesAt = this.currentTimestamp;
-    if (this.latestPortfolio && this.hasAllPrices())
-      this.startEquity = calculatePortfolioTotalValue(this.latestPortfolio, this.latestPrices, this.currency, this.assets);
+    if (this.latestPortfolio && this.hasAllPrices()) this.startEquity = this.valuePortfolio(this.latestPortfolio);
 
     // Process any buffered processing if needed (not needed here as we pull from bucket)
   }
@@ -159,11 +155,9 @@ export class PortfolioAnalyzer extends Plugin {
    */
   public onTimeframeCandle(_timeframeBuckets: CandleBucket[]): void {
     if (!this.warmupCompleted) return;
-    this.countExposureUntil(this.currentTimestamp);
+    const totalValue = this.markLatestPortfolio(this.currentTimestamp);
 
-    const portfolio = this.latestPortfolio;
-    if (!portfolio || !this.hasAllPrices()) return;
-    const totalValue = calculatePortfolioTotalValue(portfolio, this.latestPrices, this.currency, this.assets);
+    if (isNil(totalValue) || !this.hasAllPrices()) return;
     // The start equity is taken when the warmup completes (see startEquity), unless no portfolio could be valued then
     if (isNil(this.startEquity)) this.takeLateStartEquity(totalValue);
     else this.recordSnapshot(this.currentTimestamp, totalValue);
@@ -209,22 +203,38 @@ export class PortfolioAnalyzer extends Plugin {
     this.addDeferredEmit<EquitySnapshot>(EQUITY_SNAPSHOT_EVENT, snapshot);
   }
 
-  /** Counts the span from the last mark to `date` in the exposure when the latest portfolio holds an asset then (see exposureMs) */
-  private countExposureUntil(date: EpochTimeStamp): void {
-    if (this.latestPortfolio && this.holdsAsset(this.latestPortfolio)) this.exposureMs += date - this.markedAt;
-    this.markedAt = date;
+  /**
+   * The value of the portfolio in the currency at the latest prices. The pair of each watched asset is read from Plugin.pairs, which
+   * holds them in the order of Plugin.assets, rather than built anew on every call.
+   */
+  private valuePortfolio(portfolio: Portfolio): number {
+    return calculatePortfolioTotalValue(portfolio, this.latestPrices, this.currency, this.assets, this.pairs);
   }
 
   /**
-   * Whether the portfolio holds a position: an asset other than the currency worth at least DUST_TOLERANCE of the portfolio at the
-   * latest prices. Less is dust left by a SELL (see DUST_TOLERANCE), no position for the RoundTripAnalyzer either: counted, it would
-   * expose the rest of the run. The limit of the rule: a position the strategy keeps under 1 % of the equity on purpose is not counted
-   * as exposure either.
+   * Marks the latest portfolio at `date`: counts the span from the last mark in the exposure when the portfolio holds an asset then
+   * (see exposureMs), and returns its value at the latest prices, null without a portfolio, for the equity curve to take. Valued apart
+   * for the exposure and for the curve, the same portfolio at the same prices cost two decimal valuations a timeframe candle.
    */
-  private holdsAsset(portfolio: Portfolio): boolean {
-    const totalValue = calculatePortfolioTotalValue(portfolio, this.latestPrices, this.currency, this.assets);
-    return this.assets.some(asset => {
-      const value = getAssetBalance(portfolio, asset).total * (this.latestPrices.get(`${asset}/${this.currency}`) ?? 0);
+  private markLatestPortfolio(date: EpochTimeStamp): number | null {
+    const portfolio = this.latestPortfolio;
+    const lastMark = this.markedAt;
+    this.markedAt = date;
+    if (!portfolio) return null;
+    const totalValue = this.valuePortfolio(portfolio);
+    if (this.holdsAsset(portfolio, totalValue)) this.exposureMs += date - lastMark;
+    return totalValue;
+  }
+
+  /**
+   * Whether the portfolio holds a position: an asset other than the currency worth at least DUST_TOLERANCE of the portfolio, whose
+   * value at the latest prices is `totalValue`. Less is dust left by a SELL (see DUST_TOLERANCE), no position for the RoundTripAnalyzer
+   * either: counted, it would expose the rest of the run. The limit of the rule: a position the strategy keeps under 1 % of the equity
+   * on purpose is not counted as exposure either.
+   */
+  private holdsAsset(portfolio: Portfolio, totalValue: number): boolean {
+    return this.assets.some((asset, index) => {
+      const value = getAssetBalance(portfolio, asset).total * (this.latestPrices.get(this.pairs[index]) ?? 0);
       // An asset worth nothing is no position, even in a portfolio worth nothing
       return value > 0 && value >= DUST_TOLERANCE * totalValue;
     });
@@ -237,11 +247,9 @@ export class PortfolioAnalyzer extends Plugin {
    */
   private markEnd(): void {
     if (!this.warmupCompleted) return;
-    this.countExposureUntil(this.dates.end);
+    const totalValue = this.markLatestPortfolio(this.dates.end);
 
-    const portfolio = this.latestPortfolio;
-    if (!portfolio || !this.hasAllPrices() || isNil(this.startEquity)) return;
-    const totalValue = calculatePortfolioTotalValue(portfolio, this.latestPrices, this.currency, this.assets);
+    if (isNil(totalValue) || !this.hasAllPrices() || isNil(this.startEquity)) return;
     const lastSnapshot = this.equityCurve.at(-1);
     // Not recordSnapshot: nothing is sent once the run has ended (see processFinalize)
     if (lastSnapshot?.date === this.dates.end) lastSnapshot.totalValue = totalValue;
@@ -291,11 +299,7 @@ export class PortfolioAnalyzer extends Plugin {
       startPrice: this.startBenchmarkPrice,
       endPrice: this.endBenchmarkPrice,
       equityCurve: this.equityCurve,
-      maxDrawdownPct: calculateMaxDrawdown(
-        this.equityCurve.map(s => s.totalValue),
-        this.startEquity,
-      ),
-      longestDrawdownMs: calculateLongestDrawdownDuration(this.equityCurve, this.startEquity),
+      ...calculateDrawdowns(this.equityCurve, this.startEquity),
       startEquity: this.startEquity,
       endEquity,
       portfolioChangeCount: this.portfolioChangeCount,
@@ -323,15 +327,14 @@ export class PortfolioAnalyzer extends Plugin {
     const firstCandle = getFirstCandleFromBucket(bucket);
     this.currentTimestamp = addMinutes(firstCandle.start, 1).getTime();
 
-    // Update prices for all assets
-    for (const asset of this.assets) {
-      const pair = `${asset}/${this.currency}` as TradingPair;
+    // Update prices for all assets, through the pairs the plugin holds rather than pairs built anew on every bucket
+    for (const pair of this.pairs) {
       const candle = bucket.get(pair);
       if (candle) {
         this.latestPrices.set(pair, candle.close);
 
-        // Track benchmark asset price (first asset)
-        if (asset === this.benchmarkAsset) this.endBenchmarkPrice = candle.close;
+        // Track the price of the benchmark asset
+        if (pair === this.benchmarkPair) this.endBenchmarkPrice = candle.close;
       }
     }
 
@@ -340,7 +343,7 @@ export class PortfolioAnalyzer extends Plugin {
     if (this.warmupCompleted) this.dates.end = this.currentTimestamp;
   }
 
-  protected processFinalize(failure?: Error): void {
+  protected async processFinalize(failure?: Error): Promise<void> {
     this.markEnd();
     // A run stopped before its end (a crash, missing candles, the circuit breaker) gives the report of a partial period, and says why
     const report: PortfolioReport = { ...this.calculateReportStatistics(), ...(failure && { interruption: failure.message }) };
@@ -350,8 +353,14 @@ export class PortfolioAnalyzer extends Plugin {
     if (this.enableConsoleTable) logPortfolioReport(report, this.currency);
     else info('portfolio analyzer', { ...omit(report, 'equityCurve'), equityCurveLength: report.equityCurve.length });
 
-    // Emit directly: processFinalize is the final lifecycle hook.
-    this.emit<PortfolioReport>(PERFORMANCE_REPORT_EVENT, report);
+    // Emit directly: processFinalize is the final lifecycle hook. Awaited, so that the run ends once the listeners are done with the
+    // report, and caught: the report is logged above whatever a listener does with it. Neither awaited nor caught, a listener that
+    // failed rejected a promise nobody held, and a backtest that ended normally exited with code 1.
+    try {
+      await this.emit<PortfolioReport>(PERFORMANCE_REPORT_EVENT, report);
+    } catch (err) {
+      error('portfolio analyzer', `A listener failed on the performance report: ${describeError(err)}`);
+    }
   }
 
   public static getStaticConfiguration() {

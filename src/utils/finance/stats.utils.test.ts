@@ -8,9 +8,7 @@ import {
   calculateDrawdowns,
   calculateElapsedYears,
   calculateExposurePct,
-  calculateLongestDrawdownDuration,
   calculateMarketReturnPct,
-  calculateMaxDrawdown,
   calculateReturns,
   calculateSharpeRatio,
   calculateSortinoRatio,
@@ -356,6 +354,9 @@ describe('calculateSortinoRatio', () => {
 });
 
 describe('calculateDrawdowns', () => {
+  // The exchanges book a cost to 8 decimals, while a holding is valued at amount × price, up to 5e-9 above or below the currency it
+  // cost: within a booked unit of the peak, a sample is at it. The curve valued 5e-9 above its cost had a drawdown of 5e-10 % that
+  // lasted to its end, the one valued 5e-9 below a drawdown until it got back
   it.each`
     description                                               | points                                                                | initialBalance | maxDrawdownPct | longestDrawdownMs
     ${'no sample'}                                            | ${[]}                                                                 | ${1000}        | ${0}           | ${0}
@@ -363,6 +364,9 @@ describe('calculateDrawdowns', () => {
     ${'a negative initial balance'}                           | ${[[0, 900], [1000, 800]]}                                            | ${-100}        | ${0}           | ${0}
     ${'a NaN initial balance, which no sample compares with'} | ${[[0, 900], [1000, 800]]}                                            | ${NaN}         | ${0}           | ${0}
     ${'the deepest drawdown short, a shallower one long'}     | ${[[0, 1000], [1000, 800], [2000, 1000], [3000, 950], [20000, 1000]]} | ${1000}        | ${20}          | ${18000}
+    ${'a holding valued 5e-9 above its cost, then sold'}      | ${[[0, 1000], [1000, 1000.000000005], [2000, 1000], [3000, 1000]]}    | ${1000}        | ${0}           | ${0}
+    ${'a holding valued 5e-9 below its cost, then sold'}      | ${[[0, 1000], [1000, 999.999999995], [2000, 1000]]}                   | ${1000}        | ${0}           | ${0}
+    ${'a dip of 1e-7, ten booked units'}                      | ${[[0, 1000], [1000, 999.9999999], [2000, 1000]]}                     | ${1000}        | ${1e-8}        | ${2000}
   `(
     'should return a max drawdown of $maxDrawdownPct % and a longest of $longestDrawdownMs ms for $description',
     ({ points, initialBalance, maxDrawdownPct, longestDrawdownMs }) => {
@@ -420,37 +424,24 @@ describe('calculateDrawdowns', () => {
   });
 });
 
-describe('calculateMaxDrawdown', () => {
-  it('should return the largest drawdown of the balances, 25 from a peak of 1200 to 900', () => {
-    expect(calculateMaxDrawdown([1100, 1000, 1200, 900], 1000)).toBe(25);
-  });
-});
-
-describe('calculateLongestDrawdownDuration', () => {
-  it('should return the longest drawdown of the curve, 9000 ms before a shorter one', () => {
-    const curve = curveOfPoints([
-      [0, 1000],
-      [1000, 900],
-      [9000, 1000],
-      [10000, 950],
-      [11000, 1000],
-    ]);
-    expect(calculateLongestDrawdownDuration(curve, 1000)).toBe(9000);
-  });
-});
-
 describe('calculateReturns', () => {
   // The change from each value of the curve to the next, in % of the first: (110 - 100) / 100 * 100 = 10. A value of 0 or less starts no
-  // return
+  // return. A change of less than a booked unit is none: a holding valued 5e-9 above its cost, then sold, made returns of 5e-10 % and
+  // -5e-10 %
   it.each`
-    description                             | values            | expected
-    ${'no snapshot'}                        | ${[]}             | ${[]}
-    ${'a single snapshot'}                  | ${[100]}          | ${[]}
-    ${'a gain of 10 % then a loss of 10 %'} | ${[100, 110, 99]} | ${[10, -10]}
-    ${'a start at 0'}                       | ${[0, 100]}       | ${[]}
-    ${'a fall to 0, then a value after it'} | ${[100, 0, 50]}   | ${[-100]}
-    ${'a negative value'}                   | ${[-100, 50]}     | ${[]}
+    description                                          | values                          | expected
+    ${'no snapshot'}                                     | ${[]}                           | ${[]}
+    ${'a single snapshot'}                               | ${[100]}                        | ${[]}
+    ${'a gain of 10 % then a loss of 10 %'}              | ${[100, 110, 99]}               | ${[10, -10]}
+    ${'a start at 0'}                                    | ${[0, 100]}                     | ${[]}
+    ${'a fall to 0, then a value after it'}              | ${[100, 0, 50]}                 | ${[-100]}
+    ${'a negative value'}                                | ${[-100, 50]}                   | ${[]}
+    ${'a holding valued 5e-9 above its cost, then sold'} | ${[1000, 1000.000000005, 1000]} | ${[0, 0]}
   `('should return $expected for $description', ({ values, expected }) => {
     expect(calculateReturns(curveOfValues(values))).toEqual(expected);
+  });
+
+  it('should return a change of 1e-7, ten booked units, as a gain', () => {
+    expect(calculateReturns(curveOfValues([1000, 1000.0000001]))[0]).toBeGreaterThan(0);
   });
 });

@@ -1,10 +1,10 @@
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@constants/event.const';
+import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
-import { info, warning } from '@services/logger';
-import { calculateReturns, calculateSharpeRatio, calculateSortinoRatio } from '@utils/finance/stats.utils';
-import { createEmptyPortfolio, updateAssetBalance } from '@utils/portfolio/portfolio.utils';
+import { error, info, warning } from '@services/logger';
+import { calculatePortfolioTotalValue, createEmptyPortfolio } from '@utils/portfolio/portfolio.utils';
 import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { PortfolioAnalyzer } from './portfolioAnalyzer';
@@ -27,8 +27,15 @@ vi.mock('@services/configuration/configuration', () => ({
 vi.mock('@services/logger', () => ({
   info: vi.fn(),
   warning: vi.fn(),
+  error: vi.fn(),
   debug: vi.fn(),
 }));
+
+// The actual valuation, watched: how often the analyzer values a portfolio, and with what
+vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => {
+  const actual = await importOriginal<typeof import('@utils/portfolio/portfolio.utils')>();
+  return { ...actual, calculatePortfolioTotalValue: vi.fn(actual.calculatePortfolioTotalValue) };
+});
 
 const MINUTE = 60_000;
 /** The bucket of a minute, or the timeframe bucket of a 1m timeframe, its candles closing at the given prices */
@@ -39,13 +46,12 @@ const bucketAt = (minute: number, btc: number, eth = 10) => {
   return bucket;
 };
 /** A portfolio holding these amounts and nothing else */
-const holding = (btc: number, eth = 0, usdt = 0) => {
-  const portfolio: Portfolio = createEmptyPortfolio();
-  updateAssetBalance(portfolio, 'BTC', { total: btc, free: btc, used: 0 });
-  updateAssetBalance(portfolio, 'ETH', { total: eth, free: eth, used: 0 });
-  updateAssetBalance(portfolio, 'USDT', { total: usdt, free: usdt, used: 0 });
-  return portfolio;
-};
+const holding = (btc: number, eth = 0, usdt = 0): Portfolio =>
+  new Map([
+    ['BTC', { total: btc, free: btc, used: 0 }],
+    ['ETH', { total: eth, free: eth, used: 0 }],
+    ['USDT', { total: usdt, free: usdt, used: 0 }],
+  ]);
 
 describe('PortfolioAnalyzer', () => {
   let analyzer: PortfolioAnalyzer;
@@ -110,16 +116,14 @@ describe('PortfolioAnalyzer', () => {
     );
 
     it('should skip valuation if prices are missing (startEquity)', () => {
-      const portfolio: Portfolio = createEmptyPortfolio();
-      updateAssetBalance(portfolio, 'BTC', { total: 1, free: 1, used: 0 });
+      const portfolio: Portfolio = new Map([['BTC', { total: 1, free: 1, used: 0 }]]);
       (analyzer as any).warmupCompleted = true;
       analyzer.onPortfolioChange([portfolio]);
       expect((analyzer as any).startEquity).toBeNull();
     });
 
     it('should not update equityCurve if prices are missing', () => {
-      const portfolio: Portfolio = createEmptyPortfolio();
-      updateAssetBalance(portfolio, 'BTC', { total: 1, free: 1, used: 0 });
+      const portfolio: Portfolio = new Map([['BTC', { total: 1, free: 1, used: 0 }]]);
       analyzer.onPortfolioChange([portfolio]);
       expect((analyzer as any).equityCurve.length).toBe(0);
     });
@@ -148,6 +152,40 @@ describe('PortfolioAnalyzer', () => {
       const tableAnalyzer = new PortfolioAnalyzer({ enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 });
       (tableAnalyzer as any).processFinalize();
       expect(logPortfolioReport).toHaveBeenCalled();
+    });
+
+    // The actual emit, which calls the listeners of the report one after the other, each awaited
+    describe('with the listeners of the performance report', () => {
+      beforeEach(() => {
+        emitSpy.mockRestore();
+      });
+
+      it('should end its finalization once a listener is done with the report', async () => {
+        const done: string[] = [];
+        analyzer.on(PERFORMANCE_REPORT_EVENT, async () => {
+          await new Promise(resolve => setTimeout(resolve, 10));
+          done.push('report written');
+        });
+        await analyzer.processCloseStream();
+        expect(done).toEqual(['report written']);
+      });
+
+      // The line has a tag of its own: a GekkoError is quoted without its tag
+      it.each`
+        failure                       | listener                                                                     | message
+        ${'an Error'}                 | ${() => Promise.reject(new Error('disk full'))}                              | ${'A listener failed on the performance report: disk full'}
+        ${'a GekkoError'}             | ${() => Promise.reject(new GekkoError('performance reporter', 'disk full'))} | ${'A listener failed on the performance report: disk full'}
+        ${'a value that is no Error'} | ${() => Promise.reject({ errno: -13 })}                                      | ${'A listener failed on the performance report: { errno: -13 }'}
+      `('should log a listener that fails with $failure: $message', async ({ listener, message }) => {
+        analyzer.on(PERFORMANCE_REPORT_EVENT, listener);
+        await analyzer.processCloseStream();
+        expect(error).toHaveBeenCalledWith('portfolio analyzer', message);
+      });
+
+      it('should end its finalization when a listener fails, the report logged', async () => {
+        analyzer.on(PERFORMANCE_REPORT_EVENT, () => Promise.reject(new Error('disk full')));
+        await expect(analyzer.processCloseStream()).resolves.toBeUndefined();
+      });
     });
 
     it('should handle zero elapsed years and zero volatility with one snapshot (volatility check)', () => {
@@ -187,16 +225,16 @@ describe('PortfolioAnalyzer', () => {
         const firstBucket = runMinute(1000, 100);
         analyzer.onStrategyWarmupCompleted([firstBucket]);
         analyzer.onTimeframeCandle([firstBucket]);
-        const p1: Portfolio = createEmptyPortfolio();
-        updateAssetBalance(p1, 'USDT', { total: 1000, free: 1000, used: 0 });
-        analyzer.onPortfolioChange([p1]);
+        analyzer.onPortfolioChange([new Map([['USDT', { total: 1000, free: 1000, used: 0 }]])]);
 
         // A year later, 5 BTC bought at 110
         analyzer.onTimeframeCandle([runMinute(1000 + YEAR, 110)]);
-        const p2: Portfolio = createEmptyPortfolio();
-        updateAssetBalance(p2, 'BTC', { total: 5, free: 5, used: 0 });
-        updateAssetBalance(p2, 'USDT', { total: 450, free: 450, used: 0 });
-        analyzer.onPortfolioChange([p2]);
+        analyzer.onPortfolioChange([
+          new Map([
+            ['BTC', { total: 5, free: 5, used: 0 }],
+            ['USDT', { total: 450, free: 450, used: 0 }],
+          ]),
+        ]);
 
         // Two years later, BTC at 200: an equity of 1450
         analyzer.onTimeframeCandle([runMinute(1000 + 2 * YEAR, 200)]);
@@ -583,6 +621,17 @@ describe('PortfolioAnalyzer', () => {
       receive(holding(0, 0, 100));
       runMinute(3, 200);
     };
+    // 0.0001 BTC bought at 100.00004 with 100 USDT, then sold back at that price. The exchanges book a cost to 8 decimals, 0.01 for
+    // 0.010000004: the holding is valued 4e-9 above the currency it cost, a peak that the sale at the same price never regains
+    const tradeBookedToTheUnit = () => {
+      startWith(holding(0, 0, 100));
+      runMinute(2, 100.00004);
+      receive(holding(0.0001, 0, 99.99));
+      runMinute(3, 100.00004);
+      receive(holding(0, 0, 100));
+      runMinute(4, 100.00004);
+      runMinute(5, 100.00004);
+    };
 
     it('should add a point at the close of every timeframe candle, the latest portfolio valued at its closes', () => {
       holdWhileDoubling();
@@ -594,18 +643,55 @@ describe('PortfolioAnalyzer', () => {
       ]);
     });
 
+    // The dip of tradeAroundDip lasts from the point of the curve dated 3 minutes, the last at the peak, to the one dated 5, back at it
     it.each`
-      scenario                                    | run                          | field               | expected
-      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'endEquity'}      | ${200}
-      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'netProfit'}      | ${100}
-      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'exposurePct'}    | ${100}
-      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'maxDrawdownPct'} | ${50}
-      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'exposurePct'}    | ${50}
-      ${'selling all of it but dust after a dip'} | ${tradeAroundDipLeavingDust} | ${'exposurePct'}    | ${50}
-      ${'holding the currency only'}              | ${holdCurrency}              | ${'exposurePct'}    | ${0}
+      scenario                                    | run                          | field                  | expected
+      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'endEquity'}         | ${200}
+      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'netProfit'}         | ${100}
+      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'exposurePct'}       | ${100}
+      ${'holding BTC while its price doubles'}    | ${holdWhileDoubling}         | ${'marketReturnPct'}   | ${100}
+      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'maxDrawdownPct'}    | ${50}
+      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'longestDrawdownMs'} | ${2 * MINUTE}
+      ${'buying BTC before a dip, selling after'} | ${tradeAroundDip}            | ${'exposurePct'}       | ${50}
+      ${'selling all of it but dust after a dip'} | ${tradeAroundDipLeavingDust} | ${'exposurePct'}       | ${50}
+      ${'holding the currency only'}              | ${holdCurrency}              | ${'exposurePct'}       | ${0}
+      ${'selling at the price it was bought at'}  | ${tradeBookedToTheUnit}      | ${'maxDrawdownPct'}    | ${0}
+      ${'selling at the price it was bought at'}  | ${tradeBookedToTheUnit}      | ${'longestDrawdownMs'} | ${0}
+      ${'selling at the price it was bought at'}  | ${tradeBookedToTheUnit}      | ${'volatility'}        | ${0}
+      ${'selling at the price it was bought at'}  | ${tradeBookedToTheUnit}      | ${'sharpeRatio'}       | ${0}
     `('should report $field $expected when $scenario', ({ run, field, expected }) => {
       run();
       expect(finalReport()[field as keyof PortfolioReport]).toBe(expected);
+    });
+
+    // The exposure and the curve each valued the latest portfolio, at the same prices: twice a timeframe candle, in decimal
+    it('should value the portfolio once per timeframe candle', () => {
+      startWith(holding(1));
+      vi.mocked(calculatePortfolioTotalValue).mockClear();
+      runMinute(2, 100);
+      runMinute(3, 150);
+      runMinute(4, 200);
+      expect(calculatePortfolioTotalValue).toHaveBeenCalledTimes(3);
+    });
+
+    it('should value the portfolio once at the end of the run', () => {
+      startWith(holding(1));
+      runMinute(2, 200);
+      vi.mocked(calculatePortfolioTotalValue).mockClear();
+      finalReport();
+      expect(calculatePortfolioTotalValue).toHaveBeenCalledOnce();
+    });
+
+    // Not rebuilt from the assets on every call
+    it('should value the portfolio with the pairs of the watched assets', () => {
+      holdWhileDoubling();
+      expect(calculatePortfolioTotalValue).toHaveBeenLastCalledWith(
+        expect.any(Map),
+        expect.any(Map),
+        'USDT',
+        ['BTC', 'ETH'],
+        ['BTC/USDT', 'ETH/USDT'],
+      );
     });
 
     // 1000 USDT of equity, BTC at 100: at least 1 % of the equity (see DUST_TOLERANCE) is a position, less is dust
@@ -621,42 +707,35 @@ describe('PortfolioAnalyzer', () => {
 
     describe('annualization', () => {
       /**
-       * 1 BTC held through a run that goes on for that many minutes after the warmup, its price rising from 100 by a tenth a minute but
-       * for a dip to 95 at minute 3: the returns of the curve have a spread, and a loss among them
+       * 1 BTC held through a run that goes on for that many minutes after the warmup, its price at 110 the first minute, then at 99: a
+       * total return of -1 %, and one return per minute, 10 %, -10 %, then 0, whose mean is 0. Annualized by sqrt(returns / years), the
+       * standard deviation of the returns is sqrt((100 + 100) / years), their downside deviation sqrt(100 / years). Over a day, 1/365 of
+       * a year, the yearly return is -365 % and 5 % less is -370; over two days, -182.5 % and -187.5.
        */
       const holdFor = (minutes: number) => {
         startWith(holding(1));
-        for (let minute = 2; minute < 2 + minutes; minute++) runMinute(minute, minute === 3 ? 95 : 100 + minute / 10);
+        for (let minute = 2; minute < 2 + minutes; minute++) runMinute(minute, minute === 2 ? 110 : 99);
         return finalReport();
       };
 
       it.each`
-        minutes | horizonYears | horizon
-        ${8}    | ${1 / 365}   | ${'a day, the period being shorter'}
-        ${2880} | ${2 / 365}   | ${'the period'}
-      `('should annualize the return of a run of $minutes minutes over $horizon', ({ minutes, horizonYears }) => {
-        const { totalReturnPct, annualizedReturnPct } = holdFor(minutes);
-        expect(annualizedReturnPct).toBeCloseTo(totalReturnPct / horizonYears, 6);
+        minutes | horizon                              | expected
+        ${8}    | ${'a day, the period being shorter'} | ${-365}
+        ${2880} | ${'the period'}                      | ${-182.5}
+      `('should annualize the return of a run of $minutes minutes over $horizon: $expected %', ({ minutes, expected }) => {
+        expect(holdFor(minutes).annualizedReturnPct).toBe(expected);
       });
 
       it.each`
-        ratio             | calculateRatio           | minutes | horizonYears
-        ${'sharpeRatio'}  | ${calculateSharpeRatio}  | ${8}    | ${1 / 365}
-        ${'sortinoRatio'} | ${calculateSortinoRatio} | ${8}    | ${1 / 365}
-        ${'sharpeRatio'}  | ${calculateSharpeRatio}  | ${2880} | ${2 / 365}
-        ${'sortinoRatio'} | ${calculateSortinoRatio} | ${2880} | ${2 / 365}
+        ratio             | minutes | formula                   | expected
+        ${'sharpeRatio'}  | ${8}    | ${'-370 / sqrt(73000)'}   | ${-370 / Math.sqrt(73000)}
+        ${'sortinoRatio'} | ${8}    | ${'-370 / sqrt(36500)'}   | ${-370 / Math.sqrt(36500)}
+        ${'sharpeRatio'}  | ${2880} | ${'-187.5 / sqrt(36500)'} | ${-187.5 / Math.sqrt(36500)}
+        ${'sortinoRatio'} | ${2880} | ${'-187.5 / sqrt(18250)'} | ${-187.5 / Math.sqrt(18250)}
       `(
-        'should annualize the $ratio of a run of $minutes minutes over the years that annualize its return',
-        ({ ratio, calculateRatio, minutes, horizonYears }) => {
-          const report = holdFor(minutes);
-          const returns = calculateReturns(report.equityCurve);
-          const expected = calculateRatio({
-            returns,
-            yearlyProfit: report.annualizedReturnPct,
-            riskFreeReturn: 5,
-            elapsedYears: horizonYears,
-          });
-          expect(report[ratio as 'sharpeRatio']).toBeCloseTo(expected, 6);
+        'should annualize the $ratio of a run of $minutes minutes over the years that annualize its return: $formula',
+        ({ ratio, minutes, expected }) => {
+          expect(holdFor(minutes)[ratio as 'sharpeRatio']).toBeCloseTo(expected, 12);
         },
       );
 

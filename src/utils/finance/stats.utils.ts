@@ -11,8 +11,18 @@
  */
 
 import { EquitySnapshot } from '@models/event.types';
+import { COST_DECIMALS } from '@services/exchange/dummy/dummyCentralizedExchange.const';
 import { addPrecise, compareWithTolerance, stdev, toSignificantDigits } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
+
+/**
+ * The smallest amount of currency the exchanges book, 10^-COST_DECIMALS: they book the cost of an order rounded to it, while an equity
+ * values a holding at amount × price, which has more decimals on a pair such as ETH/BTC (4-decimal amounts at 5-decimal prices). A
+ * holding valued at the price it was bought at came out up to half a unit above or below the currency it cost: a peak that a sale at
+ * the same price never regained, a drawdown that lasted to the end of the run, and returns of 1e-9 % that the Sharpe ratio divided by.
+ * Two equities less than a unit apart are one amount.
+ */
+const BOOKED_UNIT = 10 ** -COST_DECIMALS;
 
 // ============================================================================
 // TYPES
@@ -146,7 +156,7 @@ export const calculateAlpha = (totalReturnPct: number, marketReturnPct: number):
 };
 
 /**
- * Calculates the returns for each period based on equity snapshots.
+ * Calculates the returns for each period based on equity snapshots. A change of less than a booked unit is no return (see BOOKED_UNIT).
  *
  * @param snapshots - Array of equity snapshots
  * @returns Array of percentage returns
@@ -156,7 +166,7 @@ export const calculateReturns = (snapshots: EquitySnapshot[]): number[] => {
   for (let i = 1; i < snapshots.length; i++) {
     const prev = snapshots[i - 1].totalValue;
     const curr = snapshots[i].totalValue;
-    if (prev > 0) returns.push(((curr - prev) / prev) * 100);
+    if (prev > 0) returns.push(Math.abs(curr - prev) < BOOKED_UNIT ? 0 : ((curr - prev) / prev) * 100);
   }
   return returns;
 };
@@ -294,7 +304,8 @@ export const calculateSortinoRatio = (params: RatioParams): number =>
 
 /**
  * Calculates the drawdowns of an equity curve, in one walk of its running peak. The start equity is the first peak, dated with the first
- * sample. A sample at or above the peak is the new peak, and ends the drawdown in progress; a sample below it is in drawdown.
+ * sample. A sample at the peak, less than a booked unit below it (see BOOKED_UNIT), or above it ends the drawdown in progress and dates
+ * the peak, which a higher sample raises; a sample a booked unit or more below the peak is in drawdown.
  * - maxDrawdownPct: the largest fall from a peak, in % of the peak (above 100 for a negative equity).
  * - longestDrawdownMs: the longest time from a peak to the sample that gets back to it, or to the last sample for a drawdown still in
  *   progress.
@@ -314,15 +325,17 @@ export const calculateDrawdowns = (samples: EquitySnapshot[], initialBalance: nu
   // and trough: in binary, (1000 - 999.7) / 1000 was 0.029999999999995454 %, written 0.02 %
   let largest = { peak, trough: peak, drawdown: 0 };
   for (const { date, totalValue } of samples) {
-    if (totalValue < peak) {
+    const belowPeak = peak - totalValue;
+    if (belowPeak >= BOOKED_UNIT) {
       inDrawdown = true;
-      const drawdown = (peak - totalValue) / peak;
+      const drawdown = belowPeak / peak;
       if (drawdown > largest.drawdown) largest = { peak, trough: totalValue, drawdown };
-    } else if (totalValue >= peak) {
+    } else if (belowPeak < BOOKED_UNIT) {
       // Not a plain else: a NaN value fails both comparisons, and is passed over. Taken for a peak, it ended the drawdown in progress
       // at its date, and nothing compares below NaN: the next value became the peak, whatever it was
       if (inDrawdown && date - peakDate > longestDrawdownMs) longestDrawdownMs = date - peakDate;
-      peak = totalValue;
+      // Less than a unit below, the sample is at the peak without lowering it: a run of such samples would let it drift down
+      if (totalValue > peak) peak = totalValue;
       peakDate = date;
       inDrawdown = false;
     }
@@ -336,27 +349,3 @@ export const calculateDrawdowns = (samples: EquitySnapshot[], initialBalance: nu
     longestDrawdownMs,
   };
 };
-
-/**
- * Calculates the maximum drawdown (MDD) as a percentage: the largest fall from a peak of the balances (see calculateDrawdowns).
- *
- * @param balances - Array of balance values in chronological order
- * @param initialBalance - The starting balance before the first sample
- * @returns Maximum drawdown as a positive percentage (0-100)
- */
-export const calculateMaxDrawdown = (balances: number[], initialBalance: number): number =>
-  // The dates weigh on the longest drawdown only
-  calculateDrawdowns(
-    balances.map(totalValue => ({ date: 0, totalValue })),
-    initialBalance,
-  ).maxDrawdownPct;
-
-/**
- * Calculates the longest drawdown duration in milliseconds (see calculateDrawdowns).
- *
- * @param samples - Array of EquitySnapshot samples in chronological order
- * @param initialBalance - The starting balance
- * @returns Longest drawdown duration in milliseconds
- */
-export const calculateLongestDrawdownDuration = (samples: EquitySnapshot[], initialBalance: number): number =>
-  calculateDrawdowns(samples, initialBalance).longestDrawdownMs;

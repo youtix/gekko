@@ -1,7 +1,9 @@
+import { GekkoError } from '@errors/gekko.error';
 import { Watch } from '@models/configuration.types';
 import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '@plugins/analyzers/roundTripAnalyzer/roundTrip.types';
 import { config } from '@services/configuration/configuration';
+import { useTimeZone } from '@utils/date/date.mock';
 import * as fs from 'fs';
 import path from 'path';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
@@ -51,6 +53,8 @@ const OLD_PORTFOLIO_HEADER =
 
 const OLD_TRADING_HEADER =
   'id;pair;net profit;total return;annualized return;win rate;market;alpha;sharpe ratio;sortino ratio;trade count;start time;end time;duration;exposure;start balance;final balance;start price;end price;standard deviation;downside deviation;top maes';
+
+const DAY = 86_400_000;
 
 const baseConfig = {
   name: 'PerformanceReporter',
@@ -181,14 +185,14 @@ describe('PerformanceReporter', () => {
       expect(() => reporter['processInit']()).not.toThrow();
     });
 
-    it('should log errors during directory creation', async () => {
+    it('should log errors during directory creation, by their message', async () => {
       const error = new Error('Permission denied');
       (fs.mkdirSync as Mock).mockImplementation(() => {
         throw error;
       });
       reporter['processInit']();
       const { error: logError } = await import('@services/logger');
-      expect(logError).toHaveBeenCalledWith('performance reporter', `setup error: ${error}`);
+      expect(logError).toHaveBeenCalledWith('performance reporter', 'setup error: Permission denied');
     });
   });
 
@@ -288,6 +292,48 @@ describe('PerformanceReporter', () => {
         reporter.onPerformanceReport(report);
 
         expect(cellOf(file.content, column)).toBe(value);
+      });
+
+      // Still a JSON array of numbers, each written as the amounts are: JSON.stringify wrote every digit of the binary values, and an
+      // exponent below 1e-6
+      it.each`
+        description                      | topMAEs                                            | value
+        ${'up to 8 decimals'}            | ${[33.33333333333333, 9.090909090909099]}          | ${'[33.33333333,9.09090909]'}
+        ${'without an exponent'}         | ${[0.000031249995123554724, 1.000000338535756e-8]} | ${'[0.00003125,0.00000001]'}
+        ${'an MAE of 0 and a round one'} | ${[4.5, 0]}                                        | ${'[4.5,0]'}
+      `('should write the top MAEs $description under top maes: $value', ({ topMAEs, value }) => {
+        const file = useInMemoryFile();
+
+        reporter.onPerformanceReport({ ...sampleTradingReport, topMAEs });
+
+        expect(cellOf(file.content, 'top maes')).toBe(value);
+      });
+    });
+
+    // From the epoch, on the UTC calendar: the same on every host. On the host's, a host in a zone that had daylight saving time in 1970
+    // (New York) wrote 120 days "3 months 30 days 1 hour"
+    describe.each`
+      timeZone
+      ${'UTC'}
+      ${'Europe/Paris'}
+      ${'America/New_York'}
+    `('When the report of a run on a host in $timeZone has a longest drawdown', ({ timeZone }) => {
+      useTimeZone(timeZone);
+
+      it.each`
+        longestDrawdownMs | value
+        ${9_000_000}      | ${'2 hours 30 minutes'}
+        ${30 * DAY}       | ${'30 days'}
+        ${59 * DAY}       | ${'2 months'}
+        ${120 * DAY}      | ${'4 months'}
+        ${200 * DAY}      | ${'6 months 19 days'}
+        ${400 * DAY}      | ${'1 year 1 month 4 days'}
+      `('should write a longest drawdown of $longestDrawdownMs ms as $value', ({ longestDrawdownMs, value }) => {
+        const file = useInMemoryFile();
+
+        reporter.onPerformanceReport({ ...samplePortfolioReport, longestDrawdownMs });
+
+        expect(cellOf(file.content, 'longest drawdown duration')).toBe(value);
       });
     });
 
@@ -494,7 +540,7 @@ describe('PerformanceReporter', () => {
         const { error: logError } = await import('@services/logger');
         expect(logError).toHaveBeenCalledWith(
           'performance reporter',
-          `report lost: TRADING REPORT not written, ${expectedPath} could not be locked (${lockError})`,
+          `report lost: TRADING REPORT not written, ${expectedPath} could not be locked (${lockError.message})`,
         );
       });
 
@@ -593,18 +639,25 @@ describe('PerformanceReporter', () => {
         expect(fs.appendFileSync).not.toHaveBeenCalled();
       });
 
-      it('should log write errors', async () => {
+      // Described, not interpolated: String() wrote an Error with its name, a GekkoError with its own tag after the reporter's, and
+      // threw for a value without a prototype, from the catch itself
+      it.each`
+        kind                               | thrown                                                | logged
+        ${'an Error'}                      | ${new Error('Disk full')}                             | ${'write error: Disk full'}
+        ${'a GekkoError, without its tag'} | ${new GekkoError('storage', 'Disk full')}             | ${'write error: Disk full'}
+        ${'a string'}                      | ${'EIO'}                                              | ${'write error: EIO'}
+        ${'a value without a prototype'}   | ${Object.assign(Object.create(null), { errno: -28 })} | ${'write error: [Object: null prototype] { errno: -28 }'}
+      `('should log a write error, $kind thrown: $logged', async ({ thrown, logged }) => {
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
-        const error = new Error('Disk full');
         (fs.appendFileSync as Mock).mockImplementation(() => {
-          throw error;
+          throw thrown;
         });
 
         reporter.onPerformanceReport(samplePortfolioReport);
 
         const { error: logError } = await import('@services/logger');
-        expect(logError).toHaveBeenCalledWith('performance reporter', `write error: ${error}`);
+        expect(logError).toHaveBeenCalledWith('performance reporter', logged);
       });
 
       it('should release lock even on write error', () => {
@@ -634,7 +687,7 @@ describe('PerformanceReporter', () => {
           reporter.onPerformanceReport(samplePortfolioReport);
 
           const { error: logError } = await import('@services/logger');
-          expect(logError).toHaveBeenCalledWith('performance reporter', 'write error: Error: EIO');
+          expect(logError).toHaveBeenCalledWith('performance reporter', 'write error: EIO');
         });
 
         it('should not append the row', () => {

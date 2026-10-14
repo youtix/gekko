@@ -1,5 +1,6 @@
 import { Tag } from '@models/tag.types';
 import { warning } from '@services/logger';
+import { formatDurationUTC } from '@utils/date/date.utils';
 import {
   calculateAlpha,
   calculateAnnualizedReturnPct,
@@ -9,10 +10,11 @@ import {
   calculateSharpeRatio,
   calculateSortinoRatio,
   calculateTotalReturnPct,
+  calculateVolatility,
   RatioParams,
 } from '@utils/finance/stats.utils';
-import { stdev } from '@utils/math/math.utils';
-import { differenceInMilliseconds, formatDuration, intervalToDuration } from 'date-fns';
+import { addPrecise, toSignificantDigits } from '@utils/math/math.utils';
+import { differenceInMilliseconds } from 'date-fns';
 import { MIN_ANNUALIZATION_HORIZON_MS } from './analyzer.const';
 import { PerformanceStatistics, PerformanceStatisticsInput } from './analyzer.types';
 
@@ -33,25 +35,30 @@ export const calculatePerformanceStatistics = (input: PerformanceStatisticsInput
     );
   }
 
-  const netProfit = endEquity - startEquity;
+  // In decimal, as the equities are valued: in binary, a period from 1000 to 1000.3 made a net profit of 0.2999999999999545
+  const netProfit = addPrecise(endEquity, -startEquity);
   const totalReturnPct = calculateTotalReturnPct(endEquity, startEquity);
   const annualizedReturnPct = calculateAnnualizedReturnPct(totalReturnPct, horizonYears);
   const ratioParams: RatioParams = { returns, yearlyProfit: annualizedReturnPct, riskFreeReturn, elapsedYears: horizonYears };
-  const volatility = stdev(returns);
+  // The deviation the Sharpe ratio weighs: 0 for returns all equal, where their standard deviation was the noise of their mean
+  const volatility = calculateVolatility(returns);
 
   return {
     periodStartAt,
     periodEndAt,
-    formattedDuration: formatDuration(intervalToDuration({ start: periodStartAt, end: periodEndAt })),
+    // Counted on the UTC calendar, the same on every machine: on the machine's, a period across a change of daylight saving time came
+    // out an hour off, 2024-10-01 to 2024-11-01 reading "30 days 23 hours" in Paris (see formatDurationUTC)
+    formattedDuration: formatDurationUTC(periodStartAt, periodEndAt),
     netProfit,
-    annualizedNetProfit: netProfit / horizonYears,
+    // A quotient, rid of the noise of the division: 0.3 over 3 years is 0.1 a year, 0.09999999999999999 in binary
+    annualizedNetProfit: toSignificantDigits(netProfit / horizonYears),
     totalReturnPct,
     annualizedReturnPct,
     marketReturnPct,
     alpha: calculateAlpha(totalReturnPct, marketReturnPct),
     // A run that ends with the bucket that completed the warmup has a period of 0 ms, and nothing exposed in it
     exposurePct: periodMs > 0 ? calculateExposurePct(exposureMs, periodMs) : 0,
-    // Without any return, the standard deviation is NaN: there is no volatility to measure
+    // A return that is not a number gives a deviation that is not one either: no volatility could be measured
     volatility: Number.isNaN(volatility) ? 0 : volatility,
     downsideDeviation: calculateDownsideDeviation(returns),
     sharpeRatio: calculateSharpeRatio(ratioParams),

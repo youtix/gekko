@@ -1,13 +1,13 @@
+import { describeError } from '@errors/error.utils';
 import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '@plugins/analyzers/roundTripAnalyzer/roundTrip.types';
 import { Plugin } from '@plugins/plugin';
 import { lockSync as defaultLockSync } from '@services/fs/fs.service';
 import { Fs } from '@services/fs/fs.types';
 import { error } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
+import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
 import { round } from '@utils/math/round.utils';
 import { formatRatio, toPlainNumber } from '@utils/string/string.utils';
-import { formatDuration, intervalToDuration } from 'date-fns';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
 import { random } from 'lodash-es';
 import path from 'path';
@@ -81,12 +81,14 @@ export class PerformanceReporter extends Plugin {
     { header: 'downside deviation', value: report => formatRatio(report.downsideDeviation) },
     {
       header: 'longest drawdown duration',
-      value: portfolioOnly(({ longestDrawdownMs }) =>
-        longestDrawdownMs > 0 ? formatDuration(intervalToDuration({ start: 0, end: longestDrawdownMs })) : '0',
-      ),
+      // From the epoch on the UTC calendar, the same on every machine: on a machine whose zone had daylight saving time in 1970 (New
+      // York), 120 days read "3 months 30 days 1 hour" (see formatDurationUTC)
+      value: portfolioOnly(({ longestDrawdownMs }) => (longestDrawdownMs > 0 ? formatDurationUTC(0, longestDrawdownMs) : '0')),
     },
     { header: 'benchmark asset', value: portfolioOnly(({ benchmarkAsset }) => benchmarkAsset) },
-    { header: 'top maes', value: tradingOnly(({ topMAEs }) => JSON.stringify(topMAEs)) },
+    // A JSON array of numbers written as the amounts are (see toPlainNumber): JSON.stringify wrote every digit of the binary value,
+    // 33.33333333333333, and an exponent below 1e-6, 1.000000338535756e-8
+    { header: 'top maes', value: tradingOnly(({ topMAEs }) => `[${topMAEs.map(toPlainNumber).join(',')}]`) },
     // The row of a run stopped before its end (a crash, missing candles, the circuit breaker) says why, rather than passing for that of
     // a full run. The reason is written as the error gave it, quoted when it holds the separator or a line break (see toCsvCell).
     { header: 'status', value: ({ interruption }) => (interruption === undefined ? 'completed' : `interrupted: ${interruption}`) },
@@ -116,8 +118,9 @@ export class PerformanceReporter extends Plugin {
       // the same delay, the runs that miss the lock together would retry together, and only a few would get it each time.
       release = this.fs.lockSync(this.filePath, { retries: 5, retryDelayMs: random(25, 75) });
     } catch (err) {
-      // Not thrown: an exception in a plugin ends the run with exit code 1.
-      error('performance reporter', `report lost: ${report.id} not written, ${this.filePath} could not be locked (${err})`);
+      // Not thrown: an exception in a plugin ends the run with exit code 1. The failure is described, not interpolated, here as in
+      // the two catches below: a template literal calls String(), which throws for a value without a prototype, from the catch itself.
+      error('performance reporter', `report lost: ${report.id} not written, ${this.filePath} could not be locked (${describeError(err)})`);
       return;
     }
     try {
@@ -132,7 +135,7 @@ export class PerformanceReporter extends Plugin {
         );
       }
     } catch (err) {
-      error('performance reporter', `write error: ${err}`);
+      error('performance reporter', `write error: ${describeError(err)}`);
     } finally {
       release();
     }
@@ -169,7 +172,7 @@ export class PerformanceReporter extends Plugin {
       // Create parent folders if the user supplied a nested path
       mkdirSync(path.dirname(this.filePath), { recursive: true });
     } catch (err) {
-      error('performance reporter', `setup error: ${err}`);
+      error('performance reporter', `setup error: ${describeError(err)}`);
     }
   }
 

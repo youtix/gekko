@@ -1,5 +1,5 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import { isValid } from 'date-fns';
+import { formatDuration, intervalToDuration, isValid } from 'date-fns';
 import { isNil } from 'lodash-es';
 
 /**
@@ -20,6 +20,32 @@ export const toTimestamp = (iso8601String?: string): EpochTimeStamp => new Date(
  * live stream pushed nothing for that hour. A UTC minute has no such ambiguity.
  */
 export const startOfMinuteUTC = (timestamp: EpochTimeStamp): EpochTimeStamp => Math.floor(timestamp / ONE_MINUTE) * ONE_MINUTE;
+
+/**
+ * A Date whose local fields are its UTC fields (getHours is getUTCHours, setDate setUTCDate…) and whose offset is 0: date-fns, which
+ * reads and writes local fields, computes on the UTC calendar through it, whatever the zone of the machine. The TZDate of @date-fns/tz
+ * for 'UTC' goes through the machine's zone, and on a machine with daylight saving time a date whose UTC wall-clock time that zone
+ * skips at its spring change moves by the change: 2023-03-25T02:30Z to 2023-03-26T02:30Z read "1 day -1 hours" in Paris.
+ */
+class UTCDate extends Date {
+  getTimezoneOffset() {
+    return 0;
+  }
+}
+for (const method of Object.getOwnPropertyNames(Date.prototype)) {
+  const match = /^(get|set)(?!UTC)(.*)$/.exec(method);
+  const utcMethod = match && Reflect.get(Date.prototype, `${match[1]}UTC${match[2]}`);
+  if (utcMethod) Reflect.set(UTCDate.prototype, method, utcMethod);
+}
+
+/**
+ * The duration from `start` to `end` in words, counted on the UTC calendar, the same on every machine: "3 months 2 days", '' for none.
+ * Counted on the machine's calendar, as intervalToDuration does, a period across a change of daylight saving time came out an hour off
+ * (2024-10-01 to 2024-11-01 read "30 days 23 hours" in Paris), and so did a duration from the epoch on a machine whose zone had it in
+ * 1970 (120 days read "3 months 30 days 1 hour" in New York).
+ */
+export const formatDurationUTC = (start: EpochTimeStamp, end: EpochTimeStamp): string =>
+  formatDuration(intervalToDuration({ start, end }, { in: value => new UTCDate(value) }));
 
 /**
  * Splits the minutes from the one holding `startDate` to the one holding `endDate`, both included, into chunks of `batchSize`

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { useTimeZone } from './date.mock';
-import { splitIntervals, startOfMinuteUTC, toISOString, toTimestamp } from './date.utils';
+import { formatDurationUTC, splitIntervals, startOfMinuteUTC, toISOString, toTimestamp } from './date.utils';
 
 describe('date utils', () => {
   describe('toISOString', () => {
@@ -71,6 +71,35 @@ describe('date utils', () => {
         ${'a UTC wall time Paris skipped when DST started'}     | ${'2026-03-29T02:30:20.000Z'} | ${'2026-03-29T02:30:00.000Z'}
       `('returns $expected for $description, $timestamp', ({ timestamp, expected }) => {
         expect(startOfMinuteUTC(Date.parse(timestamp))).toBe(Date.parse(expected));
+      });
+    });
+  });
+
+  describe('formatDurationUTC', () => {
+    // On the UTC calendar, the same text on every host. On the host's calendar, intervalToDuration was an hour off across a change of
+    // daylight saving time: "30 days 23 hours" in Paris for October 2024, and from the epoch "3 months 30 days 1 hour" in New York,
+    // whose zone had it in 1970. Through the TZDate of @date-fns/tz for 'UTC', a date whose UTC wall-clock time the host's zone skips at
+    // its spring change moved by the change: in Paris the first, second and fourth rows read "1 day -1 hours", "1 year -1 hours" and
+    // "7 months 1 day -59 minutes", in New York the third "1 day -1 hours".
+    describe.each`
+      timeZone
+      ${'UTC'}
+      ${'Europe/Paris'}
+      ${'America/New_York'}
+    `('on a host in $timeZone', ({ timeZone }) => {
+      useTimeZone(timeZone);
+
+      it.each`
+        start                     | end                       | expected
+        ${'2023-03-25T02:30:00Z'} | ${'2023-03-26T02:30:00Z'} | ${'1 day'}
+        ${'2025-03-29T02:30:00Z'} | ${'2026-03-29T02:30:00Z'} | ${'1 year'}
+        ${'2023-03-11T02:00:00Z'} | ${'2023-03-12T02:00:00Z'} | ${'1 day'}
+        ${'2026-08-27T02:55:00Z'} | ${'2027-03-28T02:56:00Z'} | ${'7 months 1 day 1 minute'}
+        ${'2024-10-01T00:00:00Z'} | ${'2024-11-01T00:00:00Z'} | ${'1 month'}
+        ${'1970-01-01T00:00:00Z'} | ${'1970-05-01T00:00:00Z'} | ${'4 months'}
+        ${'2024-01-01T00:00:00Z'} | ${'2024-01-01T00:00:00Z'} | ${''}
+      `('returns $expected from $start to $end', ({ start, end, expected }) => {
+        expect(formatDurationUTC(Date.parse(start), Date.parse(end))).toBe(expected);
       });
     });
   });
