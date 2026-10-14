@@ -11,6 +11,7 @@ import {
 import { EMPTY_ORDER_SUMMARY } from '@constants/order.const';
 import { GekkoError } from '@errors/gekko.error';
 import { AdviceOrder } from '@models/advice.types';
+import { Watch } from '@models/configuration.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
 import { OrderSummary } from '@services/core/order/order.types';
@@ -31,17 +32,22 @@ const { orderActions } = vi.hoisted(() => ({
   },
 }));
 
-const baseWatch = {
-  pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }],
+// A realtime run on BTC/USDT at 1m, as config.getWatch() returns it: the timeframe belongs to the watch, and the pairs are derived from
+// the assets. Typed, so that it keeps the shape of the schema's output: untyped, it kept a retired option and put the timeframe on the
+// pair, so that the Trader ran without one and its backtest synchronizations were tested on a fallback no configuration reaches
+const baseWatch: Watch = {
+  assets: ['BTC'],
+  currency: 'USDT',
+  timeframe: '1m',
   tickrate: 1000,
-  mode: 'realtime' as const,
-  fillGaps: 'empty' as const,
+  mode: 'realtime',
   warmup: { tickrate: 1000, candleCount: 0 },
-  daterange: null,
+  pairs: [{ symbol: 'BTC/USDT' }],
 };
 
-const cloneWatch = () => ({
+const cloneWatch = (): Watch => ({
   ...baseWatch,
+  assets: [...baseWatch.assets],
   pairs: [...baseWatch.pairs],
   warmup: { ...baseWatch.warmup },
 });
@@ -524,7 +530,8 @@ describe('Trader', () => {
     });
   });
 
-  // The bucket that ends the warmup was processed as it arrived, like every bucket: what is left is the portfolio at the end of the warmup
+  // The bucket that ends the warmup was processed as it arrived, like every bucket: what is left is a synchronization, which emits the
+  // portfolio unless the portfolioUpdates filter holds it back
   describe('onStrategyWarmupCompleted', () => {
     const bucket = new Map([['BTC/USDT', defaultCandle]]) as any;
 
@@ -549,6 +556,39 @@ describe('Trader', () => {
       await trader.onStrategyCreateOrder([buildAdvice({ amount: 1, price: 100 })]);
       await completeWarmup();
       expect(orderActions.checkOrder).toHaveBeenCalledOnce();
+    });
+
+    // The synchronization at the start emitted the first portfolio read: with the filter, the one at the end of the warmup emits only a
+    // portfolio that moved past it since, here by more than 1 % of the USDT
+    describe('with the portfolioUpdates filter', () => {
+      const portfolioHolding = (usdt: number) =>
+        new Map<string, BalanceDetail>([
+          ['BTC', { free: 1, used: 0, total: 1 }],
+          ['USDT', { free: usdt, used: 0, total: usdt }],
+        ]);
+      const getEmittedPortfolios = () =>
+        (trader['addDeferredEmit'] as unknown as Mock).mock.calls
+          .filter(([event]) => event === PORTFOLIO_CHANGE_EVENT)
+          .map(([, portfolio]) => portfolio);
+
+      beforeEach(() => {
+        trader = new Trader({ portfolioUpdates: { threshold: 1, dust: 10 } });
+        trader['currentTimestamp'] = 1_700_000_000_000;
+        trader['getExchange'] = vi.fn().mockReturnValue(fakeExchange);
+        trader['addDeferredEmit'] = vi.fn();
+      });
+
+      it.each`
+        usdt    | emitted
+        ${1000} | ${[1000]}
+        ${1005} | ${[1000]}
+        ${1020} | ${[1000, 1020]}
+      `('emits the portfolios of $emitted USDT when the USDT went from 1000 to $usdt during the warmup', async ({ usdt, emitted }) => {
+        fakeExchange.fetchBalance.mockResolvedValueOnce(portfolioHolding(1000)).mockResolvedValue(portfolioHolding(usdt));
+        await trader['synchronize'](); // At the start (see processInit)
+        await completeWarmup();
+        expect(getEmittedPortfolios()).toEqual(emitted.map(portfolioHolding));
+      });
     });
 
     // Best effort, like every synchronization of the plugin: a rejection leaving the handler would end the run
@@ -616,6 +656,29 @@ describe('Trader', () => {
 
       expect(synchronizeSpy).toHaveBeenCalledTimes(calls);
     });
+
+    // At a timeframe of the watch above 10 minutes, once a timeframe candle: 28,333,335 is a multiple of 15 but not of 10, 28,333,320 a
+    // multiple of 60, and 28,333,340 a multiple of 10 but of neither 15 nor 60
+    it.each`
+      timeframe | start                | minute          | calls
+      ${'15m'}  | ${1_700_000_100_000} | ${'28,333,335'} | ${1}
+      ${'15m'}  | ${1_700_000_400_000} | ${'28,333,340'} | ${0}
+      ${'1h'}   | ${1_699_999_200_000} | ${'28,333,320'} | ${1}
+      ${'1h'}   | ${1_700_000_400_000} | ${'28,333,340'} | ${0}
+    `(
+      'synchronizes $calls time(s) in a backtest at $timeframe on a bucket of minute $minute since the epoch',
+      async ({ timeframe, start, calls }) => {
+        getWatchMock.mockReturnValue({ ...cloneWatch(), timeframe });
+        trader = new Trader();
+        trader['currentTimestamp'] = 1_700_000_000_000; // Not the first bucket, which the backtest does not synchronize on
+        (trader as any).mode = 'backtest';
+        const synchronizeSpy = vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+
+        await trader['processOneMinuteBucket'](new Map([['BTC/USDT', { ...defaultCandle, start }]]));
+
+        expect(synchronizeSpy).toHaveBeenCalledTimes(calls);
+      },
+    );
 
     // In backtest a bucket checks the STICKY orders and waits for the reports in flight. With no order listed, nothing can be checked,
     // nor start a report: awaited all the same, each cost a turn of the microtask queue, on most buckets of a run.

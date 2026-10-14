@@ -653,10 +653,14 @@ export class Trader extends Plugin {
   /* -------------------------------------------------------------------------- */
 
   /**
-   * Emits the portfolio at the end of the warmup, when the PortfolioAnalyzer starts recording the equity. The bucket that ended the
-   * warmup was processed as it arrived, like every bucket: nothing else is left to do. Best effort, like every synchronization of the
-   * plugin (see relayError): a rejection leaving the handler would end the run (see PluginsStream), and the next synchronization
-   * tries again.
+   * Synchronizes with the exchange at the end of the warmup: the orders that follow are sized from the balance it reads. Like every
+   * synchronization, it emits the portfolio unless the portfolioUpdates filter holds it back. That filter emits the first portfolio read
+   * (at the start, see processInit), then a portfolio only when it moved since the last one emitted: an asset crossed the dust (a value
+   * in the currency) either way, or the quantity of an asset held changed by more than the threshold, in % (see shouldEmitPortfolio).
+   * With it, a balance that has not moved since is not emitted again. An emitted portfolio reaches the PortfolioAnalyzer once the
+   * analyzer has taken its start equity, from the portfolio it held when the warmup completed. The bucket that ended the warmup was
+   * processed as it arrived, like every bucket: nothing else is left to do. Best effort, like every synchronization of the plugin (see
+   * relayError): a rejection leaving the handler would end the run (see PluginsStream), and the next synchronization tries again.
    */
   public async onStrategyWarmupCompleted(_bucket: CandleBucket[]) {
     try {

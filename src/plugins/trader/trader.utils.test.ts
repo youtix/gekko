@@ -2,7 +2,14 @@ import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { round } from '@utils/math/round.utils';
 import { describe, expect, it, vi } from 'vitest';
-import { computeOrderPricing, getAllInBuyAmount, getBuyBudget, PortfolioUpdatesConfig, shouldEmitPortfolio } from './trader.utils';
+import {
+  computeOrderPricing,
+  getAllInBuyAmount,
+  getBacktestModeIntervalSyncTime,
+  getBuyBudget,
+  PortfolioUpdatesConfig,
+  shouldEmitPortfolio,
+} from './trader.utils';
 
 // Mock logger
 vi.mock('@services/logger', () => ({
@@ -99,6 +106,22 @@ describe('trader.utils', () => {
       ${1000}              | ${3}    | ${5}     | ${316.66666}
     `('is placed as $placed for $currency at $price on a step of $decimals decimals', ({ currency, price, decimals, placed }) => {
       expect(round(getAllInBuyAmount(currency, price), decimals, 'down')).toBe(placed);
+    });
+  });
+
+  // A timeframe candle, 10 minutes at least: a backtest at 1m does not read the simulated exchange at every minute
+  describe('getBacktestModeIntervalSyncTime', () => {
+    it.each`
+      timeframe | minutes
+      ${'1m'}   | ${10}
+      ${'5m'}   | ${10}
+      ${'10m'}  | ${10}
+      ${'15m'}  | ${15}
+      ${'1h'}   | ${60}
+      ${'1d'}   | ${1440}
+      ${'1w'}   | ${10080}
+    `('is $minutes minutes at $timeframe', ({ timeframe, minutes }) => {
+      expect(getBacktestModeIntervalSyncTime(timeframe)).toBe(minutes);
     });
   });
 

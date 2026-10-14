@@ -77,10 +77,12 @@ export const getBuyBudget = (amount: number, price: number): number => multiplyP
 export const getAllInBuyAmount = (currency: number, price: number): number =>
   toSignificantDigits(multiplyPrecise(currency, ALL_IN_BUY_SHARE) / price);
 
-export const getBacktestModeIntervalSyncTime = (timeframe: Timeframe): number => {
-  // Minimum 10 minutes to avoid excessive synchronization
-  return Math.max(TIMEFRAME_TO_MINUTES[timeframe ?? '1m'], 10);
-};
+/**
+ * The minutes between two synchronizations of a backtest: a timeframe candle, 10 at least to avoid excessive synchronization. The
+ * configuration requires a timeframe in backtest (see watchSchema): the 1m it fell back to without one was only ever reached by a test
+ * whose mocked configuration had none.
+ */
+export const getBacktestModeIntervalSyncTime = (timeframe: Timeframe): number => Math.max(TIMEFRAME_TO_MINUTES[timeframe!], 10);
 
 /* -------------------------------------------------------------------------- */
 /*                      PORTFOLIO EMISSION FILTERING                          */

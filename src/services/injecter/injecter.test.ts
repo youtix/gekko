@@ -54,6 +54,7 @@ describe('Injecter', () => {
   describe('storage', () => {
     it('returns cached storage instance on subsequent calls', () => {
       getStorageMock.mockReturnValue({ type: 'sqlite', database: '' });
+      // Checked against the parsed watch rather than cast to it: cast, it kept fillGaps, an option the schema refuses
       getWatchMock.mockReturnValue({
         pairs: [{ symbol: 'BTC/USDT' }],
         assets: ['BTC'],
@@ -61,9 +62,8 @@ describe('Injecter', () => {
         timeframe: '1h',
         mode: 'backtest',
         tickrate: 1000,
-        fillGaps: 'no',
         warmup: { candleCount: 100, tickrate: 1000 },
-      } as Watch);
+      });
       const first = inject.storage();
       const second = inject.storage();
       expect(second).toBe(first);
@@ -145,9 +145,8 @@ describe('Injecter', () => {
         timeframe: '1h',
         mode: 'backtest',
         tickrate: 1000,
-        fillGaps: 'no',
         warmup: { candleCount: 100, tickrate: 1000 },
-      } as Watch);
+      });
 
       const first = inject.exchange();
       const second = inject.exchange();
