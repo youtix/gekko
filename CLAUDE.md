@@ -8,7 +8,7 @@ Gekko 2 is a modular crypto trading bot framework written in TypeScript and run 
 
 ## Commands
 
-Bun is the package manager and the runtime. Scripts, git hooks and CI all go through `bun` and `bun.lock`; `package-lock.json` is not used by any of them.
+Bun is the package manager and the runtime. Scripts, git hooks and CI all go through `bun` and `bun.lock`; there is no `package-lock.json`.
 
 ```bash
 bun install
