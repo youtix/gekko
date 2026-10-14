@@ -222,6 +222,30 @@ export const configurationSchema = z
       });
     }
 
+    // Hyperliquid's keys are optional, an import reading the public client alone, but a realtime TradingAdvisor reads the open orders
+    // and the balance of the account at walletAddress at start-up, and the Trader reads them too and signs its orders with privateKey.
+    // Without the address, the run would stop at start-up on ccxt's ArgumentsRequired; without the key, ccxt would refuse every order
+    // until the circuit breaker stopped the run. Like the marketData rule, it only checks a configuration whose sections have no issue:
+    // a privateKey without walletAddress is already refused in the exchange section.
+    if (data.exchange.name === 'hyperliquid' && data.watch.mode === 'realtime' && !hasSectionIssues) {
+      const { privateKey, walletAddress } = data.exchange;
+      const hasTradingAdvisor = some(data.plugins, { name: 'TradingAdvisor' });
+      if (walletAddress === undefined && (hasTraderPlugin || hasTradingAdvisor)) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['exchange', 'walletAddress'],
+          message: `walletAddress is required by the ${hasTraderPlugin ? 'Trader' : 'TradingAdvisor'}, which reads the balance and the orders of the account at that address`,
+        });
+      }
+      if (privateKey === undefined && hasTraderPlugin) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['exchange', 'privateKey'],
+          message: 'privateKey is required by the Trader, which signs its orders with it',
+        });
+      }
+    }
+
     // marketData is dummy-cex's only source of fees and order limits, looked up by exact symbol: a watched pair without an
     // entry would trade free of both, and an entry for any other symbol (a typo, a swapped asset) would never be read.
     // The rule reads watch.pairs and the marketData Map, so it only checks a configuration whose sections have no issue.

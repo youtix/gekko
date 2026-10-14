@@ -606,6 +606,66 @@ describe('configurationSchema', () => {
     });
   });
 
+  // The keys are optional, an import needing neither, but a realtime run that reads the account or trades without them would fail on
+  // ccxt: at start-up for want of the address (ArgumentsRequired), or on every order for want of the private key, until the circuit
+  // breaker stopped the run
+  describe('hyperliquid keys in realtime mode', () => {
+    const PRIVATE_KEY = `0x${'11'.repeat(32)}`;
+    const WALLET_ADDRESS = `0x${'22'.repeat(20)}`;
+    const advisor = [{ name: 'TradingAdvisor' }];
+    const advisorAndTrader = [{ name: 'TradingAdvisor' }, { name: 'Trader' }];
+    const addressIssue = (plugin: string) => ({
+      path: ['exchange', 'walletAddress'],
+      message: `walletAddress is required by the ${plugin}, which reads the balance and the orders of the account at that address`,
+    });
+    const privateKeyIssue = {
+      path: ['exchange', 'privateKey'],
+      message: 'privateKey is required by the Trader, which signs its orders with it',
+    };
+    const createHyperliquidConfig = (mode: string, plugins: Array<{ name: string }>, keys: Record<string, string>) => ({
+      ...createBaseConfig(),
+      watch: { ...createBaseConfig().watch, mode, daterange: { start: ISO_START, end: ISO_END } },
+      exchange: { name: 'hyperliquid', ...keys },
+      storage: sqliteStorage,
+      plugins,
+      [DISCLAIMER_FIELD]: true,
+    });
+
+    it.each`
+      scenario                                                     | plugins                 | keys                                 | issues
+      ${'a TradingAdvisor without keys, needing walletAddress'}    | ${advisor}              | ${{}}                                | ${[addressIssue('TradingAdvisor')]}
+      ${'a Trader without keys, needing both at once'}             | ${advisorAndTrader}     | ${{}}                                | ${[addressIssue('Trader'), privateKeyIssue]}
+      ${'a Trader without a TradingAdvisor or keys, needing both'} | ${[{ name: 'Trader' }]} | ${{}}                                | ${[addressIssue('Trader'), privateKeyIssue]}
+      ${'a Trader with walletAddress alone, needing privateKey'}   | ${advisorAndTrader}     | ${{ walletAddress: WALLET_ADDRESS }} | ${[privateKeyIssue]}
+    `('reports $scenario', ({ plugins, keys, issues }) => {
+      const result = configurationSchema.safeParse(createHyperliquidConfig('realtime', plugins, keys));
+      expect(result.error?.issues).toMatchObject(issues);
+    });
+
+    it.each`
+      scenario                                                         | mode          | plugins                       | keys
+      ${'a TradingAdvisor without a Trader, with walletAddress alone'} | ${'realtime'} | ${advisor}                    | ${{ walletAddress: WALLET_ADDRESS }}
+      ${'a Trader with both keys'}                                     | ${'realtime'} | ${advisorAndTrader}           | ${{ privateKey: PRIVATE_KEY, walletAddress: WALLET_ADDRESS }}
+      ${'a CandleWriter alone without keys'}                           | ${'realtime'} | ${[{ name: 'CandleWriter' }]} | ${{}}
+      ${'a Supervision alone without keys'}                            | ${'realtime'} | ${[{ name: 'Supervision' }]}  | ${{}}
+      ${'an import without keys'}                                      | ${'importer'} | ${[{ name: 'CandleWriter' }]} | ${{}}
+    `('accepts $scenario', ({ mode, plugins, keys }) => {
+      const result = configurationSchema.safeParse(createHyperliquidConfig(mode, plugins, keys));
+      expect(result.error?.issues).toBeUndefined();
+    });
+
+    // Like the marketData rule, the check stands down while a section has an issue: the exchange section refuses the key alone
+    it('reports only the exchange section issue for a privateKey without walletAddress', () => {
+      const result = configurationSchema.safeParse(createHyperliquidConfig('realtime', advisorAndTrader, { privateKey: PRIVATE_KEY }));
+      expect(result.error?.issues).toMatchObject([
+        {
+          path: ['exchange', 'walletAddress'],
+          message: 'walletAddress is required with privateKey, which signs the orders of the account at that address',
+        },
+      ]);
+    });
+  });
+
   describe('dummy-cex marketData', () => {
     const createBacktestConfig = (assets: string[], symbols?: string[]) => ({
       ...createBaseConfig(),
