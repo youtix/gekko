@@ -1,3 +1,4 @@
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { OrderSide, OrderState } from '@models/order.types';
@@ -127,7 +128,7 @@ export const retry = async <T>(fn: () => Promise<T>, attempt = 0, maxRetries = B
     return await fn();
   } catch (err) {
     const failure = `Call to the exchange failed, attempt ${attempt + 1}`;
-    const reason = err instanceof Error ? err.message : inspect(err);
+    const reason = describeError(err);
     if (!(err instanceof ccxt.NetworkError)) {
       debug('exchange', `${failure}, not retried: ${reason}`);
       throw translateCcxtError(err);

@@ -1,4 +1,5 @@
 import { ApplicationStopError } from '@errors/applicationStop.error';
+import { describeError, toError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Nullable } from '@models/utility.types';
@@ -23,8 +24,6 @@ const describeReason = (reason: unknown) => {
   if (reason instanceof Error) return String(reason); // "<name>: <message>"
   return isString(reason) ? reason : inspect(reason);
 };
-
-const toError = (value: unknown) => (value instanceof Error ? value : new Error(String(value)));
 
 export class PluginsStream extends Writable {
   private readonly plugins: Plugin[];
@@ -66,8 +65,10 @@ export class PluginsStream extends Writable {
       }
       callback();
     } catch (error) {
+      // Not a template literal for a value that is not an Error: String() throws for one without a prototype, and the pipeline waited
+      // for a callback never called
       if (error instanceof Error) callback(error);
-      else callback(new Error(`Error when initializing stream plugin: ${error}`));
+      else callback(new Error(`Error when initializing stream plugin: ${describeError(error)}`));
     }
   }
 

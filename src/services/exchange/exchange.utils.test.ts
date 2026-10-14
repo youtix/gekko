@@ -24,8 +24,10 @@ describe('Exchange Utils', () => {
   describe('retry', () => {
     const timeout = new ccxt.RequestTimeout('binance GET https://api.binance.com/api/v3/order request timed out (10000 ms)');
     const keyRefused = new ccxt.AuthenticationError('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}');
-    // A rejection with a value that is not an Error, which the log line writes as inspect does
+    // A rejection with a value that is not an Error, which the log line writes as it is
     const hangUp = 'socket hang up';
+    // A failure of Gekko's own in the call, quoted without its tag: the log line has the exchange's
+    const noTicker = new GekkoError('exchange', 'Fetch ticker failed to return data for BTC/USDT');
 
     it('should return result immediately on success', async () => {
       const fn = vi.fn().mockResolvedValue('success');
@@ -100,7 +102,8 @@ describe('Exchange Utils', () => {
       ${'a second timeout, retried'}    | ${() => vi.fn().mockRejectedValue(timeout)}                                   | ${2} | ${`Call to the exchange failed, attempt 2 of 4, retried in 1585 ms: ${timeout.message}`}
       ${'a fourth timeout, given up'}   | ${() => vi.fn().mockRejectedValue(timeout)}                                   | ${4} | ${`Call to the exchange failed, attempt 4 of 4, given up: ${timeout.message}`}
       ${'a refusal, not retried'}       | ${() => vi.fn().mockRejectedValue(keyRefused)}                                | ${1} | ${`Call to the exchange failed, attempt 1, not retried: ${keyRefused.message}`}
-      ${'a value that is not an Error'} | ${() => vi.fn().mockRejectedValue(hangUp)}                                    | ${1} | ${`Call to the exchange failed, attempt 1, not retried: '${hangUp}'`}
+      ${'a value that is not an Error'} | ${() => vi.fn().mockRejectedValue(hangUp)}                                    | ${1} | ${`Call to the exchange failed, attempt 1, not retried: ${hangUp}`}
+      ${'a GekkoError, not retried'}    | ${() => vi.fn().mockRejectedValue(noTicker)}                                  | ${1} | ${'Call to the exchange failed, attempt 1, not retried: Fetch ticker failed to return data for BTC/USDT'}
       ${'a refusal after a timeout'}    | ${() => vi.fn().mockRejectedValueOnce(timeout).mockRejectedValue(keyRefused)} | ${2} | ${`Call to the exchange failed, attempt 2, not retried: ${keyRefused.message}`}
     `('logs $description at debug level, as line $line: $message', async ({ createFn, line, message }) => {
       await utils.retry(createFn()).catch(() => undefined);

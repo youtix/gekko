@@ -6,7 +6,7 @@ import { debug } from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Transaction } from './order.types';
-import { createOrderSummary, getWeightedAverage, toError } from './order.utils';
+import { createOrderSummary, getWeightedAverage } from './order.utils';
 
 vi.mock('@services/logger', () => ({ debug: vi.fn() }));
 
@@ -26,22 +26,6 @@ const summarize = (transactions: Transaction[]) =>
     side: 'BUY',
     transactions,
   });
-
-describe('toError', () => {
-  it('returns an Error as it is', () => {
-    const err = new Error('boom');
-    expect(toError(err)).toBe(err);
-  });
-
-  it.each`
-    value        | message
-    ${'boom'}    | ${'boom'}
-    ${42}        | ${'42'}
-    ${undefined} | ${'undefined'}
-  `('wraps $value in an Error with the message "$message"', ({ value, message }) => {
-    expect(toError(value)).toEqual(new Error(message));
-  });
-});
 
 // In binary, the mean of the first three is 104.44000000000001, 100.50000000000001 and 104.44000000000001, and the sums of 'two
 // prices whose binary sums go astray' are off far enough that their mean, rounded to 15 significant digits, is 84633.4737320045

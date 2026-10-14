@@ -115,12 +115,12 @@ describe('main', () => {
     beforeEach(async () => {
       // Imported after vi.resetModules(), so that it is the class gekko2.ts checks against
       const { ApplicationStopError } = await import('@errors/applicationStop.error');
-      vi.mocked(gekkoPipeline).mockRejectedValue(new ApplicationStopError('Max consecutive order errors reached (5)'));
+      vi.mocked(gekkoPipeline).mockRejectedValue(new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)'));
       await import('./gekko2');
     });
 
     it('logs the stop reason at error level', () => {
-      expect(error).toHaveBeenCalledWith('gekko', 'Application stopped: [CORE] Max consecutive order errors reached (5)');
+      expect(error).toHaveBeenCalledWith('gekko', 'Application stopped: [STRATEGY] Max consecutive order errors reached (5)');
     });
 
     it('logs nothing at debug level', () => {
@@ -144,7 +144,7 @@ describe('main', () => {
       vi.mocked(gekkoPipeline).mockImplementation(async () => {
         // As when a floated timer-driven task (an order poll) rejects before the breaker trips
         handlerOf('unhandledRejection')(new Error('binance fetchOrder failed: 503 Service Unavailable'));
-        throw new ApplicationStopError('Max consecutive order errors reached (5)');
+        throw new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)');
       });
       await import('./gekko2');
     });
@@ -183,8 +183,7 @@ describe('main', () => {
 
     beforeEach(async () => {
       const { GekkoError } = await import('@errors/gekko.error');
-      // Its constructor takes no cause option
-      vi.mocked(gekkoPipeline).mockRejectedValue(Object.assign(new GekkoError('exchange', 'Could not load the markets'), { cause }));
+      vi.mocked(gekkoPipeline).mockRejectedValue(new GekkoError('exchange', 'Could not load the markets', { cause }));
       await import('./gekko2');
     });
 

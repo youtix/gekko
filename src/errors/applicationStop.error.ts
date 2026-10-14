@@ -7,11 +7,8 @@ import { GekkoError } from './gekko.error';
  * in the interruption of the reports, on Telegram and in the exit log, though the strategy's orders had tripped it.
  */
 export class ApplicationStopError extends GekkoError {
-  constructor(tag: Tag, message: string);
-  /** Tagged 'core': the form of the callers that do not pass their tag yet */
-  constructor(message: string);
-  constructor(tagOrMessage: Tag | string, message?: string) {
-    super(message === undefined ? 'core' : (tagOrMessage as Tag), message ?? tagOrMessage);
+  constructor(tag: Tag, message: string) {
+    super(tag, message);
     this.name = 'ApplicationStopError';
   }
 }

@@ -110,11 +110,14 @@ describe('PluginsStream', () => {
       expect(plugin.processInitStream).toHaveBeenCalledOnce();
     });
 
+    // A template literal threw for a value without a prototype, from the catch meant to report it: the stream was never constructed, and
+    // the pipeline never settled
     it.each`
-      thrown                   | message
-      ${new Error('init err')} | ${'init err'}
-      ${'string error'}        | ${'Error when initializing stream plugin: string error'}
-    `('rejects the pipeline with $message when a plugin init throws $thrown', async ({ thrown, message }) => {
+      kind                             | thrown                                                 | message
+      ${'an Error'}                    | ${new Error('init err')}                               | ${'init err'}
+      ${'a string'}                    | ${'string error'}                                      | ${'Error when initializing stream plugin: string error'}
+      ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'Error when initializing stream plugin: [Object: null prototype] { status: 503 }'}
+    `('rejects the pipeline with $message when a plugin init throws $kind', async ({ thrown, message }) => {
       const plugin = createPluginStub({ processInitStream: throwing(thrown) });
 
       expect(await runPipeline([BUCKET], [plugin])).toEqual(new Error(message));
@@ -221,11 +224,14 @@ describe('PluginsStream', () => {
     });
 
     describe('when a plugin fails on a bucket', () => {
+      // String() threw for a value without a prototype, from the handler of the failed bucket: the stream was never destroyed, and the
+      // pipeline never settled
       it.each`
-        thrown                         | message
-        ${new Error('process-failed')} | ${'process-failed'}
-        ${'string error'}              | ${'string error'}
-      `('rejects the pipeline with $message when a plugin throws $thrown', async ({ thrown, message }) => {
+        kind                             | thrown                                                 | message
+        ${'an Error'}                    | ${new Error('process-failed')}                         | ${'process-failed'}
+        ${'a string'}                    | ${'string error'}                                      | ${'string error'}
+        ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'[Object: null prototype] { status: 503 }'}
+      `('rejects the pipeline with $message when a plugin throws $kind', async ({ thrown, message }) => {
         const plugin = createPluginStub({ processInputStream: throwing(thrown) });
 
         expect(await runPipeline([BUCKET], [plugin])).toEqual(new Error(message));
@@ -329,16 +335,18 @@ describe('PluginsStream', () => {
         });
       });
 
+      // String() threw for a value without a prototype: the warning named the TypeError instead of the failure
       it.each`
-        kind               | thrown
-        ${'an Error'}      | ${new Error('finalize failed')}
-        ${'another value'} | ${'finalize failed'}
-      `('logs a finalization that throws $kind as a warning', async ({ thrown }) => {
+        kind                             | thrown                                                 | logged
+        ${'an Error'}                    | ${new Error('finalize failed')}                        | ${'finalize failed'}
+        ${'another value'}               | ${'finalize failed'}                                   | ${'finalize failed'}
+        ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'[Object: null prototype] { status: 503 }'}
+      `('logs a finalization that throws $kind as a warning: Finalization errors: $logged', async ({ thrown, logged }) => {
         const plugin = createPluginStub({ processInputStream: throwing(new Error('fail')), processCloseStream: throwing(thrown) });
 
         await runPipeline([BUCKET], [plugin]);
 
-        expect(warning).toHaveBeenCalledWith('stream', 'Finalization errors: finalize failed');
+        expect(warning).toHaveBeenCalledWith('stream', `Finalization errors: ${logged}`);
       });
     });
 
@@ -384,8 +392,8 @@ describe('PluginsStream', () => {
     describe('when two plugins fail on the same bucket, the second before the first', () => {
       const firstError = new Error('first failure');
       const secondError = new Error('second failure');
-      const firstStop = new ApplicationStopError('first stop');
-      const secondStop = new ApplicationStopError('second stop');
+      const firstStop = new ApplicationStopError('strategy', 'first stop');
+      const secondStop = new ApplicationStopError('strategy', 'second stop');
 
       /** Runs a bucket both plugins fail on, the second one first: gives what the pipeline rejects with */
       const runBucketBothFailOn = (firstReason: unknown, secondReason: unknown) =>
@@ -438,7 +446,7 @@ describe('PluginsStream', () => {
       ${'processInputStream'}                | ${'processInputStream'}
       ${'broadcastDeferredEmit (a handler)'} | ${'broadcastDeferredEmit'}
     `('on an ApplicationStopError thrown by $source', ({ method }) => {
-      const stopError = new ApplicationStopError('stop error application');
+      const stopError = new ApplicationStopError('strategy', 'stop error application');
       let plugin: Plugin;
       let stream: PluginsStream;
       let rejection: unknown;
@@ -463,7 +471,7 @@ describe('PluginsStream', () => {
       });
 
       it('logs the stop reason as a warning, for the last flush of Supervision to send it', () => {
-        expect(warning).toHaveBeenCalledWith('stream', 'Application stopped gracefully: [CORE] stop error application');
+        expect(warning).toHaveBeenCalledWith('stream', 'Application stopped gracefully: [STRATEGY] stop error application');
       });
 
       it('logs the stop reason before finalizing the plugins', () => {
@@ -474,7 +482,7 @@ describe('PluginsStream', () => {
     });
 
     describe('when a handler stops the application during the flush, with deferred events still queued', () => {
-      const STOP_LOG = 'Application stopped gracefully: [CORE] Max consecutive order errors reached (1)';
+      const STOP_LOG = 'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (1)';
       const DROPPED_EVENTS_LOG =
         'Deferred events dropped as the application closes, the final reports may miss them: ' +
         'Trader (orderCompleted: 1, portfolioChange: 2), RoundTripAnalyzer (roundtripCompleted: 1)';
@@ -488,7 +496,7 @@ describe('PluginsStream', () => {
         plugins = [advisor, trader, analyzer];
         // As the circuit breaker: the advisor stops the application on an order error the Trader reports
         trader.on('orderErrored', () => {
-          throw new ApplicationStopError('Max consecutive order errors reached (1)');
+          throw new ApplicationStopError('strategy', 'Max consecutive order errors reached (1)');
         });
         onOrderCompleted = vi.fn();
         trader.on('orderCompleted', onOrderCompleted);
@@ -650,7 +658,7 @@ describe('PluginsStream', () => {
 
     describe('when a failure upstream destroys it while a plugin is processing a bucket it then fails on', () => {
       const upstreamError = new Error('download failed');
-      const stopError = new ApplicationStopError('Max consecutive order errors reached (5)');
+      const stopError = new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)');
       let plugin: Plugin;
       let finalization: ReturnType<typeof createHeldWork>;
       let stream: PluginsStream;
@@ -710,7 +718,10 @@ describe('PluginsStream', () => {
       });
 
       it('logs the failure of the bucket', () => {
-        expect(warning).toHaveBeenCalledWith('stream', 'Application stopped gracefully: [CORE] Max consecutive order errors reached (5)');
+        expect(warning).toHaveBeenCalledWith(
+          'stream',
+          'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)',
+        );
       });
 
       it('logs the error it was destroyed with as well', () => {
@@ -727,7 +738,7 @@ describe('PluginsStream', () => {
     });
 
     describe('when a stream upstream fails while the plugins are finalized after an ApplicationStopError', () => {
-      const stopError = new ApplicationStopError('circuit breaker');
+      const stopError = new ApplicationStopError('strategy', 'circuit breaker');
       const sourceError = new Error('download failed');
       let plugins: Plugin[];
       let rejection: unknown;

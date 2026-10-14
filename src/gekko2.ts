@@ -15,11 +15,11 @@
 */
 
 import { ApplicationStopError } from '@errors/applicationStop.error';
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { debug, error, info, warning } from '@services/logger';
 import { logVersion } from '@utils/process/process.utils';
-import { isNil, isString } from 'lodash-es';
-import { inspect } from 'node:util';
+import { isNil } from 'lodash-es';
 
 const LOGO = `
   ______   ________  __    __  __    __   ______          ______  
@@ -70,13 +70,13 @@ export const main = async () => {
 
 // "<name>: <message>", then the frames. A stack usually starts with that line, but not always: in Bun, a DOMException's stack
 // (the DataCloneError of structuredClone, for one) is frames only.
-const describeError = (e: Error) => {
+const describeStack = (e: Error) => {
   const header = String(e);
   return e.stack?.startsWith(header) ? e.stack : [header, e.stack].filter(Boolean).join('\n');
 };
 
-// Not String(), which gives '[object Object]' for an object, and throws for one without a prototype
-const describeValue = (value: unknown) => (value instanceof Error ? describeError(value) : isString(value) ? value : inspect(value));
+// An Error in full, any other value as describeError writes it
+const describeValue = (value: unknown) => (value instanceof Error ? describeStack(value) : describeError(value));
 
 // Down to the root cause (inspect() cuts a chain after two causes), stopping at a cause already listed: a chain can loop
 const describeCauses = (failure: unknown) => {
@@ -97,7 +97,7 @@ const describeCauses = (failure: unknown) => {
 const logFailure = (failure: unknown, prefix = '') => {
   const isExpected = failure instanceof GekkoError;
   error('gekko', [`${prefix}${isExpected ? failure.message : describeValue(failure)}`, ...describeCauses(failure)].join('\n'));
-  if (isExpected) debug('gekko', `${prefix}${describeError(failure)}`);
+  if (isExpected) debug('gekko', `${prefix}${describeStack(failure)}`);
 };
 
 const onUncaughtException = (e: unknown) => {

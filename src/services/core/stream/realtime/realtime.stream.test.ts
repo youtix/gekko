@@ -206,12 +206,19 @@ describe('RealtimeStream', () => {
     });
   });
 
-  it('should warn with the reason of a fetch rejected with a value that is not an Error', async () => {
-    fetchOHLCV.mockRejectedValueOnce('socket hang up');
+  // Quoted under the stream's tag: a GekkoError without its own, which showed two tags, a string as it is, and a value without a
+  // prototype as util.inspect writes it: String() threw for it, from the catch meant to warn, and the tick rejected unhandled
+  it.each`
+    failure                          | rejection                                                                     | reason
+    ${'a GekkoError'}                | ${new GekkoError('exchange', 'binance GET /api/v3/klines request timed out')} | ${'binance GET /api/v3/klines request timed out'}
+    ${'a string'}                    | ${'socket hang up'}                                                           | ${'socket hang up'}
+    ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })}                        | ${'[Object: null prototype] { status: 503 }'}
+  `('should warn with the reason of a fetch rejected with $failure: $reason', async ({ rejection, reason }) => {
+    fetchOHLCV.mockRejectedValueOnce(rejection);
     await runUntilTick(1);
     expect(warning).toHaveBeenCalledWith(
       'stream',
-      `Failed to fetch the 1m candles of BTC/USDT from ${iso(0)}, retrying on the next tick: socket hang up`,
+      `Failed to fetch the 1m candles of BTC/USDT from ${iso(0)}, retrying on the next tick: ${reason}`,
     );
   });
 

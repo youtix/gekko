@@ -322,9 +322,11 @@ describe('TelegramBot', () => {
         expect(sentPayloads().at(-1)).toEqual({ chat_id: OWNER_CHAT, text: 'answer to /subscriptions' });
       });
 
+      // A string as it is, which util.inspect quoted
       it.each`
         failure                                                         | reason
         ${new Error('HTTP 403 Forbidden: bot was blocked by the user')} | ${'HTTP 403 Forbidden: bot was blocked by the user'}
+        ${'socket hang up'}                                             | ${'socket hang up'}
         ${{ error_code: 403 }}                                          | ${'{ error_code: 403 }'}
       `('logs the failure $reason at warning level', async ({ failure, reason }) => {
         (fetcher.post as Mock).mockRejectedValueOnce(failure);

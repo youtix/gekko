@@ -6,18 +6,16 @@ import { GekkoError } from '@errors/gekko.error';
  */
 export class InvalidOrder extends GekkoError {
   constructor(message: string, options?: ErrorOptions) {
-    super('exchange', message);
+    super('exchange', message, options);
     this.name = 'InvalidOrder';
-    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 
 /** The exchange does not know the order: it was never placed, or it is already filled or canceled. */
 export class OrderNotFound extends GekkoError {
   constructor(message: string, options?: ErrorOptions) {
-    super('exchange', message);
+    super('exchange', message, options);
     this.name = 'OrderNotFound';
-    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 
@@ -28,9 +26,8 @@ export class OrderNotFound extends GekkoError {
  */
 export class ExchangeNetworkError extends GekkoError {
   constructor(message: string, options?: ErrorOptions) {
-    super('exchange', message);
+    super('exchange', message, options);
     this.name = 'ExchangeNetworkError';
-    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }
 
@@ -44,8 +41,7 @@ export class ExchangeNetworkError extends GekkoError {
  */
 export class OrderOutcomeUnknown extends GekkoError {
   constructor(message: string, options?: ErrorOptions) {
-    super('exchange', message);
+    super('exchange', message, options);
     this.name = 'OrderOutcomeUnknown';
-    if (options?.cause !== undefined) this.cause = options.cause;
   }
 }

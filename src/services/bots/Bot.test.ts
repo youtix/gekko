@@ -72,9 +72,11 @@ describe('Bot', () => {
     });
 
     describe('when a check fails', () => {
+      // A string as it is, which util.inspect quoted
       it.each`
         rejection                                              | reason
         ${new Error('Network down')}                           | ${'Network down'}
+        ${'socket hang up'}                                    | ${'socket hang up'}
         ${{ status: 502 }}                                     | ${'{ status: 502 }'}
         ${Object.assign(Object.create(null), { status: 502 })} | ${'[Object: null prototype] { status: 502 }'}
       `('logs the failure with the bot tag and $reason as the reason', async ({ rejection, reason }) => {

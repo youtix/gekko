@@ -112,8 +112,9 @@ export const checkPluginsDependencies = async (context: PipelineContext) => {
     for (const dependency of plugin.dependencies ?? []) {
       try {
         await import(dependency);
-      } catch {
-        throw new GekkoError('pipeline', `Dependency ${dependency} not installed for plugin ${plugin.name}`);
+      } catch (error) {
+        // Kept as the cause, which main() appends to its report: a module that is installed but fails to load read "not installed" too
+        throw new GekkoError('pipeline', `Dependency ${dependency} not installed for plugin ${plugin.name}`, { cause: error });
       }
     }
   }

@@ -302,6 +302,12 @@ describe('Pipeline Service', () => {
       const context: PipelineContext = [{ name: 'P', dependencies: ['non-existent-dep-xyz'] }];
       await expect(pipelineModule.checkPluginsDependencies(context)).rejects.toThrow(/Dependency non-existent-dep-xyz not installed/);
     });
+
+    // main() appends the cause to its report: a module installed but failing to load read "not installed" all the same
+    it('keeps the failure of the import as the cause', async () => {
+      const context: PipelineContext = [{ name: 'P', dependencies: ['non-existent-dep-xyz'] }];
+      await expect(pipelineModule.checkPluginsDependencies(context)).rejects.toHaveProperty('cause', expect.any(Error));
+    });
   });
 
   describe('validatePluginsSchema', () => {

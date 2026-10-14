@@ -4,10 +4,10 @@ import { BalanceDetail } from '@models/portfolio.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
 import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@services/logger';
+import { toTimestamp } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { toTimestamp } from '../../utils/date/date.utils';
 import { EventSubscriber } from './eventSubscriber';
 import { eventSubscriberSchema } from './eventSubscriber.schema';
 import { EVENT_NAMES } from './eventSubscriber.types';
@@ -696,16 +696,20 @@ describe('EventSubscriber', () => {
       });
     });
 
-    // inspect(), not String(), which throws for a value without a prototype: the warning would fail and the loop reject
-    it('logs a notification not sent for a rejection that is not an Error', async () => {
+    // inspect(), not String(), which throws for a value without a prototype: the warning would fail and the loop reject. A string as it
+    // is, which inspect() quoted.
+    it.each`
+      failure                          | rejection                                              | reason
+      ${'a value without a prototype'} | ${Object.assign(Object.create(null), { status: 503 })} | ${'[Object: null prototype] { status: 503 }'}
+      ${'a string'}                    | ${'socket hang up'}                                    | ${'socket hang up'}
+    `('logs a notification not sent for a rejection with $failure: $reason', async ({ rejection, reason }) => {
       plugin['handleCommand']('/sub_strat_cancel');
-      fakeBot.sendMessage.mockRejectedValueOnce(Object.assign(Object.create(null), { status: 503 }));
+      fakeBot.sendMessage.mockRejectedValueOnce(rejection);
       notifyCancelRequests(plugin);
       await settle();
       expect(warning).toHaveBeenCalledWith(
         'event subscriber',
-        'The strat_cancel notification was not sent: [Object: null prototype] { status: 503 }. ' +
-          'Until a notification goes out again, the next failures are logged at debug level',
+        `The strat_cancel notification was not sent: ${reason}. Until a notification goes out again, the next failures are logged at debug level`,
       );
     });
 

@@ -167,11 +167,13 @@ describe('Supervision', () => {
       expect(fakeBot.sendMessage).toHaveBeenCalledTimes(2);
     });
 
-    // A value without a prototype, which String() (and so a template literal) throws for, is described as inspect() does
+    // A value without a prototype, which String() (and so a template literal) throws for, is described as inspect() does, and a string
+    // as it is, which inspect() quoted
     describe.each`
       failure                          | rejection                        | reason
       ${'an error'}                    | ${new Error('Telegram is down')} | ${'Telegram is down'}
       ${'a value without a prototype'} | ${Object.create(null)}           | ${'[Object: null prototype] {}'}
+      ${'a string'}                    | ${'socket hang up'}              | ${'socket hang up'}
     `('when Telegram fails to take one with $failure', ({ rejection, reason }) => {
       beforeEach(async () => {
         fakeBot.sendMessage.mockRejectedValueOnce(rejection);
@@ -735,7 +737,7 @@ describe('Supervision', () => {
       timestamp: 2,
       level: 'warn',
       tag: 'stream',
-      message: 'Application stopped gracefully: [CORE] Max consecutive order errors reached (5)',
+      message: 'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)',
     };
 
     it('sends nothing when log monitoring is off', async () => {

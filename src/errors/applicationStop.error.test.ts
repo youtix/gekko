@@ -10,17 +10,12 @@ describe('ApplicationStopError', () => {
     form                   | error                                           | message
     ${'given a tag'}       | ${new ApplicationStopError('strategy', REASON)} | ${`[STRATEGY] ${REASON}`}
     ${'given another tag'} | ${new ApplicationStopError('trader', REASON)}   | ${`[TRADER] ${REASON}`}
-    ${'given no tag'}      | ${new ApplicationStopError(REASON)}             | ${`[CORE] ${REASON}`}
   `('prefixes its message with the tag of its thrower, $form: $message', ({ error, message }) => {
     expect(error.message).toBe(message);
   });
 
-  it.each`
-    form              | error
-    ${'given a tag'}  | ${new ApplicationStopError('strategy', REASON)}
-    ${'given no tag'} | ${new ApplicationStopError(REASON)}
-  `('is named ApplicationStopError, $form', ({ error }) => {
-    expect(error.name).toBe('ApplicationStopError');
+  it('is named ApplicationStopError', () => {
+    expect(new ApplicationStopError('strategy', REASON).name).toBe('ApplicationStopError');
   });
 
   // The pipeline tells the graceful stop from a crash by its class, and reports it as any GekkoError, on one line

@@ -1,6 +1,6 @@
+import { describeError } from '@errors/error.utils';
 import { error } from '@services/logger';
 import { wait } from '@utils/process/process.utils';
-import { inspect } from 'node:util';
 import { HandleCommand } from './bots.types';
 
 // After a failed check, each wait doubles, up to this many intervals (a minute with the default interval): a network that stays
@@ -33,9 +33,8 @@ export abstract class Bot {
         delay = interval;
       } catch (err) {
         delay = Math.min(delay * 2, interval * MAX_BACKOFF_FACTOR);
-        // Not String(), which throws for an object without a prototype: the failure would escape and end the loop after all
-        const reason = err instanceof Error ? err.message : inspect(err);
-        error('bot', `Failed to check for updates, next check in ${delay} ms: ${reason}`);
+        // Never throws, even for a value without a prototype: the failure would escape and end the loop after all
+        error('bot', `Failed to check for updates, next check in ${delay} ms: ${describeError(err)}`);
       }
       await wait(delay);
     }

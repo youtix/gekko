@@ -1,3 +1,4 @@
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
@@ -160,9 +161,9 @@ export class SQLiteStorage extends Storage {
       if (database !== IN_MEMORY) mkdirSync(dirname(database), { recursive: true }); // db/ is gitignored: absent from a fresh clone
       return new Database(database);
     } catch (error) {
-      const reason = error instanceof Error ? error.message : String(error);
       const hint = this.readOnly ? ' A backtest reads an existing database: check storage.database, or import the candles first.' : '';
-      throw new GekkoError('storage', `Cannot open the database ${resolve(database)} (${reason}).${hint}`);
+      // Kept as the cause, which main() appends to its report: only its message was kept, the error (its class, code and stack) dropped
+      throw new GekkoError('storage', `Cannot open the database ${resolve(database)} (${describeError(error)}).${hint}`, { cause: error });
     }
   }
 

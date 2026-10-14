@@ -13,11 +13,11 @@ import { UUID } from 'node:crypto';
 import { OrderSummary, Transaction } from './order.types';
 
 /**
- * A failure as an Error. Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder),
- * so an order reports a failure through orderErrored and never throws. A non-Error value is wrapped rather than dropped, so that
- * the order still ends with ORDER_ERRORED_EVENT.
+ * Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so an order reports a failure
+ * through orderErrored and never throws: a thrown value that is not an Error is wrapped in one rather than dropped, so that the order
+ * still ends with ORDER_ERRORED_EVENT. The order classes import it from here.
  */
-export const toError = (value: unknown) => (value instanceof Error ? value : new Error(String(value)));
+export { toError } from '@errors/error.utils';
 
 /**
  * The mean of `values` weighted by `weights`, worked out in decimal: the products and the sums exactly (see multiplyPrecise and

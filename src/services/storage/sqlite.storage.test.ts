@@ -110,6 +110,25 @@ describe('SQLiteStorage', () => {
       );
     });
 
+    // String() threw for it, from the catch meant to report it: the run stopped on a TypeError that named neither SQLite nor the file
+    it('reports a database it cannot open for a failure without a prototype, as util.inspect writes it', () => {
+      vi.mocked(Database).mockImplementationOnce(function () {
+        throw Object.assign(Object.create(null), { code: 'SQLITE_CANTOPEN' });
+      });
+      expect(() => new SQLiteStorage([])).toThrow(
+        new GekkoError('storage', `Cannot open the database ${resolve(database)} ([Object: null prototype] { code: 'SQLITE_CANTOPEN' }).`),
+      );
+    });
+
+    // main() appends the cause to its report: the error of SQLite, its class, its code and its stack, was dropped
+    it('keeps the failure to open the database as the cause', () => {
+      const failure = Object.assign(new Error('unable to open database file'), { code: 'SQLITE_CANTOPEN', errno: 14 });
+      vi.mocked(Database).mockImplementationOnce(function () {
+        throw failure;
+      });
+      expect(() => new SQLiteStorage([])).toThrow(expect.objectContaining({ cause: failure }));
+    });
+
     it.each`
       mode          | statements
       ${'importer'} | ${['PRAGMA busy_timeout = 5000;', 'PRAGMA journal_mode = WAL;', 'PRAGMA synchronous = NORMAL;', 'CREATE TABLE', 'CREATE TABLE']}

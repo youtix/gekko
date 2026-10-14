@@ -1,5 +1,6 @@
 import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
+import { describeError } from '@errors/error.utils';
 import { Candle } from '@models/candle.types';
 import { Timeframe } from '@models/configuration.types';
 import { CandleBucket } from '@models/event.types';
@@ -13,7 +14,6 @@ import { BufferedLog } from '@services/logger.types';
 import { toISOString } from '@utils/date/date.utils';
 import { shallowObjectDiff } from '@utils/object/object.utils';
 import { filter, isEmpty } from 'lodash-es';
-import { inspect } from 'node:util';
 import { supervisionSchema } from './supervision.schema';
 import { Subscription, SUBSCRIPTION_NAMES, SupervisionConfig } from './supervision.types';
 
@@ -37,12 +37,6 @@ const LAST_FLUSH_TIMEOUT = 15 * ONE_SECOND;
 
 /** The answer to a subscription once processFinalize has started */
 const STOPPING_ANSWER = 'Gekko is stopping: no monitoring can start any more';
-
-/**
- * A failure, as the logs name it. Not String(), which a template literal calls: it throws for a value without a prototype, and
- * thrown from a catch, the failure would escape after all.
- */
-const describeFailure = (err: unknown) => (err instanceof Error ? err.message : inspect(err));
 
 /** The checks that alert when a usage exceeds its threshold, as their alerts name them */
 type ThresholdCheck = 'CPU' | 'Memory';
@@ -250,7 +244,7 @@ export class Supervision extends Plugin {
     try {
       await this.bot.sendMessage(message);
     } catch (err) {
-      warning('supervision', `${check} alert not sent: ${describeFailure(err)}`);
+      warning('supervision', `${check} alert not sent: ${describeError(err)}`);
     } finally {
       this.alertsInFlight.delete(check);
     }
@@ -302,7 +296,7 @@ export class Supervision extends Plugin {
       await this.bot.sendMessage(message);
       this.candlesReportedStale = isStale;
     } catch (err) {
-      warning('supervision', `Candle alert not sent, sent again at the next check: ${describeFailure(err)}`);
+      warning('supervision', `Candle alert not sent, sent again at the next check: ${describeError(err)}`);
     }
   }
 
@@ -322,7 +316,7 @@ export class Supervision extends Plugin {
   private sendNewLogsInBackground() {
     if (this.logBatchInFlight) return debug('supervision', 'Log batch skipped: another one is in flight');
     this.logBatchInFlight = this.sendNewLogs()
-      .catch(err => debug('supervision', `Logs not sent, retried with the next batch: ${describeFailure(err)}`))
+      .catch(err => debug('supervision', `Logs not sent, retried with the next batch: ${describeError(err)}`))
       .finally(() => {
         this.logBatchInFlight = undefined;
       });
@@ -366,7 +360,7 @@ export class Supervision extends Plugin {
       const fields = Object.keys(diff).map(key => `${key}: ${exchangeCandle[key as keyof Candle]} | ${candle[key as keyof Candle]}`);
       await this.bot.sendMessage([`⚠️ Timeframe candle mismatch detected: ${candleName} (exchange | Gekko)`, ...fields].join('\n'));
     } catch (err) {
-      warning('supervision', `Timeframe candle check failed for the ${candleName}: ${describeFailure(err)}`);
+      warning('supervision', `Timeframe candle check failed for the ${candleName}: ${describeError(err)}`);
     }
   }
 
@@ -476,7 +470,7 @@ export class Supervision extends Plugin {
     const givenUp = new Promise<'given up'>(resolve => {
       timer = setTimeout(() => resolve('given up'), LAST_FLUSH_TIMEOUT);
     });
-    const flush = this.sendNewLogs().catch(err => warning('supervision', `Last logs not sent: ${describeFailure(err)}`));
+    const flush = this.sendNewLogs().catch(err => warning('supervision', `Last logs not sent: ${describeError(err)}`));
     const outcome = await Promise.race([flush, givenUp]);
     clearTimeout(timer); // Left pending, it would keep a process that ends normally alive until it fires
     if (outcome === 'given up') warning('supervision', `Last logs given up: not sent within ${LAST_FLUSH_TIMEOUT / ONE_SECOND} s`);

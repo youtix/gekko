@@ -1,4 +1,5 @@
 import { ONE_SECOND } from '@constants/time.const';
+import { describeError } from '@errors/error.utils';
 import { AdviceOrder } from '@models/advice.types';
 import {
   CandleBucket,
@@ -20,7 +21,6 @@ import { formatAmount, pluralize } from '@utils/string/string.utils';
 import { formatDuration, intervalToDuration } from 'date-fns';
 import { bindAll, filter, isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
-import { inspect } from 'node:util';
 import { eventSubscriberSchema } from './eventSubscriber.schema';
 import { Event, EVENT_NAMES, EventSubscriberConfig } from './eventSubscriber.types';
 
@@ -42,9 +42,8 @@ const LAST_FLUSH_TIMEOUT = 15 * ONE_SECOND;
 /** A message waiting for its turn, with the event it notifies of, which the logs name */
 type PendingNotification = { event: Event; text: string };
 
-/** How the logs say that a notification was not sent. Not String() for the reason, which throws for an object without a prototype. */
-const describeNotSent = (event: Event, err: unknown) =>
-  `The ${event} notification was not sent: ${err instanceof Error ? err.message : inspect(err)}`;
+/** How the logs say that a notification was not sent */
+const describeNotSent = (event: Event, err: unknown) => `The ${event} notification was not sent: ${describeError(err)}`;
 
 export class EventSubscriber extends Plugin {
   private bot: TelegramBot;

@@ -6,6 +6,7 @@ import {
   TIMEFRAME_CANDLE_EVENT,
 } from '@constants/event.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
+import { describeError } from '@errors/error.utils';
 import { AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -19,7 +20,6 @@ import { StrategyManager } from '@strategies/strategyManager';
 import { isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { bindAll, filter } from 'lodash-es';
 import { UUID } from 'node:crypto';
-import { inspect } from 'node:util';
 import { tradingAdvisorSchema } from './tradingAdvisor.schema';
 import { TradingAdvisorConfiguration } from './tradingAdvisor.types';
 
@@ -96,7 +96,7 @@ export class TradingAdvisor extends Plugin {
       return;
     }
     this.emit<StrategyInfo[]>(STRATEGY_INFO_EVENT, [strategyInfo]).catch((err: unknown) =>
-      error('trading advisor', `A listener failed on the error line of the strategy: ${err instanceof Error ? err.message : inspect(err)}`),
+      error('trading advisor', `A listener failed on the error line of the strategy: ${describeError(err)}`),
     );
   }
 

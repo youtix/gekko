@@ -1,5 +1,6 @@
 import { REALTIME_GRACE_PERIOD, REALTIME_MAX_CANDLES_PER_FETCH, REALTIME_MAX_TICKS_WITHOUT_CANDLE } from '@constants/realtime.const';
 import { ONE_MINUTE } from '@constants/time.const';
+import { describeError } from '@errors/error.utils';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';
@@ -74,10 +75,9 @@ export class RealtimeStream extends Readable {
       candles = await this.exchange.fetchOHLCV(this.symbol, { from, limit });
     } catch (error) {
       if (!this.destroyed) {
-        const reason = error instanceof Error ? error.message : String(error);
         warning(
           'stream',
-          `Failed to fetch the 1m candles of ${this.symbol} from ${toISOString(from)}, retrying on the next tick: ${reason}`,
+          `Failed to fetch the 1m candles of ${this.symbol} from ${toISOString(from)}, retrying on the next tick: ${describeError(error)}`,
         );
       }
       return 0;

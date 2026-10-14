@@ -1,8 +1,8 @@
+import { describeError } from '@errors/error.utils';
 import { fetcher } from '@services/fetcher/fetcher.service';
 import { debug, info, warning } from '@services/logger';
 import { pluralize } from '@utils/string/string.utils';
 import { isString } from 'lodash-es';
-import { inspect } from 'node:util';
 import { Bot } from '../Bot';
 import { HandleCommand } from '../bots.types';
 import { TelegramMessage, TelegramUpdate } from './telegram.types';
@@ -129,11 +129,10 @@ export class TelegramBot extends Bot {
       }
     } catch (err) {
       // The polls go on regardless, from the earliest update kept: the queued updates are handled as they come, as before this step
-      // existed, and the first command among them binds the bot. Not String(), which throws for an object without a prototype.
-      const reason = err instanceof Error ? err.message : inspect(err);
+      // existed, and the first command among them binds the bot
       warning(
         'bot',
-        `Telegram bot @${this.botUsername} could not drop the updates queued before start-up: ${reason}. ` +
+        `Telegram bot @${this.botUsername} could not drop the updates queued before start-up: ${describeError(err)}. ` +
           'It handles them as they come, so the first command among them, whoever sent it, binds it.',
       );
     }
@@ -149,9 +148,7 @@ export class TelegramBot extends Bot {
     // The offset is already past the whole batch: a failure that escaped would drop the updates after it for good
     for (const update of updates) {
       await this.handleUpdate(update).catch(err => {
-        // Not String(), which throws for an object without a prototype
-        const reason = err instanceof Error ? err.message : inspect(err);
-        warning('bot', `Failed to handle the Telegram update ${update.update_id}: ${reason}`);
+        warning('bot', `Failed to handle the Telegram update ${update.update_id}: ${describeError(err)}`);
       });
     }
   }

@@ -40,7 +40,6 @@ import {
 import { toTimestamp } from '@utils/date/date.utils';
 import { UUID } from 'node:crypto';
 import { resolve } from 'node:path';
-import { inspect } from 'node:util';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { TradingAdvisor } from './tradingAdvisor';
 import { tradingAdvisorSchema } from './tradingAdvisor.schema';
@@ -469,11 +468,12 @@ describe('TradingAdvisor', () => {
         ]);
       });
 
+      // A string as it is, as main() reports one: util.inspect quoted it
       it.each`
-        thrown                        | reason
-        ${new Error('Telegram down')} | ${'Telegram down'}
-        ${'Telegram down'}            | ${inspect('Telegram down')}
-      `('at error, has a listener that fails on it logged at error level: $reason', async ({ thrown, reason }) => {
+        failure       | thrown                        | reason
+        ${'an Error'} | ${new Error('Telegram down')} | ${'Telegram down'}
+        ${'a string'} | ${'Telegram down'}            | ${'Telegram down'}
+      `('at error, has a listener that fails on it with $failure logged at error level: $reason', async ({ thrown, reason }) => {
         strategy.onEachTimeframeCandle.mockImplementation(logErrorAndGoOn);
         advisor.on(STRATEGY_INFO_EVENT, () => {
           throw thrown;
