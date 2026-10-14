@@ -1,4 +1,5 @@
 import { EMPTY_ORDER_SUMMARY } from '@constants/order.const';
+import { ONE_SECOND } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { OrderSide, OrderType } from '@models/order.types';
 import { Trade } from '@models/trade.types';
@@ -7,7 +8,6 @@ import { Exchange } from '@services/exchange/exchange.types';
 import { debug } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
 import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@utils/math/math.utils';
-import { startOfSecond } from 'date-fns';
 import { filter, isNil, last, map, min, sortBy } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { OrderSummary, Transaction } from './order.types';
@@ -48,10 +48,13 @@ type CreateOrderSummaryParams = {
  * The bound the trades of an order are fetched from: the start of the second of its oldest transaction, which is not always the
  * first one listed (a timestamp may be the last update of the exchange order, or the time its state was read). Only finite
  * timestamps count. Without any, undefined: the exchange then returns its latest trades, where a NaN bound found none.
+ * The second is floored in epoch milliseconds: date-fns' startOfSecond works in local time, where a wall-clock time of the hour
+ * repeated when DST ends resolves to its first pass, so the trades of a transaction of the second pass were fetched from an hour
+ * earlier.
  */
 const getTradesStart = (transactions: Transaction[]) => {
   const oldestTimestamp = min(filter(map(transactions, 'timestamp'), timestamp => Number.isFinite(timestamp)));
-  return isNil(oldestTimestamp) ? undefined : startOfSecond(oldestTimestamp).getTime();
+  return isNil(oldestTimestamp) ? undefined : Math.floor(oldestTimestamp / ONE_SECOND) * ONE_SECOND;
 };
 
 type RatedTrade = Trade & { fee: { rate: number } };

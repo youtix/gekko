@@ -8,27 +8,47 @@ import { dummyExchangeSchema } from '@services/exchange/dummy/dummyCentralizedEx
 import { hyperliquidExchangeSchema } from '@services/exchange/hyperliquid/hyperliquid.schema';
 import { paperBinanceExchangeSchema } from '@services/exchange/paper/paperTradingBinanceExchange.schema';
 import { getCandleStart, getCandleTimeOffset } from '@utils/candle/candle.utils';
-import { toISOString, toTimestamp } from '@utils/date/date.utils';
-import { startOfMinute } from 'date-fns';
+import { startOfMinuteUTC, toISOString, toTimestamp } from '@utils/date/date.utils';
 import { difference, find, some } from 'lodash-es';
 import { z } from 'zod';
 import { TIMEFRAMES } from './configuration.const';
 
 const disclaimerField = 'I understand that Gekko only automates MY OWN trading strategies' as const;
 
-// js-yaml loads an unquoted timestamp as a Date. An invalid Date is not converted (toISOString() would throw)
-// and fails the string check instead.
-const isoDatetimeSchema = z.preprocess(
-  value => (value instanceof Date && !Number.isNaN(value.getTime()) ? value.toISOString() : value),
-  z.iso.datetime(),
-);
+/**
+ * A bound of watch.daterange, as text: a day, from its midnight UTC (2024-01-01), or a day and a time with Z or an offset
+ * (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00). zod's ISO patterns check it against the calendar before Date reads it: Date rolls
+ * a day that does not exist over (2023-02-29 to March 1st, 24:00 to the next day), as js-yaml did with an unquoted one until the loader
+ * kept YAML timestamps as text, so a range written with such a day ran from another one, without a word.
+ */
+const ISO_DAY_PATTERN = z.regexes.date;
+const ISO_DATETIME_PATTERN = z.regexes.datetime({ offset: true });
 
+const dateBoundSchema = (bound: 'start' | 'end') =>
+  z.string().refine(value => ISO_DAY_PATTERN.test(value) || ISO_DATETIME_PATTERN.test(value), {
+    error: ({ input }) =>
+      `watch.daterange.${bound} '${input}' must be a date that exists, in ISO 8601: a day (2024-01-01, from its midnight UTC), or a day and a time with Z or an offset (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00)`,
+  });
+
+/**
+ * Both bounds are included, each read as the minute holding it (the backtest reader, the importer): equal bounds are a one-minute
+ * range, and an end earlier in the minute of the start reads that minute. Checked in milliseconds once the configuration was loaded,
+ * the range of a one-minute re-import was refused, with a message in epoch milliseconds.
+ */
 const daterangeSchema = z
   .strictObject({
-    start: isoDatetimeSchema,
-    end: isoDatetimeSchema,
+    start: dateBoundSchema('start'),
+    end: dateBoundSchema('end'),
   })
-  .transform(({ start, end }) => ({ start: toTimestamp(start), end: toTimestamp(end) }));
+  .transform(({ start, end }) => ({ start: toTimestamp(start), end: toTimestamp(end) }))
+  .superRefine(({ start, end }, ctx) => {
+    if (startOfMinuteUTC(end) < startOfMinuteUTC(start)) {
+      ctx.addIssue({
+        code: 'custom',
+        message: `watch.daterange must end in the minute of its start or later: it starts at ${toISOString(start)} and ends at ${toISOString(end)}`,
+      });
+    }
+  });
 
 // tickrate and warmup.tickrate space the requests of a history download (the importer's, the realtime warmup's): the least delay,
 // in ms, between the starts of two of them
@@ -107,8 +127,8 @@ export const watchSchema = z
  * the candle the end of the range cuts is never completed. `endOfCandle(n)` is the end of the n-th candle, the start of the next one.
  */
 const getBacktestCandles = (candleSize: CandleSize, { start, end }: { start: EpochTimeStamp; end: EpochTimeStamp }) => {
-  const firstMinute = startOfMinute(start).getTime();
-  const endOfRange = startOfMinute(end).getTime() + ONE_MINUTE;
+  const firstMinute = startOfMinuteUTC(start);
+  const endOfRange = startOfMinuteUTC(end) + ONE_MINUTE;
   const firstCandleStart = getCandleTimeOffset(candleSize, firstMinute) ? getCandleStart(candleSize, firstMinute, -1) : firstMinute;
   const endOfCandle = (count: number) => getCandleStart(candleSize, firstCandleStart, -count);
   // Counted at the nominal length of a candle, then moved to the calendar: exact already but for the candles of whole months, whose
@@ -223,6 +243,24 @@ export const configurationSchema = z
           message: `Each marketData symbol must match a watched pair (not watched: ${unwatchedSymbols.join(', ')})`,
         });
       }
+    }
+
+    // The simulator holds the asset and the currency of each watched pair, nothing else (initializePortfolio), and dropped the balance
+    // of any other asset without a word: `usdt` for USDT started a backtest without its currency, its BUYs refused until the circuit
+    // breaker stopped it, and `btc` for BTC ran it from the currency alone. The rule reads the simulationBalance Map, so like the
+    // marketData rule it only checks a configuration whose sections have no issue, a repeated asset among them: the Map then holds the
+    // entries of the list in its order, one each, and the index of a key is that of its entry.
+    if ('simulationBalance' in data.exchange && !hasSectionIssues) {
+      const watchedAssets = [...data.watch.assets, data.watch.currency];
+      [...data.exchange.simulationBalance.keys()].forEach((assetName, index) => {
+        if (!watchedAssets.includes(assetName)) {
+          ctx.addIssue({
+            code: 'custom',
+            path: ['exchange', 'simulationBalance', index, 'assetName'],
+            message: `simulationBalance assetName '${assetName}' must name a watched asset or the currency (${watchedAssets.join(', ')}), the only balances the simulator holds`,
+          });
+        }
+      });
     }
 
     // strategyName selects the strategy class, strategy.name only labels the run (backtest log, PerformanceReporter rows): a

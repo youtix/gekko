@@ -1,4 +1,4 @@
-import { load } from 'js-yaml';
+import { useTimeZone } from '@utils/date/date.mock';
 import { cloneDeep, get, set } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { configurationSchema, watchSchema } from './configuration.schema';
@@ -26,34 +26,10 @@ const marketDataEntry = (symbol: string) => ({
   },
 });
 
-// js-yaml loads the unquoted timestamps below as Date objects, not strings.
-const UNQUOTED_DATERANGE_YAML = `
-watch:
-  assets: [BTC]
-  currency: USDT
-  timeframe: 1m
-  mode: backtest
-  daterange:
-    start: 2023-01-01T00:00:00Z
-    end: 2023-01-02T00:00:00Z
-exchange:
-  name: dummy-cex
-  simulationBalance:
-    - assetName: USDT
-      balance: 1000
-  marketData:
-    - symbol: BTC/USDT
-      marketData:
-        price: { min: 0.01, max: 1000000 }
-        amount: { min: 0.00001, max: 9000 }
-        cost: { min: 5, max: 9000000 }
-        precision: { price: 8, amount: 8 }
-        fee: { maker: 0.0004, taker: 0.0007 }
-storage:
-  type: sqlite
-  database: db/candles.sql
-plugins: []
-`;
+const boundMessage = (bound: 'start' | 'end', value: string) =>
+  `watch.daterange.${bound} '${value}' must be a date that exists, in ISO 8601: a day (2024-01-01, from its midnight UTC), or a day and a time with Z or an offset (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00)`;
+const orderMessage = (start: string, end: string) =>
+  `watch.daterange must end in the minute of its start or later: it starts at ${start} and ends at ${end}`;
 
 // Required in backtest mode and by CandleWriter
 const sqliteStorage = { type: 'sqlite', database: 'db/candles.sql' };
@@ -186,25 +162,81 @@ describe('watchSchema', () => {
 
   describe('daterange', () => {
     const backtestWatch = { ...baseWatch, mode: 'backtest' as const };
+    const parseRange = (start: unknown, end: unknown) => watchSchema.safeParse({ ...backtestWatch, daterange: { start, end } });
 
+    it('converts ISO strings to epoch milliseconds', () => {
+      expect(parseRange(ISO_START, ISO_END).data?.daterange).toEqual({ start: START_TIMESTAMP, end: END_TIMESTAMP });
+    });
+
+    // Each row is both bounds of the range, a one-minute range
     it.each`
-      scenario          | start                  | end
-      ${'ISO strings'}  | ${ISO_START}           | ${ISO_END}
-      ${'a Date start'} | ${new Date(ISO_START)} | ${ISO_END}
-      ${'a Date end'}   | ${ISO_START}           | ${new Date(ISO_END)}
-    `('converts $scenario to epoch milliseconds', ({ start, end }) => {
-      const { daterange } = watchSchema.parse({ ...backtestWatch, daterange: { start, end } });
-      expect(daterange).toEqual({ start: START_TIMESTAMP, end: END_TIMESTAMP });
+      scenario                                 | bound                          | expected
+      ${'a day and a time in UTC'}             | ${'2023-01-01T00:00:00Z'}      | ${START_TIMESTAMP}
+      ${'a day and a time with an offset'}     | ${'2023-01-01T02:00:00+02:00'} | ${START_TIMESTAMP}
+      ${'a day and a time without seconds'}    | ${'2023-01-01T00:00Z'}         | ${START_TIMESTAMP}
+      ${'a day alone, from its midnight UTC'}  | ${'2023-01-01'}                | ${START_TIMESTAMP}
+      ${'the 29th of February of a leap year'} | ${'2024-02-29'}                | ${Date.UTC(2024, 1, 29)}
+      ${'the 29th of February of 2000'}        | ${'2000-02-29T00:00:00Z'}      | ${Date.UTC(2000, 1, 29)}
+    `('reads $scenario, $bound, as $expected', ({ bound, expected }) => {
+      expect(parseRange(bound, bound).data?.daterange).toEqual({ start: expected, end: expected });
+    });
+
+    // Date reads a day that does not exist as another one (2023-02-29 as March 1st, 24:00 as the next day), and js-yaml did so with an
+    // unquoted one before the schema saw it: such a range ran from another day than the one written, without a word
+    it.each`
+      scenario                                   | bound
+      ${'the 29th of February of a common year'} | ${'2023-02-29'}
+      ${'that day with a time'}                  | ${'2023-02-29T00:00:00Z'}
+      ${'the 29th of February of 1900'}          | ${'1900-02-29'}
+      ${'the 31st of April'}                     | ${'2023-04-31'}
+      ${'a 13th month'}                          | ${'2023-13-01'}
+      ${'the hour 24'}                           | ${'2023-02-28T24:00:00Z'}
+      ${'the second 60'}                         | ${'2023-01-01T00:00:60Z'}
+      ${'an offset of 25 hours'}                 | ${'2023-01-01T00:00:00+25:00'}
+      ${'a time without a zone'}                 | ${'2023-01-01T00:00:00'}
+      ${'a space instead of the T'}              | ${'2023-01-01 00:00:00Z'}
+      ${'a word'}                                | ${'yesterday'}
+      ${'an empty text'}                         | ${''}
+    `('refuses $scenario, $bound, naming it', ({ bound }) => {
+      expect(parseRange(bound, ISO_END).error?.issues).toMatchObject([
+        { path: ['daterange', 'start'], message: boundMessage('start', bound) },
+      ]);
+    });
+
+    it('refuses an end that does not exist, naming it at its own path', () => {
+      expect(parseRange(ISO_START, '2023-04-31').error?.issues).toMatchObject([
+        { path: ['daterange', 'end'], message: boundMessage('end', '2023-04-31') },
+      ]);
+    });
+
+    // A configuration file gives text, JSON and YAML alike (the loader keeps YAML timestamps as text)
+    it.each`
+      scenario                           | start                     | end                  | path
+      ${'a Date start'}                  | ${new Date(ISO_START)}    | ${ISO_END}           | ${['daterange', 'start']}
+      ${'a Date end'}                    | ${ISO_START}              | ${new Date(ISO_END)} | ${['daterange', 'end']}
+      ${'an invalid Date start'}         | ${new Date('not a date')} | ${ISO_END}           | ${['daterange', 'start']}
+      ${'a start in epoch milliseconds'} | ${START_TIMESTAMP}        | ${ISO_END}           | ${['daterange', 'start']}
+    `('reports $scenario as a type issue on its path', ({ start, end, path }) => {
+      expect(parseRange(start, end).error?.issues).toMatchObject([{ path, code: 'invalid_type' }]);
+    });
+
+    // The readers take each bound as the minute holding it, both included: equal bounds are a one-minute range, the range of a
+    // one-minute re-import, which the check refused when it compared milliseconds
+    it.each`
+      scenario                                       | start                         | end
+      ${'equal bounds, one minute'}                  | ${'2024-03-01T10:23:00Z'}     | ${'2024-03-01T10:23:00Z'}
+      ${'an end earlier in the minute of the start'} | ${'2024-03-01T10:23:45Z'}     | ${'2024-03-01T10:23:30Z'}
+      ${'an end in the next minute'}                 | ${'2024-03-01T10:23:59.999Z'} | ${'2024-03-01T10:24:00Z'}
+    `('accepts $scenario', ({ start, end }) => {
+      expect(parseRange(start, end).error?.issues).toBeUndefined();
     });
 
     it.each`
-      scenario                      | start                     | end                       | issue
-      ${'an invalid Date start'}    | ${new Date('not a date')} | ${ISO_END}                | ${{ path: ['daterange', 'start'], code: 'invalid_type' }}
-      ${'an invalid Date end'}      | ${ISO_START}              | ${new Date('not a date')} | ${{ path: ['daterange', 'end'], code: 'invalid_type' }}
-      ${'a date-only string start'} | ${'2023-01-01'}           | ${ISO_END}                | ${{ path: ['daterange', 'start'], message: 'Invalid ISO datetime' }}
-    `('reports $scenario as an issue on its path', ({ start, end, issue }) => {
-      const result = watchSchema.safeParse({ ...backtestWatch, daterange: { start, end } });
-      expect(result.error?.issues).toMatchObject([issue]);
+      scenario                         | start                     | end                           | startISO                      | endISO
+      ${'an end in the minute before'} | ${'2024-03-01T10:23:00Z'} | ${'2024-03-01T10:22:59.999Z'} | ${'2024-03-01T10:23:00.000Z'} | ${'2024-03-01T10:22:59.999Z'}
+      ${'an end a day before'}         | ${'2023-01-02'}           | ${'2023-01-01'}               | ${'2023-01-02T00:00:00.000Z'} | ${'2023-01-01T00:00:00.000Z'}
+    `('refuses $scenario, naming both bounds in ISO 8601', ({ start, end, startISO, endISO }) => {
+      expect(parseRange(start, end).error?.issues).toMatchObject([{ path: ['daterange'], message: orderMessage(startISO, endISO) }]);
     });
 
     // Omitted, not null: YAML loads a `daterange:` key with no value as null, which fails the type check before this rule runs.
@@ -557,11 +589,6 @@ describe('configurationSchema', () => {
     });
   });
 
-  it('accepts a YAML daterange written as unquoted ISO timestamps', () => {
-    const { watch } = configurationSchema.parse(load(UNQUOTED_DATERANGE_YAML));
-    expect(watch.daterange).toEqual({ start: START_TIMESTAMP, end: END_TIMESTAMP });
-  });
-
   describe('dummy-cex marketData', () => {
     const createBacktestConfig = (assets: string[], symbols?: string[]) => ({
       ...createBaseConfig(),
@@ -635,7 +662,7 @@ describe('configurationSchema', () => {
         ${'a duplicated asset'}                  | ${['watch', 'assets']}                     | ${['BTC', 'BTC']}                 | ${{ path: ['watch', 'assets'], message: 'assets must not contain duplicates (repeated: BTC)' }}
         ${'an asset with a slash'}               | ${['watch', 'assets']}                     | ${['BTC/USDT']}                   | ${{ path: ['watch', 'assets', 0], message: 'Asset must not contain a slash' }}
         ${'6 assets'}                            | ${['watch', 'assets']}                     | ${['A', 'B', 'C', 'D', 'E', 'F']} | ${{ path: ['watch', 'assets'], message: 'Maximum 5 assets allowed' }}
-        ${'a daterange start that is not ISO'}   | ${['watch', 'daterange', 'start']}         | ${'yesterday'}                    | ${{ path: ['watch', 'daterange', 'start'], message: 'Invalid ISO datetime' }}
+        ${'a daterange start that is not ISO'}   | ${['watch', 'daterange', 'start']}         | ${'yesterday'}                    | ${{ path: ['watch', 'daterange', 'start'], message: boundMessage('start', 'yesterday') }}
         ${'an asset equal to the currency'}      | ${['watch', 'assets']}                     | ${['USDT']}                       | ${{ path: ['watch', 'assets'], message: 'assets must not contain the currency (USDT)' }}
         ${'a marketData symbol without a slash'} | ${['exchange', 'marketData', 0, 'symbol']} | ${'BTCUSDT'}                      | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: 'Symbol must contain a slash' }}
         ${'a lowercase marketData symbol'}       | ${['exchange', 'marketData', 0, 'symbol']} | ${'btc/usdt'}                     | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: malformedSymbolMessage('btc/usdt') }}
@@ -731,7 +758,6 @@ describe('configurationSchema', () => {
       ${'calendar months, a 29-day February included'}              | ${'1M'}   | ${1}        | ${'2024-01-15T00:00:00Z'} | ${'2024-03-31T23:58:00Z'} | ${1}  | ${'2024-02-01T00:00:00.000Z'} | ${'2024-03-31T23:59:00.000Z'}
       ${'361 days, a year not over yet'}                            | ${'1y'}   | ${0}        | ${'2023-01-01T00:00:00Z'} | ${'2023-12-27T23:59:00Z'} | ${0}  | ${'2023-01-01T00:00:00.000Z'} | ${'2023-12-31T23:59:00.000Z'}
       ${'seconds, which the backtest drops'}                        | ${'1m'}   | ${2}        | ${'2024-01-01T00:00:30Z'} | ${'2024-01-01T00:01:59Z'} | ${2}  | ${'2024-01-01T00:00:00.000Z'} | ${'2024-01-01T00:02:00.000Z'}
-      ${'an end before the start'}                                  | ${'1d'}   | ${10}       | ${'2024-02-01T00:00:00Z'} | ${'2024-01-01T00:00:00Z'} | ${0}  | ${'2024-02-01T00:00:00.000Z'} | ${'2024-02-11T23:59:00.000Z'}
     `(
       'refuses a range of $timeframe candles with $scenario, saying where it must end',
       ({ timeframe, candleCount, start, end, held, first, lastMinuteNeeded }) => {
@@ -748,6 +774,7 @@ describe('configurationSchema', () => {
     // One candle more than the warmup, each range ending on the last minute the refusal above asks for
     it.each`
       scenario                                                      | timeframe | candleCount | start                     | end
+      ${'equal bounds, one minute, without warmup'}                 | ${'1m'}   | ${0}        | ${'2024-03-01T10:23:00Z'} | ${'2024-03-01T10:23:00Z'}
       ${'one candle more than warmup.candleCount'}                  | ${'1m'}   | ${10}       | ${'2024-01-01T00:00:00Z'} | ${'2024-01-01T00:10:00Z'}
       ${'the minutes before the first boundary, which are skipped'} | ${'1h'}   | ${2}        | ${'2024-01-01T00:30:00Z'} | ${'2024-01-01T03:59:00Z'}
       ${'one whole candle, without warmup'}                         | ${'1d'}   | ${0}        | ${'2024-01-01T10:00:00Z'} | ${'2024-01-02T23:59:00Z'}
@@ -780,6 +807,110 @@ describe('configurationSchema', () => {
     `('stands down when a section has an issue: $scenario', ({ path, value }) => {
       const config = set(createWarmupConfig('1m', 10, '2024-01-01T00:00:00Z', '2024-01-01T00:09:00Z'), path, value);
       expect(configurationSchema.safeParse(config).error?.issues.map(issue => issue.path)).toEqual([path]);
+    });
+
+    // Counted from the start, a range that ends before it starts held no candle, and was refused for the warmup, asking for an end
+    // after its start
+    it('reports a range that ends before it starts as the only issue, at watch.daterange', () => {
+      const result = configurationSchema.safeParse(createWarmupConfig('1d', 10, '2024-02-01T00:00:00Z', '2024-01-01T00:00:00Z'));
+      expect(result.error?.issues).toMatchObject([
+        { path: ['watch', 'daterange'], message: orderMessage('2024-02-01T00:00:00.000Z', '2024-01-01T00:00:00.000Z') },
+      ]);
+    });
+
+    // On 2025-10-26 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+    // Floored in local time, a bound in that second pass was read an hour early: a range ending in it was refused, one candle short,
+    // asking for an end it already had.
+    describe.each`
+      timeZone
+      ${'UTC'}
+      ${'Europe/Paris'}
+    `('on a host in $timeZone, around the hour Paris repeats when DST ends', ({ timeZone }) => {
+      useTimeZone(timeZone);
+
+      it.each`
+        scenario                                         | start                     | end
+        ${'two candles, the second ending in that hour'} | ${'2025-10-26T00:00:00Z'} | ${'2025-10-26T01:59:00Z'}
+        ${'two candles, then half an hour'}              | ${'2025-10-25T23:00:00Z'} | ${'2025-10-26T01:30:00Z'}
+      `('accepts a range of 1h candles with $scenario, for a warmup of one', ({ start, end }) => {
+        const result = configurationSchema.safeParse(createWarmupConfig('1h', 1, start, end));
+        expect(result.error?.issues).toBeUndefined();
+      });
+
+      it('refuses a range of one 1h candle, that hour, for a warmup of one, saying where it must end', () => {
+        const result = configurationSchema.safeParse(createWarmupConfig('1h', 1, '2025-10-26T01:00:00Z', '2025-10-26T01:59:00Z'));
+        expect(result.error?.issues).toMatchObject([
+          {
+            path: ['watch', 'daterange'],
+            message:
+              'watch.daterange must hold more whole 1h candles than warmup.candleCount (1), or the warmup never ends and the strategy never trades: it holds 1 from 2025-10-26T01:00:00.000Z, its first 1h boundary, so it must end at 2025-10-26T02:59:00.000Z or later',
+          },
+        ]);
+      });
+    });
+  });
+
+  // The simulator holds the asset and the currency of each watched pair, nothing else: the balance of any other asset was dropped
+  // without a word, so `usdt` started a backtest without its currency, and `btc` 0.05 ran it from the currency alone
+  describe('simulationBalance', () => {
+    type Balance = { assetName: string; balance: number };
+    const createSimulatedConfig = (exchange: string, assets: string[], currency: string, simulationBalance: Balance[]) => ({
+      ...createBaseConfig(),
+      watch:
+        exchange === 'dummy-cex'
+          ? { ...createBaseConfig().watch, assets, currency, mode: 'backtest', daterange: { start: ISO_START, end: ISO_END } }
+          : { ...createBaseConfig().watch, assets, currency },
+      exchange:
+        exchange === 'dummy-cex'
+          ? { name: exchange, simulationBalance, marketData: assets.map(asset => marketDataEntry(`${asset}/${currency}`)) }
+          : { name: exchange, simulationBalance },
+      storage: sqliteStorage,
+    });
+    const balanceIssue = (index: number, assetName: string, watched: string) => ({
+      path: ['exchange', 'simulationBalance', index, 'assetName'],
+      message: `simulationBalance assetName '${assetName}' must name a watched asset or the currency (${watched}), the only balances the simulator holds`,
+    });
+
+    it.each`
+      scenario                                   | exchange           | assets            | currency  | balances                                                                       | issues
+      ${'the currency in lower case'}            | ${'dummy-cex'}     | ${['BTC']}        | ${'USDT'} | ${[{ assetName: 'BTC', balance: 0 }, { assetName: 'usdt', balance: 1000 }]}    | ${[balanceIssue(1, 'usdt', 'BTC, USDT')]}
+      ${'an asset in lower case'}                | ${'paper-binance'} | ${['BTC']}        | ${'USDT'} | ${[{ assetName: 'btc', balance: 0.05 }, { assetName: 'USDT', balance: 1000 }]} | ${[balanceIssue(0, 'btc', 'BTC, USDT')]}
+      ${'the currency the watch switched from'}  | ${'dummy-cex'}     | ${['BTC']}        | ${'USDC'} | ${[{ assetName: 'BTC', balance: 0 }, { assetName: 'USDT', balance: 1000 }]}    | ${[balanceIssue(1, 'USDT', 'BTC, USDC')]}
+      ${'an asset no watched pair holds'}        | ${'paper-binance'} | ${['BTC', 'ETH']} | ${'USDT'} | ${[{ assetName: 'SOL', balance: 5 }, { assetName: 'USDT', balance: 1000 }]}    | ${[balanceIssue(0, 'SOL', 'BTC, ETH, USDT')]}
+      ${'two balances of names nothing watches'} | ${'dummy-cex'}     | ${['BTC']}        | ${'USDT'} | ${[{ assetName: 'btc', balance: 1 }, { assetName: 'usdt', balance: 1000 }]}    | ${[balanceIssue(0, 'btc', 'BTC, USDT'), balanceIssue(1, 'usdt', 'BTC, USDT')]}
+    `('refuses $scenario on $exchange, naming the watched assets and the currency', ({ exchange, assets, currency, balances, issues }) => {
+      const result = configurationSchema.safeParse(createSimulatedConfig(exchange, assets, currency, balances));
+      expect(result.error?.issues).toMatchObject(issues);
+    });
+
+    it.each`
+      scenario                                               | exchange           | assets            | currency  | balances
+      ${'a balance for each watched asset and the currency'} | ${'dummy-cex'}     | ${['BTC', 'ETH']} | ${'USDT'} | ${[{ assetName: 'BTC', balance: 1 }, { assetName: 'ETH', balance: 2 }, { assetName: 'USDT', balance: 1000 }]}
+      ${'the currency alone'}                                | ${'paper-binance'} | ${['BTC']}        | ${'USDT'} | ${[{ assetName: 'USDT', balance: 1000 }]}
+    `('accepts $scenario on $exchange', ({ exchange, assets, currency, balances }) => {
+      const result = configurationSchema.safeParse(createSimulatedConfig(exchange, assets, currency, balances));
+      expect(result.error?.issues).toBeUndefined();
+    });
+
+    // Repeated, the list is not read into a Map: the rule stands down, as the marketData rule does
+    it('reports a repeated balance asset that nothing watches as the only issue', () => {
+      const balances = [
+        { assetName: 'usdt', balance: 1000 },
+        { assetName: 'usdt', balance: 100 },
+      ];
+      const result = configurationSchema.safeParse(createSimulatedConfig('dummy-cex', ['BTC'], 'USDT', balances));
+      expect(result.error?.issues).toMatchObject([
+        { path: ['exchange', 'simulationBalance'], message: 'simulationBalance must hold one entry per assetName (repeated: usdt)' },
+      ]);
+    });
+
+    it('stands down when a section has an issue', () => {
+      const config = set(
+        createSimulatedConfig('paper-binance', ['BTC'], 'USDT', [{ assetName: 'usdt', balance: 1000 }]),
+        ['watch', 'tickrate'],
+        50,
+      );
+      expect(configurationSchema.safeParse(config).error?.issues.map(issue => issue.path)).toEqual([['watch', 'tickrate']]);
     });
   });
 });

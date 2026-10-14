@@ -1,7 +1,6 @@
 import { GekkoError } from '@errors/gekko.error';
-import { isDaterangeValid } from '@utils/date/date.utils';
 import { readFileSync } from 'fs';
-import { load } from 'js-yaml';
+import { CORE_SCHEMA, load } from 'js-yaml';
 import JSON5 from 'json5';
 import { find, isNil } from 'lodash-es';
 import { extname } from 'path';
@@ -20,7 +19,10 @@ export class Configuration {
     if (!isJson && !isYaml)
       throw new GekkoError('configuration', `Unsupported file extension: ${configFilePath} (expected .json, .json5, .yml or .yaml)`);
     const data = readFileSync(configFilePath, 'utf8');
-    const content = isJson ? JSON5.parse(data) : load(data);
+    // YAML's core schema, without the timestamps of js-yaml's default one: an unquoted date became a Date before the schema saw it,
+    // rolled over when it did not exist (2023-02-29 read as March 1st). Kept as text, it is checked like a quoted one. The default
+    // schema's merge key (<<) and its !!binary, !!omap, !!pairs and !!set tags go with it: no configuration has a use for them.
+    const content = isJson ? JSON5.parse(data) : load(data, { schema: CORE_SCHEMA });
     if (isNil(content)) throw new GekkoError('configuration', `Empty configuration file: ${configFilePath}`);
     const result = configurationSchema.safeParse(content);
     // Not the ZodError itself, whose message, the JSON of its issues, names no file: a GekkoError, which the fatal error report
@@ -47,14 +49,6 @@ export class Configuration {
 
   public getWatch() {
     if (!this.configuration) throw new GekkoError('configuration', 'Empty configuration file');
-    const { daterange, mode } = this.configuration.watch;
-
-    if (mode === 'importer' && daterange && !isDaterangeValid(daterange.start, daterange.end))
-      throw new GekkoError('configuration', `Wrong date range: ${daterange.start} -> ${daterange.end}`);
-
-    if (mode === 'backtest' && daterange && !isDaterangeValid(daterange.start, daterange.end))
-      throw new GekkoError('configuration', `Wrong date range: ${daterange.start} -> ${daterange.end}`);
-
     return this.configuration.watch;
   }
 

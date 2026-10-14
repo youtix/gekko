@@ -160,6 +160,55 @@ describe('Configuration Service', () => {
       setConfigFile('config.yml', content);
       expect(() => new Configuration()).toThrow('[CONFIGURATION] Empty configuration file: config.yml');
     });
+
+    // js-yaml's default schema loaded an unquoted timestamp as a Date, rolled over when the day did not exist (2023-02-29 as March 1st),
+    // while the schema refused a quoted day or offset: the loader keeps YAML timestamps as text, which the schema checks either way
+    describe('with a YAML daterange', () => {
+      /** An importer configuration file, its daterange.start written as `start` is */
+      const importerYaml = (start: string) =>
+        [
+          'watch:',
+          '  assets: [BTC]',
+          '  currency: USDT',
+          '  mode: importer',
+          '  daterange:',
+          `    start: ${start}`,
+          '    end: 2023-01-02T00:00:00Z',
+          'exchange:',
+          '  name: binance',
+          'plugins: []',
+        ].join('\n');
+      const quoted = (text: string) => `'${text}'`;
+
+      it.each`
+        form                                          | start
+        ${'an unquoted date and time'}                | ${'2023-01-01T00:00:00Z'}
+        ${'a quoted date and time'}                   | ${quoted('2023-01-01T00:00:00Z')}
+        ${'an unquoted day'}                          | ${'2023-01-01'}
+        ${'a quoted day'}                             | ${quoted('2023-01-01')}
+        ${'an unquoted date and time with an offset'} | ${'2023-01-01T02:00:00+02:00'}
+        ${'a quoted date and time with an offset'}    | ${quoted('2023-01-01T02:00:00+02:00')}
+      `('should read $form, $start, as 2023-01-01T00:00:00.000Z', ({ start }) => {
+        setConfigFile('config.yml', importerYaml(start));
+        expect(new Configuration().getWatch().daterange).toEqual({ start: Date.UTC(2023, 0, 1), end: Date.UTC(2023, 0, 2) });
+      });
+
+      it.each`
+        start
+        ${'2023-02-29'}
+        ${'2023-04-31'}
+        ${'2023-13-01'}
+        ${'2023-02-28T24:00:00Z'}
+        ${'2023-01-01T00:00:00+25:00'}
+      `('should refuse $start, a date that does not exist, unquoted, naming it and its path', ({ start }) => {
+        setConfigFile('config.yml', importerYaml(start));
+        expect(() => new Configuration()).toThrow(
+          expect.objectContaining({
+            message: `[CONFIGURATION] Invalid configuration file config.yml:\n✖ watch.daterange.start '${start}' must be a date that exists, in ISO 8601: a day (2024-01-01, from its midnight UTC), or a day and a time with Z or an offset (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00)\n  → at watch.daterange.start`,
+          }),
+        );
+      });
+    });
   });
 
   describe('Methods', () => {
@@ -251,37 +300,38 @@ describe('Configuration Service', () => {
         });
       });
 
-      it('should throw on invalid daterange in importer mode', () => {
-        const invalidRangeConfig = {
+      // Both bounds are included, each as the minute holding it: equal bounds are the range of a one-minute re-import, which getWatch
+      // refused when it compared milliseconds, quoting them
+      it('should return equal bounds, a one-minute range, in importer mode', () => {
+        const daterange = { start: '2023-01-01T10:23:00Z', end: '2023-01-01T10:23:00Z' };
+        setConfigFile('config.json', {
           ...mockConfig,
           exchange: importerExchange,
-          watch: {
-            ...mockConfig.watch,
-            mode: 'importer',
-            daterange: { start: '2023-01-02T00:00:00Z', end: '2023-01-01T00:00:00Z' },
-          },
-        };
-        setConfigFile('config.json', invalidRangeConfig);
-        const config = new Configuration();
-        expect(() => config.getWatch()).toThrow(/Wrong date range/);
+          watch: { ...mockConfig.watch, mode: 'importer', daterange },
+        });
+        expect(new Configuration().getWatch().daterange).toEqual({
+          start: Date.UTC(2023, 0, 1, 10, 23),
+          end: Date.UTC(2023, 0, 1, 10, 23),
+        });
       });
 
-      it('should throw on invalid daterange in backtest mode', () => {
-        const invalidRangeConfig = {
-          ...mockConfig,
-          exchange: backtestExchange,
-          watch: {
-            ...mockConfig.watch,
-            mode: 'backtest',
-            daterange: { start: '2023-01-02T00:00:00Z', end: '2023-01-01T00:00:00Z' },
-          },
-          storage: { type: 'sqlite', database: 'gekko.db' },
-        };
-        setConfigFile('config.json', invalidRangeConfig);
-        const config = new Configuration();
-
-        expect(() => config.getWatch()).toThrow(/Wrong date range/);
-      });
+      it.each`
+        mode          | exchange            | storage
+        ${'importer'} | ${importerExchange} | ${undefined}
+        ${'backtest'} | ${backtestExchange} | ${{ type: 'sqlite', database: 'gekko.db' }}
+      `(
+        'should refuse at load a range that ends before it starts in $mode mode, naming both bounds in ISO 8601',
+        ({ mode, exchange, storage }) => {
+          const daterange = { start: '2023-01-02T00:00:00Z', end: '2023-01-01T00:00:00Z' };
+          setConfigFile('config.json', { ...mockConfig, exchange, storage, watch: { ...mockConfig.watch, mode, daterange } });
+          expect(() => new Configuration()).toThrow(
+            expect.objectContaining({
+              message:
+                '[CONFIGURATION] Invalid configuration file config.json:\n✖ watch.daterange must end in the minute of its start or later: it starts at 2023-01-02T00:00:00.000Z and ends at 2023-01-01T00:00:00.000Z\n  → at watch.daterange',
+            }),
+          );
+        },
+      );
     });
 
     describe('getStorage', () => {

@@ -3,6 +3,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { Trade } from '@models/trade.types';
 import { Exchange } from '@services/exchange/exchange.types';
 import { debug } from '@services/logger';
+import { useTimeZone } from '@utils/date/date.mock';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Transaction } from './order.types';
 import { createOrderSummary, getWeightedAverage, toError } from './order.utils';
@@ -88,6 +89,22 @@ describe('createOrderSummary', () => {
   `('fetches the trades from the start of the second of the oldest finite timestamp when $case', async ({ timestamps, from }) => {
     await summarize(timestamps.map((timestamp: EpochTimeStamp, index: number) => transaction(`ex-${index}`, timestamp)));
     expect(fetchMyTrades).toHaveBeenCalledWith('BTC/USDT', from);
+  });
+
+  // On 2025-10-26 Paris goes from 03:00 CEST back to 02:00 CET: the hour from 01:00Z to 02:00Z is the second pass of 02:00-03:00.
+  // Floored in local time, a timestamp of that second pass fetched the trades from an hour earlier.
+  describe('on a host in Europe/Paris', () => {
+    useTimeZone('Europe/Paris');
+
+    it.each`
+      case                                         | timestamp                     | from
+      ${'a transaction of the second pass'}        | ${'2025-10-26T01:30:00.500Z'} | ${'2025-10-26T01:30:00.000Z'}
+      ${'the last millisecond of the second pass'} | ${'2025-10-26T01:59:59.999Z'} | ${'2025-10-26T01:59:59.000Z'}
+      ${'a transaction of the first pass'}         | ${'2025-10-26T00:30:00.500Z'} | ${'2025-10-26T00:30:00.000Z'}
+    `('fetches the trades from $from for $case, at $timestamp', async ({ timestamp, from }) => {
+      await summarize([transaction('ex-0', Date.parse(timestamp))]);
+      expect(fetchMyTrades).toHaveBeenCalledWith('BTC/USDT', Date.parse(from));
+    });
   });
 
   it('logs an unknown start for the trades fetched when no timestamp is a finite number', async () => {

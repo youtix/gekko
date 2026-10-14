@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { useTimeZone } from './date.mock';
-import { isDaterangeValid, splitIntervals, startOfMinuteUTC, toISOString, toTimestamp } from './date.utils';
+import { splitIntervals, startOfMinuteUTC, toISOString, toTimestamp } from './date.utils';
 
 describe('date utils', () => {
   describe('toISOString', () => {
@@ -31,24 +31,15 @@ describe('date utils', () => {
     `('returns $expected for $description', ({ iso8601String, expected }) => {
       expect(toTimestamp(iso8601String)).toBe(expected);
     });
-  });
 
-  describe('isDaterangeValid', () => {
-    it.each`
-      startDate                           | endDate                             | expected
-      ${undefined}                        | ${undefined}                        | ${false}
-      ${null}                             | ${null}                             | ${false}
-      ${''}                               | ${''}                               | ${false}
-      ${'invalid-date'}                   | ${new Date('2023-01-01').getTime()} | ${false}
-      ${new Date('2023-01-01').getTime()} | ${'invalid-date'}                   | ${false}
-      ${'invalid-date'}                   | ${'invalid-date'}                   | ${false}
-      ${new Date('2023-12-31').getTime()} | ${new Date('2023-01-01').getTime()} | ${false}
-      ${new Date('2023-05-15').getTime()} | ${new Date('2023-05-14').getTime()} | ${false}
-      ${new Date('2023-01-01').getTime()} | ${new Date('2023-01-01').getTime()} | ${false}
-      ${new Date('2023-01-01').getTime()} | ${new Date('2023-12-31').getTime()} | ${true}
-      ${new Date('2023-05-14').getTime()} | ${new Date('2023-05-15').getTime()} | ${true}
-    `('returns $expected for startDate: $startDate and endDate: $endDate', ({ startDate, endDate, expected }) => {
-      expect(isDaterangeValid(startDate, endDate)).toBe(expected);
+    // A day alone is read in UTC, where a day and a time without a zone would be read in local time: the configuration takes a
+    // daterange bound written as a day for its midnight UTC
+    describe('on a host in America/New_York', () => {
+      useTimeZone('America/New_York');
+
+      it('returns 1704326400000, its midnight UTC, for a day alone, 2024-01-04', () => {
+        expect(toTimestamp('2024-01-04')).toBe(1704326400000);
+      });
     });
   });
 

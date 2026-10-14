@@ -1,5 +1,5 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import { isBefore, isValid } from 'date-fns';
+import { isValid } from 'date-fns';
 import { isNil } from 'lodash-es';
 
 /**
@@ -20,10 +20,6 @@ export const toTimestamp = (iso8601String?: string): EpochTimeStamp => new Date(
  * live stream pushed nothing for that hour. A UTC minute has no such ambiguity.
  */
 export const startOfMinuteUTC = (timestamp: EpochTimeStamp): EpochTimeStamp => Math.floor(timestamp / ONE_MINUTE) * ONE_MINUTE;
-
-export const isDaterangeValid = (start: EpochTimeStamp, end: EpochTimeStamp) => {
-  return isValid(start) && isValid(end) && isBefore(start, end);
-};
 
 /**
  * Splits the minutes from the one holding `startDate` to the one holding `endDate`, both included, into chunks of `batchSize`
