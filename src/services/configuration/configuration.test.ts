@@ -134,6 +134,87 @@ describe('Configuration Service', () => {
       });
     });
 
+    // The parser's own error was reported whole, at error level and without the file name: js-yaml's message quotes the lines around
+    // the fault, three before and two after, so a typo near the Telegram token or the API keys printed them, whole or cut short
+    describe('when the configuration file does not parse', () => {
+      // Fake credentials, each holding FAKE, on the lines around the faults
+      const TOKEN = '123456789:FAKETELEGRAMTOKEN0000000000000000';
+      const API_KEY = `FAKEAPIKEY${'0'.repeat(54)}`;
+      const SECRET = `FAKESECRET${'0'.repeat(54)}`;
+      const watchLine = 'watch: { assets: [BTC], currency: USDT, timeframe: 5m, mode: realtime }';
+      const exchangeLines = ['exchange:', '  name: binance', `  apiKey: ${API_KEY}`, `  secret: ${SECRET}`];
+      /** A live trading configuration, its credentials on lines 4 and 5, followed by the given lines */
+      const liveYaml = (...lines: string[]) => [watchLine, ...exchangeLines, ...lines].join('\n');
+      /** A live trading configuration whose Telegram token, on line 8, is followed by the given line */
+      const telegramYaml = (line: string) => liveYaml('plugins:', '  - name: EventSubscriber', `    token: ${TOKEN}`, line);
+      const timestampYaml = [
+        'watch:',
+        '  assets: [BTC]',
+        '  currency: USDT',
+        '  mode: importer',
+        '  daterange:',
+        '    start: !!timestamp 2024-01-01',
+        '    end: 2024-01-02',
+        `exchange: { name: binance, apiKey: ${API_KEY}, secret: ${SECRET} }`,
+      ].join('\n');
+      const missingCommaJson5 = [
+        '{',
+        '  watch: { assets: ["BTC"], currency: "USDT", timeframe: "5m", mode: "realtime" },',
+        `  exchange: { name: "binance", apiKey: "${API_KEY}", secret: "${SECRET}" }`,
+        '  plugins: [],',
+        '}',
+      ].join('\n');
+      /** The refusal of a file that does not parse: its format and its name, then the fault */
+      const refusal = (format: string, path: string, fault: string) =>
+        `[CONFIGURATION] Invalid ${format} in configuration file ${path}: ${fault}`;
+      /** JSON5's reason for a character it did not expect, at the position it gives */
+      const invalidCharacter = (character: string, line: number, column: number) =>
+        `invalid character '${character}' at line ${line}, column ${column}`;
+
+      /** What loading the configuration throws, to read more of it than its message */
+      const loadError = () => {
+        try {
+          new Configuration();
+        } catch (error) {
+          return error as Error;
+        }
+        throw new Error('The configuration loaded');
+      };
+
+      // A nesting too deep for js-yaml's recursion fails with the engine's RangeError, whose message Bun ends with a period
+      describe.each`
+        problem                                     | path                     | content                                                          | message
+        ${'an @ value under the Telegram token'}    | ${'./config/live.yml'}   | ${telegramYaml('    botUsername: @gekko_bot')}                   | ${refusal('YAML', './config/live.yml', 'bad indentation of a mapping entry at line 9, column 18')}
+        ${'a stray colon under the Telegram token'} | ${'./config/live.yml'}   | ${telegramYaml('    chatId: -100123456789: alerts group')}       | ${refusal('YAML', './config/live.yml', 'bad indentation of a mapping entry at line 9, column 26')}
+        ${'a tab indent under the API keys'}        | ${'./config/live.yml'}   | ${liveYaml('\tsandbox: false', 'plugins: []')}                   | ${refusal('YAML', './config/live.yml', 'tab characters must not be used in indentation at line 6, column 1')}
+        ${'an unknown !!timestamp tag'}             | ${'./config/live.yml'}   | ${timestampYaml}                                                 | ${refusal('YAML', './config/live.yml', 'unknown tag !<tag:yaml.org,2002:timestamp> at line 6, column 34')}
+        ${'two YAML documents'}                     | ${'./config/live.yml'}   | ${`${liveYaml('plugins: []')}\n---\n${liveYaml('plugins: []')}`} | ${refusal('YAML', './config/live.yml', 'expected a single document in the stream, but found more')}
+        ${'a JSON5 object missing a comma'}         | ${'./config/live.json5'} | ${missingCommaJson5}                                             | ${refusal('JSON5', './config/live.json5', invalidCharacter('p', 4, 3))}
+        ${'YAML in a .json file'}                   | ${'./config/live.json'}  | ${liveYaml('plugins: []')}                                       | ${refusal('JSON', './config/live.json', invalidCharacter('w', 1, 1))}
+        ${'a nesting too deep for the YAML parser'} | ${'./config/live.yml'}   | ${liveYaml(`plugins: ${'['.repeat(100_000)}`)}                   | ${expect.stringMatching(/^\[CONFIGURATION\] Invalid YAML in configuration file \.\/config\/live\.yml: Maximum call stack size exceeded\.?$/)}
+      `('as $problem', ({ path, content, message }) => {
+        beforeEach(() => {
+          setConfigFile(path, content);
+        });
+
+        it('should throw a GekkoError', () => {
+          expect(() => new Configuration()).toThrow(GekkoError);
+        });
+
+        it('should name the format and the file, then what the parser found wrong and where', () => {
+          expect(() => new Configuration()).toThrow(expect.objectContaining({ message }));
+        });
+
+        it('should quote none of the credentials around the fault', () => {
+          expect(loadError().message).not.toMatch(/FAKE/);
+        });
+
+        it('should keep no cause, which the fatal error report would print in full', () => {
+          expect(loadError().cause).toBeUndefined();
+        });
+      });
+    });
+
     it('should throw error for empty content', () => {
       vi.mocked(readFileSync).mockReturnValue('');
       expect(() => new Configuration()).toThrow();

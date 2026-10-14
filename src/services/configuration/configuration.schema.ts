@@ -212,12 +212,13 @@ export const configurationSchema = z
     const isSimulatedExchange = data.exchange.name === 'dummy-cex' || data.exchange.name === 'paper-binance';
     const isUsingRealExchange = data.exchange && !isSimulatedExchange && !('sandbox' in data.exchange && data.exchange.sandbox);
     const isDisclaimerIgnored = !data[disclaimerField];
+    // The message names the key and where it goes: it sent the reader to a "settings app" Gekko does not have, and the exchange
+    // section, where the key would seem to belong, refuses it as an unrecognized key
     if (hasTraderPlugin && isUsingRealExchange && isDisclaimerIgnored) {
       ctx.addIssue({
         code: 'custom',
         path: [disclaimerField],
-        message:
-          'These settings enable Trader with a real exchange and may spend real money, leading to severe losses. Confirm by setting the disclaimer sentence to true in the settings app.',
+        message: `These settings enable Trader with a real exchange and may spend real money, leading to severe losses. Confirm by setting '${disclaimerField}': true at the top level of the configuration file.`,
       });
     }
 

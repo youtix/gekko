@@ -492,6 +492,23 @@ describe('configurationSchema', () => {
     }
   });
 
+  // The message sent the reader to a "settings app" Gekko does not have: it names the key and where it goes
+  describe('the disclaimer refusal', () => {
+    const DISCLAIMER_MESSAGE = `These settings enable Trader with a real exchange and may spend real money, leading to severe losses. Confirm by setting '${DISCLAIMER_FIELD}': true at the top level of the configuration file.`;
+
+    it('asks for the disclaimer key set to true at the top level of the configuration file', () => {
+      const result = configurationSchema.safeParse({ ...createBaseConfig(), plugins: traderPlugin, exchange: binanceExchange });
+      expect(result.error?.issues).toMatchObject([{ path: [DISCLAIMER_FIELD], message: DISCLAIMER_MESSAGE }]);
+    });
+
+    // The exchange section, where the key would seem to belong, refuses it: the message must not send the reader there
+    it('refuses the disclaimer key in the exchange section, which is not where the schema reads it', () => {
+      const exchange = { ...binanceExchange, [DISCLAIMER_FIELD]: true };
+      const result = configurationSchema.safeParse({ ...createBaseConfig(), plugins: traderPlugin, exchange });
+      expect(result.error?.issues).toMatchObject([{ code: 'unrecognized_keys', path: ['exchange'], keys: [DISCLAIMER_FIELD] }]);
+    });
+  });
+
   describe('unknown keys', () => {
     const storage = { type: 'sqlite', database: 'gekko.db', insertTreshold: 100 };
     const binance = { ...binanceExchange, sandobx: true };
