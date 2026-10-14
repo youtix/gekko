@@ -26,11 +26,20 @@ export const logRoundtrip = (roundTrip: RoundTrip, currency: string, enableConso
 };
 
 /**
- * Prints the report as a table. Its percentages, ratios and deviations are written as the CSV writes them (see PERCENT_ROUNDING and
- * formatRatio). Rounded half up, a win rate of 3.125 % read 3.13 % here and 3.12 % in the CSV; and the downside deviation, a ratio
- * there as the volatility is here, read 1.23 % for the 1.24 of the CSV.
+ * Prints the report as a table, under the reason the run stopped before its end when it did. The table replaces the info line of the
+ * report, so it gives every figure the CSV row gives: without the net profit and the total return, it showed the alpha without the
+ * return it is worked out from, and the profit only as the gap between two balances. Its percentages, ratios and deviations are written
+ * as the CSV writes them (see PERCENT_ROUNDING and formatRatio). Rounded half up, a win rate of 3.125 % read 3.13 % here and 3.12 % in
+ * the CSV; and the downside deviation, a ratio there as the volatility is here, read 1.23 % for the 1.24 of the CSV.
  */
 export const logFinalize = (report: TradingReport, currency: string) => {
+  // A run stopped before its end (a crash, missing candles, the circuit breaker) reports a partial period, which its table showed as a
+  // complete one. Said above the table rather than in a row: a reason as long as its error makes it would widen every row to its length,
+  // and Bun prints a line break in it as it is, through the borders.
+  if (report.interruption !== undefined) {
+    // eslint-disable-next-line no-console
+    console.log(`Run interrupted, the report below covers a partial period. Reason: ${report.interruption}`);
+  }
   const yearlyReturn = formatPercent(report.annualizedReturnPct, PERCENT_ROUNDING.annualizedReturnPct);
   // eslint-disable-next-line no-console
   console.table({
@@ -41,6 +50,8 @@ export const logFinalize = (report: TradingReport, currency: string) => {
     exposurePct: `${formatPercent(report.exposurePct, PERCENT_ROUNDING.exposurePct)} of time exposed`,
     startPrice: `${formatAmount(report.startPrice)} ${currency}`,
     endPrice: `${formatAmount(report.endPrice)} ${currency}`,
+    netProfit: `${formatAmount(report.netProfit)} ${currency}`,
+    totalReturnPct: formatPercent(report.totalReturnPct, PERCENT_ROUNDING.totalReturnPct),
     marketReturnPct: formatPercent(report.marketReturnPct, PERCENT_ROUNDING.marketReturnPct),
     alpha: formatPercent(report.alpha, PERCENT_ROUNDING.alpha),
     annualizedNetProfit: `${formatAmount(report.annualizedNetProfit)} ${currency} (${yearlyReturn})`,

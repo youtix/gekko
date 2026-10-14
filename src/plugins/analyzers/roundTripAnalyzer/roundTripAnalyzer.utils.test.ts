@@ -50,12 +50,14 @@ const report: TradingReport = {
 
 describe('roundTripAnalyzer.utils', () => {
   let consoleTable: MockInstance<typeof console.table>;
+  let consoleLog: MockInstance<typeof console.log>;
 
   /** The row printed by the last console.table call. */
   const printedRow = () => consoleTable.mock.lastCall?.[0];
 
   beforeEach(() => {
     consoleTable = vi.spyOn(console, 'table').mockImplementation(() => {});
+    consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
   });
 
   describe('logRoundtrip', () => {
@@ -145,6 +147,10 @@ describe('roundTripAnalyzer.utils', () => {
       ${'an amount rounded to 8 decimals'}        | ${{ ...report, finalBalance: 0.123456789 }}    | ${'finalBalance'}        | ${'0.12345679 USDT'}
       ${'the win rate'}                           | ${report}                                      | ${'winRate'}             | ${'60%'}
       ${'no win rate without a round trip'}       | ${{ ...report, winRate: null }}                | ${'winRate'}             | ${'N/A'}
+      ${'the net profit'}                         | ${report}                                      | ${'netProfit'}           | ${'234.5678 USDT'}
+      ${'a net loss, its thousands grouped'}      | ${{ ...report, netProfit: -1234.5678 }}        | ${'netProfit'}           | ${'-1,234.5678 USDT'}
+      ${'a net profit of a fraction of a cent'}   | ${{ ...report, netProfit: 0.00042 }}           | ${'netProfit'}           | ${'0.00042 USDT'}
+      ${'the total return'}                       | ${report}                                      | ${'totalReturnPct'}      | ${'23.45%'}
     `('should print $description under $field', ({ tradingReport, field, expected }) => {
       logFinalize(tradingReport, 'USDT');
 
@@ -155,6 +161,8 @@ describe('roundTripAnalyzer.utils', () => {
     // there; the downside deviation, a ratio there as the volatility is here, read 1.23 % for the 1.24 of the CSV
     it.each`
       field                    | fields                                     | expected
+      ${'totalReturnPct'}      | ${{ totalReturnPct: -5.001 }}              | ${'-5.01%'}
+      ${'totalReturnPct'}      | ${{ totalReturnPct: 3.125 }}               | ${'3.12%'}
       ${'marketReturnPct'}     | ${{ marketReturnPct: -5.001 }}             | ${'-5.01%'}
       ${'marketReturnPct'}     | ${{ marketReturnPct: 3.125 }}              | ${'3.12%'}
       ${'alpha'}               | ${{ alpha: -5.001 }}                       | ${'-5.01%'}
@@ -172,6 +180,36 @@ describe('roundTripAnalyzer.utils', () => {
       logFinalize({ ...report, ...fields }, 'USDT');
 
       expect(printedRow()[field]).toBe(expected);
+    });
+
+    // The report of a run stopped before its end covers a partial period, which the table alone showed as a complete one
+    describe('for a run stopped before its end', () => {
+      it('should print "Run interrupted, the report below covers a partial period. Reason: [STRATEGY] Max consecutive order errors reached (5)" once', () => {
+        logFinalize({ ...report, interruption: '[STRATEGY] Max consecutive order errors reached (5)' }, 'USDT');
+
+        expect(consoleLog.mock.calls).toEqual([
+          ['Run interrupted, the report below covers a partial period. Reason: [STRATEGY] Max consecutive order errors reached (5)'],
+        ]);
+      });
+
+      // An error without a message stopped the run all the same, as the status of the CSV row says
+      it('should print "Run interrupted, the report below covers a partial period. Reason: " once for an error without a message', () => {
+        logFinalize({ ...report, interruption: '' }, 'USDT');
+
+        expect(consoleLog.mock.calls).toEqual([['Run interrupted, the report below covers a partial period. Reason: ']]);
+      });
+
+      it('should print that line above the table', () => {
+        logFinalize({ ...report, interruption: '[STREAM] Missing candles in database' }, 'USDT');
+
+        expect(consoleLog.mock.invocationCallOrder[0]).toBeLessThan(consoleTable.mock.invocationCallOrder[0]);
+      });
+    });
+
+    it('should print no line beside the table of a run that reached its end', () => {
+      logFinalize(report, 'USDT');
+
+      expect(consoleLog).not.toHaveBeenCalled();
     });
   });
 });

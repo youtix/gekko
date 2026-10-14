@@ -1413,6 +1413,15 @@ describe('RoundTripAnalyzer', () => {
       expect(logFinalize).toHaveBeenCalledWith(mockReport, 'USDT'); // NOTE: Removed third argument mapping
     });
 
+    // The table prints the reason above it (see logFinalize), in place of the info line that carried it
+    it('should hand the table the reason the run stopped before its end', async () => {
+      vi.spyOn(analyzer as any, 'calculateReportStatistics').mockReturnValue({ id: 'TRADING REPORT' });
+      analyzer['enableConsoleTable'] = true;
+
+      await analyzer['processFinalize'](new Error('circuit breaker'));
+      expect(logFinalize).toHaveBeenCalledWith({ id: 'TRADING REPORT', interruption: 'circuit breaker' }, 'USDT');
+    });
+
     it('should log final report through info when console table disabled', async () => {
       vi.spyOn(analyzer as any, 'calculateReportStatistics').mockReturnValue(EMPTY_TRADING_REPORT);
       analyzer['enableConsoleTable'] = false;

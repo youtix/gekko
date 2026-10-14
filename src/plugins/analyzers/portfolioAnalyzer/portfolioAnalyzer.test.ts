@@ -154,6 +154,13 @@ describe('PortfolioAnalyzer', () => {
       expect(logPortfolioReport).toHaveBeenCalled();
     });
 
+    // The table prints the reason above it (see logPortfolioReport), in place of the info line that carried it
+    it('should hand the table the reason the run stopped before its end', () => {
+      const tableAnalyzer = new PortfolioAnalyzer({ enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 });
+      (tableAnalyzer as any).processFinalize(new Error('a stream upstream failed'));
+      expect(logPortfolioReport).toHaveBeenCalledWith({ ...EMPTY_PORTFOLIO_REPORT, interruption: 'a stream upstream failed' }, 'USDT');
+    });
+
     // The actual emit, which calls the listeners of the report one after the other, each awaited
     describe('with the listeners of the performance report', () => {
       beforeEach(() => {
