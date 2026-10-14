@@ -36,6 +36,10 @@ export type AddIndicatorFn = <T extends IndicatorNames>(name: T, symbol: Trading
  * 'error' does not return: it relays the line, then throws a GekkoError, which stops the bot. The line is relayed at once, not with
  * the other events of its minute, which the stop drops: the subscribers learn why the bot stopped. A level outside these, which only
  * an untyped strategy can pass, is logged and relayed at info, after one warning per level.
+ *
+ * A message that is not a string, which only an untyped strategy can pass too, is written as util.inspect shows it, the objects it
+ * holds two levels deep: on one line, but for an Error, written with its stack, and an array of more than six items, written in rows.
+ * It used to reach the logs and the subscribers as "[object Object]", and one holding a function (`tools` itself) failed its bucket.
  */
 export type LoggerFn = (level: LogLevel, msg: string) => void;
 export type Tools<T> = {
@@ -222,19 +226,28 @@ export interface Strategy<T> {
    * that id, and a strategy that tracks its position adopts it as its pending SELL (see PositionTracker.adoptSell). Not adopted, it
    * leaves the strategy long once the stop has sold everything, and the SELL the strategy advises next is refused: nothing is left.
    *
-   * The stop sells until that SELL ends (state.status 'selling', state.sellOrderId): completed, the stop is over. Errored or canceled,
-   * the stop is active again, with a warning and without onTrailingStopActivated, for what that SELL did not sell, from the peak and
-   * the stop price it triggered at: the next price at or below that stop price triggers it again, and this hook announces its new
-   * SELL, under a new id. Unless the portfolio after that SELL shows too little of the asset free to sell at the minimums of the
-   * market, while no SELL the strategy created is pending on the pair: nothing is left to protect, and the stop is removed, with a
-   * warning. A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in onOrderErrored) makes the stop
-   * active again all the same, with a warning to check that SELL there: a MARKET SELL rests on no book, it may only have executed.
-   * If it did, the portfolio after it shows the asset gone and the stop is removed, or the next SELL of the stop is refused for lack
-   * of anything to sell and its refusal removes the stop; unless the account holds other coins of the asset free, which that next
-   * SELL sells, up to the stop's amount. If it did not, the stop still protects the position. A SELL refused every time with the
-   * asset still free (an amount out of the limits of the market, an API key refused) is so sent again on each such minute, each
-   * refusal counting towards the circuit breaker, which stops the bot. A strategy that takes over, with a SELL of its own once that
-   * one failed, may leave the stop: its SELL holds the stop back until it ends (see Tools.createOrder). To drop the stop, cancel it
+   * The stop sells until that SELL ends (state.status 'selling', state.sellOrderId). Completed for all the stop sells, the stop is
+   * over. Completed for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the
+   * exchange truncates its amount to the step of the market), errored or canceled, the stop is active again for what that SELL did
+   * not sell, with a warning and without onTrailingStopActivated, from the peak and the stop price it triggered at: the next price at
+   * or below that stop price triggers it again, and this hook announces its new SELL, under a new id.
+   *
+   * Unless that rest is too little to sell at the minimums of the market, those of a MARKET order in tools.marketData, its cost
+   * worked out in decimal (see isSellable), whatever else the account holds, and may that SELL still be live or not: the stop is then
+   * over, said at info level (`Trailing stop of BUY <id> over: its SELL <id> errored after selling 0.4999 BTC (<reason>), and the
+   * rest, 0.0001 BTC, is too little to sell at the minimums of the market`). Nor when the portfolio after that SELL shows too little
+   * of the asset free to sell at those minimums, while no SELL the strategy created is pending on the pair: nothing is left to
+   * protect, and the stop is over, said at info level after a SELL that completed, with a warning after one that errored or was
+   * canceled.
+   *
+   * A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in onOrderErrored) makes the stop active again
+   * all the same for a rest it can sell, with a warning to check that SELL there: a MARKET SELL rests on no book, it may only have
+   * executed. If it did, the portfolio after it shows the asset gone and the stop is removed, or the next SELL of the stop is refused
+   * for lack of anything to sell and its refusal removes the stop; unless the account holds other coins of the asset free, which that
+   * next SELL sells, up to the stop's amount. If it did not, the stop still protects the position. A SELL refused every time with the
+   * asset still free (an API key refused, a cost above the maximum of the market) is so sent again on each such minute, each refusal
+   * counting towards the circuit breaker, which stops the bot. A strategy that takes over, with a SELL of its own once that one
+   * failed, may leave the stop: its SELL holds the stop back until it ends (see Tools.createOrder). To drop the stop, cancel it
    * (tools.cancelTrailingOrder(state.id)), not its SELL: canceled, its SELL makes it active again.
    *
    * `tools` is the object every other hook gets, passed last so that a hook written without it still fits.

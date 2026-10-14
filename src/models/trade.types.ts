@@ -1,5 +1,9 @@
 export type Trade = {
-  /** Trade Id */
+  /**
+   * The id of the exchange order the trade executed for (OrderState.id), not an id of the trade: the trades of an order filled in
+   * several parts share it, and the summary of an order picks its trades by it (see createOrderSummary). ccxt's own id of the trade is
+   * not kept, and a trade ccxt gives without the id of its order gets '', which no order has.
+   */
   id: string;
   amount: number;
   timestamp: EpochTimeStamp;

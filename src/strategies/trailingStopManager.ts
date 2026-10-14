@@ -97,19 +97,23 @@ export class TrailingStopManager extends EventEmitter {
     return copyState(order);
   }
 
-  /** Removes the stop whose SELL completed: the position it protected is sold. Returns whether a stop was selling through that SELL. */
+  /**
+   * Removes the stop whose SELL completed, nothing being left to protect: that SELL sold all the stop sells, or left a rest too little
+   * to sell, or a portfolio with too little of the asset free (see StrategyManager.settleCompletedStopSell). Returns whether a stop was
+   * selling through that SELL.
+   */
   public removeSellingStop(sellOrderId: UUID): boolean {
     const order = this.findSellingStop(sellOrderId);
     return order ? this.orders.delete(order.id) : false;
   }
 
   /**
-   * Makes the stop whose SELL ended without completing (errored, canceled) active again, for its amount less what that SELL sold
-   * (`sold`), with the peak and the stop price it triggered at: the first price at or below that stop price triggers it again, the
-   * open of the next candle included. Removed at its trigger, a stop whose SELL failed (refused, an exchange error) left the position
-   * held without any stop, and the strategy could not arm another one: only a BUY carries a trailing. A stop with nothing left to sell
-   * is removed. Returns a copy of the stop active again, or undefined: no stop sells through that SELL (removed while it sold), or
-   * nothing is left.
+   * Makes the stop whose SELL sold less than the stop sells (completed for less, errored, canceled) active again, for its amount less
+   * what that SELL sold (`sold`), with the peak and the stop price it triggered at: the first price at or below that stop price
+   * triggers it again, the open of the next candle included. Removed at its trigger, a stop whose SELL failed (refused, an exchange
+   * error) left the position held without any stop, and the strategy could not arm another one: only a BUY carries a trailing. A stop
+   * with nothing left to sell is removed. Returns a copy of the stop active again, or undefined: no stop sells through that SELL
+   * (removed while it sold), or nothing is left.
    */
   public resumeSellingStop(sellOrderId: UUID, sold: number): TrailingStopState | undefined {
     const order = this.findSellingStop(sellOrderId);

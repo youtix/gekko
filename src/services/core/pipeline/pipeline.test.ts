@@ -187,13 +187,18 @@ describe('Pipeline Service', () => {
       delete registry.MockPlugin;
     });
 
-    it('should instantiate plugins using the registry', async () => {
-      const context: PipelineContext = [{ name: 'MockPlugin', parameters: { foo: 'bar' } as any }];
+    const context: PipelineContext = [{ name: 'MockPlugin', parameters: { name: 'MockPlugin', foo: 'bar' } }];
 
+    it('should instantiate plugins using the registry', async () => {
       const result = await pipelineModule.createPlugins(context);
 
       expect(result[0].plugin).toBeInstanceOf(MockPlugin);
-      expect((result[0].plugin as any).params).toEqual({ foo: 'bar' });
+    });
+
+    it('should construct each plugin with its parsed options', async () => {
+      const result = await pipelineModule.createPlugins(context);
+
+      expect((result[0].plugin as any).params).toEqual({ name: 'MockPlugin', foo: 'bar' });
     });
   });
 

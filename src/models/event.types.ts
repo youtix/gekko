@@ -110,17 +110,40 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
   };
 };
 
+/**
+ * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT): from the BUY that opened a position while flat to the SELL that
+ * left it flat again, the BUYs and SELLs in between included. One still open when the warmup completed counts from the start of the
+ * period: its entry date, price and equity are then those of the start. Its equities are pair equities, in currency: the asset held,
+ * valued at a price, plus the currency held (see calculatePairEquity).
+ */
 export type RoundTrip = {
+  /** Its number, counted from 0 in the order the round trips of the run close */
   id: number;
+  /** When the BUY that opened it filled: its execution date, or its cancelation date for a BUY canceled after a partial fill */
   entryAt: number;
+  /** The mean price of its BUYs, weighted by their amounts, in currency */
   entryPrice: number;
+  /** The pair equity before the BUY that opened it: after it, at its price, with its fee given back (0 when unknown) */
   entryEquity: number;
+  /** When the SELL that closed it filled */
   exitAt: number;
+  /** The mean price of its SELLs, weighted by their amounts, in currency */
   exitPrice: number;
+  /** The pair equity after the SELL that closed it, at its price, its fee paid */
   exitEquity: number;
+  /** exitAt less entryAt, in milliseconds */
   duration: number;
+  /**
+   * The deepest fall of a one-minute low below the entry price while it was open, in % of that price (5 for 5 %), 0 when no low fell
+   * below it. Measured after the warmup only.
+   */
   maxAdverseExcursion: number;
+  /** The return from the entry equity to the exit equity, in % (5 for 5 %), 0 when the entry equity is 0 */
   profit: number;
+  /**
+   * The exit equity less the entry equity, in currency: net of the fees its orders took from the pair, that of the BUY that opened it
+   * when known (see entryEquity)
+   */
   pnl: number;
 };
 
@@ -157,7 +180,10 @@ export type Report = {
   startPrice: number;
   /** Asset price at the end of the period */
   endPrice: number;
-  /** Human-readable string representing the elapsed time (e.g., "3 months, 2 days") */
+  /**
+   * The length of the period as date-fns's formatDuration writes it: its years, months, days, hours, minutes and seconds that are not
+   * 0, largest first, without commas ("2 months 2 days 5 hours 59 minutes"). Empty for a period of 0
+   */
   formattedDuration: string;
   /** Net profit normalized to a one-year timeframe (currency units) */
   annualizedNetProfit: number;

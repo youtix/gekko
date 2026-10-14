@@ -1,4 +1,4 @@
-import { InputSources } from '@models/inputSources.types';
+import { inputSourceSchema } from '@models/schema/inputSource.schema';
 import { z } from 'zod';
 
 // Unchecked, a misspelt short (shrt) left the short SMA on the indicator's default period, 30
@@ -8,7 +8,7 @@ export const tmaStrategySchema = z
     medium: z.int().positive(),
     long: z.int().positive(),
     // The close when left out: the SMAs' own default, which a block without src always got
-    src: z.enum(['open', 'high', 'low', 'close', 'hl2', 'hlc3', 'ohlc4'] as const satisfies readonly InputSources[]).default('close'),
+    src: inputSourceSchema.default('close'),
   })
   // The uptrend is short > medium > long: swapped periods bought on the opposite alignment, and two equal ones never aligned. Zod
   // still runs the refinement after a failed bound: a period below 1, already reported, is not compared.

@@ -8,7 +8,7 @@ export type TrailingStopState = {
   /**
    * What the MARKET SELL the stop sends when triggered sells, not the whole balance: the amount its BUY filled, as its
    * ORDER_COMPLETED_EVENT reports it (an all-in BUY included), or as the ORDER_ERRORED_EVENT of a BUY that errored after a fill
-   * does. A SELL of the stop that ended without completing after it sold part of it leaves the rest (see status).
+   * does. A SELL of the stop that sold part of it, completed for less or ended without completing, leaves the rest (see status).
    */
   amount: number;
   /** The BUY's `trailing`, copied as the stop is armed: a later change to the strategy's object, or to a state's, moves nothing */
@@ -16,12 +16,14 @@ export type TrailingStopState = {
   /**
    * - dormant: armed with a trigger the price has not reached yet.
    * - active: trailing the price, from its arming without trigger, from the candle that reached its trigger, or again once its SELL
-   *   ended without completing. While its trigger is held back (see TriggerHold) it trails on, its peak still rising, but a price at
-   *   or below its stop price does not trigger it.
+   *   ended without selling all of it. While its trigger is held back (see TriggerHold) it trails on, its peak still rising, but a
+   *   price at or below its stop price does not trigger it.
    * - selling: triggered, its MARKET SELL (sellOrderId) sent and not ended yet. It trails no more, and is kept until that SELL ends:
-   *   completed, the stop is over; errored or canceled, it is active again, from the peak and the stop price it triggered at, for
-   *   what that SELL left unsold. The StrategyManager removes it instead when the portfolio after that SELL shows nothing left to
-   *   protect.
+   *   completed for all the stop sells, the stop is over; completed for less, errored or canceled, it is active again, from the peak
+   *   and the stop price it triggered at, for what that SELL left unsold. The StrategyManager ends it instead when that rest is too
+   *   little to sell at the minimums of the market (at info level), or when the portfolio after that SELL shows too little of the
+   *   asset free while no SELL the strategy created is pending on the pair (at info level after a completed SELL, with a warning
+   *   after an errored or canceled one).
    */
   status: 'dormant' | 'active' | 'selling';
   /**

@@ -1,6 +1,6 @@
 import { ORDER_CANCELED_EVENT, ORDER_COMPLETED_EVENT, ORDER_ERRORED_EVENT, STRATEGY_CREATE_ORDER_EVENT } from '@constants/event.const';
 import { GekkoError } from '@errors/gekko.error';
-import { PipelineContext } from '@models/pipeline.types';
+import { PipelineContext, PluginConstructor } from '@models/pipeline.types';
 import * as pluginList from '@plugins/index';
 import { PluginsNames } from '@plugins/plugin.types';
 import { config } from '@services/configuration/configuration';
@@ -49,8 +49,8 @@ export const wirePlugins = async (context: PipelineContext) => {
 export const createPlugins = async (context: PipelineContext) =>
   map(context, pluginCtx => {
     const { name, parameters } = pluginCtx;
-    const PluginClass = pluginList[name as PluginsNames];
-    // @ts-expect-error TODO fix complex typescript error
+    // The output of its own schema, paired with the class by name (see PluginConstructor)
+    const PluginClass = pluginList[name as PluginsNames] as PluginConstructor;
     const plugin = new PluginClass(parameters);
     debug('pipeline', `${name} plugin created !`);
     return { ...pluginCtx, plugin };

@@ -1,10 +1,10 @@
-import { InputSources } from '@models/inputSources.types';
+import { inputSourceSchema } from '@models/schema/inputSource.schema';
 import { z } from 'zod';
 
 // The ribbon parameters are the EMARibbon indicator's input, handed on as they are
 export const emaRibbonStrategySchema = z.strictObject({
   /** Source of the EMA ribbon. The close when left out: the indicator's own default, which a block without src always got */
-  src: z.enum(['open', 'high', 'low', 'close', 'hl2', 'hlc3', 'ohlc4'] as const satisfies readonly InputSources[]).default('close'),
+  src: inputSourceSchema.default('close'),
   /** Number of EMAs */
   count: z.int().min(2, 'count must be at least 2 (the spread of a single EMA is always 0)'),
   /** Period of the first, fastest EMA */
