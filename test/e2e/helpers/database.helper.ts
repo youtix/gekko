@@ -2,9 +2,6 @@ import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 
-// Same quoting as SQLiteStorage: table names can hold digits and punctuation
-const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
-
 /** The quoted name of the table of the pair, asked of the storage: test/e2e/storage checks the names it gives */
 const tableOf = (storage: SQLiteStorage, symbol: TradingPair) => storage['getQuotedTable'](symbol);
 
@@ -14,10 +11,6 @@ export const candleTables = (storage: SQLiteStorage) =>
     .query<{ name: string }, [string, string]>('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name')
     .all('table', 'candles_%')
     .map(({ name }) => name);
-
-export const cleanDatabase = (storage: SQLiteStorage) => {
-  for (const name of candleTables(storage)) storage.db.run(`DELETE FROM ${quote(name)}`);
-};
 
 /**
  * Writes the candles as they are, without the rules by which the storage replaces a stored candle. A field left out is 0, but the high

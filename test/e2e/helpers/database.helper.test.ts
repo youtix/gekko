@@ -1,7 +1,7 @@
 import type { TradingPair } from '@models/utility.types';
 import type { SQLiteStorage as Storage } from '@services/storage/sqlite.storage';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { candleTables, cleanDatabase, countCandles, readCandles, seedDatabaseWithCandles } from './database.helper';
+import { candleTables, countCandles, readCandles, seedDatabaseWithCandles } from './database.helper';
 
 // Defined before the storage is imported, which reads the configuration as it loads
 mock.module('@services/configuration/configuration', () => ({
@@ -57,14 +57,6 @@ describe('database.helper', () => {
         // Refused, as the previous test checks
       }
       expect(storage.getCandles(symbol, firstHour)).toEqual([]);
-    });
-  });
-
-  describe('cleanDatabase', () => {
-    it('should empty a table whose name needs quoting', () => {
-      seedDatabaseWithCandles(storage, 'FLX-CRCL/USDC:USDC', [{ start: 960000 }]);
-      cleanDatabase(storage);
-      expect(storage.getCandles('FLX-CRCL/USDC:USDC', firstHour)).toEqual([]);
     });
   });
 

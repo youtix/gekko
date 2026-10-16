@@ -1,26 +1,38 @@
 import { ONE_MINUTE } from '@constants/time.const';
+import type { Candle } from '@models/candle.types';
+import type { TradingPair } from '@models/utility.types';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { first } from 'lodash-es';
+import { Database } from 'bun:sqlite';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
+import { last } from 'lodash-es';
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
-import { minuteOf, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration } from '../../helpers/configuration.helper';
-import { cleanDatabase, countCandles } from '../../helpers/database.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
-import { MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { clearLogs, findTextLines } from '../../mocks/winston.mock';
+import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
+import { mockConfiguration, type RawConfiguration } from '../../helpers/configuration.helper';
+import { candleTables, countCandles, readCandles } from '../../helpers/database.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
+import { type Gap, MockCCXTExchange } from '../../mocks/ccxt.mock';
+import { clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
 // --------------------------------------------------------------------------
 
-// 1. Mock winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, and ends its run before the next test
-// starts (see realtimeRun.helper)
+// Winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, and ends its run before the next test starts (see
+// realtimeRun.helper)
 mockRealtimeModules();
 
-// 2. Mock Configuration
-// Configure all pairs from the start to ensure all tables are created
-mockConfiguration({
+type StorageSection = NonNullable<RawConfiguration['storage']>;
+
+/** The storage of most scenarios, which writes each minute as it closes: realtime's insertThreshold is 1 by default */
+const IN_MEMORY: StorageSection = { type: 'sqlite', database: ':memory:' };
+
+// The storage of the next run, which setUpRun sets: the schema parses the configuration on every read
+let mockStorage: StorageSection = IN_MEMORY;
+
+mockConfiguration(() => ({
   watch: {
     mode: 'realtime',
     assets: ['BTC', 'ETH', 'LTC'],
@@ -30,339 +42,211 @@ mockConfiguration({
     warmup: { candleCount: 0, tickrate: 100 },
   },
   exchange: { name: 'binance' },
-  storage: { type: 'sqlite', database: ':memory:' },
-  plugins: [{ name: 'CandleWriter' }], // Enable writing to DB
-});
+  storage: mockStorage,
+  plugins: [{ name: 'CandleWriter' }],
+}));
 
+// --------------------------------------------------------------------------
+// HELPERS
+// --------------------------------------------------------------------------
+
+const PAIRS: TradingPair[] = ['BTC/USDT', 'ETH/USDT', 'LTC/USDT'];
+
+/**
+ * 2024-01-01T12:00:00.000Z, the minute in progress when a run starts (REALTIME_START): the first one its live streams deliver, with the
+ * tick of 12:01:02, each tick coming 2 s after a minute boundary and fetching the minute that just closed
+ */
+const FIRST_MINUTE = minuteOf(REALTIME_START);
+/** The minute `n` minutes after the first one */
+const minute = (n: number) => FIRST_MINUTE + n * ONE_MINUTE;
+/** That minute, as the log lines write it */
+const at = (n: number) => new Date(minute(n)).toISOString();
+
+/** Sets the storage of the scenario's run, then builds it, which creates the table of each pair: it reads insertThreshold as it is built */
+const setUpRun = async (storage: StorageSection = IN_MEMORY) => {
+  mockStorage = storage;
+  const { inject } = await import('@services/injecter/injecter');
+  inject.reset();
+  return inject.storage() as SQLiteStorage;
+};
+
+/** Runs the realtime pipeline `minutes` minutes, one at a time, and what `read` reads at the end of each */
+const readEachMinute = async <T>(minutes: number, read: () => T) => {
+  const reads: T[] = [];
+  for (let elapsed = 0; elapsed < minutes; elapsed++) {
+    await runRealtimeFor({ minutes: 1 });
+    reads.push(read());
+  }
+  return reads;
+};
+
+/** The candles stored for each pair, by pair */
+const storedCandles = (storage: SQLiteStorage) => Object.fromEntries(PAIRS.map(pair => [pair, readCandles(storage, pair)]));
+
+/**
+ * The candles a run stores for the pair, from its first minute to minute `lastMinute`: the exchange's, and for the minutes `filled`
+ * holds a flat candle at the last close, without volume, as the gap filler makes them up
+ */
+const expectedCandles = (pair: TradingPair, lastMinute: number, { filled }: { filled?: Gap } = {}) => {
+  const candles: Candle[] = [];
+  for (let start = FIRST_MINUTE; start <= minute(lastMinute); start += ONE_MINUTE) {
+    if (filled && start >= filled.start && start < filled.end) {
+      const { close } = last(candles)!; // A gap is filled from the candle before it: a row filling the first minute is wrong
+      candles.push({ start, open: close, high: close, low: close, close, volume: 0 });
+    } else {
+      candles.push(generateSyntheticCandle(pair, start));
+    }
+  }
+  return candles;
+};
+
+/** The candles expected of each pair (see expectedCandles), by pair */
+const expectedCandlesOfEachPair = (lastMinute: number, options?: { filled?: Gap }) =>
+  Object.fromEntries(PAIRS.map(pair => [pair, expectedCandles(pair, lastMinute, options)]));
+
+/** The lines logged at warn level since the beforeEach, oldest first */
+const warnings = () =>
+  logStore
+    .filter(isTextLine)
+    .filter(({ level }) => level === 'warn')
+    .map(({ message }) => message);
+
+/**
+ * The candles of each pair the database file holds once the run has ended, read through a read-only connection to the file of the
+ * storage, whose own connection the run closed as it ended
+ */
+const readDatabaseFile = (storage: SQLiteStorage, database: string) => {
+  storage.db = new Database(database, { readonly: true });
+  try {
+    return storedCandles(storage);
+  } finally {
+    storage.db.close();
+  }
+};
+
+// --------------------------------------------------------------------------
+// TEST SUITE
+// --------------------------------------------------------------------------
+
+// Every scenario compares each row stored, every field of it, with the candle expected for its minute. Checks of the opens alone passed
+// a live stream that lost every third page: the minutes the gap filler made up for it, flat at the last close and without volume, had
+// the opens of the minutes they stood for while the fixture closed each candle at the next one's open. A run that fails fails its
+// scenario with its own error, which runRealtimeUntil and runRealtimeFor throw: the scenarios said the pipeline had completed without
+// an error, which a realtime run never does.
 describe('E2E: Realtime Writer (Synthetic)', () => {
-  // Reset MockCCXTExchange static state and inject singletons before each test
-  // This is especially important when running all E2E tests together
-  beforeEach(async () => {
-    // Reset inject singletons to get fresh storage/exchange for each test
-    const { inject } = await import('@services/injecter/injecter');
-    inject.reset();
+  /** The directory of the database files, those of the scenarios that read what the end of a run writes */
+  let directory: string;
 
-    // Clean DB
-    const storage = inject.storage() as SQLiteStorage;
-    cleanDatabase(storage);
+  beforeAll(() => {
+    directory = mkdtempSync(join(tmpdir(), 'gekko-writer-e2e-'));
+  });
+
+  beforeEach(() => {
     clearLogs();
-
     MockCCXTExchange.reset();
     startFakeClock();
   });
 
-  // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
+  // A realtime run never ends by itself: each test ends its own through the pipeline's signal before the next one starts, the plugins
+  // finalised, CandleWriter closing the storage, which writes the minutes it still holds
   afterEach(() => endRealtimeRun());
 
-  it('Scenario A: Realtime candle recording to SQLite', async () => {
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
+  afterAll(() => {
+    rmSync(directory, { recursive: true, force: true });
+  });
 
-    // Get storage reference before pipeline runs
-    const storage = inject.storage() as SQLiteStorage;
-    // Keep DB open for subsequent tests
-    storage.close = () => {};
+  it('Scenario A: stores each minute of a pair once it has closed, with the candle the exchange serves for it', async () => {
+    const storage = await setUpRun();
+    const storedAfterEachMinute = await readEachMinute(5, () => countCandles(storage, 'BTC/USDT'));
+    expect({ storedAfterEachMinute, candles: readCandles(storage, 'BTC/USDT'), warnings: warnings() }).toEqual({
+      storedAfterEachMinute: [1, 2, 3, 4, 5],
+      candles: expectedCandles('BTC/USDT', 4),
+      warnings: [],
+    });
+  });
 
-    // Each tick stores the minute that just closed
-    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
+  // The prices of the synthetic candles differ from pair to pair: a table holding the candles of another pair fails the comparison
+  it('Scenario B: stores each pair in a table of its own, with the candles the exchange serves for that pair', async () => {
+    const storage = await setUpRun();
+    await runRealtimeUntil(() => PAIRS.every(pair => countCandles(storage, pair) >= 3), { maxMinutes: 6 });
+    expect({ tables: candleTables(storage), candles: storedCandles(storage), warnings: warnings() }).toEqual({
+      tables: ['CANDLES_BTC_USDT', 'CANDLES_ETH_USDT', 'CANDLES_LTC_USDT'],
+      candles: expectedCandlesOfEachPair(2),
+      warnings: [],
+    });
+  });
 
-    const db = storage.db;
-
-    // Verify tables exist and have data
-    // We should have at least some candles recorded
-    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThanOrEqual(5);
-
-    // Verify data integrity - check first candle
-    const rows = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start ASC').all() as any[];
-
-    if (rows.length > 0) {
-      const firstRow = first(rows);
-      // Verify it has valid OHLCV data
-      expect(firstRow.open).toBeDefined();
-      expect(firstRow.high).toBeDefined();
-      expect(firstRow.low).toBeDefined();
-      expect(firstRow.close).toBeDefined();
-      expect(firstRow.volume).toBeDefined();
-
-      // Verify the synthetic data matches our generator
-      const expectedCandle = generateSyntheticCandle('BTC/USDT', firstRow.start);
-      expect(firstRow.open).toBeCloseTo(expectedCandle.open, 4);
-    }
-  }, 30000);
-
-  it('Scenario B: Multi-pair recording consistency', async () => {
-    // Storage is already configured with all pairs from the start
-
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
-
-    // Get storage reference - close is already disabled from Scenario A
-    const storage = inject.storage() as SQLiteStorage;
-
-    // A few minutes of every pair
-    const pairs = ['BTC/USDT', 'ETH/USDT', 'LTC/USDT'] as const;
-    await runRealtimeUntil(() => pairs.every(pair => countCandles(storage, pair) >= 3), { maxMinutes: 6 });
-
-    const db = storage.db;
-
-    // Verify each pair has its own table with data
-    // All pairs should have at least some candles recorded
-    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThanOrEqual(1);
-    expect(countCandles(storage, 'ETH/USDT')).toBeGreaterThanOrEqual(1);
-    expect(countCandles(storage, 'LTC/USDT')).toBeGreaterThanOrEqual(1);
-
-    // Verify no cross-contamination - each table should only have candles
-    // matching the expected synthetic data for that pair
-    const btcRows = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start ASC').all() as any[];
-    const ethRows = db.query('SELECT * FROM candles_ETH_USDT ORDER BY start ASC').all() as any[];
-    const ltcRows = db.query('SELECT * FROM candles_LTC_USDT ORDER BY start ASC').all() as any[];
-
-    // Verify BTC data integrity and uniqueness
-    if (btcRows.length > 0) {
-      const firstBtcRow = first(btcRows);
-      const expectedBtcCandle = generateSyntheticCandle('BTC/USDT', firstBtcRow.start);
-      expect(firstBtcRow.open).toBeCloseTo(expectedBtcCandle.open, 4);
-
-      // Ensure this candle doesn't match ETH or LTC expected prices
-      const wrongEthCandle = generateSyntheticCandle('ETH/USDT', firstBtcRow.start);
-      const wrongLtcCandle = generateSyntheticCandle('LTC/USDT', firstBtcRow.start);
-
-      // The prices should be different due to the symbol offset in synthetic generator
-      expect(firstBtcRow.open).not.toBeCloseTo(wrongEthCandle.open, 4);
-      expect(firstBtcRow.open).not.toBeCloseTo(wrongLtcCandle.open, 4);
-    }
-
-    // Verify ETH data integrity and uniqueness
-    if (ethRows.length > 0) {
-      const firstEthRow = first(ethRows);
-      const expectedEthCandle = generateSyntheticCandle('ETH/USDT', firstEthRow.start);
-      expect(firstEthRow.open).toBeCloseTo(expectedEthCandle.open, 4);
-
-      // Ensure this candle doesn't match BTC or LTC expected prices
-      const wrongBtcCandle = generateSyntheticCandle('BTC/USDT', firstEthRow.start);
-      const wrongLtcCandle = generateSyntheticCandle('LTC/USDT', firstEthRow.start);
-
-      expect(firstEthRow.open).not.toBeCloseTo(wrongBtcCandle.open, 4);
-      expect(firstEthRow.open).not.toBeCloseTo(wrongLtcCandle.open, 4);
-    }
-
-    // Verify LTC data integrity and uniqueness
-    if (ltcRows.length > 0) {
-      const firstLtcRow = first(ltcRows);
-      const expectedLtcCandle = generateSyntheticCandle('LTC/USDT', firstLtcRow.start);
-      expect(firstLtcRow.open).toBeCloseTo(expectedLtcCandle.open, 4);
-
-      // Ensure this candle doesn't match BTC or ETH expected prices
-      const wrongBtcCandle = generateSyntheticCandle('BTC/USDT', firstLtcRow.start);
-      const wrongEthCandle = generateSyntheticCandle('ETH/USDT', firstLtcRow.start);
-
-      expect(firstLtcRow.open).not.toBeCloseTo(wrongBtcCandle.open, 4);
-      expect(firstLtcRow.open).not.toBeCloseTo(wrongEthCandle.open, 4);
-    }
-  }, 30000);
-
-  it('Scenario C: Handling of duplicate candle emissions', async () => {
-    // A lie of the exchange, which ccxt would never let through: every third page has each of its candles stamped with the first
-    // minute served, the prices of the minutes asked for kept
+  // A lie of the exchange, which ccxt would never pass on (its parseOHLCVs keeps the candles at or after `since` alone): every third
+  // page has each of its candles stamped with the first minute served, 12:00, the prices of the minutes asked for kept. The first is the
+  // page of 12:03, at 12:04:02: the live stream drops its candle as delivered already, saying so for each pair, and asks for the minute
+  // again with the next tick, which brings 12:03 and 12:04. Let through, the candle would reach RejectDuplicateCandle as a bucket of
+  // 12:00 after 12:02, which it drops with a warning of its own, as the gap filler would after it, and the row of 12:00 would keep its
+  // candle, a realtime run replacing only a stored candle that is made up. Skipped rather than asked for again, 12:03 would be made up
+  // flat. The rows show the minute the lie hid as the exchange serves it, the warnings that the live stream dropped the candle itself.
+  it('Scenario C: drops a candle the exchange stamps with a minute delivered already, and stores the minute it hid', async () => {
     MockCCXTExchange.emitDuplicatesEveryXCandle = 3;
+    const storage = await setUpRun();
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
+    expect({ candles: storedCandles(storage), warnings: warnings() }).toEqual({
+      candles: expectedCandlesOfEachPair(4),
+      warnings: PAIRS.flatMap(pair => [
+        `Ignored a duplicate 1m candle of ${pair} @ ${at(0)}: already delivered`,
+        `Received undefined candle for ${pair} @ ${at(3)}`,
+      ]),
+    });
+  });
 
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
-
-    // Get storage reference - close is already disabled from previous scenarios
-    const storage = inject.storage() as SQLiteStorage;
-    const db = storage.db;
-
-    // Run the pipeline - this should NOT throw any errors even with duplicates. The fourth page, of minute 3, is the first stamped with
-    // minute 0: the minute it hides is asked for again, and stored, with the next tick
-    // The key assertion here is that this does NOT throw
-    const isDuplicateWarned = () => findTextLines('Ignored a duplicate 1m candle', 'warn').length > 0;
-    await runRealtimeUntil(() => isDuplicateWarned() && countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
-
-    // ASSERTION 1: The pipeline completed without errors (we got here = no error thrown)
-
-    // ASSERTION 2: Verify duplicate detection via logs
-    // The live stream asks for the minutes after the last one it pushed: it drops a minute served again, with a warning
-    const warningLogs = findTextLines('Ignored a duplicate 1m candle', 'warn');
-    expect(warningLogs.length).toBeGreaterThan(0);
-
-    // ASSERTION 3: Verify the stored candles are valid and not corrupted by duplicate handling
-    const recentCandles = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start DESC LIMIT 5').all() as any[];
-    expect(recentCandles.length).toBeGreaterThan(0);
-
-    // ASSERTION 4: The minute hidden behind a duplicate is asked for again on the next tick: every stored candle is the
-    // exchange's own, none is a synthetic gap filler, the first one included, the minute the duplicates are stamped with. The five
-    // newest rows never held it.
-    const storedCandles = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start ASC').all() as any[];
-    const isExchangeCandle = (row: any) => row.open === generateSyntheticCandle('BTC/USDT', row.start).open;
-    expect(storedCandles.every(isExchangeCandle)).toBe(true);
-  }, 30000);
-
-  it('Scenario D: Handling future candle emissions', async () => {
-    // A lie of the exchange, which ccxt would never let through: every page opens with the candle of 5 minutes after the call
+  // A lie of the exchange, which ccxt would never pass on (Binance has no candle after the minute in progress): every page opens with
+  // the candle of 5 minutes after the call, off the minute boundaries, 12:06:02 for the call of 12:01:02. The live stream ignores it as a
+  // minute not closed yet, at debug level. Let through, it would reach RejectFutureCandle, which drops it with a warning, while the live
+  // stream fetched nothing more until that minute had closed, or, past that stage, be stored as a row off the minute boundaries, which
+  // readCandles reads too.
+  it('Scenario D: ignores a candle the exchange serves for a minute not closed yet', async () => {
     MockCCXTExchange.emitFutureCandles = true;
-
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
-
-    // Get storage reference - close is already disabled from previous scenarios
-    const storage = inject.storage() as SQLiteStorage;
-    const db = storage.db;
-
-    // Run the pipeline - this should NOT throw any errors even with future candles: five pages, each opened by a future candle
-    // The key assertion here is that this does NOT throw
+    const storage = await setUpRun();
     await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
+    expect({ candles: storedCandles(storage), warnings: warnings() }).toEqual({ candles: expectedCandlesOfEachPair(4), warnings: [] });
+  });
 
-    // ASSERTION 1: The pipeline completed without errors (we got here = no error thrown)
+  // The exchange has no candle of any pair for minutes 2 to 4. The ticks of 12:03:02, 12:04:02 and 12:05:02 bring none, the last one
+  // only the unfinished 12:05, and the tick of 12:06:02 brings 12:05: the gap filler makes up the three minutes before it, flat at the
+  // close of 12:01, without volume. The gap was set from the wall clock before a cold import of the pipeline, which could start the run
+  // after it, and the scenario checked the order of the minutes and prices above 0, which it passed without a minute made up.
+  it('Scenario E: fills the minutes the exchange has no candle for with flat candles at the last close, for each pair', async () => {
+    const gap: Gap = { start: minute(2), end: minute(5) };
+    MockCCXTExchange.simulatedGaps = [gap];
+    const storage = await setUpRun();
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT', { start: gap.end, end: gap.end }) === 1, { maxMinutes: 10 });
+    // Each tick of the gap asks again for the minutes from 12:02 on
+    const noCandleYet = PAIRS.map(pair => `Received undefined candle for ${pair} @ ${at(2)}`);
+    expect({ candles: storedCandles(storage), warnings: warnings() }).toEqual({
+      candles: expectedCandlesOfEachPair(5, { filled: gap }),
+      warnings: [...noCandleYet, ...noCandleYet, ...noCandleYet, `Total gap detected: filling 3 minutes for all assets from ${at(2)}`],
+    });
+  });
 
-    // ASSERTION 2: Verify no future candles are stored in the database
-    // The system should gracefully ignore future candles. The mock's future candle starts 5 minutes after the fetch, off
-    // the minute boundaries; the closed minutes recorded during the run legitimately start after the run started, so the
-    // check is: nothing stored is unaligned, in progress or in the future at the end of the run.
-    const currentMinute = minuteOf(Date.now());
-    const selectNotClosed = (table: string) =>
-      db.query(`SELECT * FROM ${table} WHERE start >= ? OR start % ? != 0`).all(currentMinute, ONE_MINUTE) as any[];
-
-    // There should be NO future candles stored in the database
-    expect(selectNotClosed('candles_BTC_USDT').length).toBe(0);
-
-    // ASSERTION 3: Also check ETH and LTC tables for no future candles
-    expect(selectNotClosed('candles_ETH_USDT').length).toBe(0);
-    expect(selectNotClosed('candles_LTC_USDT').length).toBe(0);
-
-    // ASSERTION 4: The future candle does not hide the closed minute served with it
-    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThan(0);
-  }, 30000);
-
-  it('Scenario E: Filling candle gaps', async () => {
-    // The exchange has no candle of any pair for minutes 2 to 4 of the run. Computed from the minute the pipeline reads as the minute in
-    // progress, the fake clock still where the test set it: read on the wall clock before the pipeline was imported, a cold import
-    // could start the run after the gap, and the scenario passed without a minute filled.
-    const firstMinute = minuteOf(Date.now());
-    const gapEnd = firstMinute + 5 * ONE_MINUTE;
-    MockCCXTExchange.simulatedGaps = [{ start: firstMinute + 2 * ONE_MINUTE, end: gapEnd }];
-
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
-
-    // Get storage reference - close is already disabled from previous scenarios
-    const storage = inject.storage() as SQLiteStorage;
-    const db = storage.db;
-
-    // Run the pipeline - this should NOT throw any errors even with gaps - until the minute after the gap is stored
-    // CRITICAL: The pipeline should complete without throwing any errors
-    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT', { start: gapEnd, end: gapEnd }) === 1, { maxMinutes: 10 });
-
-    // ASSERTION 1: The pipeline completed without errors (reaching here = success)
-    // If the gap filling failed or threw an error, we wouldn't get here
-
-    // ASSERTION 2: Verify no gaps exist in the stored candles
-    // The FillCandleGapStream should have filled any missing candles from the exchange
-    const btcCandles = db.query('SELECT start FROM candles_BTC_USDT ORDER BY start ASC').all() as { start: number }[];
-
-    // We should have at least 1 candle stored
-    expect(btcCandles.length).toBeGreaterThanOrEqual(1);
-
-    // If we have multiple candles, verify no gaps exist between them
-    if (btcCandles.length >= 2) {
-      for (let i = 1; i < btcCandles.length; i++) {
-        const gap = btcCandles[i].start - btcCandles[i - 1].start;
-        // Each candle should be exactly one minute after the previous one (no gaps)
-        // The FillCandleGapStream fills missing candles with empty/synthetic candles
-        expect(gap).toBe(ONE_MINUTE);
-      }
-    }
-
-    // ASSERTION 3: Verify the same for ETH and LTC tables
-    const ethCandles = db.query('SELECT start FROM candles_ETH_USDT ORDER BY start ASC').all() as { start: number }[];
-    for (let i = 1; i < ethCandles.length; i++) {
-      const gap = ethCandles[i].start - ethCandles[i - 1].start;
-      expect(gap).toBe(ONE_MINUTE);
-    }
-
-    const ltcCandles = db.query('SELECT start FROM candles_LTC_USDT ORDER BY start ASC').all() as { start: number }[];
-    for (let i = 1; i < ltcCandles.length; i++) {
-      const gap = ltcCandles[i].start - ltcCandles[i - 1].start;
-      expect(gap).toBe(ONE_MINUTE);
-    }
-
-    // ASSERTION 4: Verify filled candles have valid OHLCV data
-    // Even gap-filled candles should have proper positive values
-    const allCandles = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start DESC LIMIT 10').all() as any[];
-    for (const candle of allCandles) {
-      expect(candle.open).toBeDefined();
-      expect(candle.open).toBeGreaterThan(0);
-      expect(candle.high).toBeDefined();
-      expect(candle.high).toBeGreaterThan(0);
-      expect(candle.low).toBeDefined();
-      expect(candle.low).toBeGreaterThan(0);
-      expect(candle.close).toBeDefined();
-      expect(candle.close).toBeGreaterThan(0);
-      expect(candle.volume).toBeDefined();
-      // Volume can be 0 for gap-filled candles, so we don't check > 0
-    }
-  }, 30000);
-
-  it('Scenario F: Custom batch size buffering', async () => {
-    // This test validates that the writer respects the insertThreshold configuration,
-    // buffering candles in memory and only flushing to disk when the threshold is reached
-    // or on finalize.
-
-    // Dynamic imports to ensure mocks are applied first
-    const { inject } = await import('@services/injecter/injecter');
-
-    // Get storage reference - close is already disabled from previous scenarios
-    const storage = inject.storage() as SQLiteStorage;
-    const db = storage.db;
-
-    // Access the buffer and insertThreshold via the storage instance
-    // Note: The buffer is protected, so we access it directly for testing
-    const getBufferLength = () => storage['buffer'].length;
-    const getInsertThreshold = () => storage['insertThreshold'];
-
-    // ASSERTION 1: Verify the insertThreshold is correctly set for realtime mode
-    // In realtime mode, default is 1 (unless overridden in config)
-    const insertThreshold = getInsertThreshold();
-    expect(insertThreshold).toBe(1); // Realtime mode default
-
-    // Run the pipeline
-    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
-
-    // ASSERTION 2: The pipeline completed without errors (we got here = no error thrown)
-
-    // ASSERTION 3: With insertThreshold = 1, the buffer should always be empty or 0
-    // because each candle is flushed immediately after being added
-    const bufferLength = getBufferLength();
-    expect(bufferLength).toBeLessThanOrEqual(insertThreshold);
-
-    // ASSERTION 4: Verify data integrity - all stored candles should have valid OHLCV data
-    const allCandles = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start DESC LIMIT 10').all() as any[];
-
-    // We should have candles stored
-    expect(allCandles.length).toBeGreaterThan(0);
-
-    for (const candle of allCandles) {
-      // Each candle should have valid OHLCV data
-      expect(candle.open).toBeDefined();
-      expect(candle.high).toBeDefined();
-      expect(candle.low).toBeDefined();
-      expect(candle.close).toBeDefined();
-      expect(candle.volume).toBeDefined();
-
-      // Verify data matches the synthetic generator
-      const expectedCandle = generateSyntheticCandle('BTC/USDT', candle.start);
-      expect(candle.open).toBeCloseTo(expectedCandle.open, 4);
-    }
-
-    // ASSERTION 5: Verify candles are contiguous (no gaps caused by buffering issues)
-    const orderedCandles = db.query('SELECT start FROM candles_BTC_USDT ORDER BY start ASC').all() as { start: number }[];
-
-    if (orderedCandles.length >= 2) {
-      for (let i = 1; i < orderedCandles.length; i++) {
-        const gap = orderedCandles[i].start - orderedCandles[i - 1].start;
-        // Each candle should be exactly one minute after the previous one
-        expect(gap).toBe(ONE_MINUTE);
-      }
-    }
-  }, 30000);
+  // The storage holds the minutes until insertThreshold of them are, then writes them, and CandleWriter closes it as the run ends, which
+  // writes those it still holds. The scenario set no insertThreshold and ran on realtime's 1, asserted a buffer of 1 minute at most,
+  // and the run ended after its assertions: a storage that wrote a minute late, or a close that wrote nothing, passed it. The end is
+  // read from a database file once the run has closed the storage: an in-memory database goes with the connection.
+  it('Scenario F: writes the minutes insertThreshold at a time, and those it still holds as the run ends', async () => {
+    const database = join(directory, 'candles.sql');
+    const storage = await setUpRun({ type: 'sqlite', database, insertThreshold: 3 });
+    const storedAfterEachMinute = await readEachMinute(5, () => PAIRS.map(pair => countCandles(storage, pair)));
+    const warningsOfTheRun = warnings();
+    await endRealtimeRun();
+    expect({ storedAfterEachMinute, warnings: warningsOfTheRun, storedAtTheEnd: readDatabaseFile(storage, database) }).toEqual({
+      // The rows of BTC, ETH and LTC at the end of each minute: none while one or two minutes are held, the three at the third
+      storedAfterEachMinute: [
+        [0, 0, 0],
+        [0, 0, 0],
+        [3, 3, 3],
+        [3, 3, 3],
+        [3, 3, 3],
+      ],
+      warnings: [],
+      // The two minutes held as the run ended, 12:03 and 12:04, written by the close
+      storedAtTheEnd: expectedCandlesOfEachPair(4),
+    });
+  });
 });
