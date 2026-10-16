@@ -6,6 +6,8 @@ import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { MockWinston } from '../mocks/winston.mock';
 
 mock.module('winston', () => MockWinston);
+// Not ccxt, on purpose: the pipeline imports it, and this flow is the only test that loads the real ccxt under Bun, the runtime of the
+// executable (the unit tests load it under Node, CI and the release build the executable without running it)
 
 const start = Date.parse('2024-01-01T00:00:00Z');
 /** One candle a minute from 00:00 to 00:09, except the missing minutes */
@@ -57,9 +59,16 @@ describe('E2E: Backtest on a database with missing candles', () => {
   it('is refused, with the pair that has a gap and the date ranges the database holds for it', async () => {
     const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
 
-    await expect(gekkoPipeline()).rejects.toHaveProperty(
-      'message',
-      '[STREAM] Missing candles in database: ETH/USDT 2024-01-01T00:00:00.000Z -> 2024-01-01T00:09:00.000Z, Available date ranges: [2024-01-01T00:00:00.000Z - 2024-01-01T00:03:00.000Z], [2024-01-01T00:06:00.000Z - 2024-01-01T00:09:00.000Z]',
+    // Caught rather than asserted through `rejects`, which Bun waits on past the test's timeout: a backtest that froze would hang the
+    // suite instead of failing this test
+    const failure = await gekkoPipeline().then(
+      () => new Error('The backtest ran'),
+      (error: Error) => error,
     );
+    expect({ name: failure.name, message: failure.message }).toEqual({
+      name: 'MissingCandlesError',
+      message:
+        '[STREAM] Missing candles in database: ETH/USDT 2024-01-01T00:00:00.000Z -> 2024-01-01T00:09:00.000Z, Available date ranges: [2024-01-01T00:00:00.000Z - 2024-01-01T00:03:00.000Z], [2024-01-01T00:06:00.000Z - 2024-01-01T00:09:00.000Z]',
+    });
   });
 });

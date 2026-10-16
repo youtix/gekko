@@ -11,4 +11,8 @@ const candleIndexes = z.union([candleIndex, z.array(candleIndex)], {
 export const debugBacktestStrategySchema = z.strictObject({
   buyCandleIndex: candleIndexes,
   sellCandleIndex: candleIndexes,
+  // A MARKET BUY fills with the candle it is sent with: a LIMIT BUY below the market rests until a candle reaches its price, its cost
+  // reserved meanwhile, for a backtest to show what a synchronization reads while an order is open
+  /** The price of every BUY, sent as a LIMIT order; left out, the BUYs are MARKET orders */
+  buyLimitPrice: z.number().positive().optional(),
 });

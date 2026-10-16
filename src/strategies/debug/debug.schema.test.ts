@@ -56,10 +56,10 @@ describe('debugAdviceStrategySchema', () => {
 
 describe('debugBacktestStrategySchema', () => {
   it.each`
-    source                                          | block
-    ${'the backtest e2e flow'}                      | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 4 }}
-    ${'the backtest e2e flow, with several trades'} | ${{ name: 'DebugBacktest', buyCandleIndex: [1, 5], sellCandleIndex: [3, 7] }}
-    ${'the backtest e2e flow, with several pairs'}  | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3 }}
+    source                                                      | block
+    ${'the backtest e2e flow, scenario A: several trades'}      | ${{ name: 'DebugBacktest', buyCandleIndex: [1, 5], sellCandleIndex: [3, 8] }}
+    ${'the backtest e2e flow, scenarios B and D'}               | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3 }}
+    ${'the backtest e2e flow, scenario C: a resting LIMIT BUY'} | ${{ name: 'DebugBacktest', buyCandleIndex: 2, sellCandleIndex: 14, buyLimitPrice: 9500 }}
   `('accepts the block of $source', ({ block }) => {
     expect(debugBacktestStrategySchema.safeParse(omit(block, 'name')).success).toBe(true);
   });
