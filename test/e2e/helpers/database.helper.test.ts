@@ -1,6 +1,7 @@
+import type { TradingPair } from '@models/utility.types';
 import type { SQLiteStorage as Storage } from '@services/storage/sqlite.storage';
 import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
-import { cleanDatabase, countCandles, seedDatabaseWithCandles } from './database.helper';
+import { candleTables, cleanDatabase, countCandles, readCandles, seedDatabaseWithCandles } from './database.helper';
 
 // Defined before the storage is imported, which reads the configuration as it loads
 mock.module('@services/configuration/configuration', () => ({
@@ -75,6 +76,44 @@ describe('database.helper', () => {
     ])('should count $count candles within $within', ({ range, count }) => {
       seedDatabaseWithCandles(storage, symbol, [{ start: 0 }, { start: 60000 }, { start: 120000 }]);
       expect(countCandles(storage, symbol, range)).toBe(count);
+    });
+  });
+
+  describe('readCandles', () => {
+    it('should read every candle of the pair, oldest first, an off-grid one included, without its row id', () => {
+      seedDatabaseWithCandles(storage, symbol, [
+        { start: 120000, open: 3, high: 4, low: 2, close: 3.5, volume: 7 },
+        { start: 0, open: 1, high: 1, low: 1, close: 1, volume: 0 },
+        { start: 60030, open: 2, high: 2.5, low: 1.5, close: 2, volume: 5 },
+      ]);
+      expect(readCandles(storage, symbol)).toEqual([
+        { start: 0, open: 1, high: 1, low: 1, close: 1, volume: 0 },
+        { start: 60030, open: 2, high: 2.5, low: 1.5, close: 2, volume: 5 },
+        { start: 120000, open: 3, high: 4, low: 2, close: 3.5, volume: 7 },
+      ]);
+    });
+
+    it.each(['1INCH/USDT', 'FLX-CRCL/USDC:USDC'])('should read the table the storage writes for %s', pair => {
+      seedDatabaseWithCandles(storage, pair, [{ start: 960000, open: 1, close: 1 }]);
+      expect(readCandles(storage, pair)).toEqual([{ start: 960000, open: 1, high: 1, low: 1, close: 1, volume: 0 }]);
+    });
+
+    it('should read no candle from a table without one', () => {
+      expect(readCandles(storage, symbol)).toEqual([]);
+    });
+  });
+
+  describe('candleTables', () => {
+    it.each<{ held: string; seeded: TradingPair[]; tables: string[] }>([
+      { held: 'the table of the pair the storage was built for', seeded: [], tables: ['CANDLES_BTC_USDT'] },
+      {
+        held: 'the tables of the pairs seeded since, in alphabetical order',
+        seeded: ['FLX-CRCL/USDC:USDC', '1INCH/USDT'],
+        tables: ['CANDLES_1INCH_USDT', 'CANDLES_BTC_USDT', 'CANDLES_FLX-CRCL_USDC:USDC'],
+      },
+    ])('should name $held', ({ seeded, tables }) => {
+      for (const pair of seeded) seedDatabaseWithCandles(storage, pair, []);
+      expect(candleTables(storage)).toEqual(tables);
     });
   });
 });

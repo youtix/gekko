@@ -8,13 +8,15 @@ const quote = (name: string) => `"${name.replaceAll('"', '""')}"`;
 /** The quoted name of the table of the pair, asked of the storage: test/e2e/storage checks the names it gives */
 const tableOf = (storage: SQLiteStorage, symbol: TradingPair) => storage['getQuotedTable'](symbol);
 
-export const cleanDatabase = (storage: SQLiteStorage) => {
-  const db = storage.db;
-  const tables = db.query('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ?').all('table', 'candles_%') as { name: string }[];
+/** The candle tables of the database, by name, in alphabetical order */
+export const candleTables = (storage: SQLiteStorage) =>
+  storage.db
+    .query<{ name: string }, [string, string]>('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ? ORDER BY name')
+    .all('table', 'candles_%')
+    .map(({ name }) => name);
 
-  for (const { name } of tables) {
-    db.run(`DELETE FROM ${quote(name)}`);
-  }
+export const cleanDatabase = (storage: SQLiteStorage) => {
+  for (const name of candleTables(storage)) storage.db.run(`DELETE FROM ${quote(name)}`);
 };
 
 /**
@@ -56,3 +58,10 @@ export const countCandles = (storage: SQLiteStorage, symbol: TradingPair, range?
   ) as { count: number };
   return count;
 };
+
+/**
+ * Every candle stored for the pair, oldest first, as its table holds it, an off-grid start included, without the row id: what a flow
+ * compares with the candles it expects, rather than a count, a first and a last row
+ */
+export const readCandles = (storage: SQLiteStorage, symbol: TradingPair): Candle[] =>
+  storage.db.query<Candle, []>(`SELECT start, open, high, low, close, volume FROM ${tableOf(storage, symbol)} ORDER BY start`).all();
