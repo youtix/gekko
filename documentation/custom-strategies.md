@@ -94,7 +94,7 @@ watch:
     candleCount: 100
   daterange:
     start: 2024-01-01
-    end: 2024-12-31T23:59:00Z
+    end: 2024-11-30T23:59:00Z
 
 exchange:
   name: dummy-cex
@@ -142,11 +142,13 @@ plugins:
     enableConsoleTable: true
 ```
 
-A `daterange` bound is a day, read as its midnight UTC (`2024-01-01`), or a day and a time with `Z` or an offset (`2024-12-31T23:59:00Z`, `2024-01-01T02:00:00+02:00`), quoted or not. Both bounds are included, so the range above ends with the last minute of 2024: `end: 2024-12-31` would read only the first minute of December 31st. A day that does not exist (`2023-02-29`), or a time without `Z` or an offset, is refused at start-up.
+A `daterange` bound is a day, read as its midnight UTC (`2024-01-01`), or a day and a time with `Z` or an offset (`2024-11-30T23:59:00Z`, `2024-01-01T02:00:00+02:00`), quoted or not. Both bounds are included, so the range above ends with the last minute of November 2024: `end: 2024-11-30` would read only the first minute of November 30th. A day that does not exist (`2023-02-29`), or a time without `Z` or an offset, is refused at start-up.
 
 The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
 
 ### 3. Run Your Strategy
+
+A backtest reads its candles from `storage.database`, and refuses to start while a minute of `watch.daterange` is missing there: import them first. The importer of the [Quick Start guide](./quick-start.md#-2-retrieve-historical-data) does: it writes the candles of BTC/USDT from 2024-01-01 to 2024-12-01 into `./db/binance-BTC_USDT.sql`, a range that holds this one (see [Troubleshooting](#cannot-open-the-database--or-missing-candles-in-database) for the errors otherwise).
 
 ```bash
 # Using the compiled executable (bun run build:exec builds it, see Running with Executable)
@@ -159,18 +161,18 @@ GEKKO_CONFIG_FILE_PATH=./config.yaml ./dist/gekko2
 
 A strategy lives in one of two places, which decide how Gekko finds it and what it can import:
 
-|                      | Outside the codebase (this guide)                                     | In your checkout, in `src/strategies/custom/`                                                                 |
-|----------------------|-----------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------|
-| Selected by          | `strategyName` and `strategyPath`, the path of its file               | `strategyName` alone, once your class is exported from `src/strategies/custom/index.ts`                       |
-| Loaded               | From its file, each time Gekko starts: no build needed after a change | Compiled into `dist/gekko2` by `bun run build:exec`, like the built-in strategies                             |
-| Imports from Gekko 2 | Types only                                                            | Anything: types, the [PositionTracker](#tracking-your-position), the utilities                                |
-| Packages (`zod`, …)  | Installed next to its file (see below)                                | Those of the checkout                                                                                         |
-| Type-checked         | No: Bun loads TypeScript without checking it                          | By `bun run type:check`; its tests run with `bun run test`, never in CI                                       |
-| Git                  | Yours                                                                 | Gitignored, but for a placeholder `index.ts` that `bun install` marks unchanged: your exports stay out of git |
+|                      | Outside the codebase (this guide)                                     | In your checkout, in `src/strategies/custom/`                                                                     |
+|----------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Selected by          | `strategyPath`, its file, and `strategyName`, the class it exports    | `strategyName` alone, once your class is exported from `src/strategies/custom/index.ts`                           |
+| Loaded               | From its file, each time Gekko starts: no build needed after a change | Compiled into `dist/gekko2` by `bun run build:exec`, like the built-in strategies                                 |
+| Imports from Gekko 2 | Types only                                                            | Anything: types, the [PositionTracker](#tracking-your-position), the utilities                                    |
+| Packages (`zod`, …)  | Installed next to its file (see below)                                | Those of the checkout                                                                                             |
+| Type-checked         | No: Bun loads TypeScript without checking it                          | By `bun run type:check`, not by the pre-commit hook; its tests run with `bun run test`, never in CI               |
+| Git                  | Yours                                                                 | Gitignored, but for a placeholder `index.ts` that `bun install` marks skip-worktree: your exports stay out of git |
 
-A file loaded through `strategyPath` can import Gekko 2's types (`@strategies/strategy.types`, `@models/…`), because Bun drops an import that is only used as a type, but nothing else of Gekko 2: the compiled executable resolves none of the `@strategies/…` or `@utils/…` paths of a file it loads as it starts, and Gekko run from source (`bun run dev`) resolves them only for a file inside the checkout. Such an import stops Gekko at start-up with `Cannot find module '@strategies/positionTracker' from '…/myStrategy.strategy.ts'`. So model an external strategy on the [Complete Example](#complete-example), not on a built-in strategy: those import Gekko 2 modules, and a copy of `dema.strategy.ts` placed outside the codebase stops with that very line.
+A file loaded through `strategyPath` can import Gekko 2's types (`@strategies/strategy.types`, `@models/…`), because Bun drops an import that is only used as a type, but nothing else of Gekko 2: the compiled executable resolves none of the `@strategies/…` or `@utils/…` paths of a file it loads as it starts, and Gekko run from source (`bun run dev`) resolves them only for a file inside the checkout. Such an import stops Gekko at start-up with `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@strategies/positionTracker' from '…/myStrategy.strategy.ts'`. So model an external strategy on the [Complete Example](#complete-example), not on a built-in strategy: those import Gekko 2 modules, and a copy of `dema.strategy.ts` placed outside the codebase stops with that very line.
 
-A package your strategy imports is looked up from the folder of its file: install it there (`bun add zod` in that folder), unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it. The compiled executable, though, only finds a package by the `index.js` at its root, whatever its `package.json` names as its entry: `zod` has one, but `lodash-es`, which Gekko 2 itself uses, has none, and is not found even installed next to the strategy (`Cannot find package 'lodash-es' from '…'`). Import such a package by its files (`import isNil from 'lodash-es/isNil.js'`), or run Gekko from source (`bun run dev`), which follows the `package.json`.
+A package your strategy imports is looked up from the folder of its file: install it there (`bun add zod` in that folder), unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it. The compiled executable, though, only finds a package by the `index.js` at its root, whatever its `package.json` names as its entry: `zod` has one, but `lodash-es`, which Gekko 2 itself uses, has none, and is not found even installed next to the strategy (`… ResolveMessage: Cannot find package 'lodash-es' from '…'`). Import such a package by its files (`import isNil from 'lodash-es/isNil.js'`), or run Gekko from source (`bun run dev`), which follows the `package.json`.
 
 To build on a built-in strategy, or to use the PositionTracker, keep your strategy in `src/strategies/custom/` and export it from the placeholder, which holds `export {};` until then:
 
@@ -184,6 +186,10 @@ plugins:
   - name: TradingAdvisor
     strategyName: MyStrategy # No strategyPath: Gekko looks the name up among its own strategies, those of src/strategies/custom/ included
 ```
+
+Give your class a name of its own. A copy of a built-in strategy that keeps its class name, `dema.strategy.ts` exporting `DEMA`, makes the name ambiguous, and Gekko's strategies then hold neither class: `bun run type:check` reports `TS2308: Module './custom/index' has already exported a member named 'DEMA'`, `bun run build:exec` builds without either, and `strategyName: DEMA` stops Gekko with `[TRADING ADVISOR] Cannot find internal DEMA strategy`.
+
+`bun install` marks the placeholder skip-worktree (`git update-index --skip-worktree`; outside a git checkout it does nothing): `git status` does not show your copy, `git commit -a` does not take it, and it survives `git stash`, `git reset --hard`, `git checkout -- .`, `git restore .` and a commit the pre-commit hook refuses. That hook type-checks what is committed, where the placeholder is `export {};`, and so leaves your strategies out: `bun run type:check` checks them. An update of Gekko 2 that changes the placeholder stops `git pull` (`Your local changes to the following files would be overwritten by merge: src/strategies/custom/index.ts`), which keeps your copy. Copy your exports aside, run `git update-index --no-skip-worktree src/strategies/custom/index.ts` and `git checkout -- src/strategies/custom/index.ts`, pull again, write your exports into the new placeholder, then run `bun install`, which marks it again.
 
 ---
 
@@ -204,7 +210,8 @@ interface Strategy<T> {
   onOrderCompleted?(params: OnOrderCompletedEventParams<T>, ...indicators: IndicatorResults[]): void;
   onOrderCanceled?(params: OnOrderCanceledEventParams<T>, ...indicators: IndicatorResults[]): void;
   onOrderErrored?(params: OnOrderErroredEventParams<T>, ...indicators: IndicatorResults[]): void;
-  // A trailing stop became active: the price reached its trigger, or, for a stop without one, its BUY completed (see Trailing Stops)
+  // A trailing stop became active: the price reached its trigger, or, for a stop without one, its BUY completed, or errored after a
+  // reported fill (see Trailing Stops)
   onTrailingStopActivated?(state: TrailingStopState, tools: Tools<T>): void;
   // A trailing stop was hit: orderId is the MARKET SELL Gekko has just created for it, an order of your strategy's from now on
   onTrailingStopTriggered?(orderId: UUID, state: TrailingStopState, tools: Tools<T>): void;
@@ -219,7 +226,7 @@ What a hook receives is your strategy's own copy: the candles and the indicator 
 
 ## Lifecycle Methods
 
-The snippets of this section are methods of one class, which follows two EMAs of the first watched pair and tracks its position (see [Tracking Your Position](#tracking-your-position)): the `init` snippet shows the class with its fields.
+The snippets of this section are methods of one class, which follows two EMAs of the first watched pair and tracks its position (see [Tracking Your Position](#tracking-your-position)): the `init` snippet shows the class with its fields and the two helpers its methods share, `compareWithTolerance`, which compares the two EMAs (see [Validate Indicator Values](#2-validate-indicator-values)), and `holdsSellable`, which reads the position from the portfolio once an order has ended.
 
 ### `init` — Strategy Initialization
 
@@ -227,7 +234,8 @@ Called **once**, at start-up, on the first one-minute candle, before any timefra
 
 Register your indicators here: `addIndicator(name, symbol, params)` is only available in `init`. Kept and called later, it throws `[STRATEGY] Impossible to add the SMA indicator on BTC/USDT: addIndicator is available in init only`, which stops Gekko. These stop Gekko at start-up, with an error naming the problem:
 
-- an indicator name that does not exist (`[STRATEGY] SMAA indicator not found.`), or parameters the indicator refuses;
+- an indicator name that does not exist (`[STRATEGY] SMAA indicator not found.`), or parameters the indicator refuses, a required one left out included (`[STRATEGY] Indicator ATR: period must be a whole number, at least 1, got undefined`, see [Parameter Checks](./indicators.md#parameter-checks));
+- a third argument that is not a plain object of the indicator's parameters by name, which only a JavaScript strategy can pass (`[STRATEGY] Impossible to add the RSI indicator on BTC/USDT: parameters must be a plain object of the indicator's parameters by name, {} to take its defaults, got 7`);
 - a `symbol` that is not a watched pair, a key of `candle` and of `tools.marketData` (`[STRATEGY] Impossible to add the SMA indicator on ETH/USDT: symbol must be one of the watched pairs (BTC/USDT), got 'ETH/USDT'`): an indicator on another pair would never get a candle;
 - any error your `init` throws, `tools.log('error', …)` included.
 
@@ -235,6 +243,16 @@ No orders here: the warmup is not over (see [Creating Orders](#creating-orders))
 
 ```typescript
 type MyParams = { short: number; long: number }; // From the strategy: block of the configuration, e.g. short: 12 and long: 26
+type EndedOrderParams = OnOrderCompletedEventParams<MyParams> | OnOrderCanceledEventParams<MyParams> | OnOrderErroredEventParams<MyParams>;
+
+// The sign of a - b, but 0 when they are within a relative tolerance of each other: Gekko's compareWithTolerance, copied, since a
+// file loaded through strategyPath cannot import it
+const compareWithTolerance = (a: number, b: number, tolerance = 1e-9): number => {
+  if (a === b) return 0;
+  const difference = a - b;
+  if (Number.isFinite(difference) && Math.abs(difference) <= tolerance * Math.max(Math.abs(a), Math.abs(b))) return 0;
+  return Math.sign(difference);
+};
 
 class MyStrategy implements Strategy<MyParams> {
   private pair?: TradingPair;
@@ -252,6 +270,20 @@ class MyStrategy implements Strategy<MyParams> {
   }
 
   // The methods of the next sections
+
+  // Whether the portfolio after an order holds enough of the asset to sell at the minimums of the market, its free balance cut to the
+  // amount step; undefined when no balance was read yet. Worked out in decimal, as the Complete Example explains
+  private holdsSellable({ order, exchange, tools }: EndedOrderParams): boolean | undefined {
+    const [asset] = order.symbol.split('/');
+    const free = exchange.portfolio.get(asset)?.free;
+    if (free === undefined) return undefined;
+    const { amount, cost, precision } = tools.marketData.get(order.symbol) ?? {};
+    const step = precision?.amount;
+    const decimal = (value: number) => Number(value.toPrecision(15));
+    const sellable = step ? decimal(Math.floor(decimal(free / step)) * step) : free;
+    const isCostEnough = exchange.price <= 0 || decimal(sellable * exchange.price) >= (cost?.min ?? 0);
+    return sellable > 0 && sellable >= (amount?.min ?? 0) && isCostEnough;
+  }
 }
 ```
 
@@ -280,7 +312,7 @@ onEachTimeframeCandle({ candle }: OnCandleEventParams<MyParams>, ...indicators: 
 
 Called on each timeframe candle **after** the warmup period completes, the candle that completes it included. **This is where your main trading logic belongs.**
 
-Its `portfolio` is the latest the Trader relayed: the balance at start-up, then the one a portfolio change or the end of one of your orders carries, from the candle after its order hook ran. It does not show what a pending order reserves until that order ends.
+Its `portfolio` is the balance the TradingAdvisor reads at start-up, then the latest the Trader sends, from the candle after it arrives: the one each synchronization of the Trader reads (every `exchangeSynchInterval` in realtime, 10 minutes by default; in a backtest every `watch.timeframe`, 10 minutes at least), unless the Trader's `portfolioUpdates` filter holds it back, or the one the end of one of your orders carries. So what a pending order reserves shows from the Trader's next synchronization, moved from `free` to `used`, not as soon as the order is placed. With that filter, which sends a portfolio only once a total has moved past its threshold, it shows with the next portfolio sent, or the end of that order.
 
 ```typescript
 onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<MyParams>, ...indicators: IndicatorResults[]): void {
@@ -289,8 +321,9 @@ onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<MyParams>, ...indica
   // results is unknown, and null until the indicator has seen enough candles
   if (!this.pair || typeof shortEma.results !== 'number' || typeof longEma.results !== 'number') return;
 
-  // Flat and nothing pending: the strategy only becomes long once the BUY has completed (see onOrderCompleted)
-  if (shortEma.results > longEma.results && !this.isLong && !this.pendingOrderId) {
+  // The short EMA above the long one, beyond the tolerance, flat and nothing pending: the strategy only becomes long once the BUY has
+  // completed (see onOrderCompleted)
+  if (compareWithTolerance(shortEma.results, longEma.results) > 0 && !this.isLong && !this.pendingOrderId) {
     log('info', 'EMA crossover detected — going LONG');
     this.pendingOrderId = createOrder({ type: 'STICKY', side: 'BUY', symbol: this.pair });
   }
@@ -318,11 +351,14 @@ log({ candle, tools }: OnCandleEventParams<MyParams>, ...indicators: IndicatorRe
 Called when an order of yours is filled by the exchange: `order.amount` is the amount it filled (on a market with an amount step, the amount asked for truncated to that step, in backtest and paper trading as live: an all-in BUY of 0.0310282298100942 BTC fills for 0.03102 on Binance's BTC/USDT), `order.price` the price it executed at (the mean of its trades' prices weighted by their amounts, worked out in decimal: a price all its trades share is that price, a mean that does not end is given to 15 significant digits), `order.effectivePrice` that price with the fee in (above it for a BUY, below it for a SELL), `order.fee` the fee in the currency, `exchange.price` the price of the pair the Trader read once the order ended (in realtime the event arrives with the next minute, and the market may have moved since), and `exchange.portfolio` the portfolio after the fill. When the exchange gives no usable trades, the summary is estimated and an error line says from what: a LIMIT or STICKY order from the prices the exchange reported for its own fills, otherwise its limit price or the last market price.
 
 ```typescript
-onOrderCompleted({ order, tools }: OnOrderCompletedEventParams<MyParams>): void {
+onOrderCompleted(params: OnOrderCompletedEventParams<MyParams>): void {
+  const { order, tools } = params;
   tools.log('info', `Order ${order.id} completed: ${order.side} ${order.amount} @ ${order.price}`);
   if (order.id !== this.pendingOrderId) return;
   this.pendingOrderId = undefined;
-  this.isLong = order.side === 'BUY';
+  // A BUY makes it long. A SELL may have sold less than the position (the Trader caps a SELL at the most the market takes in one
+  // order): the strategy is still long when the portfolio after it holds enough to sell
+  this.isLong = order.side === 'BUY' || this.holdsSellable(params) === true;
 }
 ```
 
@@ -333,10 +369,16 @@ onOrderCompleted({ order, tools }: OnOrderCompletedEventParams<MyParams>): void 
 Called when an order of yours is canceled: by your strategy (`tools.cancelOrder`), or by the exchange (expired, canceled from its interface). It may have filled part of its amount before: `order.filled` is the largest fill any answer of the exchange reported for it, a poll before the cancelation included, and `order.remaining` what was left of its amount. A number, `0` included, is a fact: `0` filled means that nothing executed. Both are `undefined` when no answer reported a fill: unknown, not 0 filled. `exchange.portfolio`, the portfolio after the cancelation, then tells what you hold (see [Tracking Your Position](#tracking-your-position)).
 
 ```typescript
-onOrderCanceled({ order, tools }: OnOrderCanceledEventParams<MyParams>): void {
+onOrderCanceled(params: OnOrderCanceledEventParams<MyParams>): void {
+  const { order, tools } = params;
   // undefined when the exchange reported no fill: unknown, not 0
   const fill = order.filled === undefined ? 'no fill reported' : `${order.filled} filled, ${order.remaining} left`;
   tools.log('warn', `Order ${order.id} was canceled (${fill})`);
+  if (order.id !== this.pendingOrderId) return;
+  // No longer pending: the next candle that calls for it sends the order again
+  this.pendingOrderId = undefined;
+  // It may have filled part of its amount first: the portfolio after it tells, once a balance was read
+  this.isLong = this.holdsSellable(params) ?? this.isLong;
 }
 ```
 
@@ -351,11 +393,16 @@ Called when an order of yours fails or is refused by the exchange, `order.reason
 `maxConsecutiveErrors` order errors in a row (a [TradingAdvisor option](#tradingadvisor-plugin-configuration), 5 by default, `-1` to disable it) stop Gekko with `[STRATEGY] Max consecutive order errors reached (5)` and exit code 0: the circuit breaker. A completed or canceled order resets the count. Your `onOrderErrored` still runs for the error that trips it, before the stop, but an order it creates then is never sent.
 
 ```typescript
-onOrderErrored({ order, tools }: OnOrderErroredEventParams<MyParams>): void {
+onOrderErrored(params: OnOrderErroredEventParams<MyParams>): void {
+  const { order, tools } = params;
   // Not 'error': tools.log('error', …) throws, and stops the bot
   tools.log('warn', `Order ${order.id} failed: ${order.reason}`);
   if (order.mayBeLive) tools.log('warn', `Order ${order.id} may still be live on the exchange: check it there before placing it again`);
-  // It may have executed before its error: read the position from the portfolio before sending it again (see Tracking Your Position)
+  if (order.id !== this.pendingOrderId) return;
+  // No longer pending: a BUY refused is sent again on the next candle of the uptrend, each refusal counting towards maxConsecutiveErrors
+  this.pendingOrderId = undefined;
+  // It may have executed before its error: the portfolio after it tells (see Tracking Your Position)
+  this.isLong = this.holdsSellable(params) ?? this.isLong;
 }
 ```
 
@@ -390,7 +437,7 @@ Every lifecycle method but `end` receives a `tools` object, the same object in e
 
 ## Using Indicators
 
-Register indicators in `init` with `addIndicator(name, symbol, params)` and receive their values in candle handlers:
+Register indicators in `init` with `addIndicator(name, symbol, params)` and receive their values in candle handlers. `params` holds the indicator's parameters by name, and TypeScript requires it even when each one has a default: pass `{}` to take the defaults, `undefined` for TrueRange, which takes none. A JavaScript strategy may leave it out or pass `null`, which Gekko reads as `{}`; anything but a plain object, such as `7` given for a period, stops Gekko at start-up (see [Parameter Checks](./indicators.md#parameter-checks)).
 
 ```typescript
 init({ candle, addIndicator }: InitParams<MyParams>): void {
@@ -403,7 +450,8 @@ init({ candle, addIndicator }: InitParams<MyParams>): void {
 
 onTimeframeCandleAfterWarmup(params: OnCandleEventParams<MyParams>, ...indicators: IndicatorResults[]): void {
   // Access in the same order you registered them, each as { results, symbol }: results is unknown, null until the indicator
-  // has seen enough candles, then complete on every candle (macd.results is then { macd, signal, hist }, all three set)
+  // has seen enough candles, then complete on every candle (macd.results is then { macd, signal, hist }, all three set). Only ROC,
+  // and TRIX built on it, give null again, on a candle whose base is 0
   const [sma, rsi, macd] = indicators;
   const price = params.candle.get(sma.symbol)?.close;
   if (price === undefined || typeof sma.results !== 'number' || typeof rsi.results !== 'number') return;
@@ -485,10 +533,10 @@ const orderId = createOrder({ symbol: 'BTC/USDT', type: 'MARKET', side: 'BUY', t
 A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows the price up, and sells at the market once the price falls `percentage` below its highest point. Gekko trails it on every one-minute candle, whatever the timeframe, and tells your strategy through two hooks, which get `tools` as their last argument.
 
 - **Armed when the BUY completes**, for the amount it filled, from a copy of `trailing` taken by `createOrder`: changing your object afterwards changes nothing. A BUY canceled loses its stop, even after a partial fill. A BUY that errors after a reported fill (`order.filled`) gets its stop for that part; one that errors with no fill reported loses it. A warning says which, and whether the BUY may still be live on the exchange.
-- **Activated**: a stop without `trigger` is active as soon as it is armed, and `onTrailingStopActivated(state, tools)` is called then, right after `onOrderCompleted`, its peak and its stop price still 0. It takes its first peak from the open of the next one-minute candle, not from the price the BUY filled at: the price can fall more than `percentage` below that price before the stop triggers. A stop with a `trigger` waits until the high of a one-minute candle reaches it. Its peak is then that candle's open when the open reached the trigger, else its high, and `onTrailingStopActivated` is called before the rest of that candle is trailed.
+- **Activated**: a stop without `trigger` is active as soon as it is armed, and `onTrailingStopActivated(state, tools)` is called then, right after `onOrderCompleted`, or right after `onOrderErrored` for a BUY that errored after a reported fill (its stop armed for that fill), its peak and its stop price still 0. It takes its first peak from the open of the next one-minute candle, not from the price the BUY filled at: the price can fall more than `percentage` below that price before the stop triggers. A stop with a `trigger` waits until the high of a one-minute candle reaches it. Its peak is then that candle's open when the open reached the trigger, else its high, and `onTrailingStopActivated` is called before the rest of that candle is trailed.
 - **Trailed**: each one-minute candle is met as open, low, high, close, each price tested against the stop price, `peak × (1 − percentage / 100)`, before it raises the peak. So a candle that rises more than `percentage` from its open does not trigger the stop on its own low. The candle that activates a stop with a trigger is met from its open when the open reached the trigger; otherwise only its close is tested, after its high.
 - **Triggered**: a price at or below the stop price makes Gekko create a MARKET SELL of the stop's amount, then call `onTrailingStopTriggered(orderId, state, tools)`, `state` holding the peak and the stop price of that moment. That SELL is an order of your strategy's from then on: its outcome comes through `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored`, under `orderId`. A strategy that tracks its position adopts it as its pending SELL (see [Tracking Your Position](#tracking-your-position)); otherwise it stays long once the stop has sold everything, and its next SELL is refused, nothing being left to sell.
-- **Selling**: the stop (`state.status` `'selling'`, `state.sellOrderId` its SELL) sells until that SELL ends. Completed for all of the stop's amount, the stop is over. Completed for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the exchange truncates its amount to the market's step), errored or canceled, it is active again for what that SELL did not sell, from the peak and the stop price it triggered at, with a warning (`Trailing stop of BUY <id> active again: its SELL <id> completed after selling 0.3 of its 0.5 BTC …`): the next price at or below that stop price triggers it again, and `onTrailingStopTriggered` announces its new SELL under a new id, to adopt as the first one. The stop is over instead when nothing it can sell is left to protect: when that rest is too little to sell at the minimums of the market, whatever else your account holds (`Trailing stop of BUY <id> over: …, and the rest, 0.0001 BTC, is too little to sell at the minimums of the market`, at info level), or when the portfolio after that SELL shows too little of the asset free to sell, while no SELL of yours is pending on the pair (at info level after a SELL that completed, such as one whose BUY's fee the exchange took from the asset bought; with a warning, `… removed: …`, after one that errored or was canceled). A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in `onOrderErrored`: its answer lost, the exchange busy or overloaded) makes the stop active again all the same for a rest it can sell, with a warning to check that SELL on the exchange (`Trailing stop of BUY <id> kept: its SELL <id> errored, …, and may still have gone through on the exchange, …`). A MARKET SELL rests on no book: it may only have executed. If it did, the portfolio after it shows the asset gone and the stop is removed, or the stop's next SELL is refused for lack of anything to sell and that refusal removes it; unless your account holds other coins of the asset free, which that next SELL sells, up to the stop's amount. If it did not, the stop still protects your position. A SELL refused every time with the asset still free (an API key refused, a cost above the maximum of the market) is sent again on each such minute, each refusal counting towards `maxConsecutiveErrors`.
+- **Selling**: the stop (`state.status` `'selling'`, `state.sellOrderId` its SELL) sells until that SELL ends. Completed for all of the stop's amount, the stop is over. So it is when that SELL errors or is canceled after a reported fill (`order.filled`) of all of it (`[TRAILING STOP] Trailing stop of BUY <id> over: its SELL <id> sold 0.5, all of its 0.5`, at info level). Completed for less (the Trader caps a SELL to the free balance and to the most the market takes in one order, and the exchange truncates its amount to the market's step), errored or canceled for less, it is active again for what that SELL did not sell, from the peak and the stop price it triggered at, with a warning (`Trailing stop of BUY <id> active again: its SELL <id> completed after selling 0.3 of its 0.5 BTC …`): the next price at or below that stop price triggers it again, and `onTrailingStopTriggered` announces its new SELL under a new id, to adopt as the first one. The stop is over instead when nothing it can sell is left to protect: when that rest is too little to sell at the minimums of the market, whatever else your account holds (`Trailing stop of BUY <id> over: …, and the rest, 0.0001 BTC, is too little to sell at the minimums of the market`, at info level), or when the portfolio after that SELL shows too little of the asset free to sell, while no SELL of yours is pending on the pair (at info level after a SELL that completed, such as one whose BUY's fee the exchange took from the asset bought; with a warning, `… removed: …`, after one that errored or was canceled). A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in `onOrderErrored`: its answer lost, the exchange busy or overloaded) makes the stop active again all the same for a rest it can sell, with a warning to check that SELL on the exchange (`Trailing stop of BUY <id> kept: its SELL <id> errored, …, and may still have gone through on the exchange, …`). A MARKET SELL rests on no book: it may only have executed. If it did, the portfolio after it shows the asset gone and the stop is removed, or the stop's next SELL is refused for lack of anything to sell and that refusal removes it; unless your account holds other coins of the asset free, which that next SELL sells, up to the stop's amount. If it did not, the stop still protects your position. A SELL refused every time with the asset still free (an API key refused, a cost above the maximum of the market) is sent again on each such minute, each refusal counting towards `maxConsecutiveErrors`.
 - **Your own SELLs**: while a SELL your strategy created is pending on a pair, the stops of that pair keep trailing but do not trigger (`[STRATEGY] Trailing stop of BUY <id> held back: …`, once per stop, at info level): the exchange reserves the asset for your SELL, and the stop's SELL would be refused. Completed, your SELL cancels every stop armed on the pair, whatever the amount sold, with an info line: a strategy that scales out loses its stops at its first SELL. Canceled or errored, with no other SELL of yours pending there, it releases them (`… resumes: …`), and the next price at or below a stop price triggers that stop. So a take-profit LIMIT SELL left pending leaves the position without a working stop for as long as it pends, the part it does not reserve included. The SELL a stop sends cancels no other stop, and a stop whose BUY has not completed yet is kept.
 - **Canceled by you**: `tools.cancelTrailingOrder(state.id)`, `state.id` being the BUY's id, at any time. From `onTrailingStopActivated`, the stop is gone before the rest of its activation candle is trailed. To take over from a stop that is selling, cancel the stop, not its SELL: a canceled SELL makes the stop active again.
 
@@ -510,6 +558,7 @@ A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows th
 
 ```typescript
 import { pickTradedPair, PositionTracker } from '@strategies/positionTracker';
+import { compareWithTolerance } from '@utils/math/math.utils';
 
 export class MyTrackedStrategy implements Strategy<MyParams> {
   private readonly position = new PositionTracker();
@@ -525,10 +574,12 @@ export class MyTrackedStrategy implements Strategy<MyParams> {
   onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<MyParams>, ...indicators: IndicatorResults[]): void {
     const [shortEma, longEma] = indicators;
     if (!this.pair || typeof shortEma.results !== 'number' || typeof longEma.results !== 'number') return;
+    // Above, below, or within a relative 1e-9 of each other: equal, which is no signal (see Validate Indicator Values)
+    const shortToLong = compareWithTolerance(shortEma.results, longEma.results);
     // canBuy: flat and nothing pending; canSell: long and nothing pending. buy and sell keep the order pending until its outcome
-    if (shortEma.results > longEma.results && this.position.canBuy())
+    if (shortToLong > 0 && this.position.canBuy())
       this.position.buy(tools.createOrder, { type: 'STICKY', symbol: this.pair, trailing: { percentage: 5 } });
-    else if (shortEma.results < longEma.results && this.position.canSell())
+    else if (shortToLong < 0 && this.position.canSell())
       this.position.sell(tools.createOrder, { type: 'STICKY', symbol: this.pair });
   }
 
@@ -554,7 +605,7 @@ export class MyTrackedStrategy implements Strategy<MyParams> {
 
 For an order canceled or errored, the tracker reads the fill a cancelation reports, else the free balance of the asset in the portfolio after the order, truncated to the lot step of the market and checked against its minimum amount and cost, the cost worked out in decimal, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. It reads a completed SELL from that free balance too when the SELL sold less than it asked for, as it reads every all-in SELL and every adopted one, which ask for all of the asset free or for an amount it does not know: long when enough is left to sell, logged then. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` and `playSteps` helpers of `src/strategies/positionTracker.mock.ts`.
 
-A strategy loaded through `strategyPath` cannot import the PositionTracker (see [Where Your Strategy Lives](#where-your-strategy-lives)): the [Complete Example](#complete-example) keeps the same bookkeeping by hand.
+A strategy loaded through `strategyPath` cannot import the PositionTracker (see [Where Your Strategy Lives](#where-your-strategy-lives)): the class of the [Lifecycle Methods](#lifecycle-methods) and the [Complete Example](#complete-example) keep the same bookkeeping by hand.
 
 ---
 
@@ -579,6 +630,8 @@ plugins:
 | `strategyName`         | string  | Yes                                 | The exact name of your exported class                                                                                                                                                                                                  |
 | `strategyPath`         | string  | For a strategy outside the codebase | Path to your strategy file, absolute, or relative to the directory Gekko is started from (not to the configuration file). Left out, Gekko looks `strategyName` up among its own strategies, those of `src/strategies/custom/` included |
 | `maxConsecutiveErrors` | integer | No (`5`)                            | Order errors in a row after which Gekko stops, with exit code 0: the circuit breaker. At least `1`, or `-1` to never stop; `0` is refused                                                                                              |
+
+With a `strategyPath`, Gekko takes `strategyName` from that file only, never from its own strategies: a built-in name beside a path, such as `strategyName: RSI`, stops Gekko at start-up (`[TRADING ADVISOR] Cannot find external RSI strategy in <path>`) unless the file exports a class of that name (see [Troubleshooting](#cannot-import-the-strategy-file--or-cannot-find-external--strategy)).
 
 A strategy that creates orders needs a `Trader` beside it (on `paper-binance` or `dummy-cex` the orders are only simulated). Without one, no order ever ends: a strategy that waits for its orders, as the position tracking above does, never advises again, and Gekko warns at start-up, at `warn` level (`TradingAdvisor emits strategyCreateOrder, but no configured plugin executes orders…`). A strategy that never creates orders, and only logs, needs none and can ignore that warning. See the [TradingAdvisor](./plugins.md#-tradingadvisor) and the [Trader](./plugins.md#-trader).
 
@@ -636,7 +689,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 
 Without a `schema`, the whole block, `name` included, reaches the strategy unchecked, and Gekko says so as it starts, in an `info` line.
 
-Your strategy imports `zod` itself, and like any package it is looked up from the strategy file's folder: unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it, install it next to the strategy (`bun add zod` or `npm install zod` in its folder). Otherwise Gekko stops with `Cannot find package 'zod' from '…/emaCrossover.strategy.ts'`. The same goes for any other package (see [Where Your Strategy Lives](#where-your-strategy-lives) for the packages the compiled executable cannot find).
+Your strategy imports `zod` itself, and like any package it is looked up from the strategy file's folder: unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it, install it next to the strategy (`bun add zod` or `npm install zod` in its folder). Otherwise Gekko stops with `[TRADING ADVISOR] Cannot import the strategy file …/emaCrossover.strategy.ts: ResolveMessage: Cannot find package 'zod' from '…/emaCrossover.strategy.ts'`. The same goes for any other package (see [Where Your Strategy Lives](#where-your-strategy-lives) for the packages the compiled executable cannot find).
 
 ---
 
@@ -703,6 +756,16 @@ type EMACrossoverParams = z.infer<typeof emaCrossoverSchema>;
 type UnfinishedOrderParams = OnOrderCanceledEventParams<EMACrossoverParams> | OnOrderErroredEventParams<EMACrossoverParams>;
 type EndedOrderParams = OnOrderCompletedEventParams<EMACrossoverParams> | UnfinishedOrderParams;
 
+// The sign of a - b, but 0 when they are within a relative tolerance of each other. Two EMAs equal in exact arithmetic, on a market
+// that has not moved since the first candle, come out a few ulps apart, either way: compared strictly, that noise is a cross, and an
+// order. Gekko's compareWithTolerance, copied: a file loaded through strategyPath cannot import it
+const compareWithTolerance = (a: number, b: number, tolerance = 1e-9): number => {
+  if (a === b) return 0;
+  const difference = a - b;
+  if (Number.isFinite(difference) && Math.abs(difference) <= tolerance * Math.max(Math.abs(a), Math.abs(b))) return 0;
+  return Math.sign(difference);
+};
+
 export class EMACrossover implements Strategy<EMACrossoverParams> {
   static schema = emaCrossoverSchema;
 
@@ -734,15 +797,17 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
     // results is unknown, and null until the EMA has seen enough candles
     if (!current || typeof shortEma.results !== 'number' || typeof longEma.results !== 'number') return;
 
+    // Above, below, or within the tolerance of each other: equal, which is no cross
+    const shortToLong = compareWithTolerance(shortEma.results, longEma.results);
     // Golden cross: short EMA above long EMA, and nothing is held
-    if (shortEma.results > longEma.results && !this.isLong) {
+    if (shortToLong > 0 && !this.isLong) {
       log('info', `Golden cross at ${current.close} — BUY signal`);
       const { trailingPercentage } = strategyParams;
       const trailing = trailingPercentage ? { percentage: trailingPercentage } : undefined;
       this.pendingOrders.set(createOrder({ type: 'STICKY', side: 'BUY', symbol: this.pair, trailing }), 'BUY');
     }
     // Death cross: short EMA below long EMA, and the BUY has completed
-    else if (shortEma.results < longEma.results && this.isLong) {
+    else if (shortToLong < 0 && this.isLong) {
       log('info', `Death cross at ${current.close} — SELL signal`);
       this.pendingOrders.set(createOrder({ type: 'STICKY', side: 'SELL', symbol: this.pair }), 'SELL');
     }
@@ -805,7 +870,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 }
 ```
 
-`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)).
+`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)).
 
 ### Configuration File: `ema-crossover-config.yaml`
 
@@ -821,7 +886,7 @@ watch:
     candleCount: 200
   daterange:
     start: 2024-01-01
-    end: 2024-12-31T23:59:00Z # Both bounds included: a day alone, 2024-12-31, would be its first minute only
+    end: 2024-11-30T23:59:00Z # Both bounds included: a day alone, 2024-11-30, would be its first minute only
 
 exchange:
   name: dummy-cex
@@ -875,6 +940,8 @@ The simulator receives each order as the live exchange does: its amount truncate
 
 ### Run the Backtest
 
+The backtest reads the candles of its range from `./db/binance-BTC_USDT.sql`, the database of the [Quick Start](#3-run-your-strategy): import them first, as it says.
+
 ```bash
 # Build executable (only needed once)
 bun run build:exec
@@ -907,29 +974,31 @@ export class MyStrategy implements Strategy<MyParams> {
 
 ### 2. Validate Indicator Values
 
-An indicator's `results` is typed `unknown` and stays `null` until the indicator has seen enough candles, after warmup too if the warmup is shorter than the indicator needs. From then on it is complete on every candle, a number or an object whose fields are all set, so one check is enough, whatever its shape (see [Reading Results](./indicators.md#reading-results)):
+An indicator's `results` is typed `unknown` and stays `null` until the indicator has seen enough candles, after warmup too if the warmup is shorter than the indicator needs. From then on it is complete on every candle, a number or an object whose fields are all set (but for ROC, and TRIX built on it, `null` again on a candle whose base is 0, which prices never are), so one check on each candle is enough, whatever its shape (see [Reading Results](./indicators.md#reading-results)):
 
 ```typescript
 const [ema] = indicators;
 if (typeof ema.results !== 'number' || !Number.isFinite(ema.results)) return;
 ```
 
-Compare a price with an average, or two averages, with a relative tolerance rather than strictly: values equal in exact arithmetic come out a few ulps apart on a flat market, and a strict comparison then trades on noise. A strategy under `src/strategies/custom/` can use `compareWithTolerance` from `@utils/math/math.utils`; a file loaded through `strategyPath` cannot import it and carries its own.
+Compare a price with an average, or two averages, with a relative tolerance rather than strictly: values equal in exact arithmetic come out a few ulps apart on a flat market, and a strict comparison then trades on noise. A strategy under `src/strategies/custom/` can use `compareWithTolerance` from `@utils/math/math.utils`, as the [PositionTracker example](#tracking-your-position) does; a file loaded through `strategyPath` cannot import it and carries its own copy, as the [Complete Example](#complete-example) does.
 
 ### 3. Track the Order, Not the Signal
 
-Decide from your position and your pending order, which only the order hooks move (see [Tracking Your Position](#tracking-your-position)), not from the last signal you acted on: a strategy that only remembers the trend it ordered on does not know whether that order went through, never sends again a BUY that was refused, and cannot tell when it holds something to sell. Act on the position instead:
+Decide from your position and your pending order, which only the order hooks move (see [Tracking Your Position](#tracking-your-position)), not from the last signal you acted on: a strategy that only remembers the trend it ordered on does not know whether that order went through, never sends again a BUY that was refused, and cannot tell when it holds something to sell. Act on the position instead, here in the class of the [Lifecycle Methods](#lifecycle-methods):
 
 ```typescript
 onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<MyParams>, ...indicators: IndicatorResults[]): void {
   const [shortEma, longEma] = indicators;
   if (typeof shortEma.results !== 'number' || typeof longEma.results !== 'number') return;
-  const isUptrend = shortEma.results > longEma.results;
+  // Above, below, or within the tolerance of each other: equal, which is neither trend (see Validate Indicator Values)
+  const shortToLong = compareWithTolerance(shortEma.results, longEma.results);
 
-  // The order hooks set isLong and clear pendingOrderId: a BUY refused is sent again on the next candle of the uptrend
+  // The order hooks clear pendingOrderId and read isLong from the outcome: a BUY refused is sent again on the next candle of the uptrend
   if (this.pendingOrderId) return;
-  if (isUptrend && !this.isLong) this.pendingOrderId = tools.createOrder({ type: 'STICKY', side: 'BUY', symbol: shortEma.symbol });
-  else if (!isUptrend && this.isLong) this.pendingOrderId = tools.createOrder({ type: 'STICKY', side: 'SELL', symbol: shortEma.symbol });
+  const { symbol } = shortEma;
+  if (shortToLong > 0 && !this.isLong) this.pendingOrderId = tools.createOrder({ type: 'STICKY', side: 'BUY', symbol });
+  else if (shortToLong < 0 && this.isLong) this.pendingOrderId = tools.createOrder({ type: 'STICKY', side: 'SELL', symbol });
 }
 ```
 
@@ -962,7 +1031,7 @@ With `warmup.candleCount: N`, the warmup takes the first N timeframe candles, an
 
 Bollinger Bands follow the kind of their middle: n with the default sma, 2n − 1 with a dema. [Indicators at a Glance](./indicators.md#-indicators-at-a-glance) gives the first complete candle of every indicator. A strategy that compares a value with the one of the candle before needs one candle more.
 
-```yaml
+```yaml fragment
 watch:
   warmup:
     candleCount: 40  # DEMA(21) is complete from candle 41: 40 or more gives it a value on the first candle after the warmup
@@ -977,20 +1046,21 @@ In a backtest the warmup takes the first `candleCount` candles of `watch.dateran
 
 ## Troubleshooting
 
-### "Cannot find module" or "Cannot find external … strategy"
+### "Cannot import the strategy file …" or "Cannot find external … strategy"
 
-Gekko loads the strategy as it starts: it imports the file at `strategyPath` (a relative path is resolved against the directory Gekko is started from, not against the config file), then takes the export named `strategyName` from it. A failure stops Gekko with exit code 1, and the log says which step failed:
+Gekko loads the strategy as it starts: it imports the file at `strategyPath` (a relative path is resolved against the directory Gekko is started from, not against the config file), then takes the export named `strategyName` from it. A failure stops Gekko with exit code 1, and the log says which step failed: `[TRADING ADVISOR] Cannot import the strategy file <path>: …`, followed by Bun's reason, or `[TRADING ADVISOR] Cannot find external <strategyName> strategy in <path>`:
 
-- `Cannot find module '/home/user/strategies/myStrategy.strategy.ts' from '…'`: there is no file at that path (`strategyPath` once resolved).
+- `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: ResolveMessage: Cannot find module '/home/user/strategies/myStrategy.strategy.ts' from '…'`: there is no file at that path (`strategyPath` once resolved).
   - Verify `strategyPath` points to the correct file
   - For a relative `strategyPath`, check the directory Gekko is started from, or use an absolute path
-- `Cannot find module '@strategies/positionTracker' from '…/myStrategy.strategy.ts'`: the file imports a Gekko 2 module, which a file loaded through `strategyPath` cannot: import only types from Gekko 2, or move the strategy to `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
-- `Cannot find package 'zod' from '…/myStrategy.strategy.ts'`: install the package next to the strategy. The compiled executable never finds a package without an `index.js` at its root, such as `lodash-es` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+- `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@strategies/positionTracker' from '…/myStrategy.strategy.ts'`: the file imports a Gekko 2 module, which a file loaded through `strategyPath` cannot: import only types from Gekko 2, or move the strategy to `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+- `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find package 'zod' from '…/myStrategy.strategy.ts'`: install the package next to the strategy. The compiled executable never finds a package without an `index.js` at its root, such as `lodash-es` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+- `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: BuildMessage: Expected ")" but found ";" at /home/user/strategies/myStrategy.strategy.ts:12:21`: a syntax error at that line and column of the file named, the strategy file or a file it imports. Two or more are listed one after the other, after Bun's count, and one mistake can make several: `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: 2 errors building "/home/user/strategies/myStrategy.strategy.ts": BuildMessage: Expected ")" but found ";" at …:12:21; BuildMessage: Expected "]" but found ";" at …:13:20`.
 - `[TRADING ADVISOR] Cannot find external MyStrategy strategy in /home/user/strategies/myStrategy.strategy.ts`: the file was loaded, but exports nothing under the name `strategyName`.
   - Ensure `strategyName` matches your exported class name exactly (case-sensitive)
   - Check that your class is exported with `export class` (an `export default` class is not found)
+  - A built-in name beside a `strategyPath` (`strategyName: RSI`) is looked up in that file only: leave `strategyPath` out to run a built-in strategy
 - `[TRADING ADVISOR] Cannot find internal MyStrategy strategy`: `strategyPath` is missing, so Gekko looked for a built-in strategy of that name (or one exported from `src/strategies/custom/index.ts`).
-- A parse error that names no file, such as `BuildMessage: Expected ")" but found end of file`: the strategy file has a syntax error.
 
 ### "Invalid parameters for strategy … (strategy block)"
 
@@ -1020,11 +1090,21 @@ Followed by `Order 'amount' with value 0 is invalid`, the exchange refusing the 
 
 An all-in SELL sized from nothing says so the same way, `All-in SELL … sized from 0 BTC: 0 BTC sent, which the market refuses (…)`: your strategy sold all-in while holding nothing free (a position already sold, by hand or by a trailing stop), or a SELL sent just before took it all.
 
-### "Impossible to add the … indicator on …" or "… indicator not found."
+### "Impossible to add the … indicator on …", "… indicator not found." or "Indicator …: …"
 
 - `symbol must be one of the watched pairs (…)`: as for an order, above.
 - `addIndicator is available in init only`: register every indicator in `init`. One added later would only be fed from then on, and would add an argument to every hook.
+- `parameters must be a plain object of the indicator's parameters by name, {} to take its defaults, got 7`: the third argument, which only a JavaScript strategy can get wrong, must be an object such as `{ period: 7 }`, `{}` for the defaults (see [Using Indicators](#using-indicators)).
 - `SMAA indicator not found.`: the name is not one of the [indicators](./indicators.md); it is case-sensitive.
+- `[STRATEGY] Indicator ATR: period must be a whole number, at least 1, got undefined`, a parameter the indicator refuses, or requires and did not get: see [Parameter Checks](./indicators.md#parameter-checks).
+
+### "Cannot open the database …" or "Missing candles in database"
+
+A backtest reads the one-minute candles of `watch.daterange` from `storage.database` (a relative path is resolved against the directory Gekko is started from), and checks that every minute is there before it starts. Import the candles first (see [Run Your Strategy](#3-run-your-strategy)):
+
+- `[STORAGE] Cannot open the database /…/db/binance-BTC_USDT.sql (unable to open database file). A backtest reads an existing database: check storage.database, or import the candles first.`: there is no database at that path.
+- `[STORAGE] /…/db/binance-BTC_USDT.sql holds no candles of BTC/USDT: import them first.`: the database holds none of that pair.
+- `[STREAM] Missing candles in database: BTC/USDT 2024-01-01T00:00:00.000Z -> 2024-11-30T23:59:00.000Z, Available date ranges: [2024-01-01T00:00:00.000Z - 2024-06-30T23:59:00.000Z]`: the database lacks minutes of the range, and lists those it holds. Import the missing ones, or backtest a range within those.
 
 ### "watch.daterange must hold more whole … candles than warmup.candleCount"
 
@@ -1036,15 +1116,16 @@ The circuit breaker: `maxConsecutiveErrors` order errors in a row stopped Gekko,
 
 ### Trailing stop lines
 
-Gekko logs what happens to your stops, under the `strategy` tag:
+Gekko logs what happens to your stops, each line of this table under the `strategy` tag but the second `over` line, which comes under the `trailing stop` tag:
 
 | Line                                                                       | Level | Meaning                                                                                                                                             |
 |----------------------------------------------------------------------------|-------|-----------------------------------------------------------------------------------------------------------------------------------------------------|
 | `Trailing stop of BUY <id> held back: …`                                   | info  | A price reached its stop price while a SELL of yours is pending on the pair: the stop sends no SELL until that one ends                             |
 | `Trailing stop of BUY <id> resumes: …`                                     | info  | Your SELL was canceled or errored, and no other is pending on the pair: the stop may trigger again                                                  |
 | `Trailing stop of BUY <id> canceled: the strategy sold on <pair> …`        | info  | Your SELL completed: it closed the position the stop protected                                                                                      |
-| `Trailing stop of BUY <id> active again: its SELL <id> …`                  | warn  | The stop's SELL completed for less than the stop's amount, errored or was canceled: it sells what is left once a price reaches its stop price again |
+| `Trailing stop of BUY <id> active again: its SELL <id> …`                  | warn  | The stop's SELL completed, errored or was canceled for less than the stop's amount: it sells what is left once a price reaches its stop price again |
 | `Trailing stop of BUY <id> over: …`                                        | info  | The stop's SELL left too little to sell at the minimums of the market, or completed with too little of the asset free: nothing is left to protect   |
+| `Trailing stop of BUY <id> over: its SELL <id> sold 0.5, all of its 0.5`   | info  | Under the `trailing stop` tag: the stop's SELL errored or was canceled after a reported fill of all of its amount: nothing is left to protect       |
 | `Trailing stop of BUY <id> kept: its SELL <id> …`                          | warn  | The stop's SELL errored and may still have gone through on the exchange: the stop stays armed. Check that SELL there                                |
 | `Trailing stop of BUY <id> removed: …`                                     | warn  | The stop's SELL errored or was canceled, and the portfolio shows too little of the asset free to sell: nothing is left to protect                   |
 | `BUY <id> errored after it filled …`                                       | warn  | The BUY errored after a reported fill: its stop is armed for that part. When the BUY may still be live, the rest of it may fill without a stop      |

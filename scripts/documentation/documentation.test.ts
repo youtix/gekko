@@ -10,7 +10,7 @@ import { configurationSchema } from '@services/configuration/configuration.schem
 import * as strategies from '@strategies/index';
 import type { StrategyConstructor } from '@strategies/strategy.types';
 import { CORE_SCHEMA, load } from 'js-yaml';
-import { isEqual, isPlainObject, omit } from 'lodash-es';
+import { isPlainObject, omit } from 'lodash-es';
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
@@ -103,15 +103,6 @@ const STRATEGIES: Partial<Record<string, StrategyConstructor>> = strategies;
 /** A block holding these three is a whole configuration, checked as the loader checks a file; any other one section by section */
 const CONFIGURATION_SECTIONS = ['watch', 'exchange', 'plugins'];
 const SECTION_SCHEMAS: Partial<Record<string, ZodType>> = configurationSchema.shape;
-
-// Fragments that wait for their marker, each left out by its content: drop an entry once its block carries `fragment`
-const UNMARKED_FRAGMENTS = [
-  {
-    source: 'documentation/custom-strategies.md',
-    content: { watch: { warmup: { candleCount: 40 } } },
-    reason: 'the warmup of watch alone, after the table of the first complete candles',
-  },
-];
 
 // The configurations of config/ leave their credentials empty for the reader to fill in, and realtime-trader.yml its disclaimer false:
 // the loader refuses both, so they are filled in as a reader would before a run, and the name of each test says so
@@ -232,13 +223,11 @@ const configurationFile = (file: string): Document => {
 };
 
 const guideDocuments = documentsOf(guideBlocks);
-const isUnmarkedFragment = ({ source, content }: Document) =>
-  UNMARKED_FRAGMENTS.some(fragment => fragment.source === source && isEqual(fragment.content, content));
 const configurationFiles = readdirSync(path.join(ROOT, 'config'))
   .filter(file => /\.ya?ml$/.test(file))
   .sort()
   .map(configurationFile);
-const yamlDocuments = [...guideDocuments.documents.filter(document => !isUnmarkedFragment(document)), ...configurationFiles];
+const yamlDocuments = [...guideDocuments.documents, ...configurationFiles];
 const externalStrategies = new Set(
   yamlDocuments
     .flatMap(({ content }) => entriesOf(content))
