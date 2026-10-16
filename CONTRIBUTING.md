@@ -50,7 +50,7 @@ bun run test:e2e                                      # the end-to-end tests
 
 The unit tests are the `*.test.ts` files next to the code they test in `src/` and `scripts/`, and vitest runs them. `test:coverage` fails when the lines, functions, branches or statements covered fall below 95%.
 
-The end-to-end tests in `test/e2e` run the whole pipeline of each mode on Bun's own test runner: `bun test --isolate test/e2e/<path_to_file>` runs one file. Neither CI nor the hooks run them, so run them before you open a pull request.
+The end-to-end tests in `test/e2e` run the whole pipeline of each mode on Bun's own test runner: `bun test --isolate test/e2e/<path_to_file>` runs one file. Neither CI nor the hooks run them, so run them before you open a pull request. The realtime flows run on real minutes under Bun's fake timers: a run of minutes lasts milliseconds and meets the same minutes every time.
 
 ### Check Formatting, Linting, Types and the Build
 

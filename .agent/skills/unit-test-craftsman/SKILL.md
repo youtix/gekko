@@ -15,10 +15,11 @@ These rules are for the vitest suites, `src/**/*.test.ts` and `scripts/**/*.test
 
 The end-to-end tests in `test/e2e` run on Bun's own test runner (`bun:test`), where three rules change:
 
-- `it.each` takes array tables only: a tagged template does not type-check there, and run anyway it iterates the template's text fragments, so every row passes.
+- `it.each` takes array tables only: a tagged template does not type-check there, and run anyway it iterates the template's text fragments, so every row passes. Its rows are inferred as deep-readonly constants: a row holding an array that the test passes to a mutable parameter or to `toEqual` needs the table's row type, `it.each<Row>([...])`.
 - A scenario runs a whole pipeline, so it asserts its figures in one `toEqual` on a composed object rather than in one `it()` per `expect()`.
 - `bun run test` runs vitest only: run an e2e file with `bun test --isolate <path_to_file>`, all of them with `bun run test:e2e`.
 - `await expect(promise).rejects` (and `.resolves`) blocks until the promise settles, past every timeout: assert the caught form (`await promise.then(() => undefined, error => error)`) when the run under test may never settle.
+- A realtime flow waits on its run through `runRealtimeUntil`, `runRealtimeFor` or `runRealtimeUntilEnd` (`test/e2e/helpers/realtimeRun.helper.ts`), never on the pipeline's promise: under fake timers a promise that never settles hangs the test past its timeout.
 
 ## Instructions
 
