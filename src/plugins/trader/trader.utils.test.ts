@@ -5,8 +5,10 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   computeOrderPricing,
   getAllInBuyAmount,
+  getAllocatedShare,
   getBacktestModeIntervalSyncTime,
   getBuyBudget,
+  getSellAmountOfCost,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
 } from './trader.utils';
@@ -106,6 +108,53 @@ describe('trader.utils', () => {
       ${1000}              | ${3}    | ${5}     | ${316.66666}
     `('is placed as $placed for $currency at $price on a step of $decimals decimals', ({ currency, price, decimals, placed }) => {
       expect(round(getAllInBuyAmount(currency, price), decimals, 'down')).toBe(placed);
+    });
+  });
+
+  // The percentage moved two places, then the product of the decimals: in binary, 33.3 % of 3 came out at 0.9989999999999999, and 10 %
+  // of 0.7 and of 2.2, as 0.7 × 0.1 and 2.2 × 0.1, at 0.06999999999999999 and 0.22000000000000003
+  describe('getAllocatedShare', () => {
+    it.each`
+      balance    | allocation | share
+      ${1000}    | ${25}      | ${250}
+      ${1000}    | ${100}     | ${1000}
+      ${1000.01} | ${100}     | ${1000.01}
+      ${1000}    | ${0.5}     | ${5}
+      ${1000}    | ${33.33}   | ${333.3}
+      ${3}       | ${33.3}    | ${0.999}
+      ${0.7}     | ${10}      | ${0.07}
+      ${2.2}     | ${10}      | ${0.22}
+      ${0.7992}  | ${50}      | ${0.3996}
+      ${0}       | ${50}      | ${0}
+    `('is $share for $allocation % of $balance', ({ balance, allocation, share }) => {
+      expect(getAllocatedShare(balance, allocation)).toBe(share);
+    });
+
+    // Truncated to the step of the market, as ccxt and the simulated exchange place an amount: an ulp short of a whole number of steps,
+    // the amount was placed one step short (0.998)
+    it.each`
+      balance | allocation | decimals | placed
+      ${3}    | ${33.3}    | ${3}     | ${0.999}
+      ${0.7}  | ${10}      | ${2}     | ${0.07}
+    `('is placed as $placed for $allocation % of $balance on a step of $decimals decimals', ({ balance, allocation, decimals, placed }) => {
+      expect(round(getAllocatedShare(balance, allocation), decimals, 'down')).toBe(placed);
+    });
+  });
+
+  // The one division to 15 significant digits: in binary, 0.3 at 0.1 came out at 2.9999999999999996 and 0.7 at 0.1 at
+  // 6.999999999999999. Infinity, which only the Trader's tests reach, sizes nothing.
+  describe('getSellAmountOfCost', () => {
+    it.each`
+      cost    | price       | amount
+      ${100}  | ${100}      | ${1}
+      ${0.3}  | ${0.1}      | ${3}
+      ${0.7}  | ${0.1}      | ${7}
+      ${100}  | ${97.3}     | ${1.02774922918808}
+      ${1000} | ${3}        | ${333.333333333333}
+      ${5}    | ${100}      | ${0.05}
+      ${100}  | ${Infinity} | ${0}
+    `('is $amount for a cost of $cost at $price', ({ cost, price, amount }) => {
+      expect(getSellAmountOfCost(cost, price)).toBe(amount);
     });
   });
 

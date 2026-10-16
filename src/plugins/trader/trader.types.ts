@@ -27,6 +27,13 @@ export type TraderOrderMetadata = {
   price: number;
   /** The price the strategy asked for, if any: the price its terminal events relay, in both flows (see Trader.onStrategyCancelOrder) */
   requestedPrice?: number;
+  /**
+   * The cost the strategy sized the order by, in currency, as it gave it, and left out for an order it sized otherwise: its terminal
+   * events relay it in both flows (see Trader.onStrategyCancelOrder)
+   */
+  cost?: number;
+  /** The allocation the strategy sized the order by, in percent, as it gave it, and left out for an order it sized otherwise (see cost) */
+  allocation?: number;
   /** Trading Pair */
   symbol: TradingPair;
 };

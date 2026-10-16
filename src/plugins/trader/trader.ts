@@ -21,11 +21,12 @@ import { OrderErrorEventPayload, OrderSummary } from '@services/core/order/order
 import { debug, error, info, warning } from '@services/logger';
 import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
-import { getMarketOrderLimits } from '@utils/market/market.utils';
-import { addPrecise, isFiniteNumber, isFinitePositive } from '@utils/math/math.utils';
+import { getMarketOrderLimits, toBound } from '@utils/market/market.utils';
+import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
-import { filter, isNil, noop, uniq } from 'lodash-es';
+import { formatEveryDecimal } from '@utils/string/string.utils';
+import { filter, isNil, noop, pick, uniq } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { ORDER_FACTORY } from './trader.const';
 import { traderSchema } from './trader.schema';
@@ -33,12 +34,23 @@ import { CheckOrderSummaryParams, TraderOrderMetadata } from './trader.types';
 import {
   computeOrderPricing,
   getAllInBuyAmount,
+  getAllocatedShare,
   getBacktestModeIntervalSyncTime,
   getBuyBudget,
+  getSellAmountOfCost,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
   ShouldEmitPortfolioParams,
 } from './trader.utils';
+
+/**
+ * The keys with which a strategy sizes an order otherwise than by its amount: every event of the order relays them as the strategy gave
+ * them, left out when it gave none (see OrderEvent)
+ */
+const SIZING_KEYS = ['cost', 'allocation'] as const;
+
+/** The share of its currency DEFAULT_FEE_BUFFER keeps back for the fee of a BUY sized from the currency, in %, as the logs write it */
+const FEE_BUFFER_PERCENT = shiftDecimalPoint(DEFAULT_FEE_BUFFER, 2);
 
 type OrderInstance = TraderOrderMetadata['orderInstance'];
 /** An order, as the events relayed to the strategy describe it */
@@ -60,6 +72,21 @@ type FreeBalanceLeft = {
   taken: number;
   /** What is left of it, never below 0 */
   free: number;
+};
+/**
+ * What an order sized by its cost or by its allocation asks for, before any cap (see Trader.getBudget): the currency a BUY may spend, or
+ * the amount of the asset a SELL sells, and `label`, the order and its sizing as the logs name them
+ */
+type Budget = { asked: number; label: string };
+
+/**
+ * What the BUYs placed since the last synchronization take from the currency it read, as a warning of a BUY sized from what they leave
+ * says it: what each may spend, the share DEFAULT_FEE_BUFFER keeps back for its fee included (see getBuyBudget)
+ */
+const describeBuysPlacedSince = ({ read, taken }: FreeBalanceLeft, currencyName: string) => {
+  const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
+  const feeBuffer = `the ${FEE_BUFFER_PERCENT} % kept back for their fee included`;
+  return `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
 };
 
 export class Trader extends Plugin {
@@ -84,9 +111,9 @@ export class Trader extends Plugin {
   /**
    * The orders placed since the balance was read, by id: what each one takes from a free balance that read does not show, and the
    * count of synchronizations started when it was placed. A SELL takes its amount of the asset (see sizeSell), a BUY what it may spend
-   * of the currency (see sizeOrder and sizeAllInBuy). A synchronization started after an order reads a balance that shows it, filled or
-   * reserved: the order is forgotten once that synchronization has read the balance. So is an order the strategy cancels: the exchange
-   * gets the cancelation before any order sent after it, and releases what the canceled order reserved.
+   * of the currency (see sizeOrder, sizeAllInBuy and sizeBudgetBuy). A synchronization started after an order reads a balance that
+   * shows it, filled or reserved: the order is forgotten once that synchronization has read the balance. So is an order the strategy
+   * cancels: the exchange gets the cancelation before any order sent after it, and releases what the canceled order reserved.
    */
   private readonly unreadOrders = new Map<UUID, UnreadOrder>();
 
@@ -219,16 +246,47 @@ export class Trader extends Plugin {
   /**
    * The amount `advice` is placed with, and what it takes from the free balance the last synchronization read (`balance`, see
    * unreadOrders): of the asset for a SELL, its amount (see sizeSell); of the currency for a BUY, what it may spend (see getBuyBudget),
-   * all it was sized from for an all-in BUY (see sizeAllInBuy). A BUY with an amount is placed as asked, never capped: the strategy
-   * chose it, and the exchange refuses it when the market does not take it.
+   * all it was sized from for an all-in BUY (see sizeAllInBuy), its budget for one sized by its cost or by its allocation (see
+   * sizeBudgetBuy). A BUY with an amount is placed as asked, never capped: the strategy chose it, and the exchange refuses it when the
+   * market does not take it. How an order sized by its cost or by its allocation came out is then reported (see reportBudgetSizing).
    */
   private sizeOrder(advice: AdviceOrder, price: number, balance: FreeBalanceLeft): { amount: number; taken: number } {
+    const budget = this.getBudget(advice, price, balance);
     if (advice.side === 'SELL') {
-      const amount = this.sizeSell(advice, balance);
+      const amount = this.sizeSell(advice, balance, budget);
+      if (budget) this.reportBudgetSizing(advice, price, budget, amount);
       return { amount, taken: amount };
+    }
+    if (budget) {
+      const sized = this.sizeBudgetBuy(advice, price, balance, budget);
+      this.reportBudgetSizing(advice, price, budget, sized.amount);
+      return sized;
     }
     if (isNil(advice.amount)) return this.sizeAllInBuy(advice, price, balance);
     return { amount: advice.amount, taken: getBuyBudget(advice.amount, price) };
+  }
+
+  /**
+   * What an order sized by its cost or by its allocation asks for (see Budget), undefined for an order with an amount or an all-in one:
+   * createOrder lets through one of the three at most. A BUY asks for the currency it may spend, the share DEFAULT_FEE_BUFFER keeps back
+   * for the fee included: its cost, or its allocation of the currency the last synchronization read. A SELL asks for an amount of the
+   * asset: its allocation of the asset read, or its cost over the price of the order, nothing kept back, the fee coming out of what it
+   * brings in. Both worked out in decimal (see getAllocatedShare and getSellAmountOfCost). A share is of the balance read, not of what the
+   * orders placed since leave: two BUYs of 50 % on one candle are both sized from the whole of it, the second not from half of the rest.
+   */
+  private getBudget(advice: AdviceOrder, price: number, { read }: FreeBalanceLeft): Budget | undefined {
+    const { id, side, type, symbol, cost, allocation } = advice;
+    const [assetName, currencyName] = symbol.split('/');
+    const order = `[${id}] ${side} ${type} order of`;
+    if (!isNil(allocation)) {
+      const unit = side === 'BUY' ? currencyName : assetName;
+      const asked = getAllocatedShare(read, allocation);
+      return { asked, label: `${order} ${asked} ${unit} (${allocation} % of ${read} ${unit})` };
+    }
+    if (isNil(cost)) return;
+    if (side === 'BUY') return { asked: cost, label: `${order} ${cost} ${currencyName}` };
+    const asked = getSellAmountOfCost(cost, price);
+    return { asked, label: `${order} ${asked} ${assetName} (${cost} ${currencyName} at ${price})` };
   }
 
   /**
@@ -244,8 +302,9 @@ export class Trader extends Plugin {
   }
 
   /**
-   * The amount a SELL is placed with: the amount asked for, or, for an all-in SELL, what the SELLs placed before it leave of the asset
-   * (see getFreeBalanceLeft), capped at two bounds. Above both, it is capped at the lower one, and one warning says which.
+   * The amount a SELL is placed with: the amount asked for, that of a SELL sized by its cost or by its allocation (see getBudget), or,
+   * for an all-in SELL, what the SELLs placed before it leave of the asset (see getFreeBalanceLeft), capped at two bounds. Above both,
+   * it is capped at the lower one, and one warning says which, naming the cost or the allocation the amount came from.
    *
    * The free balance of its asset, which the exchange refuses to exceed. A strategy may ask for more without knowing it: the amount a
    * BUY filled, which the trailing stop of that BUY sells (see StrategyManager), is the amount of its trades, and the exchange may have
@@ -269,22 +328,24 @@ export class Trader extends Plugin {
    *
    * An all-in SELL sized from nothing (none of the asset free at the last synchronization, the SELLs placed since taking what was, or
    * no balance read yet) is sent for 0, which the limits of the market refuse, as they refuse an all-in BUY sized from no currency. It
-   * is said at warn level, as for that BUY: the refusal names the amount of 0, not its cause.
+   * is said at warn level, as for that BUY: the refusal names the amount of 0, not its cause. So is a SELL allocated a share of no asset.
    */
-  private sizeSell(advice: AdviceOrder, balance: FreeBalanceLeft) {
+  private sizeSell(advice: AdviceOrder, balance: FreeBalanceLeft, budget?: Budget) {
     const { id, type, symbol } = advice;
     const [assetName] = symbol.split('/');
     const { read, taken, free } = balance;
-    if (isNil(advice.amount) && !(free > 0)) {
-      const sized = `[${id}] All-in SELL ${type} order sized from ${free} ${assetName}: ${free} ${assetName} sent`;
-      warning('trader', `${sized}, which the market refuses (${this.getEmptyBalanceCause(balance, assetName, 'SELLs')})`);
-      return free;
+    const requestedAmount = budget?.asked ?? advice.amount ?? free;
+    if (isNil(advice.amount) && !(requestedAmount > 0)) {
+      const sized = budget?.label ?? `[${id}] All-in SELL ${type} order sized from ${free} ${assetName}`;
+      const cause = this.getEmptyBalanceCause(balance, assetName, 'SELLs');
+      warning('trader', `${sized}: ${requestedAmount} ${assetName} sent, which the market refuses (${cause})`);
+      return requestedAmount;
     }
-    const requestedAmount = advice.amount ?? free;
     const isFiniteAmount = Number.isFinite(requestedAmount);
     const isAboveBalance = isFiniteAmount && free > 0 && requestedAmount > free;
     const maximum = this.getMaximumAmount(advice);
-    const asked = `[${id}] ${isNil(advice.amount) ? 'All-in SELL' : 'SELL'} ${type} order of ${requestedAmount} ${assetName}`;
+    const asked =
+      budget?.label ?? `[${id}] ${isNil(advice.amount) ? 'All-in SELL' : 'SELL'} ${type} order of ${requestedAmount} ${assetName}`;
 
     if (isFiniteAmount && !isNil(maximum) && (isAboveBalance ? free : requestedAmount) > maximum) {
       const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
@@ -329,15 +390,70 @@ export class Trader extends Plugin {
       return { amount: maximum, taken: getBuyBudget(maximum, price) };
     }
     if (taken > 0) {
-      const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
-      const feeBuffer = `the ${shiftDecimalPoint(DEFAULT_FEE_BUFFER, 2)} % kept back for their fee included`;
-      const left = `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
-      warning('trader', `${sized}: ${amount} ${assetName} sent (${left})`);
+      warning('trader', `${sized}: ${amount} ${assetName} sent (${describeBuysPlacedSince(currency, currencyName)})`);
     } else if (!(read > 0)) {
       const cause = this.getEmptyBalanceCause(currency, currencyName, 'BUYs');
       warning('trader', `${sized}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
     }
     return { amount, taken: free };
+  }
+
+  /**
+   * The amount of a BUY sized by its cost or by its allocation, and what it takes from the currency read (see unreadOrders): what its
+   * budget buys at the price of the order, less the share DEFAULT_FEE_BUFFER keeps back for the fee, worked out in decimal as for an
+   * all-in BUY (see getAllInBuyAmount). The budget is what the order asks for (see getBudget), capped at what the BUYs placed since the
+   * last synchronization leave of the currency (see getFreeBalanceLeft), with a warning: above it, the BUY would be refused for want of
+   * funds, an error counting towards the circuit breaker, where what is left still buys something. Capped at nothing, or a share of
+   * nothing, it is sized to 0, which the limits of the market refuse, said at warn level with its cause, as for an all-in BUY: the
+   * refusal names the amount of 0, not its cause.
+   *
+   * Capped at the most the market takes in one order of its type (see getMaximumAmount), with a warning, as an all-in BUY is: it then
+   * takes from the currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it. Otherwise it takes its
+   * budget. An allocation of 100 % is an all-in BUY: the same amount, taking as much of the currency, warned of in the same cases.
+   */
+  private sizeBudgetBuy(advice: AdviceOrder, price: number, currency: FreeBalanceLeft, { asked, label }: Budget) {
+    const { type, symbol } = advice;
+    const [assetName, currencyName] = symbol.split('/');
+    const isCapped = asked > currency.free;
+    const budget = isCapped ? currency.free : asked;
+    const amount = getAllInBuyAmount(budget, price);
+    const maximum = this.getMaximumAmount(advice);
+    const sized = isCapped ? `${label} above the free balance, sized from ${budget} ${currencyName}` : label;
+
+    if (!isNil(maximum) && amount > maximum) {
+      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
+      warning('trader', `${sized}: ${amount} ${assetName}, above ${capped}, the rest of the ${currencyName} left unspent`);
+      return { amount: maximum, taken: getBuyBudget(maximum, price) };
+    }
+    if (!(budget > 0)) {
+      const cause = this.getEmptyBalanceCause(currency, currencyName, 'BUYs');
+      warning('trader', `${label}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
+    } else if (isCapped) {
+      const sent = `${sized}: ${amount} ${assetName} sent`;
+      warning('trader', currency.taken > 0 ? `${sent} (${describeBuysPlacedSince(currency, currencyName)})` : sent);
+    }
+    return { amount, taken: budget };
+  }
+
+  /**
+   * Says at debug level how an order sized by its cost or by its allocation came out, and warns before it is sent when its cost at its
+   * price, worked out in decimal as the exchanges work it out (see multiplyPrecise), is below the minimum cost of the market (see
+   * toBound): the market refuses it, an error counting towards the circuit breaker, whose reason names the cost of the order, not the
+   * budget or the share it came from. A BUY costs less than its budget, the share DEFAULT_FEE_BUFFER keeps back for the fee: one whose
+   * budget is the minimum cost is refused. Not an order sized to 0, which the market refuses for its amount, warned of with its cause
+   * (see sizeSell and sizeBudgetBuy). An order with an amount is not checked, its refusal naming the amount the strategy chose, nor an
+   * all-in one.
+   */
+  private reportBudgetSizing({ side, symbol }: AdviceOrder, price: number, { label }: Budget, amount: number) {
+    const [assetName, currencyName] = symbol.split('/');
+    debug('trader', `${label} sized to ${amount} ${assetName} at ${price}`);
+    const minimum = toBound(this.getExchange().getMarketData(symbol).cost?.min);
+    const cost = multiplyPrecise(amount, price);
+    if (isNil(minimum) || !(amount > 0) || !(cost < minimum)) return;
+    const sent = `${label}: ${amount} ${assetName} at ${price} sent`;
+    const feeBuffer = side === 'BUY' ? ` once ${FEE_BUFFER_PERCENT} % is kept back for the fee` : '';
+    const below = `below the minimum cost of ${formatEveryDecimal(minimum)} ${currencyName} on ${symbol}, which the market refuses`;
+    warning('trader', `${sent}, a cost of ${formatEveryDecimal(cost)} ${currencyName}${feeBuffer}, ${below}`);
   }
 
   /**
@@ -351,8 +467,9 @@ export class Trader extends Plugin {
   }
 
   /**
-   * Why an all-in order has nothing to be sized from, which its refusal for an amount of 0 does not say: no balance read from the
-   * exchange yet, none of the asset free at the last synchronization, or the orders of its side placed since taking what was
+   * Why an all-in order, or one sized by its cost or by its allocation, has nothing to be sized from, which its refusal for an amount of
+   * 0 does not say: no balance read from the exchange yet, none of the asset free at the last synchronization, or the orders of its side
+   * placed since taking what was
    */
   private getEmptyBalanceCause({ read, taken }: FreeBalanceLeft, assetName: string, placedSince: 'BUYs' | 'SELLs') {
     // Before any synchronization succeeded, the portfolio is the empty one the Trader starts with (see isFetchedPortfolio)
@@ -553,7 +670,10 @@ export class Trader extends Plugin {
     while (this.pendingReports.size) await Promise.all(this.pendingReports);
   }
 
-  /** The fill, with its summary, estimated when the exchange cannot give it (see summarizeCompletedOrder), and the portfolio after it */
+  /**
+   * The fill, with its summary, estimated when the exchange cannot give it (see summarizeCompletedOrder), the portfolio after it, and
+   * the cost or the allocation the strategy sized the order by, as the other events of the order relay them
+   */
   private async reportCompleted(orderInstance: OrderInstance, order: RelayedOrder, creationPrice: number) {
     const { id, symbol, side, type, orderCreationDate } = order;
     try {
@@ -566,8 +686,8 @@ export class Trader extends Plugin {
       } catch (err) {
         error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
-      const orderCompletedEvent = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
-      this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, orderCompletedEvent);
+      const { order: completed, exchange } = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
+      this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, { order: { ...completed, ...pick(order, SIZING_KEYS) }, exchange });
       this.orders.delete(id);
     } catch (err) {
       error('trader', `[${id}] Impossible to report the completion of the ${side} ${type} order: ${describeError(err)}`);
@@ -682,11 +802,12 @@ export class Trader extends Plugin {
         this.unreadOrders.delete(id);
 
         // From now on its updates are no longer logged, and its end is relayed as the creation flow relays it: with the price the
-        // strategy asked for, if any. Not the price the order was created with (see TraderOrderMetadata), the market price for an
-        // order without one, which the strategy and the EventSubscriber would read as a requested limit price: that one only goes to
-        // the report, for the estimate of a fill.
+        // strategy asked for, if any, and the cost or the allocation it sized the order by. Not the price the order was created with
+        // (see TraderOrderMetadata), the market price for an order without one, which the strategy and the EventSubscriber would read
+        // as a requested limit price: that one only goes to the report, for the estimate of a fill.
         orderInstance.removeAllListeners();
-        this.relayTerminalEvents(orderInstance, { id, orderCreationDate, amount, side, type, price: requestedPrice, symbol }, price);
+        const relayed = { id, orderCreationDate, amount, side, type, price: requestedPrice, symbol, ...pick(orderMetadata, SIZING_KEYS) };
+        this.relayTerminalEvents(orderInstance, relayed, price);
 
         // Cancel, without waiting: the outcome arrives through the terminal events. A failure is reported as ORDER_ERRORED_EVENT,
         // so a rejection is not expected, but it must not become an unhandled one. Tracked as a report: the simulated exchange
@@ -713,8 +834,9 @@ export class Trader extends Plugin {
         if (!price || price <= 0) {
           const reason = isNil(advice.price) ? `no price known for ${symbol}` : `invalid requested price ${advice.price}`;
           warning('trader', `[${id}] Impossible to create the ${side} ${type} order: ${reason}`);
-          // The amount the strategy asked for, if any. Without one the order was all-in, to be sized as it is placed (a BUY from the
-          // price, missing or invalid here): never placed, it ordered nothing, filled nothing, and nothing of it is live.
+          // The amount the strategy asked for, if any. Without one the order was to be sized as it is placed, all-in or from its cost or
+          // its allocation (a BUY, and a SELL of a cost, from the price, missing or invalid here): never placed, it ordered nothing,
+          // filled nothing, and nothing of it is live. Its cost or its allocation goes with it as asked.
           const order = {
             ...advice,
             amount: advice.amount ?? 0,
@@ -730,8 +852,9 @@ export class Trader extends Plugin {
 
         // Price cannot be zero here because we call processOneMinuteBucket before events (plugins stream)
         // We delegate the order validation (notional, lot, amount) to the exchange, but for the maximum amount the market takes in one
-        // order, which a SELL and an all-in BUY are capped at (see sizeOrder). An all-in SELL sells what the SELLs before it left of the
-        // asset, an all-in BUY spends what the BUYs before it left of the currency.
+        // order, which a SELL and a BUY without an amount are capped at, and the minimum cost an order sized by its cost or by its
+        // allocation is warned of (see sizeOrder). An all-in SELL sells what the SELLs before it left of the asset, an all-in BUY spends
+        // what the BUYs before it left of the currency, and a BUY sized by its cost or by its allocation its budget, capped at that.
         const [assetName, currencyName] = symbol.split('/');
         const takenFrom = side === 'SELL' ? assetName : currencyName;
         const { amount, taken } = this.sizeOrder(advice, price, this.getFreeBalanceLeft(takenFrom));
@@ -743,10 +866,22 @@ export class Trader extends Plugin {
 
         // Create order
         const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price);
-        this.orders.set(id, { amount, side, orderCreationDate, type, price, requestedPrice: advice.price, orderInstance, symbol });
+        // With the cost or the allocation the strategy sized it by, if any, which the events of its cancelation flow relay as asked
+        this.orders.set(id, {
+          amount,
+          side,
+          orderCreationDate,
+          type,
+          price,
+          requestedPrice: advice.price,
+          orderInstance,
+          symbol,
+          ...pick(advice, SIZING_KEYS),
+        });
         // Until the balance is read again, the orders after it can only take what it leaves (see unreadOrders): a SELL its amount of the
-        // asset, a BUY what it may spend of the currency, an all-in BUY all it was sized from, unless capped at the maximum of the market.
-        // Not an order that cannot be placed, which the exchange refuses.
+        // asset, a BUY what it may spend of the currency, an all-in BUY all it was sized from and a BUY sized by its cost or by its
+        // allocation its budget, unless capped at the maximum of the market. Not an order that cannot be placed, which the exchange
+        // refuses.
         if (isFinitePositive(amount) && isFinitePositive(taken)) {
           this.unreadOrders.set(id, { assetName: takenFrom, amount: taken, synchronizationCount: this.synchronizationCount });
         }

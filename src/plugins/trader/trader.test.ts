@@ -16,7 +16,7 @@ import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
 import { OrderSummary } from '@services/core/order/order.types';
 import * as logger from '@services/logger';
-import { noop } from 'lodash-es';
+import { noop, pick } from 'lodash-es';
 import type { Mock } from 'vitest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Trader } from './trader';
@@ -225,6 +225,9 @@ describe('Trader', () => {
     (trader['addDeferredEmit'] as unknown as Mock).mock.calls
       .map(([event]) => event)
       .filter(event => [ORDER_CANCELED_EVENT, ORDER_COMPLETED_EVENT, ORDER_ERRORED_EVENT].includes(event));
+
+  // How a strategy sizes an order: an amount, a cost, an allocation, or none of them for an all-in order
+  type Sizing = Pick<AdviceOrder, 'amount' | 'cost' | 'allocation'>;
 
   const buildAdvice = (overrides?: Partial<AdviceOrder>): AdviceOrder => ({
     id: overrides?.id ?? '20a7abd2-546b-4c65-b04d-900b84fa5fe6',
@@ -1425,6 +1428,504 @@ describe('Trader', () => {
         ]);
         await trader.onStrategyCreateOrder([buildAdvice({ side: 'SELL', type: 'MARKET', amount: 0.5 })]);
         expect(logger.warning).not.toHaveBeenCalled();
+      });
+    });
+
+    // A cost in the currency, or a share of the currency read, instead of an amount: on several pairs, the first all-in BUY took all the
+    // currency, and the BUYs of the other pairs were refused for want of funds. The account holds 1000 USDT, BTC at 100.
+    describe('when a BUY is sized by its cost or by its allocation', () => {
+      const buy = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', symbol: AdviceOrder['symbol'] = 'BTC/USDT') => ({
+        ...buildAdvice({
+          id: `00000000-0000-4000-8000-00000000006${index}`,
+          side: 'BUY',
+          type,
+          symbol,
+          price: type === 'LIMIT' ? 95 : undefined,
+        }),
+        ...sizing,
+      });
+      const allInBuy = buy(9, {});
+      const balance = (usdtFree: number) =>
+        new Map<string, BalanceDetail>([
+          ['BTC', { free: 3, used: 0, total: 3 }],
+          ['USDT', { free: usdtFree, used: 0, total: usdtFree }],
+        ]);
+
+      // What the budget buys at the price of the order, less the 5 % kept back for the fee, as for an all-in BUY
+      it.each`
+        description                                     | sizing                   | type        | amount
+        ${'a cost of 100 USDT'}                         | ${{ cost: 100 }}         | ${'MARKET'} | ${0.95}
+        ${'a cost of the 1000 USDT free'}               | ${{ cost: 1000 }}        | ${'MARKET'} | ${9.5}
+        ${'a cost of 95 USDT at its limit price of 95'} | ${{ cost: 95 }}          | ${'LIMIT'}  | ${0.95}
+        ${'an allocation of 25 %, 250 USDT'}            | ${{ allocation: 25 }}    | ${'MARKET'} | ${2.375}
+        ${'an allocation of 33.33 %, 333.3 USDT'}       | ${{ allocation: 33.33 }} | ${'MARKET'} | ${3.16635}
+      `('places a BUY of $description for $amount BTC', async ({ sizing, type, amount }) => {
+        const advice = buy(1, sizing, type);
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(amount);
+      });
+
+      // Until the balance is read again, it takes its budget from the currency read: an all-in BUY after it spends what is left
+      it.each`
+        description                                       | sizing                | amount
+        ${'a cost of 100 USDT'}                           | ${{ cost: 100 }}      | ${8.55}
+        ${'an allocation of 25 %'}                        | ${{ allocation: 25 }} | ${7.125}
+        ${'a cost of 2000 USDT, capped at the 1000 read'} | ${{ cost: 2000 }}     | ${0}
+      `('places an all-in BUY after a BUY of $description for $amount BTC', async ({ sizing, amount }) => {
+        await trader.onStrategyCreateOrder([buy(1, sizing), allInBuy]);
+        expect(getPlacedAmount(allInBuy)).toBe(amount);
+      });
+
+      // Of the currency read, not of what the BUYs before them leave: the BUYs of two pairs on one candle each get half of it
+      describe('when two BUYs of 50 % come in one batch', () => {
+        const btcBuy = buy(1, { allocation: 50 });
+        const ethBuy = buy(2, { allocation: 50 }, 'MARKET', 'ETH/USDT');
+
+        beforeEach(async () => {
+          trader['prices'].set('ETH/USDT', 10);
+          await trader.onStrategyCreateOrder([btcBuy, ethBuy]);
+        });
+
+        it.each`
+          order                 | advice    | amount
+          ${'the BTC/USDT BUY'} | ${btcBuy} | ${4.75}
+          ${'the ETH/USDT BUY'} | ${ethBuy} | ${47.5}
+        `('places $order for $amount, what 500 USDT buy at its price', ({ advice, amount }) => {
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it('warns of neither', () => {
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        it('leaves nothing to an all-in BUY after them', async () => {
+          await trader.onStrategyCreateOrder([allInBuy]);
+          expect(getPlacedAmount(allInBuy)).toBe(0);
+        });
+      });
+
+      // Sent as asked, it would be refused for want of funds, an error counting towards the circuit breaker: it buys with what is left
+      describe('when its budget is above what the BUYs placed since leave of the currency', () => {
+        it.each`
+          description                                        | before                          | sizing                | amount
+          ${'a cost of 600 USDT after a BUY of 4.75 BTC'}    | ${[buy(1, { amount: 4.75 })]}   | ${{ cost: 600 }}      | ${4.75}
+          ${'an allocation of 60 % after one of 50 %'}       | ${[buy(1, { allocation: 50 })]} | ${{ allocation: 60 }} | ${4.75}
+          ${'a cost of 2000 USDT, above the 1000 USDT read'} | ${[]}                           | ${{ cost: 2000 }}     | ${9.5}
+        `('places $description for $amount BTC, what is left buys', async ({ before, sizing, amount }) => {
+          const advice = buy(2, sizing);
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it.each`
+          description                                        | before                          | sizing                | message
+          ${'a cost of 600 USDT after a BUY of 4.75 BTC'}    | ${[buy(1, { amount: 4.75 })]}   | ${{ cost: 600 }}      | ${'BUY MARKET order of 600 USDT above the free balance, sized from 500 USDT: 4.75 BTC sent (1000 USDT free at the last synchronization, less 500 USDT for the BUYs placed since, the 5 % kept back for their fee included)'}
+          ${'an allocation of 60 % after one of 50 %'}       | ${[buy(1, { allocation: 50 })]} | ${{ allocation: 60 }} | ${'BUY MARKET order of 600 USDT (60 % of 1000 USDT) above the free balance, sized from 500 USDT: 4.75 BTC sent (1000 USDT free at the last synchronization, less 500 USDT for the BUYs placed since, the 5 % kept back for their fee included)'}
+          ${'a cost of 2000 USDT, above the 1000 USDT read'} | ${[]}                           | ${{ cost: 2000 }}     | ${'BUY MARKET order of 2000 USDT above the free balance, sized from 1000 USDT: 9.5 BTC sent'}
+        `('warns once of $description, with the budget asked for and what is left', async ({ before, sizing, message }) => {
+          const advice = buy(2, sizing);
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // It takes what it was capped at, not what it asked for: the BUYs placed since take the whole of what was read, and no more
+        it('takes the 1000 USDT it was capped at, as the warning of an all-in BUY after it says', async () => {
+          await trader.onStrategyCreateOrder([buy(2, { cost: 2000 }), allInBuy]);
+          expect(logger.warning).toHaveBeenCalledWith(
+            'trader',
+            `[${allInBuy.id}] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent (1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since, the 5 % kept back for their fee included)`,
+          );
+        });
+      });
+
+      // As an all-in BUY is: LOT_SIZE (amount) up to 1 BTC, MARKET_LOT_SIZE (market) up to 0.5 BTC
+      describe('when its budget buys more than the market takes in one order', () => {
+        beforeEach(() => {
+          fakeExchange.getMarketData.mockReturnValue({ amount: { min: 0.00001, max: 1 }, market: { min: 0, max: 0.5 } });
+        });
+
+        it.each`
+          description                                      | sizing                 | type        | amount
+          ${'a MARKET BUY of 1000 USDT'}                   | ${{ cost: 1000 }}      | ${'MARKET'} | ${0.5}
+          ${'a STICKY BUY of 100 %'}                       | ${{ allocation: 100 }} | ${'STICKY'} | ${1}
+          ${'a MARKET BUY of 50 USDT, within its maximum'} | ${{ cost: 50 }}        | ${'MARKET'} | ${0.475}
+        `('places $description for $amount BTC', async ({ sizing, type, amount }) => {
+          const advice = buy(1, sizing, type);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it.each`
+          description                                              | sizing                 | message
+          ${'a MARKET BUY of 1000 USDT'}                           | ${{ cost: 1000 }}      | ${'BUY MARKET order of 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 100 %'}                               | ${{ allocation: 100 }} | ${'BUY MARKET order of 1000 USDT (100 % of 1000 USDT): 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 2000 USDT, above the 1000 USDT read'} | ${{ cost: 2000 }}      | ${'BUY MARKET order of 2000 USDT above the free balance, sized from 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+        `('warns once of $description, with what it buys, the maximum sent and the rest', async ({ sizing, message }) => {
+          const advice = buy(1, sizing);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // It takes what the maximum may spend, 5 BTC at 100 over the 95 %: taking the 1000 USDT, it would have left the next BUY nothing
+        it('places an all-in BUY for what a BUY of 1000 USDT capped at 5 BTC leaves', async () => {
+          fakeExchange.getMarketData.mockReturnValue({ amount: { max: 5 } });
+          await trader.onStrategyCreateOrder([buy(1, { cost: 1000 }), allInBuy]);
+          expect(getPlacedAmount(allInBuy)).toBe(4.5);
+        });
+      });
+
+      // Placed for 0 and refused for it, with a reason that names the amount, not its cause, as an all-in BUY sized from nothing
+      describe('when its budget comes to nothing', () => {
+        it.each`
+          description                                                     | portfolio        | before        | sizing                | message
+          ${'a cost of 100 USDT while 0 USDT is free'}                    | ${balance(0)}    | ${[]}         | ${{ cost: 100 }}      | ${'BUY MARKET order of 100 USDT: 0 BTC sent, which the market refuses (0 USDT free at the last synchronization)'}
+          ${'a cost of 100 USDT before any balance is read'}              | ${new Map()}     | ${[]}         | ${{ cost: 100 }}      | ${'BUY MARKET order of 100 USDT: 0 BTC sent, which the market refuses (no balance read from the exchange yet)'}
+          ${'a cost of 100 USDT once an all-in BUY took the currency'}    | ${balance(1000)} | ${[allInBuy]} | ${{ cost: 100 }}      | ${'BUY MARKET order of 100 USDT: 0 BTC sent, which the market refuses (1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since)'}
+          ${'an allocation of 25 % while 0 USDT is free'}                 | ${balance(0)}    | ${[]}         | ${{ allocation: 25 }} | ${'BUY MARKET order of 0 USDT (25 % of 0 USDT): 0 BTC sent, which the market refuses (0 USDT free at the last synchronization)'}
+          ${'an allocation of 25 % once an all-in BUY took the currency'} | ${balance(1000)} | ${[allInBuy]} | ${{ allocation: 25 }} | ${'BUY MARKET order of 250 USDT (25 % of 1000 USDT): 0 BTC sent, which the market refuses (1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since)'}
+        `('warns once of $description, with its cause', async ({ portfolio, before, sizing, message }) => {
+          trader['portfolio'] = portfolio;
+          const advice = buy(1, sizing);
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        it('places it for 0, for the exchange to refuse', async () => {
+          trader['portfolio'] = new Map();
+          const advice = buy(1, { cost: 100 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(0);
+        });
+      });
+
+      // An allocation of 100 % is an all-in BUY: the same amount, as much of the currency taken, a warning in the same cases
+      describe.each`
+        kind                | sizing
+        ${'an all-in BUY'}  | ${{}}
+        ${'a BUY of 100 %'} | ${{ allocation: 100 }}
+      `('as $kind', ({ sizing }) => {
+        const advice = buy(2, sizing);
+
+        it.each`
+          description                   | portfolio        | before                        | amount
+          ${'alone'}                    | ${balance(1000)} | ${[]}                         | ${9.5}
+          ${'after a BUY of 4.75 BTC'}  | ${balance(1000)} | ${[buy(1, { amount: 4.75 })]} | ${4.75}
+          ${'after a BUY of 1000 USDT'} | ${balance(1000)} | ${[buy(1, { cost: 1000 })]}   | ${0}
+          ${'while 0 USDT is free'}     | ${balance(0)}    | ${[]}                         | ${0}
+        `('places it $description for $amount BTC', async ({ portfolio, before, amount }) => {
+          trader['portfolio'] = portfolio;
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it('does not warn of it alone', async () => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        it.each`
+          description                   | portfolio        | before
+          ${'after a BUY of 4.75 BTC'}  | ${balance(1000)} | ${[buy(1, { amount: 4.75 })]}
+          ${'after a BUY of 1000 USDT'} | ${balance(1000)} | ${[buy(1, { cost: 1000 })]}
+          ${'while 0 USDT is free'}     | ${balance(0)}    | ${[]}
+        `('warns once of it $description', async ({ portfolio, before }) => {
+          trader['portfolio'] = portfolio;
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(logger.warning).toHaveBeenCalledOnce();
+        });
+
+        it.each`
+          description                                      | limits                    | amount
+          ${'all of the currency'}                         | ${{}}                     | ${0}
+          ${'what the maximum may spend, capped at 5 BTC'} | ${{ amount: { max: 5 } }} | ${4.5}
+        `('takes $description: an all-in BUY after it gets $amount BTC', async ({ limits, amount }) => {
+          fakeExchange.getMarketData.mockReturnValue(limits);
+          await trader.onStrategyCreateOrder([advice, allInBuy]);
+          expect(getPlacedAmount(allInBuy)).toBe(amount);
+        });
+      });
+    });
+
+    // The account holds 3 BTC, BTC at 100
+    describe('when a SELL is sized by its cost or by its allocation', () => {
+      const sell = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) => ({
+        ...buildAdvice({ id: `00000000-0000-4000-8000-00000000007${index}`, side: 'SELL', type, price }),
+        ...sizing,
+      });
+      const allInSell = sell(9, {});
+
+      // A share of the asset read, or the cost over the price, nothing kept back: the fee comes out of what the SELL brings in. In binary,
+      // 33.3 % of 3 comes out at 0.9989999999999999, and 0.3 at 0.1 at 2.9999999999999996
+      it.each`
+        description                                        | advice                                   | amount
+        ${'an allocation of 50 % of the 3 BTC read'}       | ${sell(1, { allocation: 50 })}           | ${1.5}
+        ${'an allocation of 33.3 %'}                       | ${sell(1, { allocation: 33.3 })}         | ${0.999}
+        ${'an allocation of 100 %'}                        | ${sell(1, { allocation: 100 })}          | ${3}
+        ${'a cost of 100 USDT at 100'}                     | ${sell(1, { cost: 100 })}                | ${1}
+        ${'a cost of 120 USDT at its limit price of 120'}  | ${sell(1, { cost: 120 }, 'LIMIT', 120)}  | ${1}
+        ${'a cost of 0.3 USDT at its limit price of 0.1'}  | ${sell(1, { cost: 0.3 }, 'LIMIT', 0.1)}  | ${3}
+        ${'a cost of 100 USDT at its limit price of 97.3'} | ${sell(1, { cost: 100 }, 'LIMIT', 97.3)} | ${1.02774922918808}
+      `('places a SELL of $description for $amount BTC', async ({ advice, amount }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(amount);
+      });
+
+      // Until the balance is read again, it takes its amount from the asset read: an all-in SELL after it sells what is left
+      it.each`
+        description                | sizing                | amount
+        ${'an allocation of 50 %'} | ${{ allocation: 50 }} | ${1.5}
+        ${'a cost of 100 USDT'}    | ${{ cost: 100 }}      | ${2}
+      `('places an all-in SELL after a SELL of $description for $amount BTC', async ({ sizing, amount }) => {
+        await trader.onStrategyCreateOrder([sell(1, sizing), allInSell]);
+        expect(getPlacedAmount(allInSell)).toBe(amount);
+      });
+
+      // Of the asset read, not of what the SELLs before them leave
+      it.each`
+        order       | index | amount
+        ${'first'}  | ${1}  | ${1.5}
+        ${'second'} | ${2}  | ${1.5}
+      `('places the $order of two SELLs of 50 % in one batch for $amount BTC', async ({ index, amount }) => {
+        const sells = [sell(1, { allocation: 50 }), sell(2, { allocation: 50 })];
+        await trader.onStrategyCreateOrder(sells);
+        expect(getPlacedAmount(sells[index - 1])).toBe(amount);
+      });
+
+      // As a SELL with an amount: capped at the free balance left, but left as asked while none is left
+      it.each`
+        description                                                 | before                      | advice                         | amount
+        ${'of 50 % after a SELL of 2 BTC'}                          | ${[sell(5, { amount: 2 })]} | ${sell(1, { allocation: 50 })} | ${1}
+        ${'of 500 USDT, 5 BTC, above the 3 BTC held'}               | ${[]}                       | ${sell(1, { cost: 500 })}      | ${3}
+        ${'of 50 %, as asked, once a SELL of 3 BTC took the asset'} | ${[sell(5, { amount: 3 })]} | ${sell(1, { allocation: 50 })} | ${1.5}
+      `('places a SELL $description for $amount BTC', async ({ before, advice, amount }) => {
+        await trader.onStrategyCreateOrder([...before, advice]);
+        expect(getPlacedAmount(advice)).toBe(amount);
+      });
+
+      it.each`
+        description                                   | before                      | advice                         | message
+        ${'of 50 % after a SELL of 2 BTC'}            | ${[sell(5, { amount: 2 })]} | ${sell(1, { allocation: 50 })} | ${'SELL MARKET order of 1.5 BTC (50 % of 3 BTC) above the free balance: 1 BTC sent, all that can be sold (3 BTC free at the last synchronization, less 2 BTC for the SELLs placed since)'}
+        ${'of 500 USDT, 5 BTC, above the 3 BTC held'} | ${[]}                       | ${sell(1, { cost: 500 })}      | ${'SELL MARKET order of 5 BTC (500 USDT at 100) above the free balance: 3 BTC sent, all that can be sold'}
+      `('warns once of a SELL $description, capped at the free balance', async ({ before, advice, message }) => {
+        await trader.onStrategyCreateOrder([...before, advice]);
+        expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+      });
+
+      // LOT_SIZE (amount) up to 1 BTC, MARKET_LOT_SIZE (market) up to 0.5 BTC
+      describe('when it sells more than the market takes in one order', () => {
+        beforeEach(() => {
+          fakeExchange.getMarketData.mockReturnValue({ amount: { min: 0.00001, max: 1 }, market: { min: 0, max: 0.5 } });
+        });
+
+        it.each`
+          description                                          | advice                              | amount
+          ${'a MARKET SELL of 50 %'}                           | ${sell(1, { allocation: 50 })}      | ${0.5}
+          ${'a STICKY SELL of 200 USDT'}                       | ${sell(1, { cost: 200 }, 'STICKY')} | ${1}
+          ${'a STICKY SELL of 500 USDT, above the 3 BTC held'} | ${sell(1, { cost: 500 }, 'STICKY')} | ${1}
+        `('places $description for $amount BTC', async ({ advice, amount }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it.each`
+          description                                          | advice                              | message
+          ${'a MARKET SELL of 50 %'}                           | ${sell(1, { allocation: 50 })}      | ${'SELL MARKET order of 1.5 BTC (50 % of 3 BTC) above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest stays held'}
+          ${'a STICKY SELL of 200 USDT'}                       | ${sell(1, { cost: 200 }, 'STICKY')} | ${'SELL STICKY order of 2 BTC (200 USDT at 100) above the maximum amount of a STICKY order on BTC/USDT: 1 BTC sent, the rest stays held'}
+          ${'a STICKY SELL of 500 USDT, above the 3 BTC held'} | ${sell(1, { cost: 500 }, 'STICKY')} | ${'SELL STICKY order of 5 BTC (500 USDT at 100) above the maximum amount of a STICKY order on BTC/USDT: 1 BTC sent, the rest stays held'}
+        `('warns once of $description, with the amount asked for and the maximum sent', async ({ advice, message }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+      });
+
+      // Placed for 0 and refused for it, with a reason that names the amount, not its cause, as an all-in SELL sized from nothing
+      describe('when its share comes to nothing', () => {
+        const usdt: BalanceDetail = { free: 1000, used: 0, total: 1000 };
+
+        it.each`
+          description              | portfolio                                                             | message
+          ${'0 BTC free'}          | ${new Map([['BTC', { free: 0, used: 0, total: 0 }], ['USDT', usdt]])} | ${'SELL MARKET order of 0 BTC (50 % of 0 BTC): 0 BTC sent, which the market refuses (0 BTC free at the last synchronization)'}
+          ${'no balance read yet'} | ${new Map()}                                                          | ${'SELL MARKET order of 0 BTC (50 % of 0 BTC): 0 BTC sent, which the market refuses (no balance read from the exchange yet)'}
+        `('warns once of a SELL of 50 % with $description, with its cause', async ({ portfolio, message }) => {
+          trader['portfolio'] = portfolio;
+          const advice = sell(1, { allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        it('places it for 0, for the exchange to refuse', async () => {
+          trader['portfolio'] = new Map();
+          const advice = sell(1, { allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(0);
+        });
+      });
+    });
+
+    // The account holds 3 BTC and 1000 USDT, BTC at 100
+    describe('the sizing of an order by its cost or by its allocation', () => {
+      const order = (side: AdviceOrder['side'], sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) => ({
+        ...buildAdvice({ side, type, price }),
+        ...sizing,
+      });
+
+      // What the budget came to, said at debug level whatever its caps
+      it.each`
+        description                                  | before                                                                               | advice                                     | message
+        ${'a BUY of 100 USDT'}                       | ${[]}                                                                                | ${order('BUY', { cost: 100 })}             | ${'BUY MARKET order of 100 USDT sized to 0.95 BTC at 100'}
+        ${'a BUY of 25 %'}                           | ${[]}                                                                                | ${order('BUY', { allocation: 25 })}        | ${'BUY MARKET order of 250 USDT (25 % of 1000 USDT) sized to 2.375 BTC at 100'}
+        ${'a LIMIT BUY of 95 USDT at 95'}            | ${[]}                                                                                | ${order('BUY', { cost: 95 }, 'LIMIT', 95)} | ${'BUY LIMIT order of 95 USDT sized to 0.95 BTC at 95'}
+        ${'a SELL of 100 USDT'}                      | ${[]}                                                                                | ${order('SELL', { cost: 100 })}            | ${'SELL MARKET order of 1 BTC (100 USDT at 100) sized to 1 BTC at 100'}
+        ${'a SELL of 50 % capped at the 1 BTC left'} | ${[{ ...order('SELL', { amount: 2 }), id: '00000000-0000-4000-8000-000000000081' }]} | ${order('SELL', { allocation: 50 })}       | ${'SELL MARKET order of 1.5 BTC (50 % of 3 BTC) sized to 1 BTC at 100'}
+      `('logs at debug level how $description was sized', async ({ before, advice, message }) => {
+        await trader.onStrategyCreateOrder([...before, advice]);
+        expect(logger.debug).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+      });
+
+      // An untyped strategy may pass null, which createOrder lets through as left out, as it does for an amount
+      it.each`
+        description                                      | advice                                                   | amount
+        ${'an all-in BUY whose cost is null'}            | ${{ ...order('BUY', {}), cost: null }}                   | ${9.5}
+        ${'an all-in BUY whose allocation is null'}      | ${{ ...order('BUY', {}), allocation: null }}             | ${9.5}
+        ${'an all-in SELL whose cost is null'}           | ${{ ...order('SELL', {}), cost: null }}                  | ${3}
+        ${'an all-in SELL whose allocation is null'}     | ${{ ...order('SELL', {}), allocation: null }}            | ${3}
+        ${'a BUY of 1 BTC whose cost is null'}           | ${{ ...order('BUY', { amount: 1 }), cost: null }}        | ${1}
+        ${'a SELL of 100 USDT whose allocation is null'} | ${{ ...order('SELL', { cost: 100 }), allocation: null }} | ${1}
+      `('places $description for $amount BTC', async ({ advice, amount }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(amount);
+      });
+
+      it.each`
+        description                                           | advice
+        ${'a BUY of 0.5 BTC'}                                 | ${order('BUY', { amount: 0.5 })}
+        ${'an all-in BUY'}                                    | ${order('BUY', {})}
+        ${'a SELL of 0.5 BTC'}                                | ${order('SELL', { amount: 0.5 })}
+        ${'an all-in SELL'}                                   | ${order('SELL', {})}
+        ${'an all-in BUY whose cost and allocation are null'} | ${{ ...order('BUY', {}), cost: null, allocation: null }}
+      `('logs nothing at debug level of $description', async ({ advice }) => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(logger.debug).not.toHaveBeenCalled();
+      });
+
+      // The exchange refuses an order below the minimum cost of the market, with a reason that names the cost of the order, not the
+      // budget or the share it came from: the Trader says which, before it sends the order. A BUY costs 95 % of its budget.
+      describe('on a market whose minimum cost is 10 USDT', () => {
+        beforeEach(() => {
+          fakeExchange.getMarketData.mockReturnValue({ cost: { min: 10 } });
+        });
+
+        it.each`
+          description                  | advice                               | message
+          ${'a BUY of 10 USDT'}        | ${order('BUY', { cost: 10 })}        | ${'BUY MARKET order of 10 USDT: 0.095 BTC at 100 sent, a cost of 9.5 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a BUY of 0.5 %, 5 USDT'}  | ${order('BUY', { allocation: 0.5 })} | ${'BUY MARKET order of 5 USDT (0.5 % of 1000 USDT): 0.0475 BTC at 100 sent, a cost of 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a SELL of 5 USDT'}        | ${order('SELL', { cost: 5 })}        | ${'SELL MARKET order of 0.05 BTC (5 USDT at 100): 0.05 BTC at 100 sent, a cost of 5 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a SELL of 1 %, 0.03 BTC'} | ${order('SELL', { allocation: 1 })}  | ${'SELL MARKET order of 0.03 BTC (1 % of 3 BTC): 0.03 BTC at 100 sent, a cost of 3 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+        `('warns once of $description, with its cost and the minimum', async ({ advice, message }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        it('places it all the same, for the exchange to refuse', async () => {
+          const advice = order('BUY', { cost: 10 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(0.095);
+        });
+
+        // An order with an amount is refused with a reason that names the amount the strategy chose; all-in is out of its scope
+        it.each`
+          description                           | advice
+          ${'a BUY of 20 USDT, 19 USDT of BTC'} | ${order('BUY', { cost: 20 })}
+          ${'a SELL of 10 USDT, the minimum'}   | ${order('SELL', { cost: 10 })}
+          ${'a BUY of 0.05 BTC, 5 USDT'}        | ${order('BUY', { amount: 0.05 })}
+          ${'a SELL of 0.05 BTC, 5 USDT'}       | ${order('SELL', { amount: 0.05 })}
+        `('does not warn of $description', async ({ advice }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        it('does not warn of an all-in BUY of 5 USDT', async () => {
+          trader['portfolio'] = new Map<string, BalanceDetail>([['USDT', { free: 5, used: 0, total: 5 }]]);
+          await trader.onStrategyCreateOrder([order('BUY', {})]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        // Refused for its amount of 0: its cause is the one warning
+        it('warns only of the cause of a BUY of 100 USDT sized to 0', async () => {
+          trader['portfolio'] = new Map();
+          await trader.onStrategyCreateOrder([order('BUY', { cost: 100 })]);
+          expect(logger.warning).toHaveBeenCalledOnce();
+        });
+      });
+
+      // Worked out in decimal, as the exchanges check it: 0.00007 BTC at 100000 is 7 USDT, 6.999999999999999 in binary
+      it('does not warn of a LIMIT SELL of 7 USDT at 100000 on a market whose minimum cost is 7 USDT', async () => {
+        fakeExchange.getMarketData.mockReturnValue({ cost: { min: 7 } });
+        await trader.onStrategyCreateOrder([order('SELL', { cost: 7 }, 'LIMIT', 100000)]);
+        expect(logger.warning).not.toHaveBeenCalled();
+      });
+
+      // Binance disables a filter bound by setting it to 0
+      it.each`
+        description              | limits
+        ${'no minimum cost'}     | ${{ amount: { max: 9000 } }}
+        ${'a minimum cost of 0'} | ${{ cost: { min: 0 } }}
+      `('does not warn of a BUY of 1 USDT on a market with $description', async ({ limits }) => {
+        fakeExchange.getMarketData.mockReturnValue(limits);
+        await trader.onStrategyCreateOrder([order('BUY', { cost: 1 })]);
+        expect(logger.warning).not.toHaveBeenCalled();
+      });
+
+      it('relays the cost the strategy asked for, and an amount of 0, in the ORDER_ERRORED_EVENT of an order without price', async () => {
+        trader['prices'].clear();
+        await trader.onStrategyCreateOrder([order('BUY', { cost: 100 })]);
+        expect(getErroredEvent().order).toEqual(expect.objectContaining({ cost: 100, amount: 0 }));
+      });
+
+      it.each`
+        description                | sizing                | amount
+        ${'a cost of 100 USDT'}    | ${{ cost: 100 }}      | ${0.95}
+        ${'an allocation of 25 %'} | ${{ allocation: 25 }} | ${2.375}
+      `('relays $description beside the amount sized, $amount BTC, in the ORDER_INITIATED_EVENT', async ({ sizing, amount }) => {
+        await trader.onStrategyCreateOrder([order('BUY', sizing)]);
+        expect(getInitiatedOrder()).toEqual(expect.objectContaining({ ...sizing, amount }));
+      });
+
+      // The order as initiated, in both flows: the strategy hears how its order was sized beside the amount sized
+      describe.each`
+        flow             | event                    | payload                                                         | getRelayed
+        ${'creation'}    | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                    | ${getCompletedEvent}
+        ${'creation'}    | ${ORDER_CANCELED_EVENT}  | ${{ timestamp: 1_700_000_100_000, filled: 0, remaining: 0.95 }} | ${getCanceledEvent}
+        ${'creation'}    | ${ORDER_ERRORED_EVENT}   | ${{ reason: 'exchange timeout', mayBeLive: false }}             | ${getErroredEvent}
+        ${'creation'}    | ${ORDER_INVALID_EVENT}   | ${{ reason: 'too small', status: 'rejected', filled: false }}   | ${getErroredEvent}
+        ${'cancelation'} | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                    | ${getCompletedEvent}
+        ${'cancelation'} | ${ORDER_CANCELED_EVENT}  | ${{ timestamp: 1_700_000_100_000, filled: 0, remaining: 0.95 }} | ${getCanceledEvent}
+        ${'cancelation'} | ${ORDER_ERRORED_EVENT}   | ${{ reason: 'exchange timeout', mayBeLive: false }}             | ${getErroredEvent}
+        ${'cancelation'} | ${ORDER_INVALID_EVENT}   | ${{ reason: 'too small', status: 'rejected', filled: false }}   | ${getErroredEvent}
+      `('the end of an order of the $flow flow reported by its $event', ({ flow, event, payload, getRelayed }) => {
+        beforeEach(() => {
+          vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+        });
+
+        it.each`
+          description                | sizing
+          ${'a cost of 100 USDT'}    | ${{ cost: 100 }}
+          ${'an allocation of 25 %'} | ${{ allocation: 25 }}
+        `('relays $description, as the strategy asked for it', async ({ sizing }) => {
+          const placed = await prepareOrder(flow, order('BUY', sizing));
+          await placed.emitAndSettle(event, payload);
+          expect(pick(getRelayed().order, ['cost', 'allocation'])).toStrictEqual(sizing);
+        });
+
+        it.each`
+          description             | sizing
+          ${'an amount of 1 BTC'} | ${{ amount: 1 }}
+          ${'an all-in order'}    | ${{}}
+        `('relays neither a cost nor an allocation for $description', async ({ sizing }) => {
+          const placed = await prepareOrder(flow, order('BUY', sizing));
+          await placed.emitAndSettle(event, payload);
+          expect(pick(getRelayed().order, ['cost', 'allocation'])).toStrictEqual({});
+        });
       });
     });
 

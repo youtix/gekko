@@ -78,6 +78,22 @@ export const getAllInBuyAmount = (currency: number, price: number): number =>
   toSignificantDigits(multiplyPrecise(currency, ALL_IN_BUY_SHARE) / price);
 
 /**
+ * `allocation` % of `balance` (25 for 25 %): the currency a BUY sized by its allocation may spend, or the amount of the asset a SELL so
+ * sized sells. Worked out in decimal, the percentage moved two places (see shiftDecimalPoint), then the product exactly (see
+ * multiplyPrecise): in binary, 33.3 % of 3 BTC comes out at 0.9989999999999999, which an exchange that truncates the amount to its step
+ * places one step short (0.998 on a step of 0.001).
+ */
+export const getAllocatedShare = (balance: number, allocation: number): number =>
+  multiplyPrecise(balance, shiftDecimalPoint(allocation, -2));
+
+/**
+ * The amount a SELL of a notional `cost` places at `price`: the cost over the price, nothing kept back for the fee, which the exchange
+ * takes from what the SELL brings in. The one division is given to 15 significant digits (see toSignificantDigits): in binary, 0.3 at
+ * 0.1 comes out at 2.9999999999999996, placed one step short of 3 by an exchange that truncates the amount to its step.
+ */
+export const getSellAmountOfCost = (cost: number, price: number): number => toSignificantDigits(cost / price);
+
+/**
  * The minutes between two synchronizations of a backtest: a timeframe candle, 10 at least to avoid excessive synchronization. The
  * configuration requires a timeframe in backtest (see watchSchema): the 1m it fell back to without one was only ever reached by a test
  * whose mocked configuration had none.
