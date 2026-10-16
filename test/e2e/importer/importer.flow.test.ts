@@ -6,7 +6,7 @@ import { generateSyntheticCandle } from '../fixtures/syntheticData';
 import { minuteOf } from '../helpers/clock.helper';
 import { mockConfiguration, rawDaterange } from '../helpers/configuration.helper';
 import { cleanDatabase, countCandles } from '../helpers/database.helper';
-import { createCcxtModuleMock, MockCCXTExchange } from '../mocks/ccxt.mock';
+import { createCcxtModuleMock, MockCCXTExchange, MockNetworkError } from '../mocks/ccxt.mock';
 import { MockWinston, clearLogs, findTextLine } from '../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
@@ -192,29 +192,55 @@ describe('E2E: Importer (Synthetic)', () => {
     expect(offGridRows).toBe(0);
   }, 120000); // Higher timeout for larger scale
 
-  it('Scenario D: Error Handling & Resilience (Simulated Network Error)', async () => {
-    mockDaterange = { start: SCENARIO_D_START, end: SCENARIO_D_END };
-    mockAssets = ['BTC'];
+  // CCXTExchange sends a read again after a ccxt NetworkError, three more times, 1000, 1585 and 2000 ms apart, then throws an
+  // ExchangeNetworkError caused by it: a lasting fault waits 4.6 s of real time, hence the timeout. Any other ccxt error fails the read
+  // at once, as ccxt threw it. The mock threw a plain Error, which no retry met: the scenario pinned the path of an error that is not a
+  // NetworkError, and a fetchOHLCV without its retry passed it. Earlier, it also accepted a normal end without a row as well as any
+  // error, so it passed when the candle streams' relay took the failure for the end of the pair's stream (an import that completes
+  // without its candles) or lost it behind another error. Caught rather than asserted through `rejects`, which Bun waits on past the
+  // test's timeout: an import that froze would hang the suite instead of failing here.
+  it.each([
+    {
+      fault: 'a NetworkError on the first call, then the candles',
+      setFault: () => (MockCCXTExchange.networkErrorsToThrow = 1),
+      expected: { failure: undefined, rows: 61 },
+    },
+    {
+      fault: 'a NetworkError on every call',
+      setFault: () => (MockCCXTExchange.shouldThrowError = true),
+      expected: {
+        failure: {
+          name: 'ExchangeNetworkError',
+          message: '[EXCHANGE] Simulated Network Error',
+          cause: expect.any(MockNetworkError),
+        },
+        rows: 0,
+      },
+    },
+    {
+      fault: 'an ExchangeError',
+      setFault: () => (MockCCXTExchange.shouldThrowExchangeError = true),
+      expected: { failure: { name: 'ExchangeError', message: 'Simulated Exchange Error', cause: undefined }, rows: 0 },
+    },
+  ])(
+    'Scenario D: Error Handling & Resilience ($fault)',
+    async ({ setFault, expected }) => {
+      mockDaterange = { start: SCENARIO_D_START, end: SCENARIO_D_END };
+      mockAssets = ['BTC'];
+      setFault();
 
-    // Enable error
-    MockCCXTExchange.shouldThrowError = true;
+      const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
+      const { inject } = await import('@services/injecter/injecter');
+      const storage = inject.storage() as SQLiteStorage;
 
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    // The exchange's failure fails the import with its own error. The scenario accepted a normal end without a row as well as any
-    // error, so it passed when the candle streams' relay took the failure for the end of the pair's stream (an import that completes
-    // without its candles) or lost it behind another error. Caught rather than asserted through `rejects`, which Bun waits on past the
-    // test's timeout: an import that froze would hang the suite instead of failing here.
-    try {
       const failure = await gekkoPipeline().then(
-        () => new Error('The import completed'),
-        (error: unknown) => error,
+        () => undefined,
+        (error: Error) => ({ name: error.name, message: error.message, cause: error.cause }),
       );
-      expect(failure).toHaveProperty('message', 'Simulated Network Error');
-    } finally {
-      MockCCXTExchange.shouldThrowError = false;
-    }
-  }, 60000);
+      expect({ failure, rows: countCandles(storage, 'BTC/USDT', { start: SCENARIO_D_START, end: SCENARIO_D_END }) }).toEqual(expected);
+    },
+    15000,
+  );
 
   it('Scenario E: Idempotency (Double Import)', async () => {
     mockDaterange = { start: SCENARIO_E_START, end: SCENARIO_E_END };

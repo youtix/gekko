@@ -48,15 +48,16 @@ export class MockFetcherService implements Fetcher {
     return this.callHistory.filter(({ method }) => method === 'POST').map(({ payload }) => payload.text);
   }
 
-  async get<T>({ url }: { url: string; retries?: number; attempt?: number }): Promise<T> {
+  // Unknown, as the fetcher resolves the body it got (see Request): typed as whatever the caller asked for, the answers went unchecked
+  async get({ url }: { url: string; retries?: number; attempt?: number }): Promise<unknown> {
     return this.handleRequest('GET', url);
   }
 
-  async post<T>({ url, payload }: { url: string; payload: unknown; retries?: number; attempt?: number }): Promise<T> {
+  async post({ url, payload }: { url: string; payload: unknown; retries?: number; attempt?: number }): Promise<unknown> {
     return this.handleRequest('POST', url, payload);
   }
 
-  private async handleRequest(method: 'GET' | 'POST', url: string, payload?: any): Promise<any> {
+  private async handleRequest(method: 'GET' | 'POST', url: string, payload?: any): Promise<unknown> {
     MockFetcherService.callHistory.push({
       method,
       url,

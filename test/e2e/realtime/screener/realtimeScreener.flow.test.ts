@@ -156,8 +156,15 @@ describe('E2E: Realtime Screener Flow', () => {
   });
 
   it('Scenario E: Order Cancellation', async () => {
-    // Enable open orders so they don't auto-fill
-    MockCCXTExchange.simulateOpenOrders = true;
+    // The orders rest until the strategy cancels them, a candle later: each pair's price falls after the candles DebugAdvice sells on
+    // (the even ones) and rises after those it buys on, so that the candle after an order does not reach its LIMIT price. A STICKY
+    // order is priced one price.min inside the ticker, the close of the last candle served, and the simulator fills a BUY on a low at
+    // or below its price, a SELL on a high at or above it; an order priced once its pair has served the next candle still fills. The
+    // cancellations came from the synthetic ticker running ahead of the candles: a flat market canceled nothing. The open-orders
+    // switch the scenario set was read by nothing, the paper exchange sending every order to its simulator.
+    const zigzag = Array.from({ length: 20 }, (_, index) => ({ close: index % 2 ? 90 : 100 }));
+    MockCCXTExchange.setPredefinedCandles('BTC/USDT', zigzag);
+    MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag);
 
     // Configure strategy to cancel orders after 1 candle
     mockStrategyConfig = { ...DEFAULT_MOCK_STRATEGY_CONFIG, cancelAfter: 1 };
@@ -173,8 +180,6 @@ describe('E2E: Realtime Screener Flow', () => {
     // Check for Strategy Cancel Order notification
     expect(texts.filter(text => text.includes('Strategy requested order cancellation')).length).toBeGreaterThan(0);
     expect(texts.filter(text => text.includes('order canceled')).length).toBeGreaterThan(0);
-
-    MockCCXTExchange.simulateOpenOrders = false;
   });
 
   it('Scenario F: Order Error Handling', async () => {

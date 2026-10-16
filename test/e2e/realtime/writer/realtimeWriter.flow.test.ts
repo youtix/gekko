@@ -174,8 +174,8 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
   }, 30000);
 
   it('Scenario C: Handling of duplicate candle emissions', async () => {
-    // Enable duplicate emission mode in the mock exchange
-    // This simulates reconnection overlap where the same candle is emitted twice
+    // A lie of the exchange, which ccxt would never let through: every third page has each of its candles stamped with the first
+    // minute served, the prices of the minutes asked for kept
     MockCCXTExchange.emitDuplicatesEveryXCandle = 3;
 
     // Dynamic imports to ensure mocks are applied first
@@ -205,14 +205,15 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     expect(recentCandles.length).toBeGreaterThan(0);
 
     // ASSERTION 4: The minute hidden behind a duplicate is asked for again on the next tick: every stored candle is the
-    // exchange's own, none is a synthetic gap filler
+    // exchange's own, none is a synthetic gap filler, the first one included, the minute the duplicates are stamped with. The five
+    // newest rows never held it.
+    const storedCandles = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start ASC').all() as any[];
     const isExchangeCandle = (row: any) => row.open === generateSyntheticCandle('BTC/USDT', row.start).open;
-    expect(recentCandles.every(isExchangeCandle)).toBe(true);
+    expect(storedCandles.every(isExchangeCandle)).toBe(true);
   }, 30000);
 
   it('Scenario D: Handling future candle emissions', async () => {
-    // Enable future candle emission mode in the mock exchange
-    // This simulates a scenario where a candle with a timestamp > Date.now() is emitted
+    // A lie of the exchange, which ccxt would never let through: every page opens with the candle of 5 minutes after the call
     MockCCXTExchange.emitFutureCandles = true;
 
     // Dynamic imports to ensure mocks are applied first

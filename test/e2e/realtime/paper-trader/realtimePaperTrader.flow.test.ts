@@ -82,18 +82,19 @@ describe('E2E: Realtime Paper Trader Flow', () => {
     expect(roundtrip.id).toBe(0);
     expect(roundtrip.entryAt).toBeTypeOf('number');
     expect(roundtrip.entryPrice).toBe(100);
-    // 100 BTC * $100 + 300,000 USDT = $310,000
+    // The simulator charges the taker fee of the market, Binance's 0.1 %, on top of a MARKET BUY and out of a SELL's proceeds. The BUY
+    // of 1 BTC at 100 costs 100.1: 101 BTC and 299,899.9 USDT, $309,999.9 at $100/BTC. The entry equity gives the BUY's fee back:
+    // 309,999.9 + 0.1 = $310,000, the 100 BTC * $100 + 300,000 USDT held before it
     expect(roundtrip.entryEquity).toBe(310000);
 
     expect(roundtrip.exitAt).toBeTypeOf('number');
     expect(roundtrip.exitAt).toBeGreaterThan(roundtrip.entryAt);
     expect(roundtrip.exitPrice).toBe(110);
-    // After buy: 101 BTC, 299,900 USDT. At $110/BTC: 101 * 110 + 299,900 = $311,010
-    // After sell: 100 BTC, 300,010 USDT. At $110/BTC: 100 * 110 + 300,010 = $311,010
-    expect(roundtrip.exitEquity).toBe(311010);
+    // The SELL of 1 BTC at 110 brings 110 - 0.11 = 109.89: 100 BTC and 300,009.79 USDT. At $110/BTC: 100 * 110 + 300,009.79 = $311,009.79
+    expect(roundtrip.exitEquity).toBe(311009.79);
 
-    expect(roundtrip.pnl).toBe(1010); // 311010 - 310000
-    expect(roundtrip.profit).toBeCloseTo(0.3258, 4); // (311010 / 310000 - 1) * 100
+    expect(roundtrip.pnl).toBe(1009.79); // 311,009.79 - 310,000
+    expect(roundtrip.profit).toBe(0.325738709677419); // 1,009.79 / 310,000 * 100, to 15 significant digits
     expect(roundtrip.maxAdverseExcursion).toBe(0);
     expect(roundtrip.duration).toBe(FAST_MINUTE);
   });
