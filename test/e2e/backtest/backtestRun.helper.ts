@@ -208,16 +208,24 @@ export const numberedTextLines = (): TextLine[] => {
 
 type Fee = { maker: number; taker: number };
 
-/** The market of a pair as dummy-cex takes it: prices to the cent, amounts to the millionth, and Binance's regular fee of 0.1 % */
+/**
+ * The market of a pair as dummy-cex takes it: prices to the cent, amounts to the millionth, and Binance's regular fee of 0.1 %. No
+ * minimum cost unless `costMin` sets one, which the simulated exchange refuses an order below.
+ */
 export const rawMarket = (
   symbol: TradingPair,
-  { amountMax = 1000, priceMin = 0, fee = { maker: 0.001, taker: 0.001 } }: { amountMax?: number; priceMin?: number; fee?: Fee } = {},
+  {
+    amountMax = 1000,
+    priceMin = 0,
+    costMin = 0,
+    fee = { maker: 0.001, taker: 0.001 },
+  }: { amountMax?: number; priceMin?: number; costMin?: number; fee?: Fee } = {},
 ) => ({
   symbol,
   marketData: {
     price: { min: priceMin, max: 1000000 },
     amount: { min: 0, max: amountMax },
-    cost: { min: 0, max: 1000000 },
+    cost: { min: costMin, max: 1000000 },
     precision: { price: 2, amount: 6 },
     fee,
   },
