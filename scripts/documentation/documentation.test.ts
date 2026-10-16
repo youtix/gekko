@@ -285,6 +285,16 @@ describe('yaml blocks of the guides and configurations of config/', () => {
     expect(yamlChecksOf([file], new Set()).configurations.flatMap(check => check.issues())).toContainEqual(expect.stringMatching(/^plugins: /));
   });
 
+  // A configuration of config/ that leaves a credential for the reader to fill in says where to write it: in a copy git ignores
+  // (config/*.local.*), not in the tracked file, which a later `git commit -a` committed with the keys
+  it.each(
+    configurationFiles
+      .filter(({ where }) => where.includes('credentials filled in'))
+      .map(({ source }) => [source, source.replace(/\.ya?ml$/, '.local.yml')]),
+  )('%s should send the reader to %s, a copy git ignores, for its credentials', (source, copy) => {
+    expect(read(source)).toContain(copy);
+  });
+
   it.each([
     ['read', 'yaml', 1],
     ['leave out', 'yaml fragment', 0],
