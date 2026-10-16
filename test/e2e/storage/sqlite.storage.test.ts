@@ -1,7 +1,7 @@
 import type { SQLiteStorage as ISQLiteStorage } from '@services/storage/sqlite.storage';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { copyFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -173,9 +173,17 @@ describe('SQLiteStorage', () => {
       reader.close();
       return count;
     };
-    // A missing file in a directory that exists: under the default path's missing directories no open mode could create it, so a
-    // backtest that created its database passed the tests meant to refuse it
+    // A file that does not exist yet, in a directory that exists. Under the default path's missing directories no open mode could
+    // create one, so a backtest that created its database passed the tests meant to refuse it.
     const missingDatabase = () => join(directory, `${crypto.randomUUID()}.sql`);
+    // bun:sqlite opens a file that is not a database without a word: it failed at the first statement that read it, with SQLite's own
+    // error and its stack, and no path
+    const writeText = (path: string) => writeFileSync(path, 'start,open,high,low,close,volume\n1700000040000,10,12,9,11,1\n');
+    const writeCutDatabase = (path: string) => {
+      writeCandles(path);
+      truncateSync(path, 50); // Within the 100 bytes of its header, which PRAGMA schema_version still reads
+    };
+    const BACKTEST_HINT = ' A backtest reads an existing database: check storage.database, or import the candles first.';
 
     beforeAll(() => {
       directory = mkdtempSync(join(tmpdir(), 'gekko-storage-e2e-'));
@@ -276,6 +284,19 @@ describe('SQLiteStorage', () => {
       expect(() => new SQLiteStorage([symbol, 'ETH/USDT'])).toThrow(
         `[STORAGE] ${database} holds no candles of ETH/USDT: import them first.`,
       );
+    });
+
+    it.each([
+      ['backtest', 'a text file', writeText, 'file is not a database', BACKTEST_HINT],
+      ['importer', 'a text file', writeText, 'file is not a database', ''],
+      ['backtest', 'a database cut within its header', writeCutDatabase, 'database disk image is malformed', BACKTEST_HINT],
+      ['importer', 'a database cut within its header', writeCutDatabase, 'database disk image is malformed', ''],
+    ])('refuses in %s mode %s, naming its path', (runMode, _kind, write, failure, hint) => {
+      const file = missingDatabase();
+      write(file);
+      storageConfig = { type: 'sqlite', database: file };
+      mode = runMode;
+      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${file} (${failure}).${hint}`);
     });
 
     it('names the path of a database it cannot create', () => {
