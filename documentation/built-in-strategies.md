@@ -55,7 +55,7 @@ The seven signal strategies, all but GridBot (which keeps a grid of orders inste
 
 - Their orders carry no amount: the Trader sizes a BUY from the free currency, with 5 % kept back for the fee, and a SELL from the free asset. They are `STICKY` orders, `MARKET` ones for SMACrossover (see the Trader's [Order Types](./plugins.md#order-types)).
 - They start flat. They buy only when flat and sell only when long, and never while an order of their own is pending.
-- The Trader ends each order with one of three events: completed, canceled or errored, a refusal included. A completed BUY makes the strategy long, a completed SELL flat, unless the Trader capped that SELL at the most the market takes in one order and enough is left to sell: the strategy is then still long, and sells the rest at its next SELL signal. The strategy reads that rest from the free balance of the asset in the portfolio after the SELL, as below.
+- The Trader ends each order with one of three events: completed, canceled or errored, a refusal included. A completed BUY makes the strategy long. After a completed SELL, which carries no amount, the strategy reads its position from the free balance of the asset in the portfolio after it: flat, unless what is left is enough to sell (as below), as after a SELL the Trader capped at the most the market takes in one order, or when the account received some of the asset after the Trader last read its balance (a deposit, a trade made by hand or by another bot). The strategy is then still long, and sells what is left at its next SELL signal.
 - A canceled or errored order may have executed before it ended, in part or in full. The strategy then reads its position from what the event reports: the fill of a cancelation (what a BUY bought, what a SELL left unsold), otherwise the free balance of the asset in the portfolio read after the order. It is long when that amount is enough to sell (at least the market's minimum amount and cost, once truncated to its amount step), flat otherwise, and stays as it was when the event reports neither. A position read this way that differs from the one held before is logged at the `info` level, for instance `[<id>] BUY order errored: 10 BTC free in the portfolio after it, enough to sell: the strategy is long`.
 
 Each section says what becomes of a signal the position does not allow, and of an order that is canceled or refused. A custom strategy can keep the same bookkeeping: see [Tracking Your Position](./custom-strategies.md#tracking-your-position).
@@ -332,13 +332,13 @@ The RSI strategy uses the **Relative Strength Index** to identify overbought and
 
 | Parameter                | Type         | Required | Default | Description                                                      |
 |--------------------------|--------------|----------|---------|------------------------------------------------------------------|
-| `period`                 | integer ≥ 1  | Yes      | —       | RSI calculation period (typically 14)                            |
+| `period`                 | integer ≥ 2  | Yes      | —       | RSI calculation period (typically 14)                            |
 | `src`                    | price source | No       | `close` | Price the RSI reads                                              |
 | `thresholds.high`        | number       | Yes      | —       | Overbought level (typically 70), above which a high trend starts |
 | `thresholds.low`         | number       | Yes      | —       | Oversold level (typically 30), below which a low trend starts    |
 | `thresholds.persistence` | integer ≥ 0  | Yes      | —       | Candles past its threshold a trend counts before it advises      |
 
-The comparisons are strict and the RSI lies between 0 and 100: a `high` of 100 or more never sells, a `low` of 0 or less never buys. Nothing checks that `low` is below `high`: set the other way round, there is no neutral zone and the trend changes at `high` alone. On a market flat since the RSI's first candle, the RSI is 0 (TA-Lib's convention), which reads as oversold.
+The comparisons are strict and the RSI lies between 0 and 100: a `high` of 100 or more never sells, a `low` of 0 or less never buys. Nothing checks that `low` is below `high`: set the other way round, there is no neutral zone and the trend changes at `high` alone. On a market flat since the RSI's first candle, the RSI is 0 (TA-Lib's convention), which reads as oversold. A period of 1 is refused: the RSI of a single change is 100 on a rise and 0 on a fall or an unchanged close, so every unchanged close, the flat candles that fill a gap included, would read as oversold.
 
 #### Example Configuration
 

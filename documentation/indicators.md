@@ -67,7 +67,7 @@ L(p) is the lookback of a p-candle moving average, the candles before its first 
 
 ## 📈 Moving Averages
 
-Moving averages smooth price data to identify trends and potential support/resistance levels. Each one reads one price per candle, the close unless its `src` names another (see [Price Sources](#price-sources)), and gives a number. SMA, EMA, DEMA and WMA are also the four kinds a `maType` parameter takes (see [Moving Average Types](#moving-average-types)).
+Moving averages smooth price data to identify trends and potential support/resistance levels. Each one reads one price per candle, the close unless its `src` names another (see [Price Sources](#price-sources)), and gives a number, EMA Ribbon one per EMA with their spread (`{ results, spread }`). SMA, EMA, DEMA and WMA are also the four kinds a `maType` parameter takes (see [Moving Average Types](#moving-average-types)).
 
 ### SMA — Simple Moving Average
 
@@ -303,7 +303,7 @@ Momentum indicators measure the speed and strength of price movements.
   - `hist` — Histogram (MACD - Signal)
 - **First value:** candle `long` + `signal` − 1: 34 by default
 
-As in TA-Lib, the fast EMA starts `long` − `short` candles after the slow one, so that both have their first value on candle `long`, and the signal line is an EMA seeded with the mean of the first `signal` MACD values. Where TA-Lib swaps a `short` above `long` back, Gekko refuses it, and an equal one too: swapped periods give the opposite line, equal ones a line of 0. With `signal: 1` the signal line is the MACD line itself, and `hist` is 0 on every candle, exactly on real prices: only candles that jump more than twofold leave rounding noise, at most 1.6e-15 of the MACD line with tenfold jumps. The [MACD strategy](./built-in-strategies.md#macd--moving-average-convergence-divergence) refuses `signal: 1` with `macdSrc: hist`, a histogram that never moves.
+As in TA-Lib, the fast EMA starts `long` − `short` candles after the slow one, so that both have their first value on candle `long`, and the signal line is an EMA seeded with the mean of the first `signal` MACD values. Where TA-Lib swaps a `short` above `long` back, Gekko refuses it, and an equal one too: swapped periods give the opposite line, equal ones a line of 0. With `signal: 1` the signal line is the MACD line itself, and `hist` is 0 on every candle, exactly on real prices: only candles that jump more than twofold leave rounding noise, under 4e-16 of the larger of the MACD line and its previous value, and so without bound relative to a line that lands near 0 after such a jump. The [MACD strategy](./built-in-strategies.md#macd--moving-average-convergence-divergence) refuses `signal: 1` with `macdSrc: hist`, a histogram that never moves.
 
 ```typescript
 addIndicator('MACD', pair, { short: 12, long: 26, signal: 9 });
@@ -355,10 +355,12 @@ addIndicator('Stochastic', pair, { fastKPeriod: 14, slowKPeriod: 3, slowDPeriod:
 
 | Parameter     | Type   | Default | Constraint                    | Description                                                          |
 |---------------|--------|---------|-------------------------------|----------------------------------------------------------------------|
-| `period`      | number | 14      | whole number ≥ 1              | RSI period                                                           |
+| `period`      | number | 14      | whole number ≥ 2              | RSI period                                                           |
 | `fastKPeriod` | number | 5       | whole number ≥ 2              | Stochastic period: RSI values of the range `fastK` places the RSI in |
 | `fastDPeriod` | number | 3       | whole number ≥ 1              | Period of the average of `fastK` that makes `fastD`                  |
 | `slowMaType`  | string | 'sma'   | `sma`, `ema`, `dema` or `wma` | Kind of that average                                                 |
+
+Its RSI reads the close: Stochastic RSI takes no `src`.
 
 - **Name:** `StochasticRSI`
 - **Output:** `{ fastK, fastD }`
@@ -634,7 +636,7 @@ Oscillators are bounded indicators that fluctuate between fixed values, typicall
 
 | Parameter | Type   | Default | Constraint                       | Description                                   |
 |-----------|--------|---------|----------------------------------|-----------------------------------------------|
-| `period`  | number | 14      | whole number ≥ 1                 | Lookback period                               |
+| `period`  | number | 14      | whole number ≥ 2                 | Lookback period                               |
 | `src`     | string | 'close' | a [price source](#price-sources) | Price whose changes make the gains and losses |
 
 - **Name:** `RSI`
@@ -644,7 +646,7 @@ Oscillators are bounded indicators that fluctuate between fixed values, typicall
 **Formula:** `RSI = 100 - (100 / (1 + RS))`  
 Where RS = Average Gain / Average Loss, the [Wilder Smoothing](#wilder-smoothing) over `period` of the rises and of the falls of the price, as in TA-Lib. Gekko computes it as `100 × Average Gain / (Average Gain + Average Loss)`, which is 100 when there was no loss.
 
-With neither gain nor loss, on a market flat since the first candle, the RSI is 0: TA-Lib's convention, which Gekko keeps on purpose (see [Flat Markets and Zero Ranges](#flat-markets-and-zero-ranges)). Over candles that do not move after a move, both averages shrink by the same factor, so the RSI holds its value.
+With neither gain nor loss, on a market flat since the first candle, the RSI is 0: TA-Lib's convention, which Gekko keeps on purpose (see [Flat Markets and Zero Ranges](#flat-markets-and-zero-ranges)). Over candles that do not move after a move, both averages shrink by the same factor, so the RSI holds its value, but for a wobble in its last bits. A `period` of 1, which TA-Lib refuses too, is refused: the averages would be the last gain and the last loss alone, and the RSI 100 on a rise and 0 on any other candle, an unchanged close included.
 
 ```typescript
 addIndicator('RSI', pair, { period: 14 }); // First value at candle 15
@@ -858,7 +860,7 @@ Volume indicators analyze trading activity to confirm trends and predict reversa
   - `lower` — Lower Bollinger Band
 - **First value:** candle `period`, or 2 × `period` − 1 with a `dema`: 14 by default
 
-`obv` is TA-Lib's OBV: the volume of the first candle, then each candle's volume added when its close rose, subtracted when it fell, and nothing when it held. `ma`, `upper` and `lower` are the [Bollinger Bands](#bollinger-bands) of the OBV. Its level is arbitrary: it starts from the first candle the indicator gets, the first timeframe candle of the run, so it depends on where the run starts. Compare `obv` with its `ma`, its bands or its own past, not with a fixed threshold. While the closes hold for `period` candles, the bands are the OBV itself.
+`obv` is TA-Lib's OBV: the volume of the first candle, then each candle's volume added when its close rose, subtracted when it fell, and nothing when it held. `ma`, `upper` and `lower` are the [Bollinger Bands](#bollinger-bands) of the OBV. Its level is arbitrary: it starts from the first candle the indicator gets, the first timeframe candle of the run, so it depends on where the run starts. Compare `obv` with its `ma`, its bands or its own past, not with a fixed threshold. While the closes hold for `period` candles, the bands are the OBV itself with an `sma` or `wma` middle, and with an `ema` or `dema` one once it has caught up with the OBV, which can take over a hundred candles after a move: until then the three bands are that middle, and the OBV lies outside them. An OBV that comes back to exactly 0 and holds there is caught up with by a `dema` middle only after hundreds of candles or more, and never by an `ema` one of `period` 3 or more, which stalls just above 0.
 
 ```typescript
 addIndicator('OBV', pair, { period: 20 });
@@ -916,7 +918,7 @@ Eleven indicators take a `src` parameter to specify which price to use: SMA, EMA
 | `hlc3`  | Typical Price           | (High + Low + Close) / 3        |
 | `ohlc4` | Average Price           | (Open + High + Low + Close) / 4 |
 
-The other indicators read fixed prices: ROC, TRIX, Bollinger Bands and OBV the close, CCI the typical price, AO the midpoint, and Stochastic, Williams %R, PSAR, True Range and the indicators built on it (ATR, ATRCD and the directional movement) the candle's high and low, and its close where their formula uses it. OBV and EFI also read the volume.
+The other indicators read fixed prices: ROC, TRIX, Bollinger Bands, OBV and Stochastic RSI (through its RSI) the close, CCI the typical price, AO the midpoint, and Stochastic, Williams %R, PSAR, True Range and the indicators built on it (ATR, ATRCD and the directional movement) the candle's high and low, and its close where their formula uses it. OBV and EFI also read the volume.
 
 ### Moving Average Types
 
@@ -942,12 +944,14 @@ Every indicator checks its parameters when `addIndicator` builds it, in `init`, 
 ```
 
 - Periods, counts, starts and steps are whole numbers: 20.5, `'20'` (a string), `null` or `NaN` are refused, and so is a missing one where the indicator has no default (DEMA, WMA, TEMA, SMMA, ROC, ADX, DX, +DI, -DI, +DM, -DM and ATR).
-- Some minimums are 2: CCI (the CCI of a single candle is always 0), Bollinger Bands and OBV (the bands of a single candle have no width), the `fastKPeriod` of Stochastic RSI (the range of a single RSI value is 0), DX, ADX and the `start` of ADX Ribbon (TA-Lib's minimum).
+- Some minimums are 2: CCI (the CCI of a single candle is always 0), Bollinger Bands and OBV (the bands of a single candle have no width), the `period` of RSI and of Stochastic RSI (TA-Lib's minimum: the RSI of a single change is 100 on a rise, and 0 on a fall or an unchanged close), the `fastKPeriod` of Stochastic RSI (the range of a single RSI value is 0), DX, ADX and the `start` of ADX Ribbon (TA-Lib's minimum).
 - MACD, AO and ATRCD refuse a `short` that is not below `long`, which TA-Lib swaps back: swapped periods would give the opposite line, equal ones a line of 0. PSAR refuses an `acceleration` above `maxAcceleration`, which TA-Lib lowers to the maximum.
 - A `src` or a moving average type must be spelt as listed above, in lower case.
 - A key an indicator does not take is ignored, whatever its value: TypeScript refuses it in an object literal (`Object literal may only specify known properties`), Gekko does not.
 
 In TypeScript, `addIndicator` takes the parameters as its third argument even when each one has a default: pass `{}` to take the defaults, and `undefined` for True Range, which takes none.
+
+A JavaScript strategy, which Bun loads without type-checking, can leave the third argument out, or pass `null`, and the indicator is then built from `{}`: with its defaults, or, for one whose period has no default, refused as above (`[STRATEGY] Indicator ATR: period must be a whole number, at least 1, got undefined`). Anything but a plain object (a number given for a period, a string, an array, a `Map`, an instance of a class) is refused the same way, before the indicator is built: `[STRATEGY] Impossible to add the RSI indicator on BTC/USDT: parameters must be a plain object of the indicator's parameters by name, {} to take its defaults, got 7`.
 
 ---
 
@@ -991,7 +995,7 @@ export class RsiBands implements Strategy<RsiBandsParams> {
 }
 ```
 
-An indicator name that does not exist, a pair that is not watched or a refused parameter (see [Parameter Checks](#parameter-checks)) stops Gekko at start-up, with an error that names the problem, and so does an `addIndicator` kept and called after `init`, when it is called. To act on the signals, see [Creating Orders](./custom-strategies.md#creating-orders) and [Tracking Your Position](./custom-strategies.md#tracking-your-position) in the custom strategies guide.
+An indicator name that does not exist, a pair that is not watched, or a refused parameter or third argument (see [Parameter Checks](#parameter-checks)) stops Gekko at start-up, with an error that names the problem, and so does an `addIndicator` kept and called after `init`, when it is called. To act on the signals, see [Creating Orders](./custom-strategies.md#creating-orders) and [Tracking Your Position](./custom-strategies.md#tracking-your-position) in the custom strategies guide.
 
 ### Reading Results
 
@@ -1034,7 +1038,7 @@ A window whose candles did not move, on an illiquid pair or over the flat candle
 | Stochastic RSI  | a `fastK` of 0 while the RSI holds still, so `fastD` falls to 0: the most oversold reading                                                                            |
 | CCI             | 0, a neutral reading                                                                                                                                                  |
 | Bollinger Bands | the three bands on the close, once an `ema` or `dema` middle has caught up: `close > upper` and `close < lower` are false, `close >= upper` and `close <= lower` true |
-| OBV             | `obv` unchanged, and its bands on it                                                                                                                                  |
+| OBV             | `obv` unchanged, and its bands on it once an `ema` or `dema` middle has caught up                                                                                     |
 | DX, ADX         | 0 on a market flat from the start; after a move, DX keeps its value through candles without directional movement, and ADX tends to it                                 |
 
 - The RSI's 0 on a market flat since its first candle is TA-Lib's convention, which Gekko keeps on purpose: no gain and no loss give 0 / 0, which TA-Lib writes 0. The RSI is pinned at 100 on a market that has risen without falling once since the RSI started, and the `fastK` of Stochastic RSI is then 0 too, its range being flat.
