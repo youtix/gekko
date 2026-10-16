@@ -1,10 +1,15 @@
-import { ONE_MINUTE } from '@constants/time.const';
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { startFakeClock } from '../../helpers/clock.helper';
+import { ORDER_INITIATED_EVENT, PORTFOLIO_CHANGE_EVENT } from '@constants/event.const';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
+import type { OrderCompletedEvent, OrderInitiatedEvent, RoundTrip } from '@models/event.types';
+import type { Portfolio } from '@models/portfolio.types';
+import type { Trader } from '@plugins/trader/trader';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
+import { isNil, isObjectLike, range } from 'lodash-es';
+import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration, paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, findTextLine, findTextLines, isTextLine, logStore } from '../../mocks/winston.mock';
+import { clearLogs, findLoggedObject, isTextLine, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -18,16 +23,86 @@ mockRealtimeModules();
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
 // 2. Mock Configuration
-let mockStrategyConfig: NonNullable<RawConfiguration['strategy']>;
+/** What a scenario runs on the paper exchange, BTC against USDT on 1-minute candles without a warmup */
+type PaperRun = {
+  strategy: NonNullable<RawConfiguration['strategy']>;
+  analyzer: 'RoundTripAnalyzer' | 'PortfolioAnalyzer';
+  /** 100 BTC and 300,000 USDT, on the synchronization periods the schema gives, unless the scenario sets its own */
+  exchange?: ReturnType<typeof paperExchange>;
+};
+
+let paper: PaperRun;
+
 mockConfiguration(() => ({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', tickrate: 100, warmup: { candleCount: 0 } },
-  exchange: paperExchange([
-    { assetName: 'BTC', balance: 100 },
-    { assetName: 'USDT', balance: 300000 },
-  ]),
-  plugins: [{ name: 'TradingAdvisor', strategyName: mockStrategyConfig.name }, { name: 'Trader' }, { name: 'RoundTripAnalyzer' }],
-  strategy: mockStrategyConfig,
+  exchange:
+    paper.exchange ??
+    paperExchange([
+      { assetName: 'BTC', balance: 100 },
+      { assetName: 'USDT', balance: 300000 },
+    ]),
+  plugins: [{ name: 'TradingAdvisor', strategyName: paper.strategy.name }, { name: 'Trader' }, { name: paper.analyzer }],
+  strategy: paper.strategy,
 }));
+
+// --------------------------------------------------------------------------
+// HELPERS
+// --------------------------------------------------------------------------
+
+/**
+ * The time `minutes` and `seconds` past 12:00 on the fake clock, which starts at 12:00:30 (REALTIME_START). The Heart ticks at 12:01:02
+ * and every minute after, each tick fetching the minute that has just closed: the candle of 12:00 at 12:01:02, and so on.
+ */
+const at = (minutes: number, seconds = 0) => minuteOf(REALTIME_START) + minutes * ONE_MINUTE + seconds * ONE_SECOND;
+
+/** An event the Trader queued for the other plugins, as it queued it, and the time on the fake clock it did */
+type TraderEvent = { at: EpochTimeStamp; name: string; payload: unknown };
+
+let traderEvents: TraderEvent[];
+let traderEventsSpy: { mockRestore: () => void };
+
+/** An order event, as the scenarios compare it (see orderEvents) */
+type OrderEventSummary = { at: EpochTimeStamp; name: string; order: string; executedAt?: EpochTimeStamp; exchangePrice: number };
+
+/**
+ * The order events the Trader queued, oldest first: when, which one, the order (its side, type and amount, then the price the strategy
+ * asked for, none for a MARKET order, or once completed the price it executed at), when it executed, once completed, and the last price
+ * of its pair, which the event carries
+ */
+const orderEvents = () =>
+  traderEvents
+    .filter(({ name }) => name !== PORTFOLIO_CHANGE_EVENT)
+    .map((event): OrderEventSummary => {
+      const { order, exchange } = event.payload as OrderInitiatedEvent | OrderCompletedEvent;
+      const { side, type, amount, price } = order;
+      const described = `${side} ${type} ${amount}${isNil(price) ? '' : ` at ${price}`}`;
+      const execution = 'orderExecutionDate' in order && { executedAt: order.orderExecutionDate };
+      return { at: event.at, name: event.name, order: described, ...execution, exchangePrice: exchange.price };
+    });
+
+/** The ids of the orders the Trader initiated, in the order it did */
+const initiatedOrderIds = () =>
+  traderEvents.filter(({ name }) => name === ORDER_INITIATED_EVENT).map(({ payload }) => (payload as OrderInitiatedEvent).order.id);
+
+/** The balances the Trader queued as portfolio changes, one per balance it read, oldest first, with the time it read them */
+const portfolioChanges = () =>
+  traderEvents
+    .filter(({ name }) => name === PORTFOLIO_CHANGE_EVENT)
+    .map(event => ({ at: event.at, balance: Object.fromEntries(event.payload as Portfolio) }));
+
+/** What the strategy and its StrategyManager logged, oldest first */
+const strategyLines = () =>
+  logStore
+    .filter(isTextLine)
+    .filter(({ _tag }) => _tag === 'STRATEGY')
+    .map(({ message }) => message);
+
+/** The round trips the RoundTripAnalyzer logged as they closed, oldest first: numbered from 0, where its report is named */
+const loggedRoundTrips = () =>
+  logStore.map(({ message }) => message).filter(message => isObjectLike(message) && typeof (message as RoundTrip).id === 'number');
+
+/** The report the analyzer logged when the plugins were finalised: the PortfolioAnalyzer logs the length of its equity curve */
+const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findLoggedObject(message => message.id === id);
 
 // --------------------------------------------------------------------------
 // TEST SUITE
@@ -43,101 +118,280 @@ describe('E2E: Realtime Paper Trader Flow', () => {
     // Reset mocks
     MockCCXTExchange.reset();
     startFakeClock();
+
+    // Every event the Trader queues is recorded as it is queued, copied: the prices and the balances the strategy and the analyzers
+    // hear of. The pipeline builds its Trader from this class once the run starts.
+    const { Trader } = await import('@plugins/trader/trader');
+    const queue = Trader.prototype.addDeferredEmit;
+    traderEvents = [];
+    traderEventsSpy = spyOn(Trader.prototype, 'addDeferredEmit').mockImplementation(function (this: Trader, name, payload) {
+      traderEvents.push({ at: Date.now(), name, payload: structuredClone(payload) });
+      queue.call(this, name, payload);
+    });
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
-  afterEach(() => endRealtimeRun());
-
-  it('Scenario A: Intermediary Roundtrip Completion', async () => {
-    // Use the debug strategy specifically designed for this scenario (Buy on 0, Sell on 1)
-    mockStrategyConfig = { name: 'DebugRealtime' };
-
-    // Setup predefined candles to trigger buying and selling at predictable prices
-    MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
-      { close: 100 }, // Iteration 0 -> Buys 1 BTC at 100
-      { close: 110 }, // Iteration 1 -> Sells 1 BTC at 110
-      { close: 120 }, // Extra candle to ensure processing ends safely
-      { close: 125 }, // One more buffer candle
-    ]);
-
-    // One candle a minute: the round trip exits on the second, and is reported with the third
-    const isRoundtrip = (message: Record<string, any>) => 'entryAt' in message && 'exitAt' in message && 'profit' in message;
-    await runRealtimeUntil(() => findLoggedObject(isRoundtrip) !== undefined, { maxMinutes: 5 });
-
-    // Assert logs verify the execution of the e2e test
-    expect(findTextLine('Trigger BUY for BTC/USDT')).toBeDefined();
-    expect(findTextLine('Trigger SELL for BTC/USDT')).toBeDefined();
-
-    // Assert roundtrip state from Final Trading Report logged by RoundTripAnalyzer
-    // In realtime, processFinalize isn't called, so we check the individual roundtrip log
-    const roundtrip = findLoggedObject(isRoundtrip)!;
-    expect(roundtrip).toBeDefined();
-
-    // There should be exactly one completed roundtrip
-    // Test every property from the intermediary roundtrip report for strong e2e validation
-    expect(roundtrip.id).toBe(0);
-    expect(roundtrip.entryAt).toBeTypeOf('number');
-    expect(roundtrip.entryPrice).toBe(100);
-    // The simulator charges the taker fee of the market, Binance's 0.1 %, on top of a MARKET BUY and out of a SELL's proceeds. The BUY
-    // of 1 BTC at 100 costs 100.1: 101 BTC and 299,899.9 USDT, $309,999.9 at $100/BTC. The entry equity gives the BUY's fee back:
-    // 309,999.9 + 0.1 = $310,000, the 100 BTC * $100 + 300,000 USDT held before it
-    expect(roundtrip.entryEquity).toBe(310000);
-
-    expect(roundtrip.exitAt).toBeTypeOf('number');
-    expect(roundtrip.exitAt).toBeGreaterThan(roundtrip.entryAt);
-    expect(roundtrip.exitPrice).toBe(110);
-    // The SELL of 1 BTC at 110 brings 110 - 0.11 = 109.89: 100 BTC and 300,009.79 USDT. At $110/BTC: 100 * 110 + 300,009.79 = $311,009.79
-    expect(roundtrip.exitEquity).toBe(311009.79);
-
-    expect(roundtrip.pnl).toBe(1009.79); // 311,009.79 - 310,000
-    expect(roundtrip.profit).toBe(0.325738709677419); // 1,009.79 / 310,000 * 100, to 15 significant digits
-    expect(roundtrip.maxAdverseExcursion).toBe(0);
-    // Exited a minute after the entry, the SELL on the candle after the BUY's
-    expect(roundtrip.duration).toBe(ONE_MINUTE);
+  afterEach(async () => {
+    try {
+      await endRealtimeRun();
+    } finally {
+      traderEventsSpy.mockRestore();
+    }
   });
-  it('Scenario B: Trailing Stop Lifecycle', async () => {
-    // Override strategy to use DebugTrailingStop with trailing stop config
-    mockStrategyConfig = { name: 'DebugTrailingStop', wait: 0, trigger: 9930, percentage: 0.1 };
 
+  // The round trip reads the one-minute candles that close after its BUY filled, at 12:01:00, and by the time its SELL filled, at
+  // 12:02:00: the candle of 12:01 alone. The candle of 12:00 closes as the BUY fills. That of 12:02 closes after the SELL filled: it is
+  // processed before the SELL is heard, with its bucket, and taken back then. Read as each bucket arrived, the round trip skipped the
+  // candle of 12:01, which it held, and read that of 12:02, after it: 0 and 5 in the first and the last rows.
+  it.each([
+    { candle: 'of 12:01, which the position holds', index: 1, mae: 5 },
+    { candle: 'of 12:00, which closes as the BUY fills', index: 0, mae: 0 },
+    { candle: 'of 12:02, which closes after the SELL filled', index: 2, mae: 0 },
+  ])('Scenario A: one round trip from 100 to 110, a low of 95 on the candle $candle: MAE $mae', async ({ index, mae }) => {
+    paper = { strategy: { name: 'DebugRealtime' }, analyzer: 'RoundTripAnalyzer' };
+    // DebugRealtime buys 1 BTC with its first candle and sells it with its second. Each candle opens at its close, its high and its low
+    // there too, but for the low of 95 of the row.
+    MockCCXTExchange.setPredefinedCandles(
+      'BTC/USDT',
+      [100, 110, 120].map((close, n) => (n === index ? { close, low: 95 } : { close })),
+    );
+
+    // The round trip is heard with the candle of 12:02, at 12:03:02: the Trader reports the end of an order with the next bucket
+    await runRealtimeUntil(() => loggedRoundTrips().length > 0, { maxMinutes: 5 });
+    await endRealtimeRun();
+
+    // The simulator charges the taker fee of the market, Binance's 0.1 %, on top of a MARKET BUY and out of a SELL's proceeds. The BUY of
+    // 1 BTC at 100 costs 100.1: 101 BTC and 299,899.9 USDT. The SELL of 1 BTC at 110 brings 110 - 0.11 = 109.89: 100 BTC and 300,009.79
+    // USDT.
+    expect({
+      strategyLines: strategyLines(),
+      orderEvents: orderEvents(),
+      roundTrips: loggedRoundTrips(),
+      report: loggedReport('TRADING REPORT'),
+    }).toEqual({
+      strategyLines: [
+        'Strategy warmup done ! Sending first candle bucket (2024-01-01T12:00:00.000Z) to strategy',
+        'Iteration: 0 for BTC/USDT',
+        'Trigger BUY for BTC/USDT',
+        'Iteration: 1 for BTC/USDT',
+        'Trigger SELL for BTC/USDT',
+        'Iteration: 2 for BTC/USDT',
+      ],
+      // The Trader prices each order at the close of the candle it is sent with, which every event of the order carries: it takes the
+      // close of each bucket, and the ticker its synchronizations read, at the end of the warmup and after each fill, quotes it too. That
+      // ticker quoted a price of its own, about 10,000, which the BUY was priced at and all but the SELL's first event carried, while
+      // these candles traded at 100 and 110. Each MARKET order fills as it is sent, at the clock of the simulator, the close of its
+      // candle, and is reported before the next tick.
+      orderEvents: [
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 100 },
+        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 100', executedAt: at(1), exchangePrice: 100 },
+        { at: at(2, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 110 },
+        { at: at(2, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 110', executedAt: at(2), exchangePrice: 110 },
+      ],
+      roundTrips: [
+        {
+          id: 0,
+          entryAt: at(1),
+          entryPrice: 100,
+          // The pair equity after the BUY, 101 × 100 + 299,899.9 = 309,999.9, its fee given back: the 100 BTC × 100 + 300,000 USDT held
+          // before it
+          entryEquity: 310000,
+          exitAt: at(2),
+          exitPrice: 110,
+          // 100 × 110 + 300,009.79
+          exitEquity: 311009.79,
+          pnl: 1009.79,
+          // 1,009.79 / 310,000 × 100, to 15 significant digits
+          profit: 0.325738709677419,
+          // (100 - 95) / 100 × 100 for the low on the candle of 12:01
+          maxAdverseExcursion: mae,
+          duration: ONE_MINUTE,
+        },
+      ],
+      report: {
+        id: 'TRADING REPORT',
+        // From the close of the candle that completed the warmup, 12:00's, to that of the last candle processed, 12:02's
+        periodStartAt: at(1),
+        periodEndAt: at(3),
+        formattedDuration: '2 minutes',
+        // The pair equity from 310,000 to 312,009.79, 100 × 120 + 300,009.79 at the last close: the 100 BTC held throughout gain 2,000,
+        // the round trip 9.79, 10 less the fees of 0.1 and 0.11
+        netProfit: 2009.79,
+        // The period is shorter than a day: annualized over a day, 1/366 of the year 2024, 2,009.79 × 366
+        annualizedNetProfit: 735583.14,
+        // 2,009.79 / 310,000 × 100, to 15 significant digits
+        totalReturnPct: 0.64831935483871,
+        // 0.64831935483871 × 366, to 15 significant digits
+        annualizedReturnPct: 237.284883870968,
+        // From the close of 12:00, 100, to that of 12:02, 120
+        marketReturnPct: 20,
+        // 0.64831935483871 - 20
+        alpha: -19.35168064516129,
+        // The round trip, 12:01 to 12:02: 1 of the 2 minutes
+        exposurePct: 50,
+        // A single profit, which deviates from nothing: no ratio either
+        volatility: 0,
+        downsideDeviation: 0,
+        sharpeRatio: 0,
+        sortinoRatio: 0,
+        startPrice: 100,
+        endPrice: 120,
+        startBalance: 310000,
+        finalBalance: 312009.79,
+        winRate: 100,
+        topMAEs: [mae],
+        tradeCount: 2,
+        // The run is ended through the signal of its pipeline: the plugins are finalised with the AbortError as the failure that stopped
+        // it. The harness destroyed the last stream without an error instead, and the report read as that of a completed run, an end no
+        // realtime run has in production.
+        interruption: 'The operation was aborted.',
+      },
+    });
+  });
+
+  it('Scenario B: a 0.1 % trailing stop, active at a peak of 10000, its stop at 9990, sells its 1 BTC at 9800 and is over', async () => {
+    paper = { strategy: { name: 'DebugTrailingStop', wait: 0, trigger: 9930, percentage: 0.1 }, analyzer: 'RoundTripAnalyzer' };
     MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
-      { close: 9500 }, // Places BUY order
-      { close: 9500 }, // TS dormant
-      { close: 10000, high: 10000, low: 9995 }, // TS active, stopPrice == 9990
-      { close: 9800, high: 9995, low: 9800 }, // TS triggers SELL
-      { close: 9800 }, // SELL completes
+      // 12:00: the BUY of 1 BTC, sent with this candle with its stop, fills at its close
+      { close: 9500 },
+      // 12:01: the BUY's completion is heard after it, and arms the stop, dormant until a high reaches its trigger, 9930
+      { close: 9500 },
+      // 12:02: opens at its close, 10000, above the trigger: the stop is active from the open, its peak 10000 and its stop price 0.1 %
+      // below, 9990, which the low of 9995 stays above
+      { close: 10000, low: 9995 },
+      // 12:03: opens at its close, 9800, below the stop price: the stop triggers, and its MARKET SELL of 1 BTC fills at 9800
+      { close: 9800 },
+      // 12:04: the SELL's completion is heard after it, for all the stop sells: the stop is over
       { close: 9800 },
     ]);
 
-    // Until the stop's SELL, placed on the fourth candle, is reported completed with the fifth
-    await runRealtimeUntil(() => findTextLines('Trailing stop order completed').length >= 2, { maxMinutes: 8 });
+    // Until the strategy logs the completion of the stop's SELL, at 12:05:02
+    const completions = () => strategyLines().filter(line => line.startsWith('Trailing stop order completed')).length;
+    await runRealtimeUntil(() => completions() === 2, { maxMinutes: 8 });
+    await endRealtimeRun();
 
-    // Verify trailing stop BUY order was created by the strategy
-    expect(findTextLine('Trailing stop BUY order created')).toBeDefined();
-
-    // Verify the orders were completed (BUY order completed and then SELL order completed after trigger)
-    const completedLogs = findTextLines('Trailing stop order completed');
-    expect(completedLogs.length).toBeGreaterThanOrEqual(2);
-
-    // The StrategyManager forwarded both hooks of the stop to the strategy, which logs them: the orders completed are the BUY, then the
-    // SELL the trigger hook was given
-    const lineStartingWith = (prefix: string) => logStore.filter(isTextLine).find(({ message }) => message.startsWith(prefix));
-    expect(lineStartingWith('Trailing stop activated')).toBeDefined();
-    const [, buyId, sellId] = lineStartingWith('Trailing stop triggered')?.message.match(/BUY (\S+) .* MARKET SELL (\S+)/) ?? [];
-    expect(completedLogs.map(log => log.message)).toEqual([
-      `Trailing stop order completed: ${buyId}`,
-      `Trailing stop order completed: ${sellId}`,
-    ]);
+    // The StrategyManager hands the strategy the end of each order, the activation and the trigger of the stop, which DebugTrailingStop
+    // logs. Once the run has ended, it names the stops still armed or selling ("Strategy ended with…"): none, the stop being over. A stop
+    // that ignored its trigger would be said active as it was armed, at a peak and a stop price of 0.
+    const [buyId, sellId] = initiatedOrderIds();
+    expect({ strategyLines: strategyLines(), orderEvents: orderEvents() }).toEqual({
+      strategyLines: [
+        'Strategy warmup done ! Sending first candle bucket (2024-01-01T12:00:00.000Z) to strategy',
+        'Trailing stop BUY order created',
+        `Trailing stop order completed: ${buyId}`,
+        `Trailing stop activated: BUY ${buyId} on BTC/USDT, peak 10000, stop price 9990`,
+        `Trailing stop triggered: BUY ${buyId} on BTC/USDT at stop price 9990, its MARKET SELL ${sellId} of 1 sent`,
+        `Trailing stop order completed: ${sellId}`,
+      ],
+      // The SELL the stop sends with the candle of 12:03 completes for the amount of the stop, the 1 BTC its BUY filled
+      orderEvents: [
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 9500 },
+        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 9500', executedAt: at(1), exchangePrice: 9500 },
+        { at: at(4, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 9800 },
+        { at: at(4, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 9800', executedAt: at(4), exchangePrice: 9800 },
+      ],
+    });
   });
 
-  it('Scenario C: The end of the run, by the abort of its signal, reported as its interruption', async () => {
-    mockStrategyConfig = { name: 'DebugRealtime' };
-    MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }, { close: 110 }, { close: 120 }]);
-    await runRealtimeUntil(() => findTextLine('Trigger SELL for BTC/USDT') !== undefined, { maxMinutes: 5 });
+  it('Scenario C: the synchronization of 12:02:30 reads the 9508.55 USDT a resting LIMIT BUY reserves, which fills at 12:03', async () => {
+    paper = {
+      // A LIMIT BUY of 1 BTC at 9500 with the candle of 12:00, its first, and a MARKET SELL of 1 BTC with that of 12:04
+      strategy: { name: 'DebugBacktest', buyCandleIndex: 0, sellCandleIndex: 4, buyLimitPrice: 9500 },
+      analyzer: 'PortfolioAnalyzer',
+      exchange: {
+        ...paperExchange([
+          { assetName: 'BTC', balance: 0 },
+          { assetName: 'USDT', balance: 300000 },
+        ]),
+        // From the start of the Trader, 12:00:30: at 12:02:30, 12:04:30 and 12:06:30
+        exchangeSynchInterval: 2 * ONE_MINUTE,
+        // Binance's VIP 1 fee for the LIMIT BUY, merged into the fees of the market: the MARKET SELL pays its taker fee, 0.1 %
+        feeOverride: { maker: 0.0009 },
+      },
+    };
+    // BTC trades at 10000 every minute, from 12:00 to 12:06, but for the low of 12:02, 9400: the first to reach the LIMIT BUY
+    MockCCXTExchange.setPredefinedCandles(
+      'BTC/USDT',
+      range(7).map(n => (n === 2 ? { close: 10000, low: 9400 } : { close: 10000 })),
+    );
 
-    // The plugins are finalised with the AbortError as the failure that stopped the run, which the final report names. The harness
-    // destroyed the last stream without an error instead, so that the plugins were finalised as at the end of a completed run, an end no
-    // realtime run has in production.
+    // Seven minutes, to 12:07:30: the balance read at 12:06:30 is delivered with the candle of 12:06, at 12:07:02
+    await runRealtimeFor({ minutes: 7 });
     await endRealtimeRun();
-    expect(findLoggedObject(message => message.id === 'TRADING REPORT')?.interruption).toBe('The operation was aborted.');
+
+    expect({
+      orderEvents: orderEvents(),
+      portfolioChanges: portfolioChanges(),
+      report: loggedReport('PORTFOLIO PROFIT REPORT'),
+    }).toEqual({
+      // The LIMIT BUY rests from 12:01:02, its cost reserved, 9500 × 1.0009 = 9508.55, until the low of 12:02 reaches it: it fills at its
+      // price, at 12:03:00, the close of that candle. It is polled every 20 s from its creation: the poll of 12:03:02 reads it before the
+      // candle of 12:02 is processed, that of 12:03:22 reads its fill. The MARKET SELL sent with the candle of 12:04 fills as it is sent,
+      // at 10000, and brings 10000 × 0.999 = 9990.
+      orderEvents: [
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY LIMIT 1 at 9500', exchangePrice: 10000 },
+        { at: at(3, 22), name: 'orderCompleted', order: 'BUY LIMIT 1 at 9500', executedAt: at(3), exchangePrice: 10000 },
+        { at: at(5, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 10000 },
+        { at: at(5, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 10000', executedAt: at(5), exchangePrice: 10000 },
+      ],
+      // The Trader reads the balance at its start, at the end of the warmup, after each order and every two minutes, and queues each read
+      // as a portfolio change. At 12:02:30, while the BUY rests, the read shows what it reserves.
+      portfolioChanges: [
+        { at: at(0, 30), balance: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 300000, used: 0, total: 300000 } } },
+        // At the end of the warmup, with the candle of 12:00
+        { at: at(1, 2), balance: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 300000, used: 0, total: 300000 } } },
+        // Periodic, the BUY resting
+        { at: at(2, 30), balance: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 290491.45, used: 9508.55, total: 300000 } } },
+        // After the BUY, from the poll that read its fill
+        { at: at(3, 22), balance: { BTC: { free: 1, used: 0, total: 1 }, USDT: { free: 290491.45, used: 0, total: 290491.45 } } },
+        { at: at(4, 30), balance: { BTC: { free: 1, used: 0, total: 1 }, USDT: { free: 290491.45, used: 0, total: 290491.45 } } },
+        // After the SELL
+        { at: at(5, 2), balance: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 300481.45, used: 0, total: 300481.45 } } },
+        { at: at(6, 30), balance: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 300481.45, used: 0, total: 300481.45 } } },
+      ],
+      report: {
+        id: 'PORTFOLIO PROFIT REPORT',
+        // From the close of the candle that completed the warmup, 12:00's, to that of the last candle processed, 12:06's
+        periodStartAt: at(1),
+        periodEndAt: at(7),
+        formattedDuration: '6 minutes',
+        // 9990 - 9508.55: bought 500 below the market, less 8.55 and 10 of fees
+        netProfit: 481.45,
+        // 481.45 × 366, over a day of 2024
+        annualizedNetProfit: 176210.7,
+        // 481.45 / 300000 × 100
+        totalReturnPct: 0.160483333333333,
+        // 0.160483333333333 × 366, to 15 significant digits
+        annualizedReturnPct: 58.7368999999999,
+        marketReturnPct: 0,
+        alpha: 0.160483333333333,
+        // The curve has a point at the close of each candle, marked before the fills its bucket delivers are heard: the BUY's with the
+        // bucket of 12:03, the SELL's with that of 12:05. The spans that end on a point holding BTC, 12:04 to 12:06: 2 of the 6 minutes.
+        exposurePct: 33.3333333333333,
+        // The curve holds 300000 to 12:04, the reservation counted in the total, then 300491.45 at 12:05 and 12:06, BTC at 10000, and
+        // 300481.45 at 12:07, after the SELL. Its 6 returns are four of 0, 0.16381666666667055 (491.45 / 300000 × 100) and
+        // -0.003327881708447944 (-10 / 300491.45 × 100): their population standard deviation, and the root mean square of the loss over
+        // them
+        volatility: 0.06131095614191739,
+        downsideDeviation: 0.001358602018339833,
+        // 53.7368999999999, the annualized return less the risk-free 5, over each deviation × √(6 returns × 366 a year)
+        sharpeRatio: 18.70330483114111,
+        sortinoRatio: 844.0422483784143,
+        startPrice: 10000,
+        endPrice: 10000,
+        // The fee of the SELL from the peak of 12:06: 10 / 300491.45 × 100, the last minute
+        maxDrawdownPct: 0.00332788170844794,
+        longestDrawdownMs: ONE_MINUTE,
+        startEquity: 300000,
+        endEquity: 300481.45,
+        // Counted once per delivery: the reads of the start and of the end of the warmup together, with the candle of 12:00, then each of
+        // those of 12:02:30, 12:03:22, 12:04:30, 12:05:02 and 12:06:30 with the candle after it
+        portfolioChangeCount: 6,
+        benchmarkAsset: 'BTC',
+        interruption: 'The operation was aborted.',
+        // One point per candle after the warmup, that which completed it included
+        equityCurveLength: 7,
+      },
+    });
   });
 });
