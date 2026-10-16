@@ -191,6 +191,35 @@ describe('StrategyManager', () => {
       await expect(manager.createStrategy('MissingStrategy', DEBUG_ADVICE_PATH)).rejects.toThrow(GekkoError);
     });
 
+    // Bun rejects the import of a file it cannot find or parse with a ResolveMessage or a BuildMessage, which are not Errors, or with an
+    // AggregateError of BuildMessages, which the log wrote without them: the start-up failed without saying which step failed. Under
+    // vitest, a missing file rejects with the ERR_MODULE_NOT_FOUND Error of the module loader.
+    describe('when the strategy file cannot be imported', () => {
+      const MISSING_PATH = '/nowhere.strategy.ts';
+      let failure: unknown;
+
+      beforeEach(async () => {
+        failure = await manager.createStrategy('MyStrategy', MISSING_PATH).catch((e: unknown) => e);
+      });
+
+      it('refuses the strategy with a GekkoError', () => {
+        expect(failure).toBeInstanceOf(GekkoError);
+      });
+
+      it('keeps what the import rejected with as its cause: the ERR_MODULE_NOT_FOUND of the missing file', () => {
+        expect(failure).toHaveProperty('cause.code', 'ERR_MODULE_NOT_FOUND');
+      });
+
+      it('names the step and the file, then quotes its cause: [TRADING ADVISOR] Cannot import the strategy file <path>: <cause>', () => {
+        const { cause } = failure as { cause: Error };
+        expect(failure).toHaveProperty('message', `[TRADING ADVISOR] Cannot import the strategy file ${MISSING_PATH}: ${cause.message}`);
+      });
+
+      it('does not create the strategy', () => {
+        expect(manager['strategy']).toBeUndefined();
+      });
+    });
+
     describe.each`
       origin               | strategyPath
       ${'the registry'}    | ${undefined}

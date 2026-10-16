@@ -263,7 +263,16 @@ export class StrategyManager extends EventEmitter {
     let SelectedStrategy: StrategyConstructor | undefined;
     if (strategyPath) {
       const resolvedPath = isAbsolute(strategyPath) ? strategyPath : resolve(process.cwd(), strategyPath);
-      SelectedStrategy = (await import(resolvedPath))[strategyName];
+      let strategyModule: Record<string, StrategyConstructor | undefined>;
+      try {
+        strategyModule = await import(resolvedPath);
+      } catch (err) {
+        // Bun rejects with a ResolveMessage or a BuildMessage, which are not Errors, when it cannot find or parse the file, and with an
+        // AggregateError of BuildMessages for two syntax errors or more, which the log wrote as '2 errors building "<file>"', without
+        // them. The start-up failed without saying which step failed: describeError writes each of them, with its file.
+        throw new GekkoError('trading advisor', `Cannot import the strategy file ${resolvedPath}: ${describeError(err)}`, { cause: err });
+      }
+      SelectedStrategy = strategyModule[strategyName];
       if (!SelectedStrategy) throw new GekkoError('trading advisor', `Cannot find external ${strategyName} strategy in ${resolvedPath}`);
     } else {
       SelectedStrategy = strategies[strategyName as keyof typeof strategies];
