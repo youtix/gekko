@@ -79,7 +79,6 @@
     "vitest": "^4.0.18"
   },
   "dependencies": {
-    "@date-fns/tz": "^1.4.1",
     "ccxt": "^4.5.39",
     "date-fns": "^4.1.0",
     "https-proxy-agent": "^7.0.6",
