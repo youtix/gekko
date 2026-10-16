@@ -51,15 +51,34 @@ describe('DebugBacktest', () => {
     ]);
   });
 
-  // An all-in order has no amount key at all, not one set to undefined, as a built-in strategy creates it: the Trader sizes it
+  // An order the Trader sizes has no amount key at all, not one set to undefined, as a built-in strategy creates its all-in orders: an
+  // all-in order holds no sizing key, an order by cost or by allocation that key alone
   it.each`
-    scenario                                                       | options                                 | buy                                                         | sell
-    ${'with allIn, a MARKET BUY and a MARKET SELL without amount'} | ${{ allIn: true }}                      | ${{ type: 'MARKET', side: 'BUY', symbol: BTC }}             | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
-    ${'with allIn and buyLimitPrice, a LIMIT BUY without amount'}  | ${{ allIn: true, buyLimitPrice: 9500 }} | ${{ type: 'LIMIT', side: 'BUY', price: 9500, symbol: BTC }} | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
-    ${'with allIn false, orders of 1 unit as without it'}          | ${{ allIn: false }}                     | ${{ type: 'MARKET', side: 'BUY', amount: 1, symbol: BTC }}  | ${{ type: 'MARKET', side: 'SELL', amount: 1, symbol: BTC }}
+    scenario                                                           | options                                    | buy                                                                         | sell
+    ${'with allIn, a MARKET BUY and a MARKET SELL without amount'}     | ${{ allIn: true }}                         | ${{ type: 'MARKET', side: 'BUY', symbol: BTC }}                             | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
+    ${'with allIn and buyLimitPrice, a LIMIT BUY without amount'}      | ${{ allIn: true, buyLimitPrice: 9500 }}    | ${{ type: 'LIMIT', side: 'BUY', price: 9500, symbol: BTC }}                 | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
+    ${'with allIn false, orders of 1 unit as without it'}              | ${{ allIn: false }}                        | ${{ type: 'MARKET', side: 'BUY', amount: 1, symbol: BTC }}                  | ${{ type: 'MARKET', side: 'SELL', amount: 1, symbol: BTC }}
+    ${'with cost, a MARKET BUY and a MARKET SELL of that cost'}        | ${{ cost: 200000 }}                        | ${{ type: 'MARKET', side: 'BUY', cost: 200000, symbol: BTC }}               | ${{ type: 'MARKET', side: 'SELL', cost: 200000, symbol: BTC }}
+    ${'with cost and buyLimitPrice, a LIMIT BUY of that cost'}         | ${{ cost: 200000, buyLimitPrice: 9500 }}   | ${{ type: 'LIMIT', side: 'BUY', cost: 200000, price: 9500, symbol: BTC }}   | ${{ type: 'MARKET', side: 'SELL', cost: 200000, symbol: BTC }}
+    ${'with allIn false and cost, orders of that cost'}                | ${{ allIn: false, cost: 200000 }}          | ${{ type: 'MARKET', side: 'BUY', cost: 200000, symbol: BTC }}               | ${{ type: 'MARKET', side: 'SELL', cost: 200000, symbol: BTC }}
+    ${'with allocation, a MARKET BUY and a MARKET SELL of that share'} | ${{ allocation: 50 }}                      | ${{ type: 'MARKET', side: 'BUY', allocation: 50, symbol: BTC }}             | ${{ type: 'MARKET', side: 'SELL', allocation: 50, symbol: BTC }}
+    ${'with allocation and buyLimitPrice, a LIMIT BUY of that share'}  | ${{ allocation: 50, buyLimitPrice: 9500 }} | ${{ type: 'LIMIT', side: 'BUY', allocation: 50, price: 9500, symbol: BTC }} | ${{ type: 'MARKET', side: 'SELL', allocation: 50, symbol: BTC }}
+    ${'with allIn false and allocation, orders of that share'}         | ${{ allIn: false, allocation: 50 }}        | ${{ type: 'MARKET', side: 'BUY', allocation: 50, symbol: BTC }}             | ${{ type: 'MARKET', side: 'SELL', allocation: 50, symbol: BTC }}
   `('sends $scenario', ({ options, buy, sell }) => {
     play(2, { buyCandleIndex: 0, sellCandleIndex: 1, ...options });
     expect(orders.advices).toStrictEqual([buy, sell]);
+  });
+
+  // Each pair's BUY carries the share, which the Trader takes of the currency it read: two pairs at 50 % both buy on one candle, where
+  // the all-in BUY of the first left the second nothing
+  it('sends every order of every watched pair with the allocation', () => {
+    play(2, { buyCandleIndex: 0, sellCandleIndex: 1, allocation: 50 }, [BTC, ETH]);
+    expect(orders.advices).toStrictEqual([
+      { type: 'MARKET', side: 'BUY', allocation: 50, symbol: BTC },
+      { type: 'MARKET', side: 'BUY', allocation: 50, symbol: ETH },
+      { type: 'MARKET', side: 'SELL', allocation: 50, symbol: BTC },
+      { type: 'MARKET', side: 'SELL', allocation: 50, symbol: ETH },
+    ]);
   });
 
   it('orders on every watched pair', () => {

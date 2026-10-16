@@ -98,6 +98,54 @@ describe('debugBacktestStrategySchema', () => {
   });
 });
 
+describe('debugBacktestStrategySchema: cost and allocation', () => {
+  /** The block of a backtest that buys on candle 1 and sells on candle 3, its orders sized by `sizing` */
+  const sizedBy = (sizing: Record<string, unknown>) => ({ buyCandleIndex: 1, sellCandleIndex: 3, ...sizing });
+
+  // allIn: false is no sizing of its own, the orders of 1 unit a block without allIn sends, which a cost or an allocation replaces
+  it.each`
+    scenario                                 | sizing
+    ${'a cost'}                              | ${{ cost: 200000 }}
+    ${'a cost below 1 unit of the currency'} | ${{ cost: 0.5 }}
+    ${'an allocation'}                       | ${{ allocation: 50 }}
+    ${'an allocation of 100, all-in'}        | ${{ allocation: 100 }}
+    ${'an allocation below 1 %'}             | ${{ allocation: 0.5 }}
+    ${'allIn false with a cost'}             | ${{ allIn: false, cost: 200000 }}
+    ${'allIn false with an allocation'}      | ${{ allIn: false, allocation: 50 }}
+  `('accepts $scenario, kept as given', ({ sizing }) => {
+    expect(debugBacktestStrategySchema.safeParse(sizedBy(sizing)).data).toEqual(sizedBy(sizing));
+  });
+
+  // Bounded as createOrder checks them, which would refuse the first order only once the strategy placed it: above 0 and finite (YAML
+  // reads .inf as Infinity), an allocation at most 100, and a number, not a quoted one
+  it.each`
+    scenario                     | sizing                  | code              | path
+    ${'a cost of 0'}             | ${{ cost: 0 }}          | ${'too_small'}    | ${['cost']}
+    ${'a negative cost'}         | ${{ cost: -1 }}         | ${'too_small'}    | ${['cost']}
+    ${'a quoted cost'}           | ${{ cost: '25' }}       | ${'invalid_type'} | ${['cost']}
+    ${'an infinite cost'}        | ${{ cost: Infinity }}   | ${'invalid_type'} | ${['cost']}
+    ${'an allocation of 0'}      | ${{ allocation: 0 }}    | ${'too_small'}    | ${['allocation']}
+    ${'a negative allocation'}   | ${{ allocation: -1 }}   | ${'too_small'}    | ${['allocation']}
+    ${'an allocation above 100'} | ${{ allocation: 101 }}  | ${'too_big'}      | ${['allocation']}
+    ${'a quoted allocation'}     | ${{ allocation: '25' }} | ${'invalid_type'} | ${['allocation']}
+  `('refuses $scenario', ({ sizing, code, path }) => {
+    expect(debugBacktestStrategySchema.safeParse(sizedBy(sizing)).error?.issues).toMatchObject([{ code, path }]);
+  });
+
+  // Each sizes every order its own way: given together, the strategy would follow one and drop the others without a word
+  it.each`
+    scenario                             | sizing                                           | path              | given
+    ${'allIn with a cost'}               | ${{ allIn: true, cost: 200000 }}                 | ${['cost']}       | ${'allIn and cost'}
+    ${'allIn with an allocation'}        | ${{ allIn: true, allocation: 50 }}               | ${['allocation']} | ${'allIn and allocation'}
+    ${'a cost with an allocation'}       | ${{ cost: 200000, allocation: 50 }}              | ${['allocation']} | ${'cost and allocation'}
+    ${'allIn, a cost and an allocation'} | ${{ allIn: true, cost: 200000, allocation: 50 }} | ${['cost']}       | ${'allIn, cost and allocation'}
+  `('refuses $scenario at the second of them, naming $given', ({ sizing, path, given }) => {
+    expect(debugBacktestStrategySchema.safeParse(sizedBy(sizing)).error?.issues).toMatchObject([
+      { code: 'custom', path, message: `allIn, cost and allocation size the orders three ways: give at most one, got ${given}` },
+    ]);
+  });
+});
+
 describe('debugOrderScriptStrategySchema', () => {
   const marketBuy = { candle: 0, side: 'BUY', type: 'MARKET' };
   /** A block of one order, a MARKET BUY on candle 0 but for `fields` */
