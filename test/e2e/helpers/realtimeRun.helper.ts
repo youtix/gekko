@@ -24,10 +24,11 @@ const intervals = new Set<ReturnType<typeof setInterval>>();
 let isTrackingIntervals = false;
 
 /**
- * What the line PluginsStream logs when a plugin fails to finalise holds, at warn or error level. Matched on that word alone, so that
- * a rewording of the line, which names the plugins that failed, still fails the test.
+ * What the lines PluginsStream logs when a plugin fails to finalise hold: `<plugin> failed to finalize: <what it threw>` at error level
+ * (several plugins joined by '; '), and `Finalization errors: …` at warn level when the logger itself threw. Matched on those words
+ * alone, so that a rewording of the rest of the line still fails the test.
  */
-const FINALIZATION_FAILURE = /inalization/i;
+const FINALIZATION_FAILURE = /failed to finalize|finalization errors/i;
 
 const isFinalizationFailure = (line: LoggedLine): line is TextLine =>
   isTextLine(line) && (line.level === 'warn' || line.level === 'error') && FINALIZATION_FAILURE.test(line.message);

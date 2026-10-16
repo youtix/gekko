@@ -89,8 +89,8 @@ describe('realtimeRun.helper', () => {
     ],
     [
       'should fail after a failure to finalise logged as an error',
-      { level: 'error', message: 'Finalization failed for Trader: boom' },
-      'A plugin failed to finalise: Finalization failed for Trader: boom',
+      { level: 'error', message: 'Trader failed to finalize: boom; CandleWriter failed to finalize: locked' },
+      'A plugin failed to finalise: Trader failed to finalize: boom; CandleWriter failed to finalize: locked',
     ],
     [
       'should not fail after a line on the finalisation at info level',
