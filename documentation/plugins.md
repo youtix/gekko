@@ -42,18 +42,28 @@ The orders open at start-up are read once, and the run does not follow them: the
 ```yaml
 plugins:
   - name: TradingAdvisor
-    strategyName: RSI          # Name of the strategy to run
-    strategyPath: ./custom     # Optional: path to custom strategy file
+    strategyName: RSI          # One of Gekko's strategies: a built-in one, or one exported from src/strategies/custom/index.ts
     maxConsecutiveErrors: 5    # Optional: errored orders in a row that stop Gekko (at least 1, or -1: never)
 ```
+
+A strategy of your own kept in a file outside the codebase is loaded from that file: `strategyPath` gives its path, and `strategyName` the name of the class it exports (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)).
+
+```yaml
+plugins:
+  - name: TradingAdvisor
+    strategyName: MyStrategy                           # The class the file exports
+    strategyPath: ./strategies/myStrategy.strategy.ts  # Absolute, or relative to the directory Gekko is started from
+```
+
+With a `strategyPath`, Gekko takes `strategyName` from that file only, never from its own strategies: a built-in name beside a path, such as `strategyName: RSI`, stops Gekko at start-up (`[TRADING ADVISOR] Cannot find external RSI strategy in <path>`) unless the file exports a class of that name, and so does a file it cannot import (`[TRADING ADVISOR] Cannot import the strategy file <path>: …`, with the reason).
 
 ### Configuration Reference
 
 | Parameter              | Type     | Required | Default | Description                                                                                                   |
 |------------------------|----------|----------|---------|---------------------------------------------------------------------------------------------------------------|
 | `name`                 | string   | Yes      | —       | Must be `TradingAdvisor`                                                                                      |
-| `strategyName`         | string   | Yes      | —       | Name of the strategy to use                                                                                   |
-| `strategyPath`         | string   | No       | —       | Path to custom strategy (for external strategies)                                                             |
+| `strategyName`         | string   | Yes      | —       | The strategy to run: one of Gekko's, or the class a `strategyPath` file exports (see above)                   |
+| `strategyPath`         | string   | No       | —       | Path of your own strategy file, absolute or relative to the directory Gekko is started from (see above)       |
 | `maxConsecutiveErrors` | integer  | No       | `5`     | Errored orders in a row after which Gekko stops (exit code 0), at least `1`; `-1` never stops, `0` is refused |
 
 The strategy's `onOrderErrored` still runs for the error that trips the circuit breaker, before Gekko stops.
@@ -78,7 +88,7 @@ The candle hooks get the latest portfolio received, from the candle after it arr
 ### Dependencies
 
 - Requires **exchange** injection: the market data of the watched pairs, and the balance and the open orders it hands to the strategy at start-up
-- Credentials only on a real exchange (`binance` or `hyperliquid`, their sandbox included), whose balance and open orders need them; `dummy-cex` and `paper-binance` need none. A failed read stops Gekko at start-up
+- Credentials only on a real exchange (`binance` or `hyperliquid`, their sandbox included), whose balance and open orders need them: `apiKey` and `secret` on binance, `walletAddress` on hyperliquid; `dummy-cex` and `paper-binance` need none. A failed read stops Gekko at start-up. On hyperliquid, Gekko refuses at start-up a realtime configuration with a TradingAdvisor but without `walletAddress`, or with a Trader but without `privateKey`, the key that signs its orders
 - Requires a **Trader** as soon as the strategy creates orders (see below)
 
 > [!IMPORTANT]
@@ -96,7 +106,7 @@ The candle hooks get the latest portfolio received, from the candle after it arr
 ### How It Works
 
 1. Receives order signals from the TradingAdvisor
-2. Validates orders against current portfolio and market conditions
+2. Sizes each order from the balances it last read, and caps it (see [Sizing](#sizing)): the exchange checks it against the market's limits and the funds, and an order it refuses ends with `OrderErrored`
 3. Submits orders to the configured exchange
 4. Monitors order status and handles fills/cancellations
 5. Emits portfolio updates after order execution
@@ -125,7 +135,7 @@ plugins:
 **Listens to:**
 - `StrategyCreateOrder` — Receives new order requests from strategy
 - `StrategyCancelOrder` — Receives cancel requests from strategy
-- `StrategyWarmupCompleted` — Synchronizes with the exchange and emits the portfolio
+- `StrategyWarmupCompleted` — Synchronizes with the exchange, so that the strategy's first orders are sized from a balance read then, and emits the portfolio unless the `portfolioUpdates` filter holds it back: with the filter, the first portfolio read, at start-up, is always emitted, a later one only when an asset crossed `dust` either way, or the quantity of an asset held changed by more than `threshold` %, since the last one emitted
 
 **Emits:**
 - `OrderInitiated` — Order has been submitted to exchange
@@ -198,18 +208,18 @@ plugins:
 
 ### Configuration Reference
 
-| Parameter            | Type       | Required | Default | Description                                                                                                      |
-|----------------------|------------|----------|---------|------------------------------------------------------------------------------------------------------------------|
-| `name`               | string     | Yes      | —       | `RoundTripAnalyzer` or `PortfolioAnalyzer`                                                                       |
-| `riskFreeReturn`     | number ≥ 0 | No       | `5`     | Yearly return of a riskless investment (%), which the Sharpe and Sortino ratios subtract                         |
-| `enableConsoleTable` | boolean    | No       | `false` | Print the report as a table instead of a log line (the RoundTripAnalyzer also prints each round trip as a table) |
+| Parameter            | Type       | Required | Default | Description                                                                                                                                           |
+|----------------------|------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`               | string     | Yes      | —       | `RoundTripAnalyzer` or `PortfolioAnalyzer`                                                                                                            |
+| `riskFreeReturn`     | number ≥ 0 | No       | `5`     | Yearly return of a riskless investment (%), which the Sharpe and Sortino ratios subtract                                                              |
+| `enableConsoleTable` | boolean    | No       | `false` | Print the report as a table, at any log level, instead of a log line (see step 4 below; the RoundTripAnalyzer also prints each round trip as a table) |
 
 ### How Both Work
 
 1. The period measured starts when the strategy's warmup completes, at the close of the timeframe candle that completes it (the end of its last minute), when the strategy starts to act. It ends with the last minute of the run.
 2. The start equity is the latest portfolio received from the Trader, valued at the closes of that minute, the prices the market return starts from too. If no portfolio has arrived by then, the first one received afterwards gives it, valued at the prices of that moment, with a warning when those are no longer the start prices.
 3. The portfolio valued is the latest one received, with a `portfolioChange`, an `orderCompleted`, an `orderCanceled` or an `orderErrored` (each order event carries the portfolio the Trader read after it, except the empty one it sends before any of its synchronizations succeeds, which is ignored): the Trader's `portfolioUpdates` filter can hold back the `portfolioChange` of a small fill. It is marked to market at the close of every timeframe candle, and once more at the end of the run.
-4. At the end of the run, the report is computed, logged at the `info` level (start Gekko with `GEKKO_LOG_LEVEL=info` to see it) or printed as a table with `enableConsoleTable`, and emitted as `performanceReport` for the PerformanceReporter. The table rounds its percentages to 2 decimals by the rule of each figure, as the CSV does (see [CSV Output Format](#csv-output-format)): down for the returns, the alpha and the drawdown, half to even for the win rate and the exposure (`PERCENT_ROUNDING`, `src/plugins/analyzers/analyzer.const.ts`), and down for the adverse excursions, which the CSV writes to 8 decimals; Alpha has its `%` in both tables. Its ratios and deviations have 2 decimals, as in the CSV, and its amounts are grouped by thousands. It is sent from `processFinalize`, so it is emitted directly: a handler gets the report itself, not an array of payloads. The analyzer waits for the handlers; one that throws is logged at the `error` level (`A listener failed on the performance report: …`) and does not change the exit code. When it cannot measure the period, the analyzer emits an empty report and a warning says why: for the RoundTripAnalyzer, the warmup never completed, no portfolio was received, or the start equity is 0 or less (`Start equity of 0 USDT: no return to measure`); for the PortfolioAnalyzer, no start equity or no point of the curve (`Insufficient data for report generation.`), or a start equity of 0 or less.
+4. At the end of the run, the report is computed, logged at the `info` level (start Gekko with `GEKKO_LOG_LEVEL=info` to see it) or printed as a table with `enableConsoleTable`, whatever the log level, and emitted as `performanceReport` for the PerformanceReporter. The table rounds its percentages to 2 decimals by the rule of each figure, as the CSV does (see [CSV Output Format](#csv-output-format)): down for the returns, the alpha and the drawdown, half to even for the win rate and the exposure (`PERCENT_ROUNDING`, `src/plugins/analyzers/analyzer.const.ts`), and down for the adverse excursions, which the CSV writes to 8 decimals; Alpha has its `%` in both tables. Its ratios and deviations have 2 decimals, as in the CSV, and its amounts are grouped by thousands. It holds every figure of the report's CSV row, the net profit and the total return among them, and the PortfolioAnalyzer's longest drawdown as the CSV writes it (`0` without one). When the run stopped before its end (a crash, missing candles, the circuit breaker), a line above the table says so, and why: `Run interrupted, the report below covers a partial period. Reason: [STRATEGY] Max consecutive order errors reached (5)`. The report is sent from `processFinalize`, so it is emitted directly: a handler gets the report itself, not an array of payloads. The analyzer waits for the handlers; one that throws is logged at the `error` level (`A listener failed on the performance report: …`) and does not change the exit code. When it cannot measure the period, the analyzer emits an empty report and a warning says why: for the RoundTripAnalyzer, the warmup never completed, no portfolio was received, or the start equity is 0 or less (`Start equity of 0 USDT: no return to measure`); for the PortfolioAnalyzer, no start equity or no point of the curve (`Insufficient data for report generation.`), or a start equity of 0 or less.
 
 ### RoundTripAnalyzer
 
@@ -220,7 +230,7 @@ It watches a single pair: with more than one asset in `watch.assets`, Gekko stop
 - SELLs reduce the position, and the exit price is the mean of their prices weighted by their amounts. The round trip ends once what is left of the position (bought, not sold yet and still held) is at most 1 % of the amount bought (`DUST_TOLERANCE`): the dust left by an amount rounded to the exchange's lot size, or by a fee taken in the asset, does not keep it open.
 - A BUY or a SELL canceled after a partial fill counts for the part that filled, as a trade dated at the cancelation and priced at the order's price (the last close for an order without a price, such as a MARKET order), its fee unknown and counted as 0.
 - A SELL while flat ends no round trip. Before the first trade of the period, such as one that sells an asset held before it, it is not counted as a trade either.
-- Its `pnl` is the pair equity after the SELL that ends it minus its entry equity, and its `profit` the same in % of the entry equity: both are net of the fees of all its orders, and worked out in decimal, as the equities are valued and the report's total return is. A round trip whose exit equity is less than a unit of the 8th decimal (0.00000001, the smallest amount the simulator and Binance book) from its entry equity, or within a billionth of it, broke even: `pnl` and `profit` 0, neither a win nor a loss. So a round trip sold back at its buy price without a fee has a `pnl` and a `profit` of 0, though the exchange books the cost of an order rounded to 8 decimals while the round trip values its position at amount × price: on a pair such as ETH/BTC, the two can be up to 0.000000005 apart. Its maximum adverse excursion (MAE) is the deepest fall of a 1-minute low below its entry price (the weighted mean of its BUYs so far), from the end of the warmup until it ends, in % of the entry price.
+- Its `pnl` is the pair equity after the SELL that ends it minus its entry equity, and its `profit` the same in % of the entry equity: both are net of the fees of all its orders, and worked out in decimal, as the equities are valued and the report's total return is. A round trip whose exit equity is less than a unit of the 8th decimal (0.00000001, the smallest amount the simulator and Binance book) from its entry equity, or within a billionth of it, broke even: `pnl` and `profit` 0, neither a win nor a loss. So a round trip sold back at its buy price without a fee has a `pnl` and a `profit` of 0, though the exchange books the cost of an order rounded to 8 decimals while the round trip values its position at amount × price: on a pair such as ETH/BTC, the two can be up to 0.000000005 apart. Its maximum adverse excursion (MAE) is the deepest fall of a 1-minute low below its entry price (the weighted mean of its BUYs so far), in % of the entry price, over the 1-minute candles that close while the position is held: after the fill of the BUY that opens it, and by that of the SELL that ends it. A strategy that buys at the market at the close of minute a and sells at the close of minute b reads the candles of minutes a + 1 to b in every mode: its orders fill at those closes in a backtest and in paper trading, and a few seconds into minutes a + 1 and b + 1 live, where the candle of minute b + 1, held for those seconds only, is left out. The candles are picked by the dates of the fills, not by when the Trader reports them: a fill reported with a later bucket, as in realtime, is measured from the same candles, as long as it is reported within the hour.
 - Each round trip is logged at the `info` level (and printed as a table with `enableConsoleTable`) and emitted as `roundtripCompleted`, which the EventSubscriber can relay to Telegram.
 - The report covers the period only, and no trade comes before it: until the warmup is over, the strategy cannot create an order (`tools.createOrder` stops Gekko with an error, even from `init`).
 - The exposure is the time spent in round trips during the period, the one still open at the end included.
@@ -242,7 +252,7 @@ It watches a single pair: with more than one asset in `watch.assets`, Gekko stop
 
 It values the whole portfolio, on one pair or several: the currency plus every watched asset at its latest close (an asset that is not watched, such as BNB kept for the fees, is left out).
 
-- The equity curve gets a point at the close of every timeframe candle after the warmup, the one that completes it included: the latest portfolio valued at that candle's closes. Each of these points is emitted as `equitySnapshot`, once per timeframe candle (no built-in plugin listens to it; a custom one can, with `onEquitySnapshot`). At the end of the run, the latest portfolio at the last prices ends the curve: it replaces the value of the last point when the run ends at the close of a timeframe candle, and is added otherwise; it is not emitted.
+- The equity curve gets a point at the close of every timeframe candle after the warmup, the one that completes it included: the latest portfolio valued at that candle's closes. When the start equity is taken late (see step 2 above), the portfolio that gives it is the first point of the curve instead, at the end of the minute it came in, and the timeframe candles before it have none. Each of these points is emitted as `equitySnapshot`: once per timeframe candle, and once for a late start equity (no built-in plugin listens to it; a custom one can, with `onEquitySnapshot`). At the end of the run, the latest portfolio at the last prices ends the curve: it replaces the value of the last point when the run ends at the close of a timeframe candle, and is added otherwise; it is not emitted.
 - It listens to `orderCompleted`, `orderCanceled` and `orderErrored` only to refresh the portfolio it values (see step 3 above: the Trader's `portfolioUpdates` filter can hold back the `portfolioChange` of a small fill): none of them adds a point to the curve, nor counts as a portfolio change.
 - The returns of the curve, one per timeframe candle, give the volatility and the ratios. The curve also gives the max drawdown (the largest fall from a peak, the start equity being the first peak) and the longest drawdown (the longest time from a peak to the point that gets back to it, or to the end of the run). The equities are computed in decimal, as the exchanges book the balances, and two equities less than 0.00000001 of the currency apart, the smallest amount the simulator and Binance book, count as equal: a portfolio back at its peak value ends its drawdown, and a change smaller than that is a return of 0.
 - The exposure is the share of the period during which the portfolio held an asset other than the currency worth at least 1 % of the portfolio, at the latest prices, counted one timeframe at a time. Neither the dust left by a SELL nor a position deliberately kept under 1 % of the equity counts.
@@ -251,45 +261,45 @@ It values the whole portfolio, on one pair or several: the currency plus every w
 **Listens to:**
 - `StrategyWarmupCompleted` — Starts the period and takes the start equity
 - `TimeframeCandle` — Adds a point to the equity curve
-- `PortfolioChange` — Updates the portfolio it values
+- `PortfolioChange` — Updates the portfolio it values, and gives a late start equity, with its point of the curve
 - `OrderCompleted` — Refreshes the portfolio it values, without adding a point to the curve
 - `OrderCanceled` — Refreshes the portfolio it values, without adding a point to the curve
 - `OrderErrored` — Refreshes the portfolio it values, without adding a point to the curve
 
 **Emits:**
-- `EquitySnapshot` — A point of the equity curve, once per timeframe candle after the warmup
+- `EquitySnapshot` — A point of the equity curve: once per timeframe candle after the warmup, and once for a late start equity
 - `PerformanceReport` — The report, at the end of the run
 
 ### Performance Report
 
 The report holds the fields of `Report` (`src/models/event.types.ts`), and those of its analyzer. The PerformanceReporter writes it as a row of CSV (see its columns below).
 
-| Field                                        | Analyzer  | Description                                                                                                                                                                     |
-|----------------------------------------------|-----------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `id`                                         | Both      | `TRADING REPORT` (RoundTripAnalyzer) or `PORTFOLIO PROFIT REPORT` (PortfolioAnalyzer)                                                                                           |
-| `periodStartAt`, `periodEndAt`               | Both      | Start and end of the period (epoch milliseconds)                                                                                                                                |
-| `formattedDuration`                          | Both      | Length of the period, such as `3 months 2 days`, counted on the UTC calendar, the same on every machine                                                                         |
-| `netProfit`                                  | Both      | End equity minus start equity, in quote currency, computed in decimal as the equities are                                                                                       |
-| `totalReturnPct`                             | Both      | Return over the period (%)                                                                                                                                                      |
-| `annualizedNetProfit`, `annualizedReturnPct` | Both      | Net profit and return per year (see below)                                                                                                                                      |
-| `marketReturnPct`                            | Both      | Return of holding the asset, or the benchmark asset, over the period (%)                                                                                                        |
-| `alpha`                                      | Both      | Total return minus market return, in percentage points                                                                                                                          |
-| `exposurePct`                                | Both      | Share of the period spent exposed (%)                                                                                                                                           |
-| `volatility`                                 | Both      | Standard deviation of the returns (%): the population one, over their number, not their number less one; 0 for returns all equal (within a relative 1e-9)                       |
-| `downsideDeviation`                          | Both      | Root mean square of the negative returns, the positive ones counting as 0 (%)                                                                                                   |
-| `sharpeRatio`, `sortinoRatio`                | Both      | Risk-adjusted returns, annualized (see below)                                                                                                                                   |
-| `startPrice`, `endPrice`                     | Both      | Price of the asset, or of the benchmark asset, at the start and at the end                                                                                                      |
-| `interruption`                               | Both      | Message of the error that stopped the run before its end (a crash, missing candles, the circuit breaker), absent when it completed                                              |
-| `startBalance`, `finalBalance`               | RoundTrip | Pair equity at the start and at the end, a position still open included                                                                                                         |
-| `winRate`                                    | RoundTrip | Share of the closed round trips with a positive P&L (%), among those whose P&L is known, `null` without any; not rounded (the console table and the CSV round it to 2 decimals) |
-| `tradeCount`                                 | RoundTrip | Trades of the period: orders completed and canceled ones that filled in part, from the first BUY on                                                                             |
-| `topMAEs`                                    | RoundTrip | The 10 largest maximum adverse excursions (%), largest first                                                                                                                    |
-| `startEquity`, `endEquity`                   | Portfolio | Portfolio value at the start and at the end                                                                                                                                     |
-| `equityCurve`                                | Portfolio | The points of the equity curve, `{ date, totalValue }`                                                                                                                          |
-| `maxDrawdownPct`                             | Portfolio | Largest fall from a peak of the equity curve (%)                                                                                                                                |
-| `longestDrawdownMs`                          | Portfolio | Longest drawdown (milliseconds)                                                                                                                                                 |
-| `portfolioChangeCount`                       | Portfolio | Portfolio changes received                                                                                                                                                      |
-| `benchmarkAsset`                             | Portfolio | Asset whose price gives the market return                                                                                                                                       |
+| Field                                        | Analyzer  | Description                                                                                                                                                                                          |
+|----------------------------------------------|-----------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `id`                                         | Both      | `TRADING REPORT` (RoundTripAnalyzer) or `PORTFOLIO PROFIT REPORT` (PortfolioAnalyzer)                                                                                                                |
+| `periodStartAt`, `periodEndAt`               | Both      | Start and end of the period (epoch milliseconds)                                                                                                                                                     |
+| `formattedDuration`                          | Both      | Length of the period, such as `3 months 2 days`, counted on the UTC calendar, the same on every machine                                                                                              |
+| `netProfit`                                  | Both      | End equity minus start equity, in quote currency, computed in decimal as the equities are                                                                                                            |
+| `totalReturnPct`                             | Both      | Return over the period (%)                                                                                                                                                                           |
+| `annualizedNetProfit`, `annualizedReturnPct` | Both      | Net profit and return per year (see below)                                                                                                                                                           |
+| `marketReturnPct`                            | Both      | Return of holding the asset, or the benchmark asset, over the period (%)                                                                                                                             |
+| `alpha`                                      | Both      | Total return minus market return, in percentage points                                                                                                                                               |
+| `exposurePct`                                | Both      | Share of the period spent exposed (%)                                                                                                                                                                |
+| `volatility`                                 | Both      | Standard deviation of the returns (%): the population one, over their number, not their number less one; 0 for returns all equal (within a relative 1e-9)                                            |
+| `downsideDeviation`                          | Both      | Root mean square of the negative returns, the positive ones counting as 0 (%)                                                                                                                        |
+| `sharpeRatio`, `sortinoRatio`                | Both      | Risk-adjusted returns, annualized (see below)                                                                                                                                                        |
+| `startPrice`, `endPrice`                     | Both      | Price of the asset, or of the benchmark asset, at the start and at the end                                                                                                                           |
+| `interruption`                               | Both      | Message of the error that stopped the run before its end (a crash, missing candles, the circuit breaker), absent when it completed; written in the CSV's `status` column and above the console table |
+| `startBalance`, `finalBalance`               | RoundTrip | Pair equity at the start and at the end, a position still open included                                                                                                                              |
+| `winRate`                                    | RoundTrip | Share of the closed round trips with a positive P&L (%), among those whose P&L is known, `null` without any; not rounded (the console table and the CSV round it to 2 decimals)                      |
+| `tradeCount`                                 | RoundTrip | Trades of the period: orders completed and canceled ones that filled in part, from the first BUY on                                                                                                  |
+| `topMAEs`                                    | RoundTrip | The 10 largest maximum adverse excursions (%), largest first                                                                                                                                         |
+| `startEquity`, `endEquity`                   | Portfolio | Portfolio value at the start and at the end                                                                                                                                                          |
+| `equityCurve`                                | Portfolio | The points of the equity curve, `{ date, totalValue }`                                                                                                                                               |
+| `maxDrawdownPct`                             | Portfolio | Largest fall from a peak of the equity curve (%)                                                                                                                                                     |
+| `longestDrawdownMs`                          | Portfolio | Longest drawdown (milliseconds)                                                                                                                                                                      |
+| `portfolioChangeCount`                       | Portfolio | Portfolio changes received                                                                                                                                                                           |
+| `benchmarkAsset`                             | Portfolio | Asset whose price gives the market return                                                                                                                                                            |
 
 A `roundtripCompleted` payload (`RoundTrip`) holds the round trip's `id` (0 for the first one of the run), `entryAt`, `entryPrice`, `entryEquity`, `exitAt`, `exitPrice`, `exitEquity`, `duration` (milliseconds), `pnl`, `profit` (%) and `maxAdverseExcursion` (%): `entryEquity`, `exitEquity`, `pnl` and `profit` are NaN when no portfolio the Trader read valued the round trip. An `equitySnapshot` payload is a `{ date, totalValue }` point of the equity curve.
 
@@ -359,37 +369,37 @@ Cells are separated by `;`. A cell that holds a `;`, a double quote or a line br
 
 Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`, `final balance`, `start price`, `end price`) are plain numbers, written the same whatever the locale of the machine: a `.` decimal separator, no thousands separator and up to 8 decimals, so that a price of a fraction of a cent or a profit in BTC keeps its value (e.g., `1234.5678`, `0.0000012`). A value that is not a number leaves its cell empty. Percentages are computed in decimal (see [How the Statistics Are Computed](#how-the-statistics-are-computed)), then rounded to 2 decimals: down for `total return`, the return in `yearly profit`, `market`, `alpha` and `max drawdown` (so `-1.234` is written `-1.24%`), to the nearest for `win rate` and `exposure`. The ratios and deviations (`sharpe ratio`, `sortino ratio`, `standard deviation`, `downside deviation`) are written with 2 decimals, such as `1.50` (`0.00` for any value between -0.005 and 0.005); one that is missing, not a number or infinite leaves its cell empty. `top maes` is a JSON array of the values written as the amounts are, up to 8 decimals and never with an exponent, largest first (e.g., `[4.21876543,1.5]`). Rows written by earlier versions can hold the unrounded values there (`4.218765432098766`, `1.000000338535756e-8`), and amounts rounded to 3 decimals and grouped in the machine's locale (`1,234.568`, or `1 234,568` on a French machine).
 
-| Column                      | Description                                                                                                                                                  |
-|-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `id`                        | `strategy` block values joined by `-` (e.g., `RSI-21-70-30-0`)                                                                                               |
-| `report type`               | `Portfolio` (PortfolioAnalyzer) or `Trading` (RoundTripAnalyzer)                                                                                             |
-| `pair`                      | Watched pairs, separated by a space (e.g., `BTC/USDT ETH/USDT`)                                                                                              |
-| `timeframe`                 | Candle timeframe of the run, `watch.timeframe` (e.g., `1h`)                                                                                                  |
-| `net profit`                | Profit in quote currency                                                                                                                                     |
-| `total return`              | Return over the period (%)                                                                                                                                   |
-| `yearly profit`             | Annualized net profit, with the annualized return (%): over the period, or a day for a shorter run                                                           |
-| `win rate`                  | Share of profitable round trips (%), among those whose P&L is known, `N/A` without any, *Trading only*                                                       |
-| `market`                    | Buy-and-hold return (%)                                                                                                                                      |
-| `alpha`                     | Excess return vs market (%)                                                                                                                                  |
-| `sharpe ratio`              | Sharpe ratio, annualized over the same horizon as `yearly profit`                                                                                            |
-| `sortino ratio`             | Sortino ratio, annualized over the same horizon as `yearly profit`                                                                                           |
-| `max drawdown`              | Maximum drawdown (%), *Portfolio only*                                                                                                                       |
-| `total changes`             | Number of portfolio changes, *Portfolio only*                                                                                                                |
-| `trade count`               | Number of trades of the period (orders completed, canceled ones that filled in part), from the first BUY on, *Trading only*                                  |
-| `start time`                | Start of the period, when the warmup completed (ISO 8601)                                                                                                    |
-| `end time`                  | End of the period, the end of the last minute (ISO 8601)                                                                                                     |
-| `duration`                  | Length of the period (e.g., `3 months 2 days`), counted on the UTC calendar, the same on every machine                                                       |
-| `exposure`                  | Share of the period in a position (%): in round trips, the open one included (*Trading*); holding an asset worth at least 1 % of the portfolio (*Portfolio*) |
-| `start balance`             | Value at start in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                          |
-| `final balance`             | Value at end in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                            |
-| `start price`               | Asset price at start (of the benchmark asset, *Portfolio*)                                                                                                   |
-| `end price`                 | Asset price at end (of the benchmark asset, *Portfolio*)                                                                                                     |
-| `standard deviation`        | Standard deviation of the returns: of the round trips (*Trading*), of the timeframe candles (*Portfolio*)                                                    |
-| `downside deviation`        | Root mean square of the negative returns, the positive ones counting as 0                                                                                    |
-| `longest drawdown duration` | Duration of the longest drawdown, counted from 1970-01-01T00:00Z on the UTC calendar (59 days are written `2 months`, 30 days `30 days`), *Portfolio only*   |
-| `benchmark asset`           | Asset whose price gives the market return, *Portfolio only*                                                                                                  |
-| `top maes`                  | The 10 largest maximum adverse excursions (%), as a JSON array, *Trading only*                                                                               |
-| `status`                    | `completed`, or `interrupted: <reason>` when the run stopped before its end (the message of the error that stopped it, quoted when it holds a `;`)           |
+| Column                      | Description                                                                                                                                                                        |
+|-----------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `id`                        | `strategy` block values joined by `-` (e.g., `RSI-21-70-30-0`)                                                                                                                     |
+| `report type`               | `Portfolio` (PortfolioAnalyzer) or `Trading` (RoundTripAnalyzer)                                                                                                                   |
+| `pair`                      | Watched pairs, separated by a space (e.g., `BTC/USDT ETH/USDT`)                                                                                                                    |
+| `timeframe`                 | Candle timeframe of the run, `watch.timeframe` (e.g., `1h`)                                                                                                                        |
+| `net profit`                | Profit in quote currency                                                                                                                                                           |
+| `total return`              | Return over the period (%)                                                                                                                                                         |
+| `yearly profit`             | Annualized net profit, with the annualized return (%): over the period, or a day for a shorter run                                                                                 |
+| `win rate`                  | Share of profitable round trips (%), among those whose P&L is known, `N/A` without any, *Trading only*                                                                             |
+| `market`                    | Buy-and-hold return (%)                                                                                                                                                            |
+| `alpha`                     | Excess return vs market (%)                                                                                                                                                        |
+| `sharpe ratio`              | Sharpe ratio, annualized over the same horizon as `yearly profit`                                                                                                                  |
+| `sortino ratio`             | Sortino ratio, annualized over the same horizon as `yearly profit`                                                                                                                 |
+| `max drawdown`              | Maximum drawdown (%), *Portfolio only*                                                                                                                                             |
+| `total changes`             | Number of portfolio changes, *Portfolio only*                                                                                                                                      |
+| `trade count`               | Number of trades of the period (orders completed, canceled ones that filled in part), from the first BUY on, *Trading only*                                                        |
+| `start time`                | Start of the period, when the warmup completed (ISO 8601)                                                                                                                          |
+| `end time`                  | End of the period, the end of the last minute (ISO 8601)                                                                                                                           |
+| `duration`                  | Length of the period (e.g., `3 months 2 days`), counted on the UTC calendar, the same on every machine                                                                             |
+| `exposure`                  | Share of the period in a position (%): in round trips, the open one included (*Trading*); holding an asset worth at least 1 % of the portfolio (*Portfolio*)                       |
+| `start balance`             | Value at start in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                                                |
+| `final balance`             | Value at end in quote currency: the portfolio (*Portfolio*), the pair equity, asset at the pair's price plus currency (*Trading*)                                                  |
+| `start price`               | Asset price at start (of the benchmark asset, *Portfolio*)                                                                                                                         |
+| `end price`                 | Asset price at end (of the benchmark asset, *Portfolio*)                                                                                                                           |
+| `standard deviation`        | Standard deviation of the returns: of the round trips (*Trading*), of the timeframe candles (*Portfolio*)                                                                          |
+| `downside deviation`        | Root mean square of the negative returns, the positive ones counting as 0                                                                                                          |
+| `longest drawdown duration` | Duration of the longest drawdown, counted from 1970-01-01T00:00Z on the UTC calendar (59 days are written `2 months`, 30 days `30 days`), *Portfolio only*                         |
+| `benchmark asset`           | Asset whose price gives the market return, *Portfolio only*                                                                                                                        |
+| `top maes`                  | The 10 largest maximum adverse excursions (%), as a JSON array, *Trading only*                                                                                                     |
+| `status`                    | `completed`, or `interrupted: <reason>` when the run stopped before its end (the message of the error that stopped it, quoted when it holds a `;`, a double quote or a line break) |
 
 > [!TIP]
 > Use the PerformanceReporter when running multiple backtests with different parameters. The CSV format makes it easy to analyze results in spreadsheet software or import into data analysis tools.
@@ -405,7 +415,7 @@ Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`
 1. Receives 1-minute candles from the pipeline
 2. Buffers candles in memory for efficiency
 3. Writes candles to the database in batches
-4. Flushes remaining candles on finalization
+4. Writes the candles still buffered on finalization. When that last insert fails, a run that ended normally fails (exit code 1) with an error giving, per pair, how many minutes were not written, and their range, which an import writes again; after a run that failed, or that the circuit breaker stopped, that error is logged at the `error` level beside the run's own
 
 ### Configuration
 
@@ -446,6 +456,9 @@ plugins:
 2. Listens for commands to manage event subscriptions
 3. Filters events based on your active subscriptions
 4. Sends formatted messages for relevant trading events
+
+> [!IMPORTANT]
+> The EventSubscriber starts subscribed to nothing, and sends no notification until its chat subscribes: once Gekko runs, send the bot `/subscribe_all`, or the `/sub_<event>` of each event you want (see [Telegram Commands](#telegram-commands)). The subscriptions are kept in memory only: subscribe again after every restart. With `chatId` set, the commands your chat sent the bot while Gekko was not running are handled as it starts (those of the last 24 hours, which Telegram keeps for the bot), so a `/subscribe_all` sent while Gekko was down takes effect from the start.
 
 > [!NOTE]
 > Messages go out in the background, one at a time and in the order of their events, so a slow or unreachable Telegram never holds up candles or orders. Up to 1000 wait their turn, enough for a burst such as a grid strategy placing hundreds of orders at once; beyond that, each new one drops the oldest, with a single warning until the queue has emptied (the next drops are logged at the `debug` level). When sends keep failing (the bot blocked, a wrong `chatId`), only the first failure is a warning: the next ones are logged at the `debug` level until a message goes out again, which is logged at the `info` level. When Gekko stops on its own (circuit breaker or error) it waits at most 15 s for them, those queued while it stops included; Ctrl-C or a kill signal does not wait.
@@ -563,6 +576,9 @@ Amounts, prices, balances and fees are written as in the console tables: thousan
 4. Validates candle data against exchange for accuracy
 5. Monitors application logs and forwards warnings/errors
 
+> [!IMPORTANT]
+> Supervision starts subscribed to nothing, and runs no check, so sends no alert, until its chat subscribes: once Gekko runs, send the bot `/subscribe_all`, or the `/sub_...` of each check you want (see [Telegram Commands](#telegram-commands-1)). Until then, the thresholds and intervals below only configure checks that have not started. The subscriptions are kept in memory only: subscribe again after every restart (with `chatId` set, a command your chat sent the bot while Gekko was not running is handled as it starts, as for the EventSubscriber).
+
 ### Configuration
 
 ```yaml
@@ -582,19 +598,19 @@ plugins:
 
 ### Configuration Reference
 
-| Parameter               | Type    | Required          | Default | Description                                                                                                                                 |
-|-------------------------|---------|-------------------|---------|---------------------------------------------------------------------------------------------------------------------------------------------|
-| `name`                  | string  | Yes               | —       | Must be `Supervision`                                                                                                                       |
-| `token`                 | string  | Yes               | —       | Telegram Bot API token                                                                                                                      |
-| `botUsername`           | string  | Yes               | —       | Your Telegram bot's username                                                                                                                |
-| `chatId`                | integer | No, but advisable | —       | The only chat whose commands the bot handles and that gets its messages (positive for a private chat, negative for a group; `0` is refused) |
-| `cpuThreshold`          | number  | No                | `80`    | CPU usage alert threshold (%)                                                                                                               |
-| `memoryThreshold`       | number  | No                | `1024`  | Memory usage alert threshold (MB)                                                                                                           |
-| `cpuCheckInterval`      | integer | No                | `10000` | CPU check interval (milliseconds)                                                                                                           |
-| `memoryCheckInterval`   | integer | No                | `10000` | Memory check interval (milliseconds)                                                                                                        |
-| `logMonitoringInterval` | integer | No                | `60000` | Log monitoring interval (milliseconds)                                                                                                      |
-| `candleCheckInterval`   | integer | No                | `60000` | Candle freshness check interval (milliseconds)                                                                                              |
-| `candleStaleThreshold`  | integer | No                | `180000` | Age of the last 1-minute candle beyond which the candle check alerts that the candles stopped coming (milliseconds, above `60000`)          |
+| Parameter               | Type       | Required          | Default  | Description                                                                                                                                 |
+|-------------------------|------------|-------------------|----------|---------------------------------------------------------------------------------------------------------------------------------------------|
+| `name`                  | string     | Yes               | —        | Must be `Supervision`                                                                                                                       |
+| `token`                 | string     | Yes               | —        | Telegram Bot API token                                                                                                                      |
+| `botUsername`           | string     | Yes               | —        | Your Telegram bot's username                                                                                                                |
+| `chatId`                | integer    | No, but advisable | —        | The only chat whose commands the bot handles and that gets its messages (positive for a private chat, negative for a group; `0` is refused) |
+| `cpuThreshold`          | number > 0 | No                | `80`     | CPU usage alert threshold (%)                                                                                                               |
+| `memoryThreshold`       | number > 0 | No                | `1024`   | Memory usage alert threshold (MB)                                                                                                           |
+| `cpuCheckInterval`      | integer    | No                | `10000`  | CPU check interval (milliseconds)                                                                                                           |
+| `memoryCheckInterval`   | integer    | No                | `10000`  | Memory check interval (milliseconds)                                                                                                        |
+| `logMonitoringInterval` | integer    | No                | `60000`  | Log monitoring interval (milliseconds)                                                                                                      |
+| `candleCheckInterval`   | integer    | No                | `60000`  | Candle freshness check interval (milliseconds)                                                                                              |
+| `candleStaleThreshold`  | integer    | No                | `180000` | Age of the last 1-minute candle beyond which the candle check alerts that the candles stopped coming (milliseconds, above `60000`)          |
 
 The four intervals (`cpuCheckInterval`, `memoryCheckInterval`, `logMonitoringInterval` and `candleCheckInterval`) are whole milliseconds between `1000` (one second) and `2147483647` (about 24.8 days, the longest timer delay). `candleStaleThreshold` is a whole number of milliseconds above `60000`: the 1-minute candles come once a minute, so a shorter threshold would alert between every two of them.
 
@@ -666,7 +682,7 @@ volume: 1234.5 | 1234.7
 ```
 
 > [!NOTE]
-> `/sub_candle_check` turns on both candle checks. The validation compares each timeframe candle with the exchange's. The freshness check looks every `candleCheckInterval` at the age of the last 1-minute bucket, because the strategy, the trailing stops and the circuit breaker only run on candles: it sends one alert when that age exceeds `candleStaleThreshold`, then one message when the candles come again. An alert Telegram did not take is logged as a warning and sent again at the next check. Before the first bucket, the age is counted from the subscription, so a subscription made before a warmup longer than the threshold alerts before any candle came.
+> `/sub_candle_check` turns on both candle checks. The validation compares each timeframe candle with the exchange's. The freshness check looks every `candleCheckInterval` at the age of the last 1-minute bucket, because the strategy, the trailing stops and the circuit breaker only run on candles: it sends one alert when that age exceeds `candleStaleThreshold`, then one message when the candles come again. An alert Telegram did not take is logged as a warning and sent again at the next check. Before the first bucket, the age is counted from the subscription. The buckets of the realtime warmup count as they are replayed, however long the warmup, so a subscription made before any candle came alerts only when the first bucket comes more than `candleStaleThreshold` after it: a first page of the warmup history slow to come, for instance, or a run of leading buckets dropped while a watched pair has no candle yet.
 
 > [!NOTE]
 > The candle check runs in the background, so a slow or unreachable exchange or Telegram never holds up candles or orders. A timeframe candle that closes while the check of the previous one is still running is not checked (a debug log line says so).
@@ -704,7 +720,7 @@ graph TD
         SU[Supervision]
     end
     
-    TA -->|"StrategyCreateOrder<br>StrategyCancelOrder"| TR
+    TA -->|"StrategyCreateOrder<br>StrategyCancelOrder<br>StrategyWarmupCompleted"| TR
     TA -->|"TimeframeCandle"| SU
     TR -->|"OrderCompleted<br>OrderCanceled<br>OrderErrored<br>PortfolioChange"| TA
     TA -->|"StrategyWarmupCompleted<br>TimeframeCandle"| AN
@@ -723,9 +739,19 @@ graph TD
     style SU fill:#795548,color:white
 ```
 
+### Plugin Order
+
+List the TradingAdvisor first, then the Trader, then the analyzer, as the combinations below do. The plugins that emit no event (the PerformanceReporter, the EventSubscriber, Supervision and the CandleWriter) can go anywhere, last by habit. Gekko neither checks nor warns about the order.
+
+Once every plugin has processed a 1-minute candle, the events they queued are delivered in a single pass over `plugins:`, in its order: at its turn, a plugin delivers its own events to every plugin that listens to them, wherever that one is listed. An event a plugin queues after its turn, in answer to the events of a plugin listed after it, waits for the next candle, a minute later.
+
+So a Trader listed before the TradingAdvisor gets the strategy's orders at the TradingAdvisor's turn, after its own, and what it answers comes a minute late: in a backtest, the strategy and the analyzer hear of each fill with the candle after the one it filled on, and the fill of the last minute is never delivered, so the report leaves it out (a SELL of that minute leaves its round trip open). Likewise, a RoundTripAnalyzer listed before the Trader sends its `roundtripCompleted` to the EventSubscriber a minute late.
+
 ---
 
 ## Recommended Plugin Combinations
+
+Each combination lists its plugins in the order Gekko needs (see [Plugin Order](#plugin-order)).
 
 ### Importer Mode
 
@@ -773,7 +799,7 @@ plugins:
     chatId: 123456789           # Your chat id
 ```
 
-Keep the Trader, even for alerts: without it, the first order of the strategy never ends, and a built-in strategy advises once per run (see the TradingAdvisor above). On `paper-binance` it trades nothing for real: the orders are simulated from `simulationBalance`.
+Keep the Trader, even for alerts: without it, the first order of the strategy never ends, and a built-in strategy advises once per run (see the TradingAdvisor above). On `paper-binance` it trades nothing for real: the orders are simulated from `simulationBalance`. Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: the EventSubscriber sends nothing until its chat subscribes (see the [EventSubscriber](#-eventsubscriber) above).
 
 ### Realtime Trading
 
@@ -799,7 +825,7 @@ plugins:
 ```
 
 > [!NOTE]
-> Each Telegram plugin needs its own bot, with its own token: Telegram serves a bot's updates (`getUpdates`) to a single reader at a time, so two plugins on one token conflict, with HTTP 409 errors, and lose each other's commands. Both bots can talk to the same chat.
+> Each Telegram plugin needs its own bot, with its own token: Telegram serves a bot's updates (`getUpdates`) to a single reader at a time, so two plugins on one token conflict, with HTTP 409 errors, and lose each other's commands. Both bots can talk to the same chat, and each sends nothing until that chat subscribes to it: send `/subscribe_all` to each bot once Gekko runs, and again after every restart.
 
 ---
 
