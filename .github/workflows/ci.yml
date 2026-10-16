@@ -9,14 +9,14 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The checks run the code under review, its install scripts and tests included: their token can read, not push
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
     steps:
+      # The whole history, so that the commit messages are read from the first commit of the pull request or of the push
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 20
+          fetch-depth: 0
 
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
@@ -40,15 +40,28 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # The pull request's own commits. The checkout is the merge commit, whose first parent is the base branch: HEAD~10 linted the
+      # base's latest commits and missed the pull request's older ones
       - name: Check commit messages
         if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bun x commitlint --from "$BASE_SHA" --to "$HEAD_SHA"
+
+      # The commits a push brings, which a commit made in GitHub's editor or with --no-verify reaches without the commit-msg hook.
+      # A new branch has no previous tip (all zeros), and the tip a forced push replaced is not in the clone: nothing to read from
+      - name: Check commit messages of the push
+        if: ${{ github.event_name == 'push' }}
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
-          if git rev-parse HEAD~10 >/dev/null 2>&1; then
-            FROM="HEAD~10"
+          if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            bun x commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA"
           else
-            FROM=$(git rev-list --max-parents=0 HEAD)
+            echo "::notice::Commit messages not checked: the branch's previous tip $BEFORE_SHA is not in the clone (a new branch or a forced push)"
           fi
-          bunx commitlint --from="$FROM"
 
       - name: Check formatting
         run: bun run format:check
@@ -65,8 +78,50 @@ jobs:
       - name: Build
         run: bun run build:exec
 
+  release:
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # The release pushes its commit, its tag and its notes, publishes the GitHub release and comments on the issues and pull requests
+    # it closes
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    # Neither installs nor runs the git hooks: they ran at each of the release's commit and pushes, the pre-commit reformatted the
+    # changelog, and a failing pre-push left main with a release commit but no tag
+    env:
+      HUSKY: 0
+    steps:
+      # The whole history and its tags, which semantic-release reads to find the last release
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # semantic-release runs under Node
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko2 with the version it releases
       - name: Release
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun run release

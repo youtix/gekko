@@ -1,1 +1,3 @@
 documentation
+# semantic-release writes it: its notes stay as the generator wrote them, as on the GitHub release
+CHANGELOG.md

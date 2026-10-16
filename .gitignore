@@ -1,9 +1,14 @@
 node_modules
 dist
 .env.local
-db
-.sql
-.sql-shm
-.sql-wal
+# SQLite: the db folder (or a link to one) the example configurations write to, and a database elsewhere with its -shm and -wal
+/db
+*.sql
+*.sql-shm
+*.sql-wal
+# The PerformanceReporter's default CSV and the lock taken while writing it
+performance_reports.csv*
+# A configuration copied from a tracked one to hold your own keys, such as config/realtime-trader.local.yml
+config/*.local.*
 src/strategies/custom
 documentation/dev

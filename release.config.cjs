@@ -2,11 +2,16 @@
 // so that a link to the latest release's executable keeps working.
 const EXECUTABLE = 'dist/gekko2';
 
+// The commits are read as the commit-msg hook validates them, with the Conventional Commits parser of commitlint's configuration.
+// Under the default Angular preset, `feat!:` and a `BREAKING-CHANGE:` footer passed the hook but were not read as breaking: such a
+// change was released as a minor or a patch, without a note.
+const PRESET = 'conventionalcommits';
+
 module.exports = {
   branches: ['main'],
   plugins: [
-    '@semantic-release/commit-analyzer',
-    '@semantic-release/release-notes-generator',
+    ['@semantic-release/commit-analyzer', { preset: PRESET }],
+    ['@semantic-release/release-notes-generator', { preset: PRESET }],
     ['@semantic-release/changelog', { changelogFile: 'CHANGELOG.md' }],
     // Writes the version being released into package.json, which the executable prints at start-up, then rebuilds the executable
     ['./scripts/release/version.cjs', { executable: EXECUTABLE }],

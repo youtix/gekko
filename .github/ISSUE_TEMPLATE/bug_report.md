@@ -1,6 +1,6 @@
 ---
 name: Bug Report
-description: Help us squash any bugs
+about: Help us squash any bugs
 labels: [bug]
 ---
 
@@ -26,16 +26,29 @@ A clear and concise description of what the bug is.
 
 <!-- What actually happened -->
 
+### Logs
+
+<!-- What Gekko logged around the problem, with GEKKO_LOG_LEVEL=info (or debug) -->
+
 ### Screenshots (optional)
 
 If applicable, add screenshots to help explain your problem.
 
 ### Environment
 
+- Gekko version: <!-- the `Gekko version: vX.Y.Z` line logged at start-up with GEKKO_LOG_LEVEL=info, or the commit you run from source -->
+- Mode: <!-- watch.mode: importer, backtest or realtime -->
 - OS: <!-- e.g. Ubuntu 22.04 -->
-- Browser: <!-- if relevant -->
 - Bun version: <!-- `bun --version` -->
 - Other:
+
+### Configuration
+
+<!-- The configuration file you ran, with every API key, secret, private key, wallet address and bot token removed -->
+
+```yaml
+
+```
 
 ### Additional context
 

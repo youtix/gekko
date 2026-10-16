@@ -1,3 +1,15 @@
 #!/usr/bin/env sh
-bun run type:check
+# Type-checks what is committed, the index, rather than the working tree: an untracked file that did not compile refused a correct
+# commit, and a staged file that did not compile passed once its working copy was fixed. git keeps a copy of the tree being
+# committed in node_modules/.cache/index-check, with an index of its own, and updates it in place: a file deleted from the index
+# leaves the copy too, and the copy keeps its place, so that tsc's incremental build info saves most of the work.
+# The private strategies of src/strategies/custom are untracked: `bun run type:check` checks them, this hook does not.
+index_copy=node_modules/.cache/index-check
+mkdir -p "$index_copy"
+tree=$(git write-tree)
+GIT_INDEX_FILE="$PWD/$index_copy/.index" git --work-tree="$index_copy" read-tree --reset -u "$tree"
+bun tsc --noEmit -p "$index_copy/tsconfig.json" --incremental --tsBuildInfoFile node_modules/.cache/tsc/index-check.tsbuildinfo || {
+  echo "pre-commit: the staged files do not type-check (the paths above are those of their copy in $index_copy)"
+  exit 1
+}
 bun x lint-staged
