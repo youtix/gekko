@@ -7,6 +7,7 @@ import { OrderSide } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
 import { Asset, TradingPair } from '@models/utility.types';
 import { debug, error, info, warning } from '@services/logger';
+import { RingBuffer } from '@utils/collection/ringBuffer';
 import { toISOString } from '@utils/date/date.utils';
 import { calculateMarketReturnPct, calculateTotalReturnPct, calculateWinRate, extractTopMAEs } from '@utils/finance/stats.utils';
 import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
@@ -18,8 +19,8 @@ import { DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
 import { calculatePerformanceStatistics } from '../analyzer.utils';
-import { DateRange, Fill, OpenRoundTrip, OrderFill, Start, TradingReport } from './roundTrip.types';
-import { EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
+import { DateRange, ExcursionCandle, Fill, OpenRoundTrip, OrderFill, Start, TradingReport } from './roundTrip.types';
+import { EMPTY_TRADING_REPORT, LATE_FILL_CANDLES, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 
 /** A mean price weighted by amounts, once one more price is added with its amount */
@@ -48,6 +49,49 @@ const measureRoundTrip = (entryEquity: number, exitEquity: number): Pick<RoundTr
   if (Math.abs(pnl) < BOOKED_CURRENCY_UNIT || compareWithTolerance(exitEquity, entryEquity) === 0) return { pnl: 0, profit: 0 };
   return { pnl, profit: calculateTotalReturnPct(exitEquity, entryEquity) };
 };
+
+/**
+ * Counts a one-minute candle in the adverse excursion of a round trip if it closed after the first BUY of the round trip filled: its
+ * low, measured from the entry price the round trip has then. A candle that deepens the excursion is noted (see ExcursionDeepening),
+ * for a SELL heard after it to take it back (see measureAdverseExcursion). Returns the round trip, as RingBuffer.reduce hands it on.
+ *
+ * A round trip reads the candles that close while its position is held: after its first BUY fills, and by the time the SELL that ends
+ * it fills. Opened by a fill dated inside minute m, its first millisecond included, and ended by one dated inside minute n, it reads
+ * the candles of minutes m to n - 1, in every mode. A backtest and paper trading date a fill at the close of the last candle the
+ * simulated exchange processed, the start of the next minute: the round trip of a strategy that buys on the candle of minute a and
+ * sells on that of minute b fills at the start of minutes a + 1 and b + 1, and reads the candles of minutes a + 1 to b. Live, the same
+ * orders fill a few seconds into minutes a + 1 and b + 1: the same candles, that of minute a + 1 held from the BUY on, that of minute
+ * b + 1, held for the seconds before the SELL, left out.
+ *
+ * The same candles whenever the end of an order is heard. A backtest delivers it with the bucket the order filled in, once the
+ * analyzers have read that bucket; realtime, paper trading included, with the first bucket flushed after the Trader has reported it,
+ * most often a later one. A candle that closed after a BUY before the BUY was heard is counted when it is (see recentCandles), and one
+ * counted that closed after a SELL before the SELL was heard is taken back when it is. Counted as each bucket arrived, a round trip of
+ * paper or live trading skipped the first minute it held and read the minute after its SELL: the same candles gave another adverse
+ * excursion than in a backtest. Up to LATE_FILL_CANDLES minutes late: a BUY heard later counts the candles of the last LATE_FILL_CANDLES
+ * minutes alone, and a SELL heard later may keep candles that closed after it.
+ */
+const countCandle = (roundTrip: OpenRoundTrip, { start, low }: ExcursionCandle): OpenRoundTrip => {
+  const closeAt = start + ONE_MINUTE;
+  // Closed by the time the BUY filled: read before the BUY was heard, or after it by a live stream catching up on minutes it fell behind on
+  if (closeAt <= roundTrip.entryAt) return roundTrip;
+  const excursion = ((roundTrip.entryPrice - low) / roundTrip.entryPrice) * 100;
+  // An excursion that is not a number deepens nothing
+  if (!(excursion > roundTrip.maxAdverseExcursion)) return roundTrip;
+  const deepenings = roundTrip.excursionDeepenings;
+  deepenings.push({ closeAt, previous: roundTrip.maxAdverseExcursion });
+  if (deepenings.length > LATE_FILL_CANDLES) deepenings.shift();
+  roundTrip.maxAdverseExcursion = excursion;
+  return roundTrip;
+};
+
+/**
+ * The adverse excursion a round trip ends with, its SELL filled at `exitAt`: that of the candles counted that closed by then (see
+ * countCandle). One that closed after it, read before the SELL was heard, took nothing from the position: the round trip ends with the
+ * deepest excursion before the first of them that deepened it, or with the deepest of all when none did.
+ */
+const measureAdverseExcursion = ({ maxAdverseExcursion, excursionDeepenings }: OpenRoundTrip, exitAt: EpochTimeStamp) =>
+  excursionDeepenings.find(({ closeAt }) => closeAt > exitAt)?.previous ?? maxAdverseExcursion;
 
 export class RoundTripAnalyzer extends Plugin {
   /**
@@ -78,6 +122,11 @@ export class RoundTripAnalyzer extends Plugin {
   private nextRoundTripId: number;
   /** The round trip in progress, null while flat */
   private openRoundTrip: OpenRoundTrip | null;
+  /**
+   * The one-minute candles of the last LATE_FILL_CANDLES minutes of the period, oldest first: those that closed after the BUY that
+   * opens a round trip, read before that BUY was heard, count in its adverse excursion once it is (see countCandle)
+   */
+  private recentCandles: RingBuffer<ExcursionCandle>;
   private riskFreeReturn: number;
   /** The round trips closed during the period */
   private roundTrips: RoundTrip[];
@@ -105,6 +154,7 @@ export class RoundTripAnalyzer extends Plugin {
     this.latestPortfolio = null;
     this.nextRoundTripId = 0;
     this.openRoundTrip = null;
+    this.recentCandles = new RingBuffer(LATE_FILL_CANDLES);
     this.riskFreeReturn = riskFreeReturn ?? 5;
     this.roundTrips = [];
     this.start = { equity: 0, portfolio: null };
@@ -338,7 +388,7 @@ export class RoundTripAnalyzer extends Plugin {
   private registerBuy({ id, date, price, amount, fee, equity }: Fill): void {
     const roundTrip = this.openRoundTrip;
     if (!roundTrip) {
-      this.openRoundTrip = {
+      const opened: OpenRoundTrip = {
         entryAt: date,
         entryPrice: price,
         // The pair equity before the BUY, its fee given back (see OpenRoundTrip). Unknown without the portfolio after it: the first
@@ -349,7 +399,10 @@ export class RoundTripAnalyzer extends Plugin {
         sold: 0,
         exitPrice: 0,
         maxAdverseExcursion: 0,
+        excursionDeepenings: [],
       };
+      // Heard in realtime after the buckets of minutes it already held: their candles count too (see countCandle)
+      this.openRoundTrip = this.recentCandles.reduce(countCandle, opened);
       return;
     }
     // The round trip goes on: it keeps its entry date, its entry equity and its adverse excursion so far
@@ -379,7 +432,7 @@ export class RoundTripAnalyzer extends Plugin {
    * would read it as a loss or divide by it.
    */
   private handleCompletedRoundtrip(roundTrip: OpenRoundTrip, { id: sellId, date: exitAt, equity: exitEquity }: Fill): void {
-    const { entryAt, entryPrice, entryEquity, exitPrice, maxAdverseExcursion, pendingEntry } = roundTrip;
+    const { entryAt, entryPrice, entryEquity, exitPrice, pendingEntry } = roundTrip;
     const roundtrip: RoundTrip = {
       id: this.nextRoundTripId++,
 
@@ -392,7 +445,7 @@ export class RoundTripAnalyzer extends Plugin {
       exitEquity,
 
       ...measureRoundTrip(entryEquity, exitEquity),
-      maxAdverseExcursion,
+      maxAdverseExcursion: measureAdverseExcursion(roundTrip, exitAt),
 
       duration: exitAt - entryAt,
     };
@@ -514,11 +567,9 @@ export class RoundTripAnalyzer extends Plugin {
     if (this.warmupCompleted) {
       this.dates.end = this.currentTimestamp;
       this.endPrice = candle.close;
-      const roundTrip = this.openRoundTrip;
-      if (roundTrip) {
-        const adverse = ((roundTrip.entryPrice - candle.low) / roundTrip.entryPrice) * 100;
-        if (adverse > roundTrip.maxAdverseExcursion) roundTrip.maxAdverseExcursion = adverse;
-      }
+      // Kept for a BUY that filled before this candle closed and is heard after it (see countCandle)
+      this.recentCandles.push(candle);
+      if (this.openRoundTrip) countCandle(this.openRoundTrip, candle);
     }
   }
 

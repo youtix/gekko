@@ -1,5 +1,5 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
-import { ONE_MINUTE } from '@constants/time.const';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -7,10 +7,11 @@ import { config } from '@services/configuration/configuration';
 import { debug, error, info, warning } from '@services/logger';
 import * as statsUtils from '@utils/finance/stats.utils';
 import { calculatePairEquity, getAssetBalance } from '@utils/portfolio/portfolio.utils';
+import type { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { OpenRoundTrip, TradingReport } from './roundTrip.types';
 import { RoundTripAnalyzer } from './roundTripAnalyzer';
-import { EMPTY_TRADING_REPORT, PLUGIN_NAME } from './roundTripAnalyzer.const';
+import { EMPTY_TRADING_REPORT, LATE_FILL_CANDLES, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
 
 // Mocks
@@ -81,7 +82,18 @@ const errored = (minute: number) =>
 /** What the account holds of the asset after each SELL that reads it: only a SELL of an open round trip does */
 const holdAfterSells = (...amounts: number[]) =>
   amounts.forEach(total => vi.mocked(getAssetBalance).mockReturnValueOnce({ total, free: total, used: 0 }));
-const OPEN_ROUND_TRIP = { entryAt: 1000, entryPrice: 100, entryEquity: 1000, bought: 1, sold: 0, exitPrice: 0, maxAdverseExcursion: 0 };
+/** A round trip of 1 BTC entered at 100 and still open, with its own list of deepenings: counting a candle can add to it */
+const openRoundTrip = (fields: Partial<OpenRoundTrip> = {}): OpenRoundTrip => ({
+  entryAt: 1000,
+  entryPrice: 100,
+  entryEquity: 1000,
+  bought: 1,
+  sold: 0,
+  exitPrice: 0,
+  maxAdverseExcursion: 0,
+  excursionDeepenings: [],
+  ...fields,
+});
 /** The bucket of a minute, or the timeframe bucket of a 1m timeframe, its candle closing at the given price */
 const bucketAt = (minute: number, close: number) =>
   new Map([['BTC/USDT', { start: minute * ONE_MINUTE, open: close, high: close, low: close, close, volume: 1 }]]) as CandleBucket;
@@ -279,7 +291,7 @@ describe('RoundTripAnalyzer', () => {
         ${'exitPrice'}           | ${120}             | ${'the mean price of its SELLs so far'}
         ${'maxAdverseExcursion'} | ${0}               | ${'none, tracked after the warmup only'}
       `('should rebase it at the start of the period, with $field $expected: $description', ({ field, expected }) => {
-        expect(analyzer['openRoundTrip']?.[field as keyof typeof OPEN_ROUND_TRIP]).toBe(expected);
+        expect(analyzer['openRoundTrip']?.[field as keyof OpenRoundTrip]).toBe(expected);
       });
 
       it('should log that its round trip counts from the start of the period', () => {
@@ -699,7 +711,7 @@ describe('RoundTripAnalyzer', () => {
       ${0}        | ${50}          | ${'unrealized P&L unknown, no portfolio having valued its entry'}
     `('should log $pnl from an entry equity of $entryEquity to $currentEquity', ({ entryEquity, currentEquity, pnl }) => {
       analyzer['currentEquity'] = currentEquity;
-      analyzer['logOpenRoundTrip']({ ...OPEN_ROUND_TRIP, entryEquity });
+      analyzer['logOpenRoundTrip'](openRoundTrip({ entryEquity }));
       expect(info).toHaveBeenCalledWith('roundtrip analyzer', expect.stringContaining(pnl));
     });
   });
@@ -765,6 +777,7 @@ describe('RoundTripAnalyzer', () => {
           sold: 0,
           exitPrice: 0,
           maxAdverseExcursion: 0,
+          excursionDeepenings: [],
         });
       });
 
@@ -837,9 +850,9 @@ describe('RoundTripAnalyzer', () => {
       ${'SELL'} | ${NaN} | ${1}
       ${'SELL'} | ${100} | ${0}
     `('should leave the round trip untouched when a $side has price $price and amount $amount', ({ side, price, amount }) => {
-      analyzer['openRoundTrip'] = { ...OPEN_ROUND_TRIP };
+      analyzer['openRoundTrip'] = openRoundTrip();
       analyzer.onOrderCompleted([completed(side, 2, price, amount)]);
-      expect(analyzer['openRoundTrip']).toEqual(OPEN_ROUND_TRIP);
+      expect(analyzer['openRoundTrip']).toEqual(openRoundTrip());
     });
 
     describe('BUY while flat', () => {
@@ -854,6 +867,7 @@ describe('RoundTripAnalyzer', () => {
           sold: 0,
           exitPrice: 0,
           maxAdverseExcursion: 0,
+          excursionDeepenings: [],
         });
       });
 
@@ -886,7 +900,7 @@ describe('RoundTripAnalyzer', () => {
         ${'bought'}              | ${3}          | ${'the amount of both BUYs'}
         ${'maxAdverseExcursion'} | ${5}          | ${'the adverse excursion so far'}
       `('should keep the round trip open with $field $expected: $description', ({ field, expected }) => {
-        expect(analyzer['openRoundTrip']?.[field as keyof typeof OPEN_ROUND_TRIP]).toBe(expected);
+        expect(analyzer['openRoundTrip']?.[field as keyof OpenRoundTrip]).toBe(expected);
       });
     });
 
@@ -960,7 +974,7 @@ describe('RoundTripAnalyzer', () => {
       });
 
       it('should keep the round trip open with the amount and the price of the SELL', () => {
-        expect(analyzer['openRoundTrip']).toEqual({ ...OPEN_ROUND_TRIP, entryAt: ONE_MINUTE, bought: 2, sold: 1, exitPrice: 110 });
+        expect(analyzer['openRoundTrip']).toEqual(openRoundTrip({ entryAt: ONE_MINUTE, bought: 2, sold: 1, exitPrice: 110 }));
       });
     });
 
@@ -1103,13 +1117,14 @@ describe('RoundTripAnalyzer', () => {
         });
 
         it('should open it without an entry equity, waiting for a portfolio, the fee of that BUY first to give back', () => {
-          expect(analyzer['openRoundTrip']).toEqual({
-            ...OPEN_ROUND_TRIP,
-            entryAt: ONE_MINUTE,
-            entryEquity: NaN,
-            pendingEntry: { orderId: 'BUY-1', price: 100, change: -0.5 },
-            bought: 2,
-          });
+          expect(analyzer['openRoundTrip']).toEqual(
+            openRoundTrip({
+              entryAt: ONE_MINUTE,
+              entryEquity: NaN,
+              pendingEntry: { orderId: 'BUY-1' as UUID, price: 100, change: -0.5 },
+              bought: 2,
+            }),
+          );
         });
 
         it.each`
@@ -1205,7 +1220,7 @@ describe('RoundTripAnalyzer', () => {
   });
 
   describe('handleCompletedRoundtrip', () => {
-    const roundTrip: OpenRoundTrip = { ...OPEN_ROUND_TRIP, sold: 1, exitPrice: 110, maxAdverseExcursion: 5 };
+    const roundTrip = openRoundTrip({ sold: 1, exitPrice: 110, maxAdverseExcursion: 5 });
     /** The SELL that closes the round trip at `date`, and the pair equity after it */
     const closingSell = (date: number, equity: number) => ({ id: 'SELL-3', date, price: 110, amount: 1, fee: 0, equity }) as any;
 
@@ -1226,6 +1241,28 @@ describe('RoundTripAnalyzer', () => {
       analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
       expect(analyzer['roundTrips'][0][field as keyof RoundTrip]).toBe(expected);
     });
+
+    // Two candles deepened its excursion before the SELL was heard: that of minute 1, which closed at minute 2, to 5 %, then that of
+    // minute 4, which closed at minute 5, to 20 %
+    it.each`
+      exitAt | excursion | description
+      ${1}   | ${0}      | ${'before either closed: both taken back'}
+      ${3}   | ${5}      | ${'between their closes: the second taken back'}
+      ${5}   | ${20}     | ${'as the second closed: both kept'}
+    `(
+      'should end with an adverse excursion of $excursion % when the SELL filled at minute $exitAt, $description',
+      ({ exitAt, excursion }) => {
+        const deepened = openRoundTrip({
+          maxAdverseExcursion: 20,
+          excursionDeepenings: [
+            { closeAt: 2 * ONE_MINUTE, previous: 0 },
+            { closeAt: 5 * ONE_MINUTE, previous: 5 },
+          ],
+        });
+        analyzer['handleCompletedRoundtrip'](deepened, closingSell(exitAt * ONE_MINUTE, 1100));
+        expect(analyzer['roundTrips'][0].maxAdverseExcursion).toBe(excursion);
+      },
+    );
 
     it('should log the roundtrip', () => {
       analyzer['handleCompletedRoundtrip'](roundTrip, closingSell(3000, 1100));
@@ -1319,13 +1356,13 @@ describe('RoundTripAnalyzer', () => {
       ${8}    | ${10}   | ${'entered before the start, from the start to the end'}
       ${21}   | ${0}    | ${'entered after the end, not at all'}
     `('should count the round trip still open $description: $exposed minutes', ({ entryAt, exposed }) => {
-      analyzer['openRoundTrip'] = { ...OPEN_ROUND_TRIP, entryAt: entryAt * ONE_MINUTE };
+      analyzer['openRoundTrip'] = openRoundTrip({ entryAt: entryAt * ONE_MINUTE });
       expect(analyzer['calculateExposureMs']()).toBe(exposed * ONE_MINUTE);
     });
 
     it('should add the time of the round trips closed and that of the one still open', () => {
       analyzer['roundTrips'] = [{ entryAt: 12 * ONE_MINUTE, exitAt: 15 * ONE_MINUTE } as RoundTrip];
-      analyzer['openRoundTrip'] = { ...OPEN_ROUND_TRIP, entryAt: 17 * ONE_MINUTE };
+      analyzer['openRoundTrip'] = openRoundTrip({ entryAt: 17 * ONE_MINUTE });
       expect(analyzer['calculateExposureMs']()).toBe(6 * ONE_MINUTE);
     });
   });
@@ -1352,7 +1389,7 @@ describe('RoundTripAnalyzer', () => {
 
     it('should update maxAdverseExcursion if in trade and candle low drops further', () => {
       analyzer['warmupCompleted'] = true;
-      analyzer['openRoundTrip'] = { ...OPEN_ROUND_TRIP };
+      analyzer['openRoundTrip'] = openRoundTrip();
       const candle = { start: 1000, close: 90, low: 80 } as any;
       const bucket = new Map([['BTC/USDT', candle]]) as CandleBucket;
       analyzer['processOneMinuteBucket'](bucket);
@@ -1361,7 +1398,7 @@ describe('RoundTripAnalyzer', () => {
 
     it('should NOT update maxAdverseExcursion if in trade but candle low does not drop further', () => {
       analyzer['warmupCompleted'] = true;
-      analyzer['openRoundTrip'] = { ...OPEN_ROUND_TRIP, maxAdverseExcursion: 25 };
+      analyzer['openRoundTrip'] = openRoundTrip({ maxAdverseExcursion: 25 });
       const candle = { start: 1000, close: 95, low: 90 } as any;
       const bucket = new Map([['BTC/USDT', candle]]) as CandleBucket;
       analyzer['processOneMinuteBucket'](bucket);
@@ -1375,6 +1412,34 @@ describe('RoundTripAnalyzer', () => {
       const bucket = new Map([['BTC/USDT', candle]]) as CandleBucket;
       analyzer['processOneMinuteBucket'](bucket);
       expect(analyzer['openRoundTrip']?.maxAdverseExcursion).toBeCloseTo(10); // (90 - 81) / 90
+    });
+
+    // Read after the BUY was heard, as a live stream catching up on minutes it fell behind on reads it
+    it('should not count a candle that closed by the time the BUY filled', () => {
+      analyzer['warmupCompleted'] = true;
+      analyzer['openRoundTrip'] = openRoundTrip({ entryAt: 3 * ONE_MINUTE });
+      const candle = { start: 2 * ONE_MINUTE, close: 90, low: 80 } as any;
+      analyzer['processOneMinuteBucket'](new Map([['BTC/USDT', candle]]) as CandleBucket);
+      expect(analyzer['openRoundTrip']?.maxAdverseExcursion).toBe(0);
+    });
+
+    it('should note a candle that deepens the excursion: when it closed, and the deepest excursion before it', () => {
+      analyzer['warmupCompleted'] = true;
+      analyzer['openRoundTrip'] = openRoundTrip({ maxAdverseExcursion: 5 });
+      const candle = { start: 1000, close: 90, low: 80 } as any;
+      analyzer['processOneMinuteBucket'](new Map([['BTC/USDT', candle]]) as CandleBucket);
+      expect(analyzer['openRoundTrip']?.excursionDeepenings).toEqual([{ closeAt: 61_000, previous: 5 }]);
+    });
+
+    it(`should keep the last ${LATE_FILL_CANDLES} candles that deepened the excursion`, () => {
+      analyzer['warmupCompleted'] = true;
+      analyzer['openRoundTrip'] = openRoundTrip();
+      // Each low lower than the one before: a deepening more than it keeps
+      for (let minute = 0; minute <= LATE_FILL_CANDLES; minute++) {
+        const candle = { start: minute * ONE_MINUTE, close: 99 - minute, low: 99 - minute } as any;
+        analyzer['processOneMinuteBucket'](new Map([['BTC/USDT', candle]]) as CandleBucket);
+      }
+      expect(analyzer['openRoundTrip']?.excursionDeepenings).toHaveLength(LATE_FILL_CANDLES);
     });
   });
 
@@ -1935,6 +2000,85 @@ describe('RoundTripAnalyzer', () => {
       it('should count it neither as a win nor as a loss: a win rate of 0', () => {
         expect(report.winRate).toBe(0);
       });
+    });
+
+    describe('adverse excursion', () => {
+      // The warmup of 0 candles ends with the bucket of minute 0: the period starts at minute 1, with 1,000 USDT. The strategy buys
+      // 1 BTC on the candle of minute 1 and sells it on that of minute 3, both at 100: the BUY fills in minute 2, the SELL in minute 4.
+      // The round trip reads the candles that close after its BUY fills and by the time its SELL does: those of minutes 2 and 3. Every
+      // candle is flat at 100, but for the lows given.
+      type Delivery = { buyAt: number; buyHeardAfter: number; sellAt: number; sellHeardAfter: number };
+      /** 1 BTC bought or sold at 100 at `date`, and the portfolio the Trader read after it */
+      const order = (side: 'BUY' | 'SELL', date: number, portfolio: Portfolio) =>
+        ({
+          order: { id: `${side}-${date}`, side, price: 100, amount: 1, fee: 0, orderExecutionDate: date },
+          exchange: { portfolio, price: 100 },
+        }) as OrderCompletedEvent;
+      /** Plays the buckets of minutes 0 to `last`, each order heard after the bucket of the minute its delivery names */
+      const play = ({ buyAt, buyHeardAfter, sellAt, sellHeardAfter }: Delivery, lows: Record<number, number>, last = 5) => {
+        runMinute(0, 100, { completesWarmup: true });
+        analyzer.onPortfolioChange([holding(0, 1_000)]);
+        for (let minute = 1; minute <= last; minute++) {
+          runMinute(minute, 100, { low: lows[minute] });
+          if (minute === buyHeardAfter) analyzer.onOrderCompleted([order('BUY', buyAt, holding(1, 900))]);
+          if (minute === sellHeardAfter) analyzer.onOrderCompleted([order('SELL', sellAt, holding(0, 1_000))]);
+        }
+      };
+      /** The adverse excursion of the round trip the play ends */
+      const playedExcursion = (...args: Parameters<typeof play>) => {
+        play(...args);
+        return emittedRoundTrips()[0].maxAdverseExcursion;
+      };
+      // Live, an order the strategy places at the close of a candle fills a few seconds into the next minute
+      const LIVE_FILL_DELAY = 2 * ONE_SECOND;
+
+      // A backtest delivers the end of an order with the bucket it filled in, realtime with the first bucket flushed after the Trader
+      // has reported it, most often the next
+      describe.each`
+        timing                                                            | delay              | buyHeardAfter | sellHeardAfter
+        ${'with the bucket each filled in, as a backtest delivers them'}  | ${0}               | ${1}          | ${3}
+        ${'with the next bucket, as paper trading most often does'}       | ${0}               | ${2}          | ${4}
+        ${'together, with the bucket after the SELL filled'}              | ${0}               | ${4}          | ${4}
+        ${'with the next bucket, filled seconds into their minute, live'} | ${LIVE_FILL_DELAY} | ${2}          | ${4}
+      `('when the end of each order is heard $timing', ({ delay, buyHeardAfter, sellHeardAfter }) => {
+        const delivery = { buyAt: 2 * ONE_MINUTE + delay, buyHeardAfter, sellAt: 4 * ONE_MINUTE + delay, sellHeardAfter };
+
+        it.each`
+          minute | low   | excursion | candle
+          ${1}   | ${70} | ${0}      | ${'before the minute the BUY fills in, not held'}
+          ${2}   | ${95} | ${5}      | ${'of the minute the BUY fills in, held from the fill on'}
+          ${3}   | ${97} | ${3}      | ${'before the minute the SELL fills in, the last held'}
+          ${4}   | ${80} | ${0}      | ${'of the minute the SELL fills in, left out'}
+        `(
+          'should end the round trip with an adverse excursion of $excursion % from a low of $low on the candle $candle (minute $minute)',
+          ({ minute, low, excursion }) => {
+            expect(playedExcursion(delivery, { [minute]: low })).toBe(excursion);
+          },
+        );
+      });
+
+      it('should take back the candles that closed after the SELL before it was heard, each of them deepening the excursion', () => {
+        const twoBucketsLate = { buyAt: 2 * ONE_MINUTE, buyHeardAfter: 1, sellAt: 4 * ONE_MINUTE, sellHeardAfter: 5 };
+        expect(playedExcursion(twoBucketsLate, { 3: 97, 4: 90, 5: 80 })).toBe(3);
+      });
+
+      // The SELL fills at the close of the bucket the BUY is heard after, and is heard with it
+      it.each`
+        heardAfter               | excursion | description
+        ${1 + LATE_FILL_CANDLES} | ${5}      | ${`the oldest of the ${LATE_FILL_CANDLES} kept`}
+        ${2 + LATE_FILL_CANDLES} | ${0}      | ${'no longer kept'}
+      `(
+        'should end with an excursion of $excursion % when the BUY is heard after minute $heardAfter, its first candle $description',
+        ({ heardAfter, excursion }) => {
+          const late = {
+            buyAt: 2 * ONE_MINUTE,
+            buyHeardAfter: heardAfter,
+            sellAt: (heardAfter + 1) * ONE_MINUTE,
+            sellHeardAfter: heardAfter,
+          };
+          expect(playedExcursion(late, { 2: 95 }, heardAfter)).toBe(excursion);
+        },
+      );
     });
   });
 });

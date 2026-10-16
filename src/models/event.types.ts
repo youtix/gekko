@@ -139,8 +139,9 @@ export type RoundTrip = {
   /** exitAt less entryAt, in milliseconds */
   duration: number;
   /**
-   * The deepest fall of a one-minute low below the entry price while it was open, in % of that price (5 for 5 %), 0 when no low fell
-   * below it. Measured after the warmup only.
+   * The deepest fall of a one-minute low below the entry price, in % of that price (5 for 5 %), 0 when no low fell below it: over the
+   * candles that closed after the BUY that opened it filled, up to the one that closed when or before the SELL that closed it filled
+   * (see countCandle, roundTripAnalyzer.ts). Measured after the warmup only.
    */
   maxAdverseExcursion: number;
   /**

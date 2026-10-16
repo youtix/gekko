@@ -1,3 +1,4 @@
+import { Candle } from '@models/candle.types';
 import { Report } from '@models/event.types';
 import { OrderSide } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -62,9 +63,32 @@ export type OpenRoundTrip = {
   sold: number;
   /** Mean price of its SELLs so far, weighted by their amounts (0 before the first one) */
   exitPrice: number;
-  /** Deepest fall of a candle low below the entry price since it opened, in % of the entry price, measured after the warmup only */
+  /**
+   * Deepest fall of a candle low below the entry price, in % of the entry price, over the one-minute candles counted so far: those
+   * that closed after its first BUY filled, after the warmup only (see countCandle). In realtime they can include candles that closed
+   * after the SELL that ends it, counted before that SELL was heard: the round trip ends with the excursion of the candles closed by
+   * its SELL (see excursionDeepenings).
+   */
   maxAdverseExcursion: number;
+  /**
+   * The candles that deepened its adverse excursion, in the order they closed, the last LATE_FILL_CANDLES of them: what the SELL that
+   * ends it takes back of the candles that closed after it (see measureAdverseExcursion)
+   */
+  excursionDeepenings: ExcursionDeepening[];
 };
+
+/**
+ * A one-minute candle that deepened the adverse excursion of a round trip: when it closed, and the deepest excursion before it, which
+ * the round trip ends with when its SELL filled before that close
+ */
+export type ExcursionDeepening = {
+  closeAt: EpochTimeStamp;
+  /** The deepest excursion of the candles counted before it, in % of the entry price */
+  previous: number;
+};
+
+/** What the adverse excursion reads of a one-minute candle: its start, which dates its close a minute later, and its low */
+export type ExcursionCandle = Pick<Candle, 'start' | 'low'>;
 
 /**
  * What the entry equity of a round trip is worked out from when the BUY that opened it filled before the Trader had read any portfolio:
