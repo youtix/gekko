@@ -4,6 +4,8 @@ import { debugAdviceStrategySchema } from './debugAdvice.schema';
 import { DebugAdvice } from './debugAdvice.strategy';
 import { debugBacktestStrategySchema } from './debugBacktest.schema';
 import { DebugBacktest } from './debugBacktest.strategy';
+import { debugOrderScriptStrategySchema } from './debugOrderScript.schema';
+import { DebugOrderScript } from './debugOrderScript.strategy';
 import { debugRealtimeStrategySchema } from './debugRealtime.schema';
 import { DebugRealtime } from './debugRealtime.strategy';
 import { debugTrailingStopStrategySchema } from './debugTrailingStop.schema';
@@ -15,6 +17,7 @@ describe('the debug strategies', () => {
     name                   | strategy             | schema
     ${'DebugAdvice'}       | ${DebugAdvice}       | ${debugAdviceStrategySchema}
     ${'DebugBacktest'}     | ${DebugBacktest}     | ${debugBacktestStrategySchema}
+    ${'DebugOrderScript'}  | ${DebugOrderScript}  | ${debugOrderScriptStrategySchema}
     ${'DebugRealtime'}     | ${DebugRealtime}     | ${debugRealtimeStrategySchema}
     ${'DebugTrailingStop'} | ${DebugTrailingStop} | ${debugTrailingStopStrategySchema}
   `('$name declares the schema its strategy block is parsed with', ({ strategy, schema }) => {
@@ -92,6 +95,49 @@ describe('debugBacktestStrategySchema', () => {
     expect(debugBacktestStrategySchema.safeParse({ buyCandleIndex: '2', sellCandleIndex: 4 }).error?.issues[0].message).toBe(
       'Invalid input: expected a candle index (a whole number, 0 for the first candle after the warmup) or a list of them',
     );
+  });
+});
+
+describe('debugOrderScriptStrategySchema', () => {
+  const marketBuy = { candle: 0, side: 'BUY', type: 'MARKET' };
+  /** A block of one order, a MARKET BUY on candle 0 but for `fields` */
+  const orderWith = (fields: Record<string, unknown>) => ({ orders: [{ ...marketBuy, ...fields }] });
+  const ROUND_TRIP = {
+    name: 'DebugOrderScript',
+    orders: [
+      { ...marketBuy, amount: 1.0000004 },
+      { candle: 1, side: 'SELL', type: 'MARKET' },
+    ],
+  };
+  const CANCELED_LIMIT = { name: 'DebugOrderScript', ...orderWith({ type: 'LIMIT', price: 90.004, cancelAfter: 2 }) };
+  it.each`
+    source                                                       | block
+    ${'the live trader e2e flow, scenario A: a BUY then a SELL'} | ${ROUND_TRIP}
+    ${'the live trader e2e flow, scenario B: a LIMIT canceled'}  | ${CANCELED_LIMIT}
+  `('accepts the block of $source', ({ block }) => {
+    expect(debugOrderScriptStrategySchema.safeParse(omit(block, 'name')).success).toBe(true);
+  });
+
+  it('defaults the amount of an order to 1, which the other debug strategies always order', () => {
+    expect(debugOrderScriptStrategySchema.parse({ orders: [marketBuy] })).toEqual({ orders: [{ ...marketBuy, amount: 1 }] });
+  });
+
+  // cancelAfter 0 would cancel the order on the candle that creates it, before it reaches the exchange
+  it.each`
+    scenario                     | block                                     | code                   | path
+    ${'an unknown key (cancel)'} | ${{ orders: [marketBuy], cancel: 1 }}     | ${'unrecognized_keys'} | ${[]}
+    ${'a block without orders'}  | ${{}}                                     | ${'invalid_type'}      | ${['orders']}
+    ${'an empty list of orders'} | ${{ orders: [] }}                         | ${'too_small'}         | ${['orders']}
+    ${'an unknown order key'}    | ${orderWith({ quantity: 1 })}             | ${'unrecognized_keys'} | ${['orders', 0]}
+    ${'a side in lower case'}    | ${orderWith({ side: 'buy' })}             | ${'invalid_value'}     | ${['orders', 0, 'side']}
+    ${'a type Gekko has not'}    | ${orderWith({ type: 'stop_loss' })}       | ${'invalid_value'}     | ${['orders', 0, 'type']}
+    ${'a negative candle'}       | ${orderWith({ candle: -1 })}              | ${'too_small'}         | ${['orders', 0, 'candle']}
+    ${'a fractional candle'}     | ${orderWith({ candle: 0.5 })}             | ${'invalid_type'}      | ${['orders', 0, 'candle']}
+    ${'an amount of 0'}          | ${orderWith({ amount: 0 })}               | ${'too_small'}         | ${['orders', 0, 'amount']}
+    ${'a price of 0'}            | ${orderWith({ type: 'LIMIT', price: 0 })} | ${'too_small'}         | ${['orders', 0, 'price']}
+    ${'cancelAfter 0'}           | ${orderWith({ cancelAfter: 0 })}          | ${'too_small'}         | ${['orders', 0, 'cancelAfter']}
+  `('refuses $scenario', ({ block, code, path }) => {
+    expect(debugOrderScriptStrategySchema.safeParse(block).error?.issues).toMatchObject([{ code, path }]);
   });
 });
 

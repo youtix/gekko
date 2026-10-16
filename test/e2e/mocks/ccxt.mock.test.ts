@@ -14,6 +14,9 @@ import {
   MockNetworkError,
   MockOperationFailed,
   MockOrderNotFound,
+  MockRequestTimeout,
+  PRECISION_CONSTANTS,
+  type CreationFault,
   type Gap,
   type OHLCV,
   type PartialCandle,
@@ -37,6 +40,15 @@ const settle = (call: Promise<number[][]>) =>
     page => minutesOf(page),
     (error: Error) => error.name,
   );
+
+/** What a call to the account failed with: the name and the message of the error it threw, undefined when it answered */
+const failureOf = (call: Promise<unknown>) =>
+  call.then(
+    () => undefined,
+    (error: Error) => ({ name: error.name, message: error.message }),
+  );
+
+const { TRUNCATE, ROUND, TICK_SIZE, NO_PADDING, DECIMAL_PLACES } = PRECISION_CONSTANTS;
 
 describe('MockCCXTExchange', () => {
   let exchange: MockCCXTExchange;
@@ -278,6 +290,7 @@ describe('MockCCXTExchange', () => {
       const classes = [
         MockOperationFailed,
         MockNetworkError,
+        MockRequestTimeout,
         MockExchangeError,
         MockInvalidOrder,
         MockOrderNotFound,
@@ -293,6 +306,7 @@ describe('MockCCXTExchange', () => {
       expect(ancestry).toEqual([
         { name: 'OperationFailed', instanceOf: ['MockBaseError', 'MockOperationFailed'] },
         { name: 'NetworkError', instanceOf: ['MockBaseError', 'MockOperationFailed'] },
+        { name: 'RequestTimeout', instanceOf: ['MockBaseError', 'MockOperationFailed'] },
         { name: 'ExchangeError', instanceOf: ['MockBaseError', 'MockExchangeError'] },
         { name: 'InvalidOrder', instanceOf: ['MockBaseError', 'MockExchangeError', 'MockInvalidOrder'] },
         { name: 'OrderNotFound', instanceOf: ['MockBaseError', 'MockExchangeError', 'MockInvalidOrder'] },
@@ -310,6 +324,604 @@ describe('MockCCXTExchange', () => {
         BaseError: MockBaseError,
       });
     });
+
+    // CCXTExchange reads them from the default export (ccxt.TRUNCATE, ccxt.OperationFailed): ccxt exports them at the top of its module
+    it('should hand the precision constants and RequestTimeout to the module under ccxt names, as default and named exports', () => {
+      const { default: ccxt, ...named } = createCcxtModuleMock();
+      expect({ TRUNCATE: ccxt.TRUNCATE, TICK_SIZE: named.TICK_SIZE, RequestTimeout: ccxt.RequestTimeout }).toEqual({
+        TRUNCATE: 0,
+        TICK_SIZE: 4,
+        RequestTimeout: MockRequestTimeout,
+      });
+    });
+  });
+
+  describe('precision, as ccxt writes and rounds a number', () => {
+    // bun:test takes no tagged-template table. Every expected string is what ccxt 4.5.39's binance answers.
+    it.each<{ value: number | string; expected: string }>([
+      { value: 1.5e-7, expected: '0.00000015' },
+      { value: 1.234567e-7, expected: '0.0000001234567' },
+      { value: 1e21, expected: '1000000000000000000000' },
+      { value: 0.1 + 0.2, expected: '0.30000000000000004' },
+      { value: 100, expected: '100' },
+      { value: '12.5', expected: '12.5' },
+      // A string is written as it is, an exponent included
+      { value: '1e-7', expected: '1e-7' },
+    ])('should write $value as $expected, without an exponent, in numberToString', ({ value, expected }) => {
+      expect(exchange.numberToString(value)).toBe(expected);
+    });
+
+    it.each<{ value: number; mode: number; tick: number; expected: string }>([
+      { value: 0.0000560556, mode: TRUNCATE, tick: 0.00001, expected: '0.00005' },
+      { value: 0.999, mode: TRUNCATE, tick: 0.01, expected: '0.99' },
+      // A truncated value is written as String writes the number
+      { value: 1e-7, mode: TRUNCATE, tick: 1e-8, expected: '1e-7' },
+      { value: 0.004, mode: TRUNCATE, tick: 0.01, expected: '0' },
+      { value: 99.995, mode: ROUND, tick: 0.01, expected: '100' },
+      { value: 99.994999, mode: ROUND, tick: 0.01, expected: '99.99' },
+      // A half in decimal is rounded up, though 0.125 and 2.675 are below it in binary
+      { value: 0.125, mode: ROUND, tick: 0.01, expected: '0.13' },
+      { value: 2.675, mode: ROUND, tick: 0.01, expected: '2.68' },
+      { value: 12345.675, mode: ROUND, tick: 0.25, expected: '12345.75' },
+      { value: 7.5, mode: ROUND, tick: 1, expected: '8' },
+    ])('should round $value to $expected on a tick of $tick in decimalToPrecision (mode $mode)', ({ value, mode, tick, expected }) => {
+      expect(exchange.decimalToPrecision(exchange.numberToString(value), mode, tick, TICK_SIZE, NO_PADDING)).toBe(expected);
+    });
+
+    // Rounding as ccxt would in those modes is not the mock's: a mode ccxt's binance does not use fails the test that meets it
+    it('should refuse a counting mode other than TICK_SIZE', () => {
+      expect(() => exchange.decimalToPrecision('1.5', ROUND, 2, DECIMAL_PLACES, NO_PADDING)).toThrow(
+        'The mock rounds in the TICK_SIZE counting mode without padding only, got modes 2 and 5',
+      );
+    });
+
+    it('should give the precision and the padding modes of ccxt binance', () => {
+      expect({ precisionMode: exchange.precisionMode, paddingMode: exchange.paddingMode }).toEqual({ precisionMode: 4, paddingMode: 5 });
+    });
+
+    // 1.0000009 rounded to the step of 0.000001 would be 1.000001
+    it('should round a price to its tick, a half up, and truncate an amount to its step (priceToPrecision, amountToPrecision)', () => {
+      expect({ price: exchange.priceToPrecision('BTC/USDT', 90.005), amount: exchange.amountToPrecision('BTC/USDT', 1.0000009) }).toEqual({
+        price: '90.01',
+        amount: '1',
+      });
+    });
+
+    it.each<{ title: string; round: () => string; message: string }>([
+      {
+        title: 'a price rounded to 0',
+        round: () => exchange.priceToPrecision('BTC/USDT', 0.004),
+        message: 'binance price of BTC/USDT must be greater than minimum price precision of 0.01',
+      },
+      {
+        title: 'an amount truncated to 0',
+        round: () => exchange.amountToPrecision('BTC/USDT', 1e-7),
+        message: 'binance amount of BTC/USDT must be greater than minimum amount precision of 0.000001',
+      },
+    ])('should refuse $title with an InvalidOrder, as ccxt does', ({ round, message }) => {
+      expect(round).toThrow(new MockInvalidOrder(message));
+    });
+  });
+
+  describe('the clients', () => {
+    it('should keep what a client is built with, its keys read from it, and send it to the testnet with sandbox set, as ccxt does', () => {
+      const userConfig = { apiKey: 'key', secret: 'secret', sandbox: true, options: { maxRetriesOnFailure: 0 } };
+      const client = new MockCCXTExchange(userConfig);
+      expect({
+        userConfig: client.userConfig,
+        apiKey: client.apiKey,
+        secret: client.secret,
+        isSandboxModeEnabled: client.isSandboxModeEnabled,
+        hasSandbox: client.has.sandbox,
+        isListed: MockCCXTExchange.clients.includes(client),
+      }).toEqual({ userConfig, apiKey: 'key', secret: 'secret', isSandboxModeEnabled: true, hasSandbox: true, isListed: true });
+    });
+
+    // CCXTExchange.loadMarkets writes there what the public client learned, which a flow reads
+    it('should start every client with empty options, whatever the options it is built with', () => {
+      expect(new MockCCXTExchange({ options: { maxRetriesOnFailure: 0 } }).options).toEqual({});
+    });
+
+    it('should leave a client built without sandbox on the exchange itself', () => {
+      expect(new MockCCXTExchange({ apiKey: 'key', secret: 'secret' }).isSandboxModeEnabled).toBe(false);
+    });
+
+    // The client of the tests was built before the reset of beforeEach, which emptied the list
+    it('should list the clients in the order they were built', () => {
+      const [publicClient, privateClient] = [new MockCCXTExchange({}), new MockCCXTExchange({ apiKey: 'key' })];
+      const names = new Map([
+        [publicClient, 'public'],
+        [privateClient, 'private'],
+      ]);
+      expect(MockCCXTExchange.clients.map(client => names.get(client))).toEqual(['public', 'private']);
+    });
+  });
+
+  describe('the account', () => {
+    const BTC = 'BTC/USDT';
+    // The ticker follows the predefined candles: 100 once the first one is served, 110 once the second is (see fetchTicker)
+    const serveCandles = async (count: number) => {
+      for (let call = 0; call < count; call++) await exchange.fetchOHLCV(BTC, '1m', call * ONE_MINUTE, 1);
+    };
+    /** An order as the scenarios pin it, without its dates */
+    const describeOrder = ({ id, type, side, price, amount, filled, remaining, status }: Record<string, any>) => ({
+      id,
+      type,
+      side,
+      price,
+      amount,
+      filled,
+      remaining,
+      status,
+    });
+    /** A trade of the account as the scenarios pin it, without its dates and the answer it was parsed from */
+    const describeTrade = ({ id, order, side, takerOrMaker, price, amount, cost, fee }: Record<string, any>) => ({
+      id,
+      order,
+      side,
+      takerOrMaker,
+      price,
+      amount,
+      cost,
+      fee,
+    });
+
+    beforeEach(() => {
+      setSystemTime(new Date(NOW));
+      MockCCXTExchange.setBalances({ BTC: 0, USDT: 10000 });
+      MockCCXTExchange.setPredefinedCandles(BTC, [
+        { close: 100 },
+        { close: 110 },
+        { open: 95, low: 89, close: 92, volume: 0.4 },
+        { open: 92, high: 112, close: 111, volume: 0.5 },
+      ]);
+    });
+
+    it('should answer a MARKET BUY closed with its fill at the ask, its taker fee taken in the asset bought, as Binance does', async () => {
+      await serveCandles(1);
+      const answer = await exchange.createOrder(BTC, 'market', 'BUY', 1, 99);
+      expect({
+        answer: { ...describeOrder(answer), timestamp: answer.timestamp, average: answer.average, cost: answer.cost },
+        trades: answer.trades.map(describeTrade),
+        balances: MockCCXTExchange.getBalances(),
+      }).toEqual({
+        // The price sent with a MARKET order is ignored, as Binance ignores it: the order fills at the ask, the ticker of 100
+        answer: {
+          id: '1',
+          type: 'market',
+          side: 'buy',
+          price: 100,
+          amount: 1,
+          filled: 1,
+          remaining: 0,
+          status: 'closed',
+          timestamp: NOW,
+          average: 100,
+          cost: 100,
+        },
+        trades: [
+          {
+            id: '1',
+            order: '1',
+            side: 'buy',
+            takerOrMaker: 'taker',
+            price: 100,
+            amount: 1,
+            cost: 100,
+            fee: { cost: 0.001, currency: 'BTC' },
+          },
+        ],
+        balances: { BTC: { free: 0.999, used: 0, total: 0.999 }, USDT: { free: 9900, used: 0, total: 9900 } },
+      });
+    });
+
+    it('should take the fee of a SELL in the currency it brings in', async () => {
+      MockCCXTExchange.setBalances({ BTC: 1, USDT: 0 });
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'market', 'sell', 0.999, 110);
+      // 0.999 at 110 brings 109.89, less 0.1 % of it, 0.10989
+      expect(MockCCXTExchange.getBalances()).toEqual({
+        BTC: { free: 0.001, used: 0, total: 0.001 },
+        USDT: { free: 109.78011, used: 0, total: 109.78011 },
+      });
+    });
+
+    it('should place an order on the step and the tick of its market, as ccxt sends it: amount truncated, price rounded', async () => {
+      await serveCandles(1);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1.0000009, 90.005);
+      expect(MockCCXTExchange.getOrders().map(describeOrder)).toEqual([
+        { id: '1', type: 'limit', side: 'buy', price: 90.01, amount: 1, filled: 0, remaining: 1, status: 'open' },
+      ]);
+    });
+
+    it('should rest a LIMIT BUY below the ask, open, the cost of what it has left reserved', async () => {
+      await serveCandles(1);
+      const answer = await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      expect({ answer: describeOrder(answer), balances: MockCCXTExchange.getBalances() }).toEqual({
+        answer: { id: '1', type: 'limit', side: 'buy', price: 90, amount: 1, filled: 0, remaining: 1, status: 'open' },
+        balances: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 9910, used: 90, total: 10000 } },
+      });
+    });
+
+    it('should fill a LIMIT SELL at or below the bid at once, at the bid, as a taker', async () => {
+      MockCCXTExchange.setBalances({ BTC: 1, USDT: 0 });
+      await serveCandles(1);
+      const answer = await exchange.createOrder(BTC, 'limit', 'sell', 1, 95);
+      expect(answer.trades.map(describeTrade)).toEqual([
+        {
+          id: '1',
+          order: '1',
+          side: 'sell',
+          takerOrMaker: 'taker',
+          price: 100,
+          amount: 1,
+          cost: 100,
+          fee: { cost: 0.1, currency: 'USDT' },
+        },
+      ]);
+    });
+
+    it.each<{ title: string; side: string; amount: number }>([
+      { title: 'a BUY whose cost at the ask exceeds the free currency', side: 'buy', amount: 101 },
+      { title: 'a SELL of more than the free asset', side: 'sell', amount: 0.5 },
+    ])('should refuse $title with an InsufficientFunds, as Binance does, nothing placed', async ({ side, amount }) => {
+      await serveCandles(1);
+      const failure = await failureOf(exchange.createOrder(BTC, 'market', side, amount, 100));
+      expect({ failure, orders: MockCCXTExchange.getOrders() }).toEqual({
+        failure: { name: 'InsufficientFunds', message: 'binance Account has insufficient balance for requested action.' },
+        orders: [],
+      });
+    });
+
+    it('should refuse an order on a market the exchange does not have, with a BadSymbol', async () => {
+      expect(await failureOf(exchange.createOrder('DOGE/USDT', 'market', 'buy', 1, 100))).toEqual({
+        name: 'BadSymbol',
+        message: 'binance does not have market symbol DOGE/USDT',
+      });
+    });
+
+    it('should answer a creation open while matchesOrdersAtCreation is false, and match it at the next call to the account', async () => {
+      MockCCXTExchange.matchesOrdersAtCreation = false;
+      await serveCandles(1);
+      const answer = await exchange.createOrder(BTC, 'market', 'buy', 1, 100);
+      const polled = await exchange.fetchOrder('1', BTC);
+      expect({ answer: answer.status, polled: describeOrder(polled) }).toEqual({
+        answer: 'open',
+        polled: { id: '1', type: 'market', side: 'buy', price: 100, amount: 1, filled: 1, remaining: 0, status: 'closed' },
+      });
+    });
+
+    it('should trade a resting LIMIT BUY at its price, as a maker, with a later candle whose low reaches it, for its volume', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      // Candle 2 dips to 89, trading 0.4: the BUY fills 0.4 at 90 at the first call, and nothing more at the next one
+      await serveCandles(1);
+      const [first, second] = [await exchange.fetchOrder('1', BTC), await exchange.fetchOrder('1', BTC)];
+      expect({ fills: [first.filled, second.filled], trades: MockCCXTExchange.mockTrades.map(describeTrade) }).toEqual({
+        fills: [0.4, 0.4],
+        trades: [
+          {
+            id: '1',
+            order: '1',
+            side: 'buy',
+            takerOrMaker: 'maker',
+            price: 90,
+            amount: 0.4,
+            cost: 36,
+            fee: { cost: 0.0004, currency: 'BTC' },
+          },
+        ],
+      });
+    });
+
+    it('should not trade a resting order with a candle served before it was placed', async () => {
+      await serveCandles(3);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      expect((await exchange.fetchOrder('1', BTC)).filled).toBe(0);
+    });
+
+    it('should share the volume of a candle between the resting orders it fills, the oldest first', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'limit', 'buy', 0.3, 90);
+      await exchange.createOrder(BTC, 'limit', 'buy', 0.3, 91);
+      await serveCandles(1);
+      await exchange.fetchBalance();
+      // Candle 2 trades 0.4 at 89 or above: 0.3 for the first BUY, which is filled, the 0.1 left for the second
+      expect(MockCCXTExchange.getOrders().map(({ id, filled, status }) => ({ id, filled, status }))).toEqual([
+        { id: '1', filled: 0.3, status: 'closed' },
+        { id: '2', filled: 0.1, status: 'open' },
+      ]);
+    });
+
+    it('should trade a resting LIMIT SELL with a later candle whose high reaches it', async () => {
+      MockCCXTExchange.setBalances({ BTC: 1, USDT: 0 });
+      await serveCandles(3);
+      await exchange.createOrder(BTC, 'limit', 'sell', 1, 112);
+      await serveCandles(1);
+      // Candle 3 reaches 112, trading 0.5
+      expect(describeOrder(await exchange.fetchOrder('1', BTC))).toEqual({
+        id: '1',
+        type: 'limit',
+        side: 'sell',
+        price: 112,
+        amount: 1,
+        filled: 0.5,
+        remaining: 0.5,
+        status: 'open',
+      });
+    });
+
+    it('should cancel an open order with what it filled, dated with the cancelation, its reserve released', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      await serveCandles(1);
+      setSystemTime(new Date(NOW + ONE_MINUTE));
+      const answer = await exchange.cancelOrder('1', BTC);
+      expect({ answer: { ...describeOrder(answer), timestamp: answer.timestamp }, balances: MockCCXTExchange.getBalances() }).toEqual({
+        answer: {
+          id: '1',
+          type: 'limit',
+          side: 'buy',
+          price: 90,
+          amount: 1,
+          filled: 0.4,
+          remaining: 0.6,
+          status: 'canceled',
+          timestamp: NOW + ONE_MINUTE,
+        },
+        balances: { BTC: { free: 0.3996, used: 0, total: 0.3996 }, USDT: { free: 9964, used: 0, total: 9964 } },
+      });
+    });
+
+    it('should give each order the status Binance answers it with, which ccxt parses (info)', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'market', 'buy', 1, 110);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      await exchange.createOrder(BTC, 'limit', 'buy', 0.1, 80);
+      await exchange.cancelOrder('3', BTC);
+      // Candle 2 dips to 89: the BUY at 90 fills 0.4 of its 1, the one at 80 nothing
+      await serveCandles(1);
+      await exchange.fetchBalance();
+      expect(MockCCXTExchange.getOrders().map(({ info }) => info.status)).toEqual(['FILLED', 'PARTIALLY_FILLED', 'CANCELED']);
+    });
+
+    it('should give an order no fill yet the status NEW', async () => {
+      await serveCandles(1);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      expect(MockCCXTExchange.getOrders()[0].info.status).toBe('NEW');
+    });
+
+    it('should date an order it is asked about with its creation and its last update', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      await serveCandles(1);
+      setSystemTime(new Date(NOW + ONE_MINUTE));
+      const { timestamp, lastUpdateTimestamp } = await exchange.fetchOrder('1', BTC);
+      expect({ timestamp, lastUpdateTimestamp }).toEqual({ timestamp: NOW, lastUpdateTimestamp: NOW + ONE_MINUTE });
+    });
+
+    it.each<{ title: string; call: (exchange: MockCCXTExchange) => Promise<unknown>; message: string }>([
+      {
+        title: 'the cancelation of an order that is not open',
+        call: async client => {
+          await client.createOrder(BTC, 'market', 'buy', 1, 100);
+          return client.cancelOrder('1', BTC);
+        },
+        message: 'binance {"code":-2011,"msg":"Unknown order sent."}',
+      },
+      {
+        title: 'the query of an order the account never placed',
+        call: client => client.fetchOrder('7', BTC),
+        message: 'binance {"code":-2013,"msg":"Order does not exist."}',
+      },
+    ])('should answer $title with an OrderNotFound, as Binance does', async ({ call, message }) => {
+      await serveCandles(1);
+      expect(await failureOf(call(exchange))).toEqual({ name: 'OrderNotFound', message });
+    });
+
+    it('should list the orders open on the pair, those placed before the run included, oldest first, with what each has left', async () => {
+      MockCCXTExchange.setBalances({ BTC: 2, USDT: 10000 });
+      MockCCXTExchange.addOpenOrder({ symbol: BTC, side: 'buy', type: 'limit', amount: 0.5, price: 95, filled: 0.2 });
+      MockCCXTExchange.addOpenOrder({ symbol: BTC, side: 'sell', type: 'stop_loss_limit', amount: 1, price: 90, triggerPrice: 92 });
+      MockCCXTExchange.addOpenOrder({ symbol: 'ETH/USDT', side: 'buy', type: 'limit', amount: 1, price: 1000 });
+      await serveCandles(1);
+      await exchange.createOrder(BTC, 'market', 'buy', 1, 100);
+      await exchange.createOrder(BTC, 'limit', 'sell', 0.5, 130);
+      const open = await exchange.fetchOpenOrders(BTC);
+      expect(open.map(order => ({ ...describeOrder(order), triggerPrice: order.triggerPrice }))).toEqual([
+        {
+          id: '1',
+          type: 'limit',
+          side: 'buy',
+          price: 95,
+          amount: 0.5,
+          filled: 0.2,
+          remaining: 0.3,
+          status: 'open',
+          triggerPrice: undefined,
+        },
+        { id: '2', type: 'stop_loss_limit', side: 'sell', price: 90, amount: 1, filled: 0, remaining: 1, status: 'open', triggerPrice: 92 },
+        {
+          id: '5',
+          type: 'limit',
+          side: 'sell',
+          price: 130,
+          amount: 0.5,
+          filled: 0,
+          remaining: 0.5,
+          status: 'open',
+          triggerPrice: undefined,
+        },
+      ]);
+    });
+
+    it('should never trade a conditional order, which waits for its trigger price off the book', async () => {
+      MockCCXTExchange.setBalances({ BTC: 1, USDT: 0 });
+      MockCCXTExchange.addOpenOrder({ symbol: BTC, side: 'sell', type: 'limit', amount: 1, price: 100, triggerPrice: 120 });
+      await serveCandles(4);
+      expect((await exchange.fetchOrder('1', BTC)).filled).toBe(0);
+    });
+
+    it('should reserve what the orders open hold: a BUY the cost of what it has left, a SELL what it has left of the asset', async () => {
+      MockCCXTExchange.setBalances({ BTC: 2, USDT: 10000 });
+      MockCCXTExchange.addOpenOrder({ symbol: BTC, side: 'buy', type: 'limit', amount: 0.5, price: 95, filled: 0.2 });
+      MockCCXTExchange.addOpenOrder({ symbol: BTC, side: 'sell', type: 'stop_loss_limit', amount: 1, price: 90, triggerPrice: 92 });
+      expect(MockCCXTExchange.getBalances()).toEqual({
+        BTC: { free: 1, used: 1, total: 2 },
+        // 0.3 left at 95
+        USDT: { free: 9971.5, used: 28.5, total: 10000 },
+      });
+    });
+
+    it('should answer the trades of the pair from the first at or after since, oldest first, no more than limit', async () => {
+      MockCCXTExchange.setBalances({ BTC: 0, USDT: 10000, ETH: 0 });
+      MockCCXTExchange.setPredefinedCandles('ETH/USDT', [{ close: 1000 }]);
+      await serveCandles(1);
+      await exchange.fetchOHLCV('ETH/USDT', '1m', 0, 1);
+      await exchange.createOrder(BTC, 'market', 'buy', 1, 100);
+      await exchange.createOrder('ETH/USDT', 'market', 'buy', 1, 1000);
+      setSystemTime(new Date(NOW + ONE_MINUTE));
+      await exchange.createOrder(BTC, 'market', 'buy', 2, 100);
+      await exchange.createOrder(BTC, 'market', 'buy', 3, 100);
+      const pages = [await exchange.fetchMyTrades(BTC, NOW + ONE_MINUTE, 1), await exchange.fetchMyTrades(BTC)];
+      expect(pages.map(page => page.map(({ order }) => order))).toEqual([['3'], ['1', '3', '4']]);
+    });
+
+    it('should give a trade the fields ccxt gives one of Binance: no fee rate, the fee in the currency it was taken in', async () => {
+      await serveCandles(1);
+      await exchange.createOrder(BTC, 'market', 'buy', 1, 100);
+      const [trade] = await exchange.fetchMyTrades(BTC);
+      expect(trade).toEqual({
+        info: {
+          symbol: 'BTCUSDT',
+          id: '1',
+          orderId: '1',
+          price: '100',
+          qty: '1',
+          quoteQty: '100',
+          commission: '0.001',
+          commissionAsset: 'BTC',
+          time: NOW,
+          isBuyer: true,
+          isMaker: false,
+        },
+        timestamp: NOW,
+        datetime: new Date(NOW).toISOString(),
+        symbol: BTC,
+        id: '1',
+        order: '1',
+        type: undefined,
+        side: 'buy',
+        takerOrMaker: 'taker',
+        price: 100,
+        amount: 1,
+        cost: 100,
+        fee: { cost: 0.001, currency: 'BTC' },
+        fees: [{ cost: 0.001, currency: 'BTC' }],
+      });
+    });
+
+    it('should answer the balance by currency, then by free, used and total, as ccxt does', async () => {
+      MockCCXTExchange.setBalances({ BTC: 1, USDT: 100 });
+      await serveCandles(1);
+      await exchange.createOrder(BTC, 'limit', 'buy', 0.5, 90);
+      expect(await exchange.fetchBalance()).toEqual({
+        info: {},
+        timestamp: NOW,
+        datetime: new Date(NOW).toISOString(),
+        BTC: { free: 1, used: 0, total: 1 },
+        USDT: { free: 55, used: 45, total: 100 },
+        free: { BTC: 1, USDT: 55 },
+        used: { BTC: 0, USDT: 45 },
+        total: { BTC: 1, USDT: 100 },
+      });
+    });
+
+    it('should record every call to the account as it was received, the calls of the market data aside', async () => {
+      await serveCandles(1);
+      await exchange.fetchTicker(BTC);
+      await exchange.createOrder(BTC, 'limit', 'BUY', 1.0000009, 90.005);
+      await exchange.fetchOrder('1', BTC);
+      await exchange.cancelOrder('1', BTC);
+      await exchange.fetchOpenOrders(BTC);
+      await exchange.fetchMyTrades(BTC, NOW, 10);
+      await exchange.fetchBalance();
+      expect(MockCCXTExchange.accountCalls).toEqual([
+        { method: 'createOrder', symbol: BTC, type: 'limit', side: 'BUY', amount: 1.0000009, price: 90.005 },
+        { method: 'fetchOrder', id: '1', symbol: BTC },
+        { method: 'cancelOrder', id: '1', symbol: BTC },
+        { method: 'fetchOpenOrders', symbol: BTC },
+        { method: 'fetchMyTrades', symbol: BTC, since: NOW, limit: 10 },
+        { method: 'fetchBalance' },
+      ]);
+    });
+
+    describe('creation faults', () => {
+      // Each fault befalls an order the exchange has placed, and matched: the MARKET BUY of 1 at 100 executed
+      const EXECUTED = [{ id: '1', type: 'market', side: 'buy', price: 100, amount: 1, filled: 1, remaining: 0, status: 'closed' }];
+
+      it.each<{ title: string; fault: CreationFault; isSandbox: boolean; failure: { name: string; message: string } }>([
+        {
+          title: 'an answer lost on the network, a RequestTimeout from the testnet',
+          fault: 'answerLost',
+          isSandbox: true,
+          failure: {
+            name: 'RequestTimeout',
+            message: 'binance POST https://testnet.binance.vision/api/v3/order request timed out (10000 ms)',
+          },
+        },
+        {
+          title: 'an answer lost on the network, a RequestTimeout from Binance itself',
+          fault: 'answerLost',
+          isSandbox: false,
+          failure: { name: 'RequestTimeout', message: 'binance POST https://api.binance.com/api/v3/order request timed out (10000 ms)' },
+        },
+        {
+          title: "Binance's -1006, an OperationFailed",
+          fault: 'statusUnknown',
+          isSandbox: true,
+          failure: {
+            name: 'OperationFailed',
+            message: 'binance {"code":-1006,"msg":"An unexpected response was received from the message bus. Execution status unknown."}',
+          },
+        },
+      ])('should fail the creation with $title, the order placed and executed all the same', async ({ fault, isSandbox, failure }) => {
+        const client = new MockCCXTExchange({ sandbox: isSandbox });
+        MockCCXTExchange.creationFaults = [fault];
+        await serveCandles(1);
+        const caught = await failureOf(client.createOrder(BTC, 'market', 'buy', 1, 100));
+        expect({ caught, orders: MockCCXTExchange.getOrders().map(describeOrder) }).toEqual({ caught: failure, orders: EXECUTED });
+      });
+
+      it('should answer a creation without the id and the status of its order for answerWithoutId, the order placed', async () => {
+        MockCCXTExchange.creationFaults = ['answerWithoutId'];
+        await serveCandles(1);
+        const { id, status } = await exchange.createOrder(BTC, 'market', 'buy', 1, 100);
+        expect({ id, status, orders: MockCCXTExchange.getOrders().map(describeOrder) }).toEqual({
+          id: undefined,
+          status: undefined,
+          orders: EXECUTED,
+        });
+      });
+
+      it('should let a fault befall one creation only, the next one answered', async () => {
+        MockCCXTExchange.creationFaults = ['answerLost'];
+        await serveCandles(1);
+        await failureOf(exchange.createOrder(BTC, 'market', 'buy', 1, 100));
+        expect((await exchange.createOrder(BTC, 'market', 'buy', 1, 100)).status).toBe('closed');
+      });
+
+      // retry and translateCcxtError tell the two apart: an OperationFailed that is not a NetworkError is an unknown outcome of its own
+      it('should throw for statusUnknown an OperationFailed that is not a NetworkError', async () => {
+        MockCCXTExchange.creationFaults = ['statusUnknown'];
+        await serveCandles(1);
+        const failure = await exchange.createOrder(BTC, 'market', 'buy', 1, 100).catch((error: unknown) => error);
+        expect({ isOperationFailed: failure instanceof MockOperationFailed, isNetworkError: failure instanceof MockNetworkError }).toEqual({
+          isOperationFailed: true,
+          isNetworkError: false,
+        });
+      });
+    });
   });
 
   describe('reset', () => {
@@ -325,9 +937,15 @@ describe('MockCCXTExchange', () => {
       mockTrades: MockCCXTExchange.mockTrades,
       predefinedCandles: MockCCXTExchange.predefinedCandles,
       predefinedCandlesIndex: MockCCXTExchange.predefinedCandlesIndex,
+      matchesOrdersAtCreation: MockCCXTExchange.matchesOrdersAtCreation,
+      creationFaults: MockCCXTExchange.creationFaults,
+      accountCalls: MockCCXTExchange.accountCalls,
+      clients: MockCCXTExchange.clients,
+      balances: MockCCXTExchange.getBalances(),
+      orders: MockCCXTExchange.getOrders(),
     });
 
-    it('should put back every static a scenario sets', () => {
+    it('should put back every static a scenario sets, and the account as it is at load', async () => {
       MockCCXTExchange.simulatedGaps = [{ start: 0, end: ONE_MINUTE }];
       MockCCXTExchange.shouldThrowError = true;
       MockCCXTExchange.networkErrorsToThrow = 2;
@@ -337,6 +955,11 @@ describe('MockCCXTExchange', () => {
       MockCCXTExchange.emitFutureCandles = true;
       MockCCXTExchange.mockTrades = [{ id: 'trade' }];
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }]);
+      MockCCXTExchange.matchesOrdersAtCreation = false;
+      MockCCXTExchange.creationFaults = ['answerLost'];
+      MockCCXTExchange.setBalances({ BTC: 3 });
+      MockCCXTExchange.addOpenOrder({ symbol: 'BTC/USDT', side: 'sell', type: 'limit', amount: 1, price: 120 });
+      await new MockCCXTExchange({}).fetchBalance();
 
       MockCCXTExchange.reset();
 
@@ -351,6 +974,17 @@ describe('MockCCXTExchange', () => {
         mockTrades: [],
         predefinedCandles: {},
         predefinedCandlesIndex: {},
+        matchesOrdersAtCreation: true,
+        creationFaults: [],
+        accountCalls: [],
+        clients: [],
+        balances: {
+          USDT: { free: 10000, used: 0, total: 10000 },
+          BTC: { free: 1, used: 0, total: 1 },
+          ETH: { free: 10, used: 0, total: 10 },
+          LTC: { free: 10, used: 0, total: 10 },
+        },
+        orders: [],
       });
     });
   });
