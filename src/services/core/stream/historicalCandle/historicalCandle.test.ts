@@ -4,6 +4,8 @@ import { TradingPair } from '@models/utility.types';
 import { info, warning } from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
 import { toISOString } from '@utils/date/date.utils';
+import { GekkoError } from '@errors/gekko.error';
+import { MAX_GAP_FILL_MINUTES } from '@services/core/stream/validation/fillCandleGap.const';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EMPTY_FIRST_PAGE_RETRIES } from './historicalCandle.const';
 import { HistoricalCandleError } from './historicalCandle.error';
@@ -19,9 +21,12 @@ const START = Date.UTC(2023, 0, 1);
 const minute = (n: number) => START + n * ONE_MINUTE;
 const candleAt = (start: number): Candle => ({ start, open: 1, high: 2, low: 0.5, close: 1.5, volume: 10 });
 
-/** An exchange holding the minutes `0` to `lastMinute` and serving `pageSize` candles from the first minute at or after `from` */
+/**
+ * An exchange holding the minutes `0` to `lastMinute`, but those of `gap` (first and last minutes missing), and serving `pageSize`
+ * candles from the first minute it holds at or after `from`, as Binance does
+ */
 const serve =
-  (lastMinute: number, pageSize: number) =>
+  (lastMinute: number, pageSize: number, gap?: [number, number]) =>
   async (_symbol: TradingPair, { from }: { from: number }): Promise<Candle[]> => {
     const candles: Candle[] = [];
     for (
@@ -29,7 +34,7 @@ const serve =
       start <= minute(lastMinute) && candles.length < pageSize;
       start += ONE_MINUTE
     )
-      candles.push(candleAt(start));
+      if (!gap || start < minute(gap[0]) || start > minute(gap[1])) candles.push(candleAt(start));
     return candles;
   };
 
@@ -137,9 +142,91 @@ describe('HistoricalCandleStream', () => {
       ${'request each page from the millisecond after the last candle'} | ${() => fetchOHLCV.mock.calls.map(([, { from }]) => from)} | ${[minute(0), minute(1) + 1, minute(3) + 1]}
       ${'end the stream'}                                               | ${() => stream.readableEnded}                              | ${true}
       ${'log the number of candles pushed when done'}                   | ${() => vi.mocked(info).mock.lastCall}                     | ${['stream', '[BTC/USDT] Fetched 5 candles']}
+      ${'not warn'}                                                     | ${() => vi.mocked(warning).mock.calls}                     | ${[]}
     `('should $description', ({ actual, expected }) => {
       expect(actual()).toEqual(expected);
     });
+  });
+
+  // The candles after the range were dropped and the minutes the exchange skipped before them with them, without a word: a
+  // re-import of the range never got them, and a backtest of it was refused for want of them
+  describe.each`
+    pageSize | pages
+    ${10}    | ${'one page'}
+    ${2}     | ${'two pages'}
+  `('when the exchange skips the last minutes of the range, but has later ones, read in $pages', ({ pageSize }) => {
+    let stream: HistoricalCandleStream;
+    let starts: number[];
+
+    beforeEach(async () => {
+      // The exchange skips the minutes 3 to 7, and the range ends at 5
+      fetchOHLCV.mockImplementation(serve(20, pageSize, [3, 7]));
+      stream = createStream(5);
+      starts = await readAll(stream);
+    });
+
+    it.each`
+      description                                                              | actual                                 | expected
+      ${'push the candles of the range received'}                              | ${() => starts}                        | ${[0, 1, 2].map(minute)}
+      ${'end the stream'}                                                      | ${() => stream.readableEnded}          | ${true}
+      ${'warn with the minutes it skipped, the next one and what is left out'} | ${() => vi.mocked(warning).mock.calls} | ${[['stream', `[BTC/USDT] The exchange has no candle from ${toISOString(minute(3))} to ${toISOString(minute(5))}, the end of the range, its next one being at ${toISOString(minute(8))}: ending the history of this pair early, without its last 3 minutes.`]]}
+    `('should $description', ({ actual, expected }) => {
+      expect(actual()).toEqual(expected);
+    });
+  });
+
+  it.each`
+    gap       | lastMinuteOfRange | from | missing
+    ${[3, 7]} | ${3}              | ${3} | ${'1 minute'}
+    ${[0, 7]} | ${5}              | ${0} | ${'6 minutes'}
+  `(
+    'should warn that the history ends without its last $missing when the exchange skips the minutes $gap and the range ends at $lastMinuteOfRange',
+    async ({ gap, lastMinuteOfRange, from, missing }) => {
+      fetchOHLCV.mockImplementation(serve(20, 10, gap));
+      await readAll(createStream(lastMinuteOfRange));
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        'stream',
+        [
+          `[BTC/USDT] The exchange has no candle from ${toISOString(minute(from))} to ${toISOString(minute(lastMinuteOfRange))}, the end of the range,`,
+          `its next one being at ${toISOString(minute(8))}: ending the history of this pair early, without its last ${missing}.`,
+        ].join(' '),
+      );
+    },
+  );
+
+  // Downstream, the gap of one pair among several shows only minute after minute: the gap filler filled it to its end however long
+  // it was, and an import stored weeks of flat candles
+  describe.each`
+    pageSize | pages
+    ${10}    | ${'one page'}
+    ${1}     | ${'two pages'}
+  `(`when the exchange skips more than ${MAX_GAP_FILL_MINUTES} minutes of the range, read in $pages`, ({ pageSize }) => {
+    let stream: HistoricalCandleStream;
+    let failure: unknown;
+
+    beforeEach(async () => {
+      // The exchange skips the minutes 1 to MAX_GAP_FILL_MINUTES + 1
+      fetchOHLCV.mockImplementation(serve(MAX_GAP_FILL_MINUTES + 20, pageSize, [1, MAX_GAP_FILL_MINUTES + 1]));
+      stream = createStream(MAX_GAP_FILL_MINUTES + 10);
+      failure = await readAll(stream).catch(error => error);
+    });
+
+    it.each`
+      description                                     | actual                                 | expected
+      ${'fail with a GekkoError'}                     | ${() => failure instanceof GekkoError} | ${true}
+      ${'name the pair, the gap and the bound'}       | ${() => (failure as Error).message}    | ${`[STREAM] The exchange has no BTC/USDT candle from ${toISOString(minute(1))} to ${toISOString(minute(MAX_GAP_FILL_MINUTES + 1))} (${MAX_GAP_FILL_MINUTES + 1} minutes): refusing to fill more than ${MAX_GAP_FILL_MINUTES} minutes with empty candles.`}
+      ${'not end the stream as if it were complete'}  | ${() => stream.readableEnded}          | ${false}
+      ${'request no page after the one with the gap'} | ${() => fetchOHLCV.mock.calls.length}  | ${pageSize === 1 ? 2 : 1}
+    `('should $description', ({ actual, expected }) => {
+      expect(actual()).toEqual(expected);
+    });
+  });
+
+  it(`should push the candles around a gap of ${MAX_GAP_FILL_MINUTES} minutes, which the gap filler fills`, async () => {
+    fetchOHLCV.mockImplementation(serve(MAX_GAP_FILL_MINUTES + 20, 10, [1, MAX_GAP_FILL_MINUTES]));
+    expect(await readAll(createStream(MAX_GAP_FILL_MINUTES + 2))).toEqual(
+      [0, MAX_GAP_FILL_MINUTES + 1, MAX_GAP_FILL_MINUTES + 2].map(minute),
+    );
   });
 
   describe('progress', () => {
@@ -171,7 +258,7 @@ describe('HistoricalCandleStream', () => {
       description                                         | actual                                    | expected
       ${'push the candles received'}                      | ${() => starts}                           | ${[0, 1, 2].map(minute)}
       ${'end the stream'}                                 | ${() => stream.readableEnded}             | ${true}
-      ${'warn with the last minute received and the end'} | ${() => vi.mocked(warning).mock.lastCall} | ${['stream', `[BTC/USDT] The exchange returned no candle after ${toISOString(minute(2))}, the last minute received, although the range ends at ${toISOString(minute(4))}: ending the history of this pair early.`]}
+      ${'warn with the last minute received and the end'} | ${() => vi.mocked(warning).mock.lastCall} | ${['stream', `[BTC/USDT] The exchange returned no candle after ${toISOString(minute(2))}, the last minute received, although the range ends at ${toISOString(minute(4))}: ending the history of this pair early, without its last 2 minutes.`]}
     `('should $description', ({ actual, expected }) => {
       expect(actual()).toEqual(expected);
     });

@@ -77,6 +77,24 @@ describe('MultiAssetStream', () => {
     });
   });
 
+  describe('pairs whose stream ended', () => {
+    const minute = (n: number) => Date.UTC(2024, 0, 1, 0, n);
+
+    beforeEach(() => {
+      // BTC's stream ended with its candle of minute 3, as the synchronised stream reports it
+      vi.mocked(synchronizeStreams).mock.calls[0][1]!.onPairEnd!('BTC/USDT', minute(3));
+    });
+
+    it.each`
+      pair          | at   | expected
+      ${'BTC/USDT'} | ${4} | ${true}
+      ${'BTC/USDT'} | ${3} | ${false}
+      ${'ETH/USDT'} | ${4} | ${false}
+    `('should tell that the stream of $pair ended before minute $at: $expected', ({ pair, at, expected }) => {
+      expect(stream.hasEndedBefore(pair, minute(at))).toBe(expected);
+    });
+  });
+
   describe('when destroyed', () => {
     it.each`
       error                   | description

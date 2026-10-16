@@ -41,6 +41,16 @@ const throwUnreadable = () => {
   throw new Error('unreadable');
 };
 
+/** The `hasEndedBefore` of a stream whose `pair` ended with its candle of `lastMinute` */
+const endedAt =
+  (pair: TradingPair, lastMinute: number): FillCandleGapOptions['hasEndedBefore'] =>
+  (asked, minute) =>
+    asked === pair && at(lastMinute) < minute;
+
+/** The refusal of a gap of `pair` from the minute `from` to the minute `to`, both missing */
+const refusal = (pair: TradingPair, from: number, to: number) =>
+  `[STREAM] No ${pair} candle from ${toISOString(at(from))} to ${toISOString(at(to))} (${to - from + 1} minutes): refusing to fill more than ${MAX_GAP_FILL_MINUTES} minutes with empty candles`;
+
 describe('FillCandleGapStream', () => {
   describe('complete buckets', () => {
     it('should push complete consecutive buckets as they are', async () => {
@@ -173,6 +183,90 @@ describe('FillCandleGapStream', () => {
         `Partial gap closed: BTC/USDT is back at ${toISOString(at(2))}`,
         `Partial gap closed: ETH/USDT is back at ${toISOString(at(3))}`,
       ]);
+    });
+
+    it(`should fill a partial gap of ${MAX_GAP_FILL_MINUTES} minutes`, async () => {
+      await run([
+        bucketAt(0, ETH, BTC),
+        ...range(1, MAX_GAP_FILL_MINUTES + 1).map(minute => bucketAt(minute, ETH)),
+        bucketAt(MAX_GAP_FILL_MINUTES + 1, ETH, BTC),
+      ]);
+      expect(warning).toHaveBeenLastCalledWith(
+        'stream',
+        `Partial gap closed: BTC/USDT is back at ${toISOString(at(MAX_GAP_FILL_MINUTES + 1))}, ${MAX_GAP_FILL_MINUTES} minutes filled with empty candles from ${toISOString(at(1))}`,
+      );
+    });
+
+    // A pair suspended for weeks while another traded was filled minute after minute to the end, a total gap only being bounded
+    it(`should refuse to fill a partial gap longer than ${MAX_GAP_FILL_MINUTES} minutes, naming the pair`, async () => {
+      await expect(
+        run([bucketAt(0, ETH, BTC), ...range(1, MAX_GAP_FILL_MINUTES + 2).map(minute => bucketAt(minute, ETH))]),
+      ).rejects.toThrow(refusal(BTC, 1, MAX_GAP_FILL_MINUTES + 1));
+    });
+
+    it.each`
+      case                                  | input
+      ${'a total gap that lengthens it'}    | ${[bucketAt(0, ETH, BTC), ...range(1, 6).map(minute => bucketAt(minute, ETH)), bucketAt(MAX_GAP_FILL_MINUTES + 2, ETH, BTC)]}
+      ${'a total gap of the most it fills'} | ${[bucketAt(0, ETH, BTC), bucketAt(MAX_GAP_FILL_MINUTES + 1, ETH)]}
+    `(`should refuse a partial gap longer than ${MAX_GAP_FILL_MINUTES} minutes with $case`, async ({ input }) => {
+      await expect(run(input)).rejects.toThrow(refusal(BTC, 1, MAX_GAP_FILL_MINUTES + 1));
+    });
+
+    // The buckets written before the refusal still come through: read from the clock the refusal left, each made up a total gap
+    it('should push and warn about nothing more once it refused a gap', async () => {
+      const failure = await run([bucketAt(0, ETH, BTC), ...range(1, MAX_GAP_FILL_MINUTES + 4).map(minute => bucketAt(minute, ETH))]).then(
+        () => undefined,
+        (error: Error) => error.message,
+      );
+      expect({ failure, warnings: warnings() }).toEqual({
+        failure: refusal(BTC, 1, MAX_GAP_FILL_MINUTES + 1),
+        warnings: [`Partial gap: no BTC/USDT candle at ${toISOString(at(1))}, filling with empty candles until it comes back`],
+      });
+    });
+
+    it.each`
+      last | filled
+      ${1} | ${'1 minute filled'}
+      ${3} | ${'3 minutes filled'}
+    `('should tell, when the stream ends with a partial gap open, that $filled', async ({ last, filled }) => {
+      await run([bucketAt(0, ETH, BTC), ...range(1, last + 1).map(minute => bucketAt(minute, ETH))]);
+      expect(warning).toHaveBeenLastCalledWith(
+        'stream',
+        `Partial gap still open at the end of the run: no BTC/USDT candle since ${toISOString(at(1))}, ${filled} with empty candles`,
+      );
+    });
+
+    it('should tell about each partial gap still open when the stream ends', async () => {
+      await run([bucketAt(0, ETH, BTC, 'SOL/USDT'), bucketAt(1, ETH, 'SOL/USDT'), bucketAt(2, ETH)], undefined, [ETH, BTC, 'SOL/USDT']);
+      expect(warnings().slice(-2)).toEqual([
+        `Partial gap still open at the end of the run: no BTC/USDT candle since ${toISOString(at(1))}, 2 minutes filled with empty candles`,
+        `Partial gap still open at the end of the run: no SOL/USDT candle since ${toISOString(at(2))}, 1 minute filled with empty candles`,
+      ]);
+    });
+  });
+
+  describe('pairs whose stream has ended', () => {
+    it.each`
+      case                                          | input                                                                                 | hasEndedBefore     | expected
+      ${'after its last candle'}                    | ${[bucketAt(0, ETH, BTC), bucketAt(1, ETH, BTC), bucketAt(2, BTC), bucketAt(3, BTC)]} | ${endedAt(ETH, 1)} | ${['ETH0 BTC0', 'ETH1 BTC1', 'BTC2', 'BTC3']}
+      ${'through a total gap'}                      | ${[bucketAt(0, ETH, BTC), bucketAt(1, BTC), bucketAt(4, BTC)]}                        | ${endedAt(ETH, 0)} | ${['ETH0 BTC0', 'BTC1', 'BTC2~', 'BTC3~', 'BTC4']}
+      ${'but filled where its last candles follow'} | ${[bucketAt(0, ETH, BTC), bucketAt(1, BTC), bucketAt(2, ETH, BTC), bucketAt(3, BTC)]} | ${endedAt(ETH, 2)} | ${['ETH0 BTC0', 'ETH1~ BTC1', 'ETH2 BTC2', 'BTC3']}
+    `('should leave out a pair whose stream ended, $case: $expected', async ({ input, hasEndedBefore, expected }) => {
+      const buckets = await run(input, { hasEndedBefore });
+      expect(describeBuckets(buckets)).toEqual(expected);
+    });
+
+    it('should not warn about a pair whose stream ended', async () => {
+      await run([bucketAt(0, ETH, BTC), bucketAt(1, BTC), bucketAt(2, BTC)], { hasEndedBefore: endedAt(ETH, 0) });
+      expect(warning).not.toHaveBeenCalled();
+    });
+
+    // The history of a delisted pair ended early, and the pair was filled with flat candles to the end of a two-pair import
+    it(`should push BTC${MAX_GAP_FILL_MINUTES + 1} alone, ${MAX_GAP_FILL_MINUTES + 1} minutes after ETH's stream ended, neither filling ETH nor refusing`, async () => {
+      const buckets = await run([bucketAt(0, ETH, BTC), ...range(1, MAX_GAP_FILL_MINUTES + 2).map(minute => bucketAt(minute, BTC))], {
+        hasEndedBefore: endedAt(ETH, 0),
+      });
+      expect(describeBuckets(buckets).at(-1)).toBe(`BTC${MAX_GAP_FILL_MINUTES + 1}`);
     });
   });
 

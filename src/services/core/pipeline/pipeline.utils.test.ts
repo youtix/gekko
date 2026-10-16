@@ -189,10 +189,14 @@ describe('Pipeline Utils', () => {
   describe('streamPipelines', () => {
     const mockPlugins = [] as any;
 
-    // Writes one bucket holding a candle of each symbol, in order, into the gap filler and returns the symbols of each bucket
-    // it emits: a gap filler emits only the pairs it was built with, in its own order
-    const passThroughGapFiller = async (gapFiller: FillCandleGapStream, symbols: string[]) => {
-      gapFiller.end(new Map(symbols.map(symbol => [symbol, { start: 0, open: 1, high: 1, low: 1, close: 1, volume: 1 }])));
+    // Writes one bucket per list of symbols, a minute apart from 0, each holding a candle of each symbol in order, into the gap
+    // filler and returns the symbols of each bucket it emits: a gap filler emits only the pairs it was built with, in its own order
+    const passThroughGapFiller = async (gapFiller: FillCandleGapStream, ...bucketsSymbols: string[][]) => {
+      for (const [minute, symbols] of bucketsSymbols.entries()) {
+        const candle = { start: minute * ONE_MINUTE, open: 1, high: 1, low: 1, close: 1, volume: 1 };
+        gapFiller.write(new Map(symbols.map(symbol => [symbol, candle])));
+      }
+      gapFiller.end();
       const buckets: CandleBucket[] = await gapFiller.toArray();
       return buckets.map(bucket => [...bucket.keys()]);
     };
@@ -288,6 +292,21 @@ describe('Pipeline Utils', () => {
         await launchRealtime('1h', 2, watchedPairs);
         const gapFiller = vi.mocked(pipeline).mock.lastCall![3] as FillCandleGapStream;
         expect(await passThroughGapFiller(gapFiller, ['BTC/USDT'])).toEqual([]);
+      });
+
+      // Left out, the pair would make the timeframe batcher refuse the bucket: the live stream of the pair takes over from its history
+      it('should have the gap filler fill a pair whose warmup history has ended rather than leave it out', async () => {
+        vi.mocked(MultiAssetHistoricalStream).mockImplementation(function () {
+          const history = pendingStream() as MultiAssetHistoricalStream;
+          history.hasEndedBefore = () => true;
+          return history;
+        });
+        await launchRealtime('1h', 2, [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }]);
+        const gapFiller = vi.mocked(pipeline).mock.lastCall![3] as FillCandleGapStream;
+        expect(await passThroughGapFiller(gapFiller, ['BTC/USDT', 'ETH/USDT'], ['BTC/USDT'])).toEqual([
+          ['BTC/USDT', 'ETH/USDT'],
+          ['BTC/USDT', 'ETH/USDT'],
+        ]);
       });
 
       // From the start of the candle `candleCount` candles before the one in progress to the last closed minute. The window
@@ -509,6 +528,21 @@ describe('Pipeline Utils', () => {
         await launchImporter('2024-03-15T09:00:00.000Z');
         const gapFiller = vi.mocked(pipeline).mock.lastCall![2] as FillCandleGapStream;
         expect(await passThroughGapFiller(gapFiller, ['BTC/USDT'])).toEqual([['BTC/USDT']]);
+      });
+
+      // A pair whose history ended early was filled with flat candles to the end of the range, which a backtest then traded on
+      it('should have the gap filler leave out a pair from the minute the history says it ended before', async () => {
+        vi.mocked(MultiAssetHistoricalStream).mockImplementation(function () {
+          return {
+            hasEndedBefore: (pair: TradingPair, minute: EpochTimeStamp) => pair === 'ETH/USDT' && minute > 0,
+          } as MultiAssetHistoricalStream;
+        });
+        await launchImporter('2024-03-15T09:00:00.000Z');
+        const gapFiller = vi.mocked(pipeline).mock.lastCall![2] as FillCandleGapStream;
+        expect(await passThroughGapFiller(gapFiller, ['BTC/USDT', 'ETH/USDT'], ['BTC/USDT'])).toEqual([
+          ['BTC/USDT', 'ETH/USDT'],
+          ['BTC/USDT'],
+        ]);
       });
 
       it('should hand the plugins to the plugins stream', async () => {

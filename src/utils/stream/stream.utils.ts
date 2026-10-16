@@ -8,16 +8,27 @@ import { Readable } from 'node:stream';
 
 type TradingPairCandle = { symbol: TradingPair; candle: Candle };
 
+export type SynchronizeStreamsOptions = {
+  /**
+   * Called when the stream of a pair ends, with the start of the last candle it delivered: the pair has no candle after it. A stream
+   * that ends before its first candle names no pair and is not reported. The call comes as soon as that candle is read, which can be
+   * well before the buckets downstream get to it: a consumer compares the start with the minute of the bucket it holds, so as not to
+   * take a pair missing from that bucket for gone for good when its last candles come after it.
+   */
+  onPairEnd?: (pair: TradingPair, lastCandleStart: EpochTimeStamp) => void;
+};
+
 /**
  * Synchronizes the candle streams of several pairs by timestamp. It waits until every stream still going has a candle, then emits
  * the earliest minute as a CandleBucket holding the candle of each stream at that minute, in the order of the streams: the callers
  * pass them in the order of `watch.assets`, and a strategy trades the first pair of the bucket.
  *
- * A stream that ends lets the others go on. A stream that fails fails the output with its error, and one that closes without ending
- * (destroyed without an error) or delivers a candle whose start is not a finite number fails it with a GekkoError, rather than leave
- * its pair out of every later bucket, or the buckets waiting for it, without a word. Destroying the output destroys every stream.
+ * A stream that ends lets the others go on, and is reported to `onPairEnd`. A stream that fails fails the output with its error, and
+ * one that closes without ending (destroyed without an error) or delivers a candle whose start is not a finite number fails it with
+ * a GekkoError, rather than leave its pair out of every later bucket, or the buckets waiting for it, without a word. Destroying the
+ * output destroys every stream.
  */
-export const synchronizeStreams = (streams: Readable[]): Readable => {
+export const synchronizeStreams = (streams: Readable[], { onPairEnd }: SynchronizeStreamsOptions = {}): Readable => {
   if (streams.length === 0) return Readable.from([]);
 
   let reading = false;
@@ -120,6 +131,9 @@ export const synchronizeStreams = (streams: Readable[]): Readable => {
     s.on('end', () => {
       ended[i] = true;
       streamsEnded++;
+      // 'end' comes once every candle of the stream has been read: the last one read is its last
+      const last = lastRead[i];
+      if (last) onPairEnd?.(last.symbol, last.candle.start);
       tryProcess();
     });
     s.on('error', err => {

@@ -2,6 +2,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
+import { sortBy } from 'lodash-es';
 import { Readable } from 'node:stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { synchronizeStreams } from './stream.utils';
@@ -81,6 +82,32 @@ describe('synchronizeStreams', () => {
 
     it('should end at once, without a bucket, when given no stream', async () => {
       expect(await outcomeOf(synchronizeStreams([]))).toEqual([]);
+    });
+  });
+
+  // The gap filler could not tell a pair whose stream had ended from one missing for a while: a two-pair import filled the pair whose
+  // history ended early with flat candles to the end of the range
+  describe('ends', () => {
+    it.each`
+      description                                                        | btc       | eth             | expected
+      ${'the start of the last candle of each stream that ends'}         | ${[0, 1]} | ${[0, 1, 2]}    | ${[[BTC, minute(1)], [ETH, minute(2)]]}
+      ${'the start of the last candle of a stream, which follows a gap'} | ${[0, 5]} | ${[0, 1, 2, 3]} | ${[[BTC, minute(5)], [ETH, minute(3)]]}
+      ${'no stream that ends before its first candle'}                   | ${[]}     | ${[0]}          | ${[[ETH, minute(0)]]}
+    `('should report $description', async ({ btc, eth, expected }) => {
+      const onPairEnd = vi.fn();
+      await synchronizeStreams([finiteStream(BTC, btc), finiteStream(ETH, eth)], { onPairEnd }).toArray();
+      expect(sortBy(onPairEnd.mock.calls, ([pair]) => pair)).toEqual(expected);
+    });
+
+    it('should not report the end of a stream that fails', async () => {
+      const onPairEnd = vi.fn();
+      const failing = liveStream();
+      const settled = outcomeOf(synchronizeStreams([failing, finiteStream(ETH, [0, 1])], { onPairEnd }));
+      failing.push(candleOf(BTC, minute(0)));
+      await settle();
+      failing.destroy(new Error('failed'));
+      await settled;
+      expect(onPairEnd).not.toHaveBeenCalledWith(BTC, expect.anything());
     });
   });
 

@@ -35,7 +35,8 @@ const buildRealtimePipeline = async (plugins: Plugin[]) => {
       new RejectFutureCandleStream(),
       new RejectDuplicateCandleStream(),
       // A pair listed after the start of the warmup has no candle in its first buckets: they are dropped rather than handed to
-      // the plugins incomplete (the timeframe batcher refuses a bucket that misses a pair)
+      // the plugins incomplete (the timeframe batcher refuses a bucket that misses a pair). For the same reason a pair whose
+      // history ends early is filled, not left out, until its live stream delivers it again or gives up on it.
       new FillCandleGapStream(
         pairs.map(p => p.symbol),
         { dropIncompleteLeadingBuckets: true },
@@ -70,8 +71,14 @@ const buildImporterPipeline = async (plugins: Plugin[]) => {
   const end = isEndClosed ? daterange.end : lastClosedMinute;
 
   const stream = new MultiAssetHistoricalStream({ daterange: { start: daterange.start, end }, tickrate, pairs });
+  // A pair whose history ends early keeps its remaining minutes missing, as when it is imported alone, rather than getting them
+  // made up flat to the end of the range
+  const gapFiller = new FillCandleGapStream(
+    pairs.map(p => p.symbol),
+    { hasEndedBefore: (pair, minute) => stream.hasEndedBefore(pair, minute) },
+  );
   const sink = new PluginsStream(plugins);
-  await runPipeline(sink, () => pipeline(stream, new RejectFutureCandleStream(), new FillCandleGapStream(pairs.map(p => p.symbol)), sink));
+  await runPipeline(sink, () => pipeline(stream, new RejectFutureCandleStream(), gapFiller, sink));
 };
 
 /**

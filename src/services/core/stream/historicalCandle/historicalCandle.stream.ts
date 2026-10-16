@@ -1,8 +1,10 @@
 import { ONE_MINUTE } from '@constants/time.const';
+import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';
 import { EMPTY_FIRST_PAGE_RETRIES } from '@services/core/stream/historicalCandle/historicalCandle.const';
 import { HistoricalCandleError } from '@services/core/stream/historicalCandle/historicalCandle.error';
+import { MAX_GAP_FILL_MINUTES } from '@services/core/stream/validation/fillCandleGap.const';
 import { Exchange } from '@services/exchange/exchange.types';
 import { inject } from '@services/injecter/injecter';
 import { info, warning } from '@services/logger';
@@ -21,7 +23,8 @@ export interface HistoricalCandleStreamParams {
 
 /**
  * Reads the 1-minute candles of one pair from the exchange, page by page, from `daterange.start` to `daterange.end` (both
- * inclusive). The stream is pulled: the next page is requested only once the consumer has taken the current one.
+ * inclusive). The stream is pulled: the next page is requested only once the consumer has taken the current one. It fails on a gap
+ * in the history longer than the gap filler fills (MAX_GAP_FILL_MINUTES), and warns when the history ends before the range does.
  */
 export class HistoricalCandleStream extends Readable {
   private readonly symbol: TradingPair;
@@ -42,6 +45,8 @@ export class HistoricalCandleStream extends Readable {
   private emptyFirstPages: number;
   private pushedCandles: number;
   private lastProgressLog: number;
+  /** The start of the latest candle of the range received so far, to measure the gap before the next one */
+  private lastCandleStart?: EpochTimeStamp;
 
   constructor({ daterange, tickrate, symbol }: HistoricalCandleStreamParams) {
     super({ objectMode: true });
@@ -133,10 +138,56 @@ export class HistoricalCandleStream extends Readable {
     const lastStart = last(candles)!.start;
     this.nextFrom = lastStart + 1;
     this.isLastPage = lastStart >= this.endDate;
+    if (!this.checkGaps(candles)) return;
     // The exchange also serves the minutes after the range, up to the one in progress
     this.page = this.isLastPage ? candles.filter(({ start }) => start <= this.endDate) : candles;
     this.cursor = 0;
     if (this.pushPage()) this.scheduleFetch();
+  }
+
+  /**
+   * Checks the minutes of the range the page skips. A gap between two candles longer than the gap filler fills fails the stream
+   * at once: downstream, the gap of one pair among several shows only minute after minute, and the filler would make up a week of
+   * flat candles, which an import stores, before refusing it. On the last page, the minutes between the last candle of the range
+   * and its end, which the exchange skipped although it has later candles, used to be dropped without a word: they are warned
+   * about. Returns false once the stream is destroyed.
+   */
+  private checkGaps(candles: Candle[]): boolean {
+    let previousStart = this.lastCandleStart;
+    let nextStart: EpochTimeStamp | undefined;
+    for (const { start } of candles) {
+      if (start > this.endDate) {
+        nextStart = Math.min(nextStart ?? start, start);
+        continue;
+      }
+      if (previousStart !== undefined && start - previousStart > (MAX_GAP_FILL_MINUTES + 1) * ONE_MINUTE) {
+        const minutes = (start - previousStart) / ONE_MINUTE - 1;
+        this.destroy(
+          new GekkoError(
+            'stream',
+            [
+              `The exchange has no ${this.symbol} candle from ${toISOString(previousStart + ONE_MINUTE)} to ${toISOString(start - ONE_MINUTE)}`,
+              `(${minutes} minutes): refusing to fill more than ${MAX_GAP_FILL_MINUTES} minutes with empty candles.`,
+            ].join(' '),
+          ),
+        );
+        return false;
+      }
+      previousStart = Math.max(previousStart ?? start, start);
+    }
+    this.lastCandleStart = previousStart;
+
+    if (this.isLastPage && nextStart !== undefined && (previousStart === undefined || previousStart < this.endDate)) {
+      const from = previousStart === undefined ? this.initialStartDate : previousStart + ONE_MINUTE;
+      warning(
+        'stream',
+        [
+          `[${this.symbol}] The exchange has no candle from ${toISOString(from)} to ${toISOString(this.endDate)}, the end of the range,`,
+          `its next one being at ${toISOString(nextStart)}: ${this.describeEarlyEnd(from)}`,
+        ].join(' '),
+      );
+    }
+    return true;
   }
 
   private onEmptyPage(): void {
@@ -146,7 +197,7 @@ export class HistoricalCandleStream extends Readable {
         'stream',
         [
           `[${this.symbol}] The exchange returned no candle after ${toISOString(this.nextFrom - 1)}, the last minute received,`,
-          `although the range ends at ${toISOString(this.endDate)}: ending the history of this pair early.`,
+          `although the range ends at ${toISOString(this.endDate)}: ${this.describeEarlyEnd(this.nextFrom - 1 + ONE_MINUTE)}`,
         ].join(' '),
       );
       this.finish();
@@ -157,6 +208,16 @@ export class HistoricalCandleStream extends Readable {
       return;
     }
     this.destroy(new HistoricalCandleError(this.symbol, { start: this.nextFrom, end: this.endDate }, this.emptyFirstPages));
+  }
+
+  /**
+   * What an early end leaves out of the history: the minutes from `firstMissing` to the end of the range. A multi-pair import used to
+   * fill them with flat candles while the other pairs went on, against what this line said; they stay missing now, as they do when
+   * the pair is imported alone, and the realtime gap filler fills them until the pair's live candles start, saying so.
+   */
+  private describeEarlyEnd(firstMissing: EpochTimeStamp): string {
+    const minutes = (this.endDate - firstMissing) / ONE_MINUTE + 1;
+    return `ending the history of this pair early, without its last ${minutes} ${pluralize('minute', minutes)}.`;
   }
 
   private finish(): void {
