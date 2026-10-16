@@ -16,7 +16,7 @@ import { FillCandleGapStream } from '../stream/validation/fillCandleGap.stream';
 import { RejectDuplicateCandleStream } from '../stream/validation/rejectDuplicateCandle.stream';
 import { RejectFutureCandleStream } from '../stream/validation/rejectFutureCandle.stream';
 
-const buildRealtimePipeline = async (plugins: Plugin[]) => {
+const buildRealtimePipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
   const { pairs, timeframe, warmup } = config.getWatch();
   // The clock is read once: the live stream of every pair starts with the minute in progress and the warmup history ends with the
   // minute before, so that every pair starts on the same minute and the history meets the live candles without a gap or an overlap,
@@ -42,20 +42,21 @@ const buildRealtimePipeline = async (plugins: Plugin[]) => {
         { dropIncompleteLeadingBuckets: true },
       ),
       sink,
+      ...abortOn(signal),
     ),
   );
 };
 
-const buildBacktestPipeline = async (plugins: Plugin[]) => {
+const buildBacktestPipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
   const { daterange, pairs } = config.getWatch();
   if (!daterange) throw new Error('daterange is not set');
 
   warning('stream', 'BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!');
   const sink = new PluginsStream(plugins);
-  await runPipeline(sink, () => pipeline(new MultiAssetBacktestStream({ daterange, pairs }), sink));
+  await runPipeline(sink, () => pipeline(new MultiAssetBacktestStream({ daterange, pairs }), sink, ...abortOn(signal)));
 };
 
-const buildImporterPipeline = async (plugins: Plugin[]) => {
+const buildImporterPipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
   const { daterange, tickrate, pairs } = config.getWatch();
   if (!daterange) throw new Error('daterange is not set');
 
@@ -78,13 +79,22 @@ const buildImporterPipeline = async (plugins: Plugin[]) => {
     { hasEndedBefore: (pair, minute) => stream.hasEndedBefore(pair, minute) },
   );
   const sink = new PluginsStream(plugins);
-  await runPipeline(sink, () => pipeline(stream, new RejectFutureCandleStream(), gapFiller, sink));
+  await runPipeline(sink, () => pipeline(stream, new RejectFutureCandleStream(), gapFiller, sink, ...abortOn(signal)));
 };
+
+/**
+ * The options that make pipeline() end the run once `signal` is aborted, to spread after the streams: pipeline() destroys every stream
+ * with an AbortError, the plugins stream finalises the plugins with it as their failure, then pipeline() rejects with it. Nothing
+ * without a signal, as main() runs: pipeline() then gets the streams alone, the plugins stream last, as it did before a run could be
+ * aborted, which the realtime e2e harness relies on until it ends its runs with a signal.
+ */
+const abortOn = (signal?: AbortSignal) => (signal ? [{ signal }] : []);
 
 /**
  * pipeline() rejects with the first error of the chain. When a bucket fails and a stream upstream fails too during the
  * finalisation that follows, that first error is the upstream one, but the bucket's error is the one main() has to see (an
- * ApplicationStopError is a graceful stop, not a crash): it wins.
+ * ApplicationStopError is a graceful stop, not a crash): it wins. So it does over the AbortError of an abort that came while the
+ * bucket failed: the AbortError is the run's failure only when no bucket failed.
  */
 const runPipeline = async (sink: PluginsStream, run: () => Promise<void>) => {
   try {

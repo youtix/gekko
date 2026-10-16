@@ -51,17 +51,27 @@ vi.mock('@plugins/index', () => ({}));
 
 describe('Pipeline Service', () => {
   describe('launchStream', () => {
+    const context: PipelineContext = [{ name: 'TestPlugin', plugin: {} as any }];
+    const { signal } = new AbortController();
+
     it.each`
       mode
       ${'realtime'}
       ${'backtest'}
-    `('should call the stream function of the $mode mode', async ({ mode }) => {
+    `('should call the stream function of the $mode mode with the plugins and no signal', async ({ mode }) => {
       vi.mocked(config.getWatch).mockReturnValue({ mode } as any);
-
-      const context: PipelineContext = [{ name: 'TestPlugin', plugin: {} as any }];
       await pipelineModule.launchStream(context);
+      expect(streamPipelines[mode as 'realtime' | 'backtest']).toHaveBeenCalledWith([expect.anything()], undefined);
+    });
 
-      expect(streamPipelines[mode as 'realtime' | 'backtest']).toHaveBeenCalledWith([expect.anything()]);
+    it.each`
+      mode
+      ${'realtime'}
+      ${'backtest'}
+    `('should hand the stream function of the $mode mode the signal of the options', async ({ mode }) => {
+      vi.mocked(config.getWatch).mockReturnValue({ mode } as any);
+      await pipelineModule.launchStream(context, { signal });
+      expect(vi.mocked(streamPipelines[mode as 'realtime' | 'backtest']).mock.lastCall?.[1]).toBe(signal);
     });
   });
 
@@ -737,6 +747,26 @@ describe('Pipeline Service', () => {
 
       it('should inject into each plugin the services it asks for', () => {
         expect(launchedPlugins().map(({ services }) => services)).toEqual([{ exchange }, { storage }]);
+      });
+
+      it('should launch the stream of the mode without a signal', () => {
+        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][1]).toBeUndefined();
+      });
+    });
+
+    describe('with a signal', () => {
+      const { signal } = new AbortController();
+
+      beforeEach(async () => {
+        await pipelineModule.gekkoPipeline({ signal });
+      });
+
+      it('should run the steps in the documented order', () => {
+        expect(journal).toEqual(documentedOrder);
+      });
+
+      it('should hand the signal to the stream of the mode', () => {
+        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][1]).toBe(signal);
       });
     });
 

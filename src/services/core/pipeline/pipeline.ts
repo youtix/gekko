@@ -1,6 +1,6 @@
 import { ORDER_CANCELED_EVENT, ORDER_COMPLETED_EVENT, ORDER_ERRORED_EVENT, STRATEGY_CREATE_ORDER_EVENT } from '@constants/event.const';
 import { GekkoError } from '@errors/gekko.error';
-import { PipelineContext, PluginConstructor } from '@models/pipeline.types';
+import { GekkoPipelineOptions, PipelineContext, PluginConstructor } from '@models/pipeline.types';
 import * as pluginList from '@plugins/index';
 import { PluginsNames } from '@plugins/plugin.types';
 import { config } from '@services/configuration/configuration';
@@ -15,9 +15,9 @@ import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import { PluginsEmitSameEventError } from './pipeline.error';
 import { streamPipelines } from './pipeline.utils';
 
-export const launchStream = async (context: PipelineContext) => {
+export const launchStream = async (context: PipelineContext, { signal }: GekkoPipelineOptions = {}) => {
   const plugins = compact(map(context, p => p.plugin));
-  await streamPipelines[config.getWatch().mode](plugins);
+  await streamPipelines[config.getWatch().mode](plugins, signal);
   return context;
 };
 
@@ -171,7 +171,19 @@ export const checkDateRange = async (context: PipelineContext) => {
   return context;
 };
 
-export const gekkoPipeline = () =>
+/**
+ * Runs Gekko on its configuration: checks it and the plugins, creates the plugins, wires their events and hands them their services,
+ * then streams the candles of the mode through them. Rejects with the error of the first step that fails. Once the stream runs, settles
+ * when it is torn down and the plugins are finalised: resolves when it ended (a backtest or an import at the end of its range), rejects
+ * with the error that ended the run otherwise.
+ *
+ * `signal` is the one way to end a run from code, and the only end of a realtime run but a failure or the circuit breaker's stop: its
+ * live stream never ends. Once it is aborted, every stream of the run is destroyed, the plugins are finalised with an AbortError as the
+ * failure that stopped the run (the analyzers report its message as their `interruption`), then the run rejects with that AbortError,
+ * whose cause is the reason of the abort, unless a bucket failed meanwhile: its error stays the run's. main() passes no signal: SIGINT
+ * and SIGTERM close the storage and exit without finalising the plugins. The e2e harness ends its realtime runs with one.
+ */
+export const gekkoPipeline = (options: GekkoPipelineOptions = {}) =>
   [
     checkDateRange,
     getPluginsStaticConfiguration,
@@ -185,4 +197,4 @@ export const gekkoPipeline = () =>
     wirePlugins,
     injectServices,
     launchStream,
-  ].reduce(async (params, fn) => fn(await params), Promise.resolve(config.getPlugins()));
+  ].reduce(async (context, step) => step(await context, options), Promise.resolve(config.getPlugins()));

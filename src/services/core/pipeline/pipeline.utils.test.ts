@@ -2,6 +2,7 @@ import { ONE_MINUTE } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
+import { Plugin } from '@plugins/plugin';
 import { config } from '@services/configuration/configuration';
 import { inject } from '@services/injecter/injecter';
 import { warning } from '@services/logger';
@@ -37,7 +38,9 @@ vi.mock('@utils/stream/stream.utils', () => ({
 
 vi.mock('@services/logger', () => ({
   debug: vi.fn(),
+  info: vi.fn(),
   warning: vi.fn(),
+  error: vi.fn(),
 }));
 
 vi.mock('stream/promises', () => ({
@@ -62,6 +65,15 @@ vi.mock('../stream/plugins.stream', () => ({
 vi.mock('../stream/realtime/realtime.stream', () => ({
   RealtimeStream: vi.fn(),
 }));
+
+// What every mode reads from the watch section: the pair, a past range, the timeframe and the warmup
+const EVERY_MODE_WATCH = {
+  pairs: [{ symbol: 'BTC/USDT' }],
+  timeframe: '1h',
+  warmup: { candleCount: 1, tickrate: 1000 },
+  daterange: { start: new Date('2023-01-01').getTime(), end: new Date('2023-01-02').getTime() },
+  tickrate: 500,
+};
 
 describe('Pipeline Utils', () => {
   describe('mergeSequentialStreams', () => {
@@ -442,6 +454,135 @@ describe('Pipeline Utils', () => {
 
       it.each(modes)('should reject the %s pipeline with the upstream error when no bucket failed', async mode => {
         await expect(launchFailing(mode)).rejects.toBe(upstreamError);
+      });
+    });
+
+    describe('with a signal', () => {
+      const modes = Object.keys(streamPipelines) as (keyof typeof streamPipelines)[];
+      const { signal } = new AbortController();
+      // The options pipeline() got after the streams, if any: its last argument
+      const lastArgument = () => vi.mocked(pipeline).mock.lastCall?.at(-1) as unknown;
+
+      beforeEach(() => {
+        (config.getWatch as Mock).mockReturnValue(EVERY_MODE_WATCH);
+        const pendingStream = () => new Readable({ objectMode: true, read() {} });
+        vi.mocked(MultiAssetHistoricalStream).mockImplementation(function () {
+          return pendingStream() as MultiAssetHistoricalStream;
+        });
+        vi.mocked(synchronizeStreams).mockReturnValue(pendingStream());
+      });
+
+      it.each(modes)('should hand pipeline() the signal after the streams in %s mode', async mode => {
+        await streamPipelines[mode](mockPlugins, signal);
+        expect((lastArgument() as { signal?: AbortSignal }).signal).toBe(signal);
+      });
+
+      it.each(modes)('should hand pipeline() the streams alone, the plugins stream last, without a signal in %s mode', async mode => {
+        await streamPipelines[mode](mockPlugins);
+        expect(lastArgument()).toBeInstanceOf(PluginsStream);
+      });
+    });
+
+    // On the real stream pipeline and plugins stream, from a source that never ends, as the live stream of a realtime run, or a backtest
+    // or an import still reading
+    describe.each(Object.keys(streamPipelines) as (keyof typeof streamPipelines)[])('when the %s run is aborted', mode => {
+      const reason = new Error('the run is over');
+      const bucketFailure = new Error('a bucket failed');
+      const bucket: CandleBucket = new Map([['BTC/USDT', { start: 0, open: 1, high: 1, low: 1, close: 1, volume: 1 }]]);
+      let source: Readable;
+      let controller: AbortController;
+      let plugin: Plugin;
+      let initialized: PromiseWithResolvers<void>;
+      let bucketStarted: PromiseWithResolvers<void>;
+      let bucketProcessed: PromiseWithResolvers<void>;
+      let failure: unknown;
+
+      // Starts the run, then waits until its plugin is initialised: an abort before would finalise no plugin. `settled` resolves to
+      // what the run rejected with.
+      const startRun = async () => {
+        const settled = streamPipelines[mode]([plugin], controller.signal).then(
+          () => 'resolved',
+          (rejection: unknown) => rejection,
+        );
+        await initialized.promise;
+        return { settled };
+      };
+
+      beforeEach(async () => {
+        const { pipeline: actualPipeline } = await vi.importActual<typeof import('stream/promises')>('stream/promises');
+        const { PluginsStream: ActualPluginsStream } =
+          await vi.importActual<typeof import('../stream/plugins.stream')>('../stream/plugins.stream');
+        const { RejectDuplicateCandleStream: ActualRejectDuplicateCandleStream } = await vi.importActual<
+          typeof import('../stream/validation/rejectDuplicateCandle.stream')
+        >('../stream/validation/rejectDuplicateCandle.stream');
+        vi.mocked(pipeline).mockImplementation(actualPipeline);
+        vi.mocked(PluginsStream).mockImplementation(function (plugins: Plugin[]) {
+          return new ActualPluginsStream(plugins);
+        });
+        vi.mocked(RejectDuplicateCandleStream).mockImplementation(function () {
+          return new ActualRejectDuplicateCandleStream();
+        });
+        source = new Readable({ objectMode: true, read() {} });
+        vi.mocked(MultiAssetHistoricalStream).mockImplementation(function () {
+          return source as MultiAssetHistoricalStream;
+        });
+        vi.mocked(MultiAssetBacktestStream).mockImplementation(function () {
+          return source as MultiAssetBacktestStream;
+        });
+        vi.mocked(synchronizeStreams).mockReturnValue(new Readable({ objectMode: true, read() {} }));
+        (config.getWatch as Mock).mockReturnValue(EVERY_MODE_WATCH);
+
+        controller = new AbortController();
+        initialized = Promise.withResolvers();
+        bucketStarted = Promise.withResolvers();
+        bucketProcessed = Promise.withResolvers();
+        plugin = {
+          emitterName: 'Stub',
+          processInitStream: vi.fn(async () => initialized.resolve()),
+          processInputStream: vi.fn(async () => {
+            bucketStarted.resolve();
+            await bucketProcessed.promise;
+          }),
+          processCloseStream: vi.fn(async () => undefined),
+          hasDeferredEvents: vi.fn(() => false),
+          broadcastDeferredEmit: vi.fn(async () => false),
+          countUndeliveredPayloads: vi.fn(() => new Map()),
+        } as unknown as Plugin;
+      });
+
+      describe('between two buckets', () => {
+        beforeEach(async () => {
+          const { settled } = await startRun();
+          controller.abort(reason);
+          failure = await settled;
+        });
+
+        it('should reject with an AbortError caused by the reason of the abort', () => {
+          expect(failure).toEqual(expect.objectContaining({ name: 'AbortError', cause: reason }));
+        });
+
+        it('should finalise the plugins with that AbortError as the failure', () => {
+          expect(plugin.processCloseStream).toHaveBeenCalledExactlyOnceWith(failure);
+        });
+      });
+
+      describe('while a bucket in progress fails', () => {
+        beforeEach(async () => {
+          const { settled } = await startRun();
+          source.push(bucket);
+          await bucketStarted.promise;
+          controller.abort(reason);
+          bucketProcessed.reject(bucketFailure);
+          failure = await settled;
+        });
+
+        it('should reject with the error of the bucket rather than the AbortError', () => {
+          expect(failure).toBe(bucketFailure);
+        });
+
+        it('should finalise the plugins with the error of the bucket as the failure', () => {
+          expect(plugin.processCloseStream).toHaveBeenCalledExactlyOnceWith(bucketFailure);
+        });
       });
     });
 

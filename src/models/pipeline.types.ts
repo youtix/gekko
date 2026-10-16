@@ -15,6 +15,12 @@ export type PluginParameters = { name: string; [option: string]: unknown };
  */
 export type PluginConstructor = new (parameters?: PluginParameters) => Plugin;
 
+/** The options of gekkoPipeline, which main() runs without any */
+export type GekkoPipelineOptions = {
+  /** Ends the run once aborted (see gekkoPipeline) */
+  signal?: AbortSignal;
+};
+
 export type PipelineContext = {
   name: string;
   plugin?: Plugin;
