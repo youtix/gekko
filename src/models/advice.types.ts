@@ -20,8 +20,26 @@ export type AdviceOrder = {
   side: OrderSide;
   /** Order type */
   type: OrderType;
-  /** Order amount */
+  /**
+   * The amount of the asset to trade, above 0. Left out with `cost` and `allocation`, the order is all-in: the Trader sizes it from the
+   * free balance it read last (see Tools.createOrder).
+   */
   amount?: number;
+  /**
+   * The currency to trade, in place of an amount: above 0, in the currency of the pair (the USDT of BTC/USDT), turned into an amount
+   * at the price of the order, else the last price of the pair. A BUY spends at most that, the 5 % the Trader keeps back for the fee
+   * included (DEFAULT_FEE_BUFFER): it buys cost × 0.95 / price, and a cost of all the currency free is an all-in BUY. A SELL sells
+   * cost / price, its fee taken from what it brings in. createOrder refuses it beside an amount or an allocation (see
+   * Tools.createOrder).
+   */
+  cost?: number;
+  /**
+   * A share of a balance, in place of an amount: in percent, above 0 and at most 100 (25 for 25 %), of the currency free for a BUY, of
+   * the asset free for a SELL, as the Trader's last synchronization read it. Of that balance, not of what the orders placed since leave
+   * of it: two BUYs of 50 % on one candle are both sized from the whole, and a BUY of 100 % is an all-in BUY. createOrder refuses it
+   * beside an amount or a cost (see Tools.createOrder).
+   */
+  allocation?: number;
   /** Order price */
   price?: number;
 };

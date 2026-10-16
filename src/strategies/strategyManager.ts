@@ -83,6 +83,8 @@ const ORDER_KEYS = Object.keys({
   side: true,
   type: true,
   amount: true,
+  cost: true,
+  allocation: true,
   price: true,
   trailing: true,
 } satisfies Record<keyof StrategyOrder, true>);
@@ -91,29 +93,47 @@ const ORDER_KEYS = Object.keys({
  * What is wrong with the keys of an order, or undefined when it holds none but those of StrategyOrder. The Trader reads those alone,
  * and any other key was relayed and ignored: a LIMIT whose price was misspelt (limitPrice, prise) was placed at the last price of the
  * pair, where it filled at once, a take-profit SELL selling at the market; an amount given as quantity made the order all-in; a
- * trailing stop given under another name was dropped, the BUY going without it. Refused whatever its value, undefined included: a
- * misspelt key fed from an optional parameter is caught at the first order, not on the first run that sets it. Checked before the
- * fields, a misspelt symbol, side or type is named, not reported as undefined.
+ * trailing stop given under another name was dropped, the BUY going without it. So would a misspelt cost or allocation make the order
+ * all-in: a BUY whose share was spelt allocaton would spend all the currency free, not the share it asked for. Refused whatever its
+ * value, undefined included: a misspelt key fed from an optional parameter is caught at the first order, not on the first run that
+ * sets it. Checked before the fields, a misspelt symbol, side or type is named, not reported as undefined.
  */
 const getKeysProblem = (order: StrategyOrder): string | undefined => {
   const unknownKeys = getUnknownKeys(order, ORDER_KEYS);
   if (unknownKeys.length) return `order keys must be one of ${showValues(ORDER_KEYS)}, got ${showValues(unknownKeys)}`;
 };
 
+/** The keys that size an order, each its own way (see Tools.createOrder): an order holds at most one of them, none for an all-in order */
+const SIZING_KEYS = ['amount', 'cost', 'allocation'] as const satisfies readonly (keyof StrategyOrder)[];
+
+/** Names as a sentence lists them: amount and cost; amount, cost and allocation */
+const listNames = (names: readonly string[]) => `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
+
 /**
- * What is wrong with the side, the type, the amount or the price of an order, or undefined when nothing is: a side of ORDER_SIDES and a
- * type of ORDER_TYPES as they are spelt there, an amount and a price above 0 or left out (undefined, or null from an untyped strategy,
- * as the Trader reads them), for an all-in order and for the last price of the pair. Each layer below read them its own way. ccxt's
- * 'buy', which only an untyped strategy can pass, was sized by the Trader as a SELL, all the asset held, which the simulator executed
- * as a SELL and Binance as a BUY; 'market' threw a TypeError in the Trader after the order was initiated, which stopped the bot without
- * naming the strategy. An amount or a price of NaN, 0 or below, or quoted, was refused by the Trader or by the exchange as an error
- * counting towards the circuit breaker.
+ * What is wrong with the side, the type, the size or the price of an order, or undefined when nothing is: a side of ORDER_SIDES and a
+ * type of ORDER_TYPES as they are spelt there; an amount, a cost and a price above 0, and an allocation above 0 and at most 100, each
+ * of them left out otherwise (undefined, or null from an untyped strategy, as the Trader reads them); at most one of amount, cost and
+ * allocation, none of them for an all-in order, and no price for the last price of the pair. Each layer below read them its own way.
+ * ccxt's 'buy', which only an untyped strategy can pass, was sized by the Trader as a SELL, all the asset held, which the simulator
+ * executed as a SELL and Binance as a BUY; 'market' threw a TypeError in the Trader after the order was initiated, which stopped the
+ * bot without naming the strategy. An amount or a price of NaN, 0 or below, or quoted, was refused by the Trader or by the exchange as
+ * an error counting towards the circuit breaker. So would an order whose cost or allocation is, the Trader working its amount out from
+ * them; an allocation above 100 would size a share of more than the balance read, which the Trader caps at what is left with a
+ * warning: an all-in order the strategy did not ask for. Given two of amount, cost and allocation, the Trader would size the order from
+ * one and ignore the others, without a word.
  */
-const getOrderProblem = ({ side, type, amount, price }: StrategyOrder): string | undefined => {
+const getOrderProblem = (order: StrategyOrder): string | undefined => {
+  const { side, type, amount, cost, allocation, price } = order;
   if (!ORDER_SIDES.includes(side)) return `side must be one of ${showValues(ORDER_SIDES)}, got ${inspect(side)}`;
   if (!ORDER_TYPES.includes(type)) return `type must be one of ${showValues(ORDER_TYPES)}, got ${inspect(type)}`;
   if (!isNil(amount) && !isFinitePositive(amount))
     return `amount must be a number above 0, or left out for an all-in order, got ${inspect(amount)}`;
+  if (!isNil(cost) && !isFinitePositive(cost))
+    return `cost must be a number above 0, in the currency of the pair, or left out, got ${inspect(cost)}`;
+  if (!isNil(allocation) && !(isFinitePositive(allocation) && allocation <= 100))
+    return `allocation must be a number above 0 and at most 100 (25 for 25 %), or left out, got ${inspect(allocation)}`;
+  const sizingKeys = SIZING_KEYS.filter(key => !isNil(order[key]));
+  if (sizingKeys.length > 1) return `amount, cost and allocation size an order three ways: give at most one, got ${listNames(sizingKeys)}`;
   if (!isNil(price) && !isFinitePositive(price))
     return `price must be a number above 0, or left out for the last price of the pair, got ${inspect(price)}`;
 };
@@ -603,9 +623,10 @@ export class StrategyManager extends EventEmitter {
    * Refuses, before anything is relayed, an order the strategy cannot have meant. A key the Trader does not read was ignored (see
    * getKeysProblem). One on a pair that is not watched, given a price, was placed on a live exchange (an all-in BUY spending the
    * currency of the watched pairs), though Gekko has no candle or balance of that pair: what it bought was missing from the portfolio
-   * and its stop never trailed. A side, a type, an amount or a price an untyped strategy got wrong was relayed as it was (see
-   * getOrderProblem). The trailing stop of a BUY was only checked once the BUY had completed: an invalid one was refused then, with a
-   * warning, and the position the BUY had just opened kept no stop. One given to a SELL was dropped without a word.
+   * and its stop never trailed. A side, a type, an amount or a price an untyped strategy got wrong was relayed as it was, and so
+   * would a cost, an allocation or two ways to size the order be (see getOrderProblem). The trailing stop of a BUY was only checked
+   * once the BUY had completed: an invalid one was refused then, with a warning, and the position the BUY had just opened kept no
+   * stop. One given to a SELL was dropped without a word.
    */
   private checkOrder(order: StrategyOrder) {
     const problem =

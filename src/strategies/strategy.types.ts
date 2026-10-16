@@ -69,26 +69,50 @@ export type Tools<T> = {
    * Available once the warmup is over: from log and onTimeframeCandleAfterWarmup on the candle that completes it (the first one
    * with `warmup.candleCount: 0`), then from every hook. Before that, and so always in init, it throws a GekkoError: the bot stops.
    *
-   * The order holds no key but those of StrategyOrder: `symbol`, `side`, `type`, `amount`, `price` and `trailing`. Any other, whatever
-   * its value, throws a GekkoError naming it, and the order is not sent: the bot stops. The Trader reads those keys alone and ignored
-   * any other: a LIMIT whose price was misspelt (`limitPrice`, `prise`) went at the last price of the pair, an amount given as
-   * `quantity` made the order all-in, a stop given under another name was dropped. The order of an event, passed as it is, holds keys
-   * of its own, such as `id` and `orderCreationDate`: build the order from its fields.
+   * The order holds no key but those of StrategyOrder: `symbol`, `side`, `type`, `amount`, `cost`, `allocation`, `price` and
+   * `trailing`. Any other, whatever its value, throws a GekkoError naming it, and the order is not sent: the bot stops. The Trader
+   * reads those keys alone and ignored any other: a LIMIT whose price was misspelt (`limitPrice`, `prise`) went at the last price of
+   * the pair, an amount given as `quantity` made the order all-in, a stop given under another name was dropped. The order of an event,
+   * passed as it is, holds keys of its own, such as `id` and `orderCreationDate`: build the order from its fields.
    *
    * `symbol` must be a watched pair, a key of `marketData`: Gekko has no candle, price or balance of any other pair, so it could
    * neither follow the position nor trail its stop, while a live exchange would still execute the order. Any other symbol throws a
    * GekkoError naming it and the watched pairs, and the order is not sent: the bot stops.
    *
    * `side` must be 'BUY' or 'SELL', and `type` 'MARKET', 'STICKY' or 'LIMIT', in upper case: ccxt spells them in lower case, which
-   * only an untyped strategy can pass. `amount` and `price` must be numbers above 0, or left out. An amount left out makes the order
-   * all-in, sized by the Trader from the portfolio of its last synchronization: a BUY spends the currency free, less what the BUYs
-   * placed since then may spend (each its cost at the price of its order plus the 5 % kept back for its fee, an all-in BUY all it was
-   * sized from), keeping back 5 % of it for the fee (DEFAULT_FEE_BUFFER), at the price of the order; a SELL sells the asset free, less
-   * what the SELLs placed since then take. An all-in order the orders before it leave nothing to is sized to 0, and refused by the
-   * limits of the market (onOrderErrored). A BUY with an amount is placed as asked. A price left out is the last price of the pair: the
-   * limit of a LIMIT order, and what an all-in BUY is sized at. Anything else (NaN, 0, a negative number, Infinity, a quoted number)
-   * throws a GekkoError naming the field and what it accepts, and the order is not sent: the bot stops, even for an amount a strategy
-   * computed as 0, which used to come back as an order error.
+   * only an untyped strategy can pass.
+   *
+   * At most one of `amount`, `cost` and `allocation` sizes the order, each a number above 0 or left out, `allocation` at most 100. The
+   * Trader works out the amount of an order sized otherwise than by an amount from the free balances its last synchronization read (at
+   * start-up, at the end of the warmup, after the end of every order, and periodically: every exchangeSynchInterval in realtime), at
+   * the price of the order, else the last price of the pair:
+   * - `amount`, in the asset: a BUY with an amount is placed as asked.
+   * - `cost`, in the currency of the pair (the USDT of BTC/USDT): a BUY spends at most that, the 5 % kept back for its fee included
+   *   (DEFAULT_FEE_BUFFER), so it buys cost × 0.95 / price, and a cost of all the currency free is an all-in BUY; a SELL sells
+   *   cost / price, its fee taken from what it brings in.
+   * - `allocation`, a share in percent (25 for 25 %) of the currency free for a BUY, of the asset free for a SELL, as that
+   *   synchronization read them, not of what the orders placed since leave: two BUYs of 50 % on one candle are both sized from the
+   *   whole, and a BUY of 100 % is an all-in BUY.
+   * - none of them: the order is all-in. A BUY spends the currency free, less what the BUYs placed since then may spend (a BUY of an
+   *   amount its cost at the price of its order plus the 5 % kept back for its fee, any other BUY all it was sized from), keeping back
+   *   5 % of it for the fee; a SELL sells the asset free, less what the SELLs placed since then take. An all-in order the orders before
+   *   it leave nothing to is sized to 0, and refused by the limits of the market (onOrderErrored).
+   *
+   * A BUY sized from a cost or an allocation is capped, with a warning, at the currency the BUYs placed since then leave: with nothing
+   * left to spend (none free, no balance read yet, or the BUYs placed since taking it all), it is sized to 0 and refused, as an all-in
+   * BUY is, with a warning that says why. A SELL so sized is capped as a SELL of an amount is, at the asset free less what the SELLs
+   * placed since then take. Every SELL, and every BUY without an amount, is also capped at the most the market takes in one order of
+   * its type, with a warning, the rest held or left unspent. A cost or an allocation that comes to less than the minimum cost of the
+   * market is warned of before the order is sent, and the exchange refuses it (onOrderErrored, which counts towards the circuit
+   * breaker).
+   *
+   * A price left out is the last price of the pair: the limit of a LIMIT order, and what a BUY without an amount, or a SELL of a cost,
+   * is sized at. Anything else (NaN, 0, a negative number, Infinity, a quoted number, an allocation above 100) throws a GekkoError
+   * naming the field and what it accepts, and so do two of `amount`, `cost` and `allocation`, naming them: the order is not sent, and
+   * the bot stops, even for an amount a strategy computed as 0, which used to come back as an order error.
+   *
+   * The events of the order carry the amount it was placed with (once completed, the amount it executed), and its `cost` or its
+   * `allocation` as the strategy gave them (see OrderInitiatedEvent).
    *
    * A `trailing` is checked before anything is relayed: on a BUY only, with a percentage above 0 and below 100, a trigger above 0 or
    * left out, and no other key (a trigger misspelt `triger` armed a stop active at once). Anything else throws a GekkoError and the

@@ -785,6 +785,44 @@ describe('EventSubscriber', () => {
       expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining('\nTarget price: unknown USD\n'));
     });
 
+    // The Trader sizes an advice from the amount the strategy gave, else from its cost or its share of a balance, else all-in: the line
+    // says which the strategy asked for, a cost in the currency, a share with its base, the currency a BUY spends or the asset a SELL
+    // sells. An untyped strategy may give null for any of them, which createOrder relays and the Trader reads as left out.
+    it.each`
+      side      | sizing                                  | sizes                                             | line
+      ${'BUY'}  | ${'all-in'}                             | ${{ amount: undefined }}                          | ${'Requested amount: auto'}
+      ${'SELL'} | ${'all-in, its sizes null'}             | ${{ amount: null, cost: null, allocation: null }} | ${'Requested amount: auto'}
+      ${'SELL'} | ${'by an amount'}                       | ${{ amount: 3 }}                                  | ${'Requested amount: 3'}
+      ${'BUY'}  | ${'by an amount, its other sizes null'} | ${{ amount: 3, cost: null, allocation: null }}    | ${'Requested amount: 3'}
+      ${'BUY'}  | ${'by a cost'}                          | ${{ amount: undefined, cost: 100 }}               | ${'Requested amount: 100 USD worth'}
+      ${'SELL'} | ${'by a cost, its thousands grouped'}   | ${{ amount: undefined, cost: 1234.5 }}            | ${'Requested amount: 1,234.5 USD worth'}
+      ${'BUY'}  | ${'by an allocation of the currency'}   | ${{ amount: undefined, allocation: 25 }}          | ${'Requested amount: 25 % of the USD'}
+      ${'SELL'} | ${'by an allocation of the asset'}      | ${{ amount: undefined, allocation: 100 / 3 }}     | ${'Requested amount: 33.33333333 % of the BTC'}
+      ${'BUY'}  | ${'by a cost, its other sizes null'}    | ${{ amount: null, cost: 0.5, allocation: null }}  | ${'Requested amount: 0.5 USD worth'}
+    `('writes "$line" for a $side advice sized $sizing', async ({ side, sizes, line }) => {
+      plugin['handleCommand']('/sub_strat_create');
+      onStrategyCreateOrder(plugin, { side, ...sizes });
+      await settle();
+      expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+    });
+
+    it('lists the lines of an advice sized by an allocation', async () => {
+      plugin['processOneMinuteBucket'](new Map([[symbol, { close: 42 }]]) as any);
+      plugin['handleCommand']('/sub_strat_create');
+      onStrategyCreateOrder(plugin, { side: 'SELL', type: 'MARKET', amount: undefined, allocation: 50, price: undefined });
+      await settle();
+      expect(fakeBot.sendMessage).toHaveBeenCalledExactlyOnceWith(
+        [
+          `Order Id: ${baseOrder.id}`,
+          'Received MARKET SELL advice for BTC/USD',
+          'Requested amount: 50 % of the BTC',
+          'At time: 2022-01-01T00:00:00.000Z',
+          'Target price: 42 USD',
+          '------',
+        ].join('\n'),
+      );
+    });
+
     it('formats strategy advice message with order metadata', () => {
       fakeBot.sendMessage.mockReset();
       plugin['handleCommand']('/sub_strat_create');

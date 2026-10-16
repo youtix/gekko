@@ -1145,6 +1145,43 @@ describe('StrategyManager', () => {
         expect(listener).toHaveBeenLastCalledWith(expect.objectContaining({ symbol, side: 'SELL', type: 'MARKET', amount: 0.5 }));
       });
 
+      // The Trader sizes such a BUY as an all-in one, from a budget: 1000 USDT, given as such or as 25 % of the 4000 read, buy
+      // 1000 × 0.95 / 50000 = 0.019 BTC. Its completed event carries what it filled beside the cost or the share asked for, and the stop
+      // sells what it filled.
+      it.each`
+        sizing             | size
+        ${'a cost'}        | ${{ cost: 1000 }}
+        ${'an allocation'} | ${{ allocation: 25 }}
+      `('arms the stop of a BUY sized by $sizing for what it filled', ({ size }) => {
+        const id = manager['createOrder']({ symbol, side: 'BUY', type: 'MARKET', ...size, trailing: { percentage: 2 } });
+        manager.onOrderCompleted({
+          order: {
+            id,
+            symbol,
+            side: 'BUY',
+            type: 'MARKET',
+            amount: 0.019,
+            ...size,
+            orderCreationDate,
+            orderExecutionDate: 61000,
+            effectivePrice: 50000,
+            fee: 0,
+          },
+          exchange: { price: 50000, portfolio: new Map() },
+        });
+        expect(manager['trailingStopManager'].getOrders().get(id)).toEqual({
+          id,
+          symbol,
+          amount: 0.019,
+          config: { percentage: 2 },
+          status: 'active',
+          highestPeak: 0,
+          stopPrice: 0,
+          activationPrice: undefined,
+          createdAt: orderCreationDate,
+        });
+      });
+
       // From then on the SELL is an order of the strategy's own, whose outcome comes back under the id it is relayed with: a strategy
       // that tracks its position adopts that id, or it stays long once the stop has sold everything
       describe('when its stop triggers', () => {
@@ -3213,7 +3250,7 @@ describe('StrategyManager', () => {
       describe('on the keys it holds', () => {
         /** What an order holding keys StrategyOrder does not declare is told, the keys shown as util.inspect shows them */
         const keysIssue = (shown: string) =>
-          `order keys must be one of 'symbol', 'side', 'type', 'amount', 'price', 'trailing', got ${shown}`;
+          `order keys must be one of 'symbol', 'side', 'type', 'amount', 'cost', 'allocation', 'price', 'trailing', got ${shown}`;
         let listener: Mock;
 
         /** Creates `order` as an untyped strategy does, and returns what it throws */
@@ -3249,6 +3286,9 @@ describe('StrategyManager', () => {
           ${'a BUY of NaN, with a quantity'}        | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: NaN, quantity: 0.5 }}                                   | ${keysIssue(quoted('quantity'))}
           ${'a SELL with a stop and a comment'}     | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', trailing: { percentage: 2 }, comment: 'exit' }}                | ${keysIssue(quoted('comment'))}
           ${'a BUY with a triger and a comment'}    | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', trailing: { percentage: 2, triger: 50000 }, comment: 'entry' }} | ${keysIssue(quoted('comment'))}
+          ${'a BUY of a share spelt allocaton'}     | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', allocaton: 25 }}                                                | ${keysIssue(quoted('allocaton'))}
+          ${'a SELL of a notional, not a cost'}     | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', notional: 100 }}                                               | ${keysIssue(quoted('notional'))}
+          ${'a BUY of an amount and a cost, noted'} | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 0.5, cost: 100, comment: 'entry' }}                     | ${keysIssue(quoted('comment'))}
         `('when the strategy creates $problem', ({ order, reason }) => {
           let failure: unknown;
 
@@ -3284,12 +3324,15 @@ describe('StrategyManager', () => {
           });
         });
 
-        // Each key StrategyOrder declares, given or left undefined (a strategy passing its own optional parameter)
+        // Each key StrategyOrder declares, given or left undefined (a strategy passing its own optional parameter). An order is sized one
+        // way at most: by its amount, its cost or its allocation
         describe.each`
-          kind                                        | order                                                                                                                         | relayed
-          ${'its symbol, side and type alone'}        | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}                                                                        | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}
-          ${'every key'}                              | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, price: 49000, trailing: { percentage: 2, trigger: 51000 } }} | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, price: 49000 }}
-          ${'every key, the optional ones undefined'} | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: undefined, price: undefined, trailing: undefined }}             | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET' }}
+          kind                                        | order                                                                                                                                                     | relayed
+          ${'its symbol, side and type alone'}        | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}                                                                                                    | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}
+          ${'every key but cost and allocation'}      | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, price: 49000, trailing: { percentage: 2, trigger: 51000 } }}                             | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, price: 49000 }}
+          ${'every key but amount and allocation'}    | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', cost: 100, price: 49000, trailing: { percentage: 2, trigger: 51000 } }}                               | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', cost: 100, price: 49000 }}
+          ${'every key but amount and cost'}          | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', allocation: 25, price: 49000, trailing: { percentage: 2 } }}                                          | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', allocation: 25, price: 49000 }}
+          ${'every key, the optional ones undefined'} | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: undefined, cost: undefined, allocation: undefined, price: undefined, trailing: undefined }} | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET' }}
         `('when the strategy creates an order holding $kind', ({ order, relayed }) => {
           let failure: unknown;
 
@@ -3392,13 +3435,19 @@ describe('StrategyManager', () => {
       // An untyped strategy (a JavaScript strategyPath, or any file Bun loads without type-checking it) could pass any side, type, amount
       // or price: ccxt's 'buy' was sized by the Trader as a SELL, all the asset held, and executed as one by the simulator, 'market' threw
       // a TypeError in the Trader once the order was initiated, and an amount or a price of NaN, 0 or below, or quoted, was refused by
-      // the Trader or by the exchange as an order error counting towards the circuit breaker
-      describe('on its side, its type, its amount and its price', () => {
-        /** What a refused side, type, amount or price is told, the value shown as util.inspect shows it */
+      // the Trader or by the exchange as an order error counting towards the circuit breaker. The Trader works the amount of an order out
+      // from its cost or its allocation just as well, and from one of them only: two ways to size an order cannot both be followed.
+      describe('on its side, its type, its size and its price', () => {
+        /** What a refused side, type, amount, cost, allocation or price is told, the value shown as util.inspect shows it */
         const sideIssue = (shown: string) => `side must be one of 'BUY', 'SELL', got ${shown}`;
         const typeIssue = (shown: string) => `type must be one of 'MARKET', 'STICKY', 'LIMIT', got ${shown}`;
         const amountIssue = (shown: string) => `amount must be a number above 0, or left out for an all-in order, got ${shown}`;
+        const costIssue = (shown: string) => `cost must be a number above 0, in the currency of the pair, or left out, got ${shown}`;
+        const allocationIssue = (shown: string) =>
+          `allocation must be a number above 0 and at most 100 (25 for 25 %), or left out, got ${shown}`;
         const priceIssue = (shown: string) => `price must be a number above 0, or left out for the last price of the pair, got ${shown}`;
+        /** What an order sized two ways or three is told, naming the keys it gives in the order StrategyOrder declares them */
+        const sizingIssue = (given: string) => `amount, cost and allocation size an order three ways: give at most one, got ${given}`;
         const PAIR_ISSUE = `symbol must be one of the watched pairs (BTC/USDT), got ${quoted('ETH/USDT')}`;
         let listener: Mock;
 
@@ -3416,8 +3465,9 @@ describe('StrategyManager', () => {
           manager.on(STRATEGY_CREATE_ORDER_EVENT, listener);
         });
 
-        // The last rows have several problems: the pair is checked first, then the side, the type, the amount and the price, then the
-        // trailing stop, whose BUY-only refusal would have misled a strategy that spelt BUY as ccxt does
+        // The last rows have several problems: the pair is checked first, then the side, the type, the amount, the cost, the allocation,
+        // that at most one of them is given, and the price, then the trailing stop, whose BUY-only refusal would have misled a strategy
+        // that spelt BUY as ccxt does
         describe.each`
           problem                               | order                                                                                             | reason
           ${'an all-in BUY, side spelt buy'}    | ${{ symbol: 'BTC/USDT', side: 'buy', type: 'MARKET' }}                                            | ${sideIssue(quoted('buy'))}
@@ -3436,11 +3486,38 @@ describe('StrategyManager', () => {
           ${'a LIMIT BUY at NaN'}               | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, price: NaN }}                    | ${priceIssue('NaN')}
           ${'an all-in LIMIT BUY at Infinity'}  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', price: Infinity }}                            | ${priceIssue('Infinity')}
           ${'a LIMIT SELL at a quoted price'}   | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', price: '51000' }}                            | ${priceIssue(quoted('51000'))}
+          ${'a BUY of a cost of 0'}             | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: 0 }}                                   | ${costIssue('0')}
+          ${'a SELL of a negative cost'}        | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', cost: -1 }}                                 | ${costIssue('-1')}
+          ${'a BUY of a cost of NaN'}           | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'STICKY', cost: NaN }}                                 | ${costIssue('NaN')}
+          ${'a SELL of an infinite cost'}       | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', cost: Infinity, price: 51000 }}              | ${costIssue('Infinity')}
+          ${'a BUY of a quoted cost'}           | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: '100' }}                               | ${costIssue(quoted('100'))}
+          ${'a BUY of 0 %'}                     | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', allocation: 0 }}                             | ${allocationIssue('0')}
+          ${'a SELL of a negative share'}       | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', allocation: -1 }}                           | ${allocationIssue('-1')}
+          ${'a BUY of NaN %'}                   | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'STICKY', allocation: NaN }}                           | ${allocationIssue('NaN')}
+          ${'a SELL of an infinite share'}      | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', allocation: Infinity, price: 51000 }}        | ${allocationIssue('Infinity')}
+          ${'a BUY of a quoted share'}          | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', allocation: '25' }}                          | ${allocationIssue(quoted('25'))}
+          ${'a BUY of 101 %'}                   | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', allocation: 101 }}                           | ${allocationIssue('101')}
+          ${'a SELL of 100.0001 %'}             | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', allocation: 100.0001 }}                     | ${allocationIssue('100.0001')}
+          ${'a BUY of an amount and a cost'}    | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 0.5, cost: 100 }}                    | ${sizingIssue('amount and cost')}
+          ${'a BUY of an amount and a share'}   | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, allocation: 25, price: 49000 }}  | ${sizingIssue('amount and allocation')}
+          ${'a BUY of a cost and a share'}      | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'STICKY', cost: 100, allocation: 25 }}                 | ${sizingIssue('cost and allocation')}
+          ${'a BUY sized three ways'}           | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 0.5, cost: 100, allocation: 25 }}    | ${sizingIssue('amount, cost and allocation')}
+          ${'a SELL of an amount and a cost'}   | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: 0.5, cost: 100 }}                   | ${sizingIssue('amount and cost')}
+          ${'a SELL of an amount and a share'}  | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', amount: 0.5, allocation: 25, price: 51000 }} | ${sizingIssue('amount and allocation')}
+          ${'a SELL of a cost and a share'}     | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'STICKY', cost: 100, allocation: 25 }}                | ${sizingIssue('cost and allocation')}
+          ${'a SELL sized three ways'}          | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: 0.5, cost: 100, allocation: 25 }}   | ${sizingIssue('amount, cost and allocation')}
           ${'a BUY spelt buy on ETH/USDT'}      | ${{ symbol: 'ETH/USDT', side: 'buy', type: 'MARKET' }}                                            | ${PAIR_ISSUE}
           ${'a BUY spelt buy, type market'}     | ${{ symbol: 'BTC/USDT', side: 'buy', type: 'market' }}                                            | ${sideIssue(quoted('buy'))}
           ${'a MARKET BUY of NaN at NaN'}       | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: NaN, price: NaN }}                   | ${amountIssue('NaN')}
           ${'a BUY spelt buy, with a stop'}     | ${{ symbol: 'BTC/USDT', side: 'buy', type: 'MARKET', trailing: { percentage: 2 } }}               | ${sideIssue(quoted('buy'))}
           ${'a SELL of NaN with a stop'}        | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: NaN, trailing: { percentage: 2 } }} | ${amountIssue('NaN')}
+          ${'a BUY of NaN and of a cost'}       | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: NaN, cost: 100 }}                    | ${amountIssue('NaN')}
+          ${'a SELL of a cost of 0, of 50 %'}   | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', cost: 0, allocation: 50 }}                  | ${costIssue('0')}
+          ${'a BUY of an amount and of 101 %'}  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 0.5, allocation: 101 }}              | ${allocationIssue('101')}
+          ${'a LIMIT BUY sized twice, at NaN'}  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 0.5, cost: 100, price: NaN }}         | ${sizingIssue('amount and cost')}
+          ${'a BUY of a cost at 0'}             | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', cost: 100, price: 0 }}                        | ${priceIssue('0')}
+          ${'a BUY sized twice, spelt buy'}     | ${{ symbol: 'BTC/USDT', side: 'buy', type: 'MARKET', cost: 100, allocation: 25 }}                 | ${sideIssue(quoted('buy'))}
+          ${'a SELL of a cost of NaN, a stop'}  | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', cost: NaN, trailing: { percentage: 2 } }}   | ${costIssue('NaN')}
         `('when the strategy creates $problem', ({ order, reason }) => {
           let failure: unknown;
 
@@ -3473,8 +3550,9 @@ describe('StrategyManager', () => {
           });
         });
 
-        // Left out, undefined or null (an untyped strategy) as the Trader reads them, the amount makes an all-in order, and the price is
-        // the last price of the pair
+        // Left out, undefined or null (an untyped strategy) as the Trader reads them, the amount, the cost and the allocation make an
+        // all-in order, and the price is the last price of the pair. One of the three alone sizes the order: the others left out, or
+        // given as undefined or null, count for none.
         describe.each`
           kind                                       | order
           ${'an all-in MARKET BUY'}                  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}
@@ -3486,6 +3564,16 @@ describe('StrategyManager', () => {
           ${'an all-in LIMIT SELL at a price'}       | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', price: 51000 }}
           ${'a LIMIT BUY, amount, price undefined'}  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: undefined, price: undefined }}
           ${'a LIMIT SELL, amount, price null'}      | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', amount: null, price: null }}
+          ${'a MARKET BUY of a cost of 100'}         | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: 100 }}
+          ${'a MARKET SELL of a cost of 0.5'}        | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', cost: 0.5 }}
+          ${'a LIMIT BUY of a cost of 1e-8'}         | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', cost: 1e-8, price: 49000 }}
+          ${'a STICKY BUY of 100 %'}                 | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'STICKY', allocation: 100 }}
+          ${'a MARKET SELL of 0.5 %'}                | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', allocation: 0.5 }}
+          ${'a LIMIT SELL of 1e-8 % at a price'}     | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', allocation: 1e-8, price: 51000 }}
+          ${'a BUY of an amount, cost, share null'}  | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 0.5, cost: null, allocation: null }}
+          ${'a SELL of a cost, amount, share null'}  | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: null, cost: 100, allocation: null }}
+          ${'a BUY of 25 %, amount, cost undefined'} | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: undefined, cost: undefined, allocation: 25 }}
+          ${'an all-in SELL, its three sizes null'}  | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: null, cost: null, allocation: null }}
         `('when the strategy creates $kind', ({ order }) => {
           let failure: unknown;
 
@@ -3504,6 +3592,18 @@ describe('StrategyManager', () => {
               orderCreationDate: candle.start + ONE_MINUTE,
             });
           });
+        });
+
+        // The Trader reads the order as the strategy gave it, and its events carry it so: a cost or an allocation as it was given, and no
+        // key the strategy left out, not even as undefined. Compared strictly, on the minute ending at 61000.
+        it.each`
+          kind                                 | order                                                                                | payload
+          ${'a MARKET BUY of a cost'}          | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: 250 }}                    | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: 250, id: 'db2254e3-c749-448c-b7b6-aa28831bbae7', orderCreationDate: 61000 }}
+          ${'a LIMIT SELL of 25 % at a price'} | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', allocation: 25, price: 51000 }} | ${{ symbol: 'BTC/USDT', side: 'SELL', type: 'LIMIT', allocation: 25, price: 51000, id: 'db2254e3-c749-448c-b7b6-aa28831bbae7', orderCreationDate: 61000 }}
+          ${'an all-in MARKET BUY'}            | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' }}                               | ${{ symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', id: 'db2254e3-c749-448c-b7b6-aa28831bbae7', orderCreationDate: 61000 }}
+        `('relays $kind with the keys it was given and no other', ({ order, payload }) => {
+          createAs(order);
+          expect(listener.mock.calls).toStrictEqual([[payload]]);
         });
       });
 

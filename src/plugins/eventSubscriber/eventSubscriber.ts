@@ -40,6 +40,19 @@ type PendingNotification = { event: Event; text: string };
 /** How the logs say that a notification was not sent */
 const describeNotSent = (event: Event, err: unknown) => `The ${event} notification was not sent: ${describeError(err)}`;
 
+/**
+ * What an advice asks to trade, as its strat_create notification writes it: the amount the strategy gave, else its cost in the
+ * currency, else its share of the currency a BUY spends or of the asset a SELL sells, else auto for an all-in order. createOrder
+ * relays at most one of the three, and null from an untyped strategy as it was given, which the Trader reads as left out.
+ */
+const describeRequestedAmount = ({ symbol, side, amount, cost, allocation }: AdviceOrder) => {
+  const [asset, currency] = symbol.split('/');
+  if (!isNil(amount)) return formatAmount(amount);
+  if (!isNil(cost)) return `${formatAmount(cost)} ${currency} worth`;
+  if (!isNil(allocation)) return `${formatAmount(allocation)} % of the ${side === 'BUY' ? currency : asset}`;
+  return 'auto';
+};
+
 export class EventSubscriber extends Plugin {
   private bot: TelegramBot;
   private prices = new Map<TradingPair, number>();
@@ -233,7 +246,8 @@ export class EventSubscriber extends Plugin {
   }
 
   public onStrategyCreateOrder(payloads: AdviceOrder[]) {
-    this.notify('strat_create', payloads, ({ id, orderCreationDate, side, type, amount, price, symbol }) => {
+    this.notify('strat_create', payloads, advice => {
+      const { id, orderCreationDate, side, type, price, symbol } = advice;
       const [, currency] = symbol.split('/');
       const currentPrice = this.prices.get(symbol);
       // The Trader places an advice of any type at its price, or without one at the market price (see Trader.onStrategyCreateOrder):
@@ -246,7 +260,7 @@ export class EventSubscriber extends Plugin {
       return [
         `Order Id: ${id}`,
         `Received ${type} ${side} advice for ${symbol}`,
-        `Requested amount: ${isNil(amount) ? 'auto' : formatAmount(amount)}`,
+        `Requested amount: ${describeRequestedAmount(advice)}`,
         `At time: ${toISOString(orderCreationDate)}`,
         priceLine,
         '------',

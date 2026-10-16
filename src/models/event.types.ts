@@ -16,12 +16,23 @@ type OrderEvent = {
   /** Order type ('MARKET' | 'STICKY' | 'LIMIT')*/
   type: OrderType;
   /**
-   * The amount of the asset the order was placed with: the amount the strategy asked for, or the Trader's for an all-in order. A SELL is
-   * capped at the free balance of its asset, and a SELL or an all-in BUY at the most the market takes in one order, the rest then held
-   * or unspent (see Trader.sizeOrder). An order the Trader could not place carries the amount asked for, 0 for an all-in one. A
-   * completed order carries the amount it executed (see OrderCompletedEvent).
+   * The amount of the asset the order was placed with: the amount the strategy asked for, or the Trader's for an order without one,
+   * sized from its cost, its allocation or all-in. A SELL is capped at the free balance of its asset, a BUY sized from a cost or an
+   * allocation at the currency the BUYs placed since the last synchronization leave, and a SELL or a BUY without an amount at the most
+   * the market takes in one order, the rest then held or unspent (see Trader.sizeOrder). An order the Trader could not place carries
+   * the amount asked for, 0 for one without. A completed order carries the amount it executed (see OrderCompletedEvent).
    */
   amount: number;
+  /**
+   * The cost the strategy gave the order, in currency, as it gave it (see StrategyOrder.cost), which the Trader sized the order from:
+   * undefined for an order sized otherwise
+   */
+  cost?: number;
+  /**
+   * The share the strategy gave the order, in percent, as it gave it (see StrategyOrder.allocation), which the Trader sized the order
+   * from: undefined for an order sized otherwise
+   */
+  allocation?: number;
   /**
    * The price the strategy asked for, in currency: undefined for an order without one (a MARKET or STICKY order, a LIMIT order placed
    * at the market price). A completed order carries the price it executed at (see OrderCompletedEvent).
