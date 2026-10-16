@@ -1,6 +1,6 @@
 {
   "name": "gekko2",
-  "version": "3.0.0",
+  "version": "2.0.0",
   "descripton": "A modular crypto trading bot framework supporting backtesting, real-time trading, and custom strategies.",
   "keywords": [
     "trading",
