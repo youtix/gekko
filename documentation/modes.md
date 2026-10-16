@@ -93,6 +93,8 @@ exchange:
   name: hyperliquid              # No key: an import reads the markets and the candles through the public API
 ```
 
+Hyperliquid's API serves only the latest 5000 candles of each interval, about 3.5 days of 1-minute candles, so an import gets no older minute. `config/importer-hyperliquid.yml` imports such a range of UBTC/USDC without a key, and its range has to be moved into the last days before a run. `config/realtime-hyperliquid-writer.yml` records the live candles into the same database, and its comments give the keys a TradingAdvisor or a Trader adds, in quotes.
+
 ### Required Plugin
 
 - **CandleWriter** — Saves imported candles to the configured database

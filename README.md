@@ -32,7 +32,7 @@ Gekko 2 is not financial advice software. The author is not responsible for any 
 - **[Modes](./documentation/modes.md)** — Gekko 2 operates in three modes that cover the complete trading workflow — from data collection to live trading.
 - **[Built-in Strategies](./documentation/built-in-strategies.md)** — Comprehensive guide to all 8 built-in strategies: DEMA, MACD, RSI, CCI, TMA, SMACrossover, EMARibbon and GridBot, with configuration examples.
 - **[Custom Strategies](./documentation/custom-strategies.md)** — Step-by-step guide to building your own external trading strategies, with full interface documentation, lifecycle methods, indicator usage, and deployment with the standalone executable.
-- **[Technical Indicators](./documentation/indicators.md)** — Complete reference for 31 built-in indicators including moving averages (SMA, EMA, DEMA, WMA, TEMA), momentum (MACD, Stochastic, RSI), volatility (ATR, Bollinger Bands), and volume indicators.
+- **[Technical Indicators](./documentation/indicators.md)** — Complete reference for 31 built-in indicators including moving averages (SMA, EMA, DEMA, WMA, TEMA), momentum (MACD, Stochastic), oscillators (RSI, CCI), volatility (ATR, Bollinger Bands), and volume indicators.
 - **[Plugins](./documentation/plugins.md)** — Comprehensive guide to all 8 plugins including TradingAdvisor, Trader, PortfolioAnalyzer, RoundTripAnalyzer, PerformanceReporter, CandleWriter, EventSubscriber, and Supervision with configuration examples and event documentation.
 
 ---

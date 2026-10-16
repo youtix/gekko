@@ -1,3 +1,7 @@
+# Never write your bot token in this file, which git tracks: copy it to config/realtime-supervision.local.yml (git ignores every
+# config/*.local.* file), fill in the token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko takes every value as written: it
+# reads no environment variable inside the file (token: ${BOT_TOKEN} is the text ${BOT_TOKEN}).
+
 watch:
   assets:
     - BTC

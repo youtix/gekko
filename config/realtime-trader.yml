@@ -1,3 +1,7 @@
+# Never write your keys in this file, which git tracks: copy it to config/realtime-trader.local.yml (git ignores every config/*.local.*
+# file), fill in your API key, secret and bot token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko takes every value as
+# written: it reads no environment variable inside the file (apiKey: ${API_KEY} is the text ${API_KEY}).
+
 watch:
   assets:
     - BTC
@@ -33,12 +37,12 @@ plugins:
     botUsername: # Your telegram bot username
     # chatId: 123456789 # Optional: the chat the bot talks to; without it, the first chat that sends it a command after start-up is bound
 
-# set this to true if you understand that Gekko will invest according to how you configured the indicators.
-# None of the advice in the output is Gekko telling you to take a certain position. Instead it is the result
-# of running the indicators you configured automatically.
+# Set this to true if you understand that Gekko trades according to the strategy you configured. None of the advice in its output is
+# Gekko telling you to take a position: it is the result of running your strategy, and the indicators it reads, automatically.
 #
-# In other words: Gekko automates your trading strategies it doesnt advice on itself only set to true if you truly
-# understand this.
+# In other words: Gekko automates your own trading strategies; it gives no advice of its own. Only set this to true if you truly
+# understand this. Until then, Gekko refuses to start a run with a Trader on binance or hyperliquid without sandbox: true. Keep the
+# line at the top level of the file, outside every section.
 #
 # Not sure? Read this first: https://github.com/askmike/gekko/issues/201
-[I understand that Gekko only automates MY OWN trading strategies]: false
+'I understand that Gekko only automates MY OWN trading strategies': false

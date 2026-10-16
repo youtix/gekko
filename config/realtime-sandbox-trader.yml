@@ -1,3 +1,7 @@
+# Never write your keys in this file, which git tracks: copy it to config/realtime-sandbox-trader.local.yml (git ignores every
+# config/*.local.* file), fill in your testnet API key, secret and bot token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko
+# takes every value as written: it reads no environment variable inside the file (apiKey: ${API_KEY} is the text ${API_KEY}).
+
 watch:
   assets:
     - BTC
