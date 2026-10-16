@@ -7,7 +7,7 @@
     "outDir": "dist",
     "strict": true,
     "resolveJsonModule": true,
-    "esModuleInterop": true,
+    "allowJs": true,
     "skipLibCheck": true,
     "paths": {
       "@constants/*": ["./src/constants/*"],
@@ -20,5 +20,5 @@
       "@plugins/*": ["./src/plugins/*"]
     }
   },
-  "exclude": ["./*.ts"]
+  "include": ["**/*.ts", "scripts/release/version.cjs"]
 }

@@ -1,5 +1,7 @@
 node_modules
 dist
+# The html or lcov report of a coverage run (test:coverage prints its table)
+/coverage
 .env.local
 # SQLite: the db folder (or a link to one) the example configurations write to, and a database elsewhere with its -shm and -wal
 /db

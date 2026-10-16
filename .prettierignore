@@ -1,3 +1,9 @@
+# Prettier reads .gitignore too. What the tools write: the executable, the importer's candles, the coverage reports, Bun's lockfile
+/dist
+/db
+/coverage
+bun.lock
+# Its tables are aligned by hand
 documentation
 # semantic-release writes it: its notes stay as the generator wrote them, as on the GitHub release
 CHANGELOG.md

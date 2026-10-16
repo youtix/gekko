@@ -5,21 +5,20 @@ import tseslint from 'typescript-eslint';
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-  { languageOptions: { globals: globals.browser } },
+  // `eslint .` lints the whole checkout, but for what the tools write (the executable, an html or lcov coverage report), the candles
+  // the importer stores and the local notes of documentation/dev
+  { ignores: ['dist/', 'db/', 'coverage/', 'documentation/dev/'] },
+  // Node's globals, without CommonJS's (the .cjs files get them below): Bun has Node's globals, and the .js files are ES modules. With
+  // the browser's, `status = 'x'` and `document.title` passed the lint
+  { languageOptions: { globals: globals.nodeBuiltin } },
   pluginJs.configs.recommended,
   ...tseslint.configs.recommended,
   importPlugin.flatConfigs.recommended,
   {
+    // No formatting rule: Prettier formats (format:check in CI, prettier --write at commit). ESLint's stylistic rules, deprecated since
+    // ESLint 8.53, refused the double quotes Prettier writes around a text holding an apostrophe, so that no spelling passed both.
     rules: {
       'no-console': 'error',
-      'no-multiple-empty-lines': ['error', { max: 1 }],
-      'arrow-parens': ['error', 'as-needed'],
-      semi: ['error', 'always'],
-      indent: 'off',
-      quotes: ['error', 'single'],
-      'max-len': 'off',
-      'comma-dangle': ['error', 'always-multiline'],
-      'object-curly-spacing': ['error', 'always'],
       'import/no-cycle': 'error',
       'import/no-unresolved': 'error',
       // import/no-unused-modules is left out: without options it checks nothing, and its unusedExports option crashes under ESLint 10,
@@ -28,14 +27,17 @@ export default [
       // Registries are read by a computed name (indicators[name], strategies[...], pluginList[...]): the plugin cannot check one, and
       // TypeScript types the key. A plain member that does not exist is still reported.
       'import/namespace': ['error', { allowComputed: true }],
-      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
+      // Every unused parameter, a leading one too, unless its name starts with _: by default (after-used), only those after the last
+      // one used were reported
+      '@typescript-eslint/no-unused-vars': ['error', { args: 'all', argsIgnorePattern: '^_' }],
     },
   },
   {
     settings: {
       'import/resolver': { typescript: { bun: true } },
-      'import/ignore': ['node_modules', 'dist'],
-      'import/core-modules': ['reflect-metadata'],
+      // Each entry is a regular expression tested against the absolute path of a module: an unanchored 'dist' matched a checkout under
+      // ~/distrib/ or /srv/dist/, where import/no-cycle and the other rules that read a module's exports then reported nothing
+      'import/ignore': ['/node_modules/'],
       // The import plugin reads the imports and exports of a module only for these extensions (JavaScript ones by default): without
       // .ts, import/no-cycle saw no import between two of our files, and a value cycle passed the lint
       'import/extensions': ['.ts', '.js'],
@@ -57,7 +59,7 @@ export default [
     rules: { '@typescript-eslint/no-require-imports': 'off' },
   },
   {
-    files: ['**/*.test.ts', '**/*.bench.ts', '**/test/e2e/**/*.ts'],
+    files: ['**/*.test.ts', '**/test/e2e/**/*.ts'],
     rules: {
       '@typescript-eslint/no-explicit-any': 'off',
     },
