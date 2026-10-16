@@ -439,7 +439,7 @@ plugins:
 ```
 
 > [!NOTE]
-> An exchange takes a limited amount in one order: on Binance, a `MARKET` order is held to MARKET_LOT_SIZE, tens of BTC on BTC/USDT, far below what `LIMIT` and `STICKY` orders can buy. The Trader caps a SELL, and an all-in BUY, at that maximum with a warning (`… above the maximum amount of a MARKET order on BTC/USDT: … sent, the rest stays held`), and the rest waits for a later order (see the Trader's [Sizing](./plugins.md#sizing)).
+> An exchange takes a limited amount in one order: on Binance, a `MARKET` order is held to MARKET_LOT_SIZE, tens of BTC on BTC/USDT, far below what `LIMIT` and `STICKY` orders can buy. The Trader caps a SELL, and a BUY without an `amount` (all-in, or sized by `cost` or `allocation`), at that maximum with a warning (`… above the maximum amount of a MARKET order on BTC/USDT: … sent, the rest stays held`), and the rest waits for a later order (see the Trader's [Sizing](./plugins.md#sizing)).
 
 On `hyperliquid`, the `exchange` section holds the address of the account and the key that signs its orders, both in quotes, and `watch` names a Hyperliquid spot market (`assets: [UBTC]`, `currency: USDC`: see the note on Unit-wrapped tokens under [Importer Mode](#-importer-mode)):
 

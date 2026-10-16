@@ -148,12 +148,16 @@ A partial fill or a status change of an order is only logged (`info` level), not
 
 ### Sizing
 
-The Trader sizes an order from the balances it read at its last synchronization, less what the orders it placed since take from them:
+The Trader sizes an order from the balances it read at its last synchronization, less what the orders it placed since take from them. The strategy gives each order at most one of an `amount`, in the asset, a `cost`, in the currency, and an `allocation`, a percentage of the balance read; an order given none of them is all-in (see [Order Parameters](./custom-strategies.md#order-parameters)):
 
-- A SELL is capped to the free balance of its asset, with a warning, and an all-in SELL (one without an `amount`) sells that balance.
+- A SELL is capped to the free balance of its asset, with a warning, and an all-in SELL sells that balance. A SELL by `cost` asks for that worth of the asset at the order's price, one by `allocation` for that share of the asset read: either is capped so.
 - An all-in BUY spends the free currency, sized at the order's price with 5 % kept back for the fee, in decimal; a BUY with an `amount` is placed as asked.
-- A SELL, the trailing stop's included, and an all-in BUY are also capped at the most the market takes in one order of their type (the maximum of its amount range, narrowed for a `MARKET` order by Binance's MARKET_LOT_SIZE), with a warning (`[<id>] SELL MARKET order of 100 BTC above the maximum amount of a MARKET order on BTC/USDT: 86.27382215 BTC sent, the rest stays held`): the rest stays held, or unspent, for a later order, and `OrderCompleted` carries the amount executed. A BUY with an `amount` above that maximum is refused by the exchange.
-- An all-in order sized from nothing is warned of with its cause before the exchange refuses its amount of 0: `[<id>] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent, which the market refuses (0 USDT free at the last synchronization)`, or `(no balance read from the exchange yet)` while every synchronization has failed.
+- A BUY by `cost` spends that sum, the 5 % kept back for the fee included, sized as an all-in BUY is; one by `allocation` spends that share of the currency read, whatever the BUYs placed since spend: two BUYs of `allocation: 50` on one candle both go through, and `allocation: 100` is all-in. Either is capped at what the BUYs placed since leave of the currency, with a warning, and sized to 0 once nothing is left.
+- A SELL, the trailing stop's included, and a BUY without an `amount` are also capped at the most the market takes in one order of their type (the maximum of its amount range, narrowed for a `MARKET` order by Binance's MARKET_LOT_SIZE), with a warning (`[<id>] SELL MARKET order of 100 BTC above the maximum amount of a MARKET order on BTC/USDT: 86.27382215 BTC sent, the rest stays held`): the rest stays held, or unspent, for a later order, and `OrderCompleted` carries the amount executed. A BUY with an `amount` above that maximum is refused by the exchange.
+- An all-in order sized from nothing is warned of with its cause before the exchange refuses its amount of 0: `[<id>] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent, which the market refuses (0 USDT free at the last synchronization)`, or `(no balance read from the exchange yet)` while every synchronization has failed. So is a BUY by `cost` or `allocation` whose budget comes to nothing, or a SELL by `allocation` of an asset the Trader read none of, its line naming the cost or the share it asked for: `[<id>] BUY MARKET order of 100 USDT: 0 BTC sent, which the market refuses (…)`, `[<id>] SELL MARKET order of 0 BTC (50 % of 0 BTC): 0 BTC sent, which the market refuses (0 BTC free at the last synchronization)`.
+- An order by `cost` or `allocation` whose amount costs less, at its price, than the minimum cost of the market (for a BUY, 95 % of its budget, the rest kept back for the fee) is warned of before it is sent (`[<id>] BUY MARKET order of 5 USDT (5 % of 100 USDT): 0.0475 BTC at 100 sent, a cost of 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses`), then refused by the exchange: an `OrderErrored` that counts towards the TradingAdvisor's `maxConsecutiveErrors`. An order sized to 0 gets the warning of its cause instead.
+
+A share, like an all-in order, is of the balance as of the last synchronization: every `exchangeSynchInterval` in realtime (10 minutes by default), every `watch.timeframe` in a backtest (10 minutes at least), and after the end of each order. What reached the account since, a deposit or a trade made by hand or by another bot, counts from the next one.
 
 ### Dependencies
 
@@ -169,7 +173,7 @@ The Trader supports multiple order types depending on your strategy:
 | `LIMIT`    | Execute at specified price or better                                                      |
 | `STICKY`   | Limit order kept at the best bid (BUY) or ask (SELL), moved when the market moves past it |
 
-A `STICKY` order is placed one minimum price step (`price.min` of the pair's market data) above the best bid for a BUY, below the best ask for a SELL, so that it leads the book. It is checked every `orderSynchInterval` of the exchange (20 s by default) in realtime, and at every minute in backtest: once the market has moved past it (a higher bid for a BUY, a lower ask for a SELL), it is canceled and what is left to fill is placed again at the new price. Its price and what is left are worked out in decimal, as the exchange takes them: 101.2 + 0.01 is 101.21, not 101.21000000000001 (the exchange rounds a price to its tick and truncates an amount to its step). A relaunch the exchange refuses once part of the order has filled, what is left being under the market's minimum for instance, ends the order as completed with what it filled. It has no option of its own. Like a `MARKET` order, it ignores the price an advice may give, which then only sizes a BUY without an amount.
+A `STICKY` order is placed one minimum price step (`price.min` of the pair's market data) above the best bid for a BUY, below the best ask for a SELL, so that it leads the book. It is checked every `orderSynchInterval` of the exchange (20 s by default) in realtime, and at every minute in backtest: once the market has moved past it (a higher bid for a BUY, a lower ask for a SELL), it is canceled and what is left to fill is placed again at the new price. Its price and what is left are worked out in decimal, as the exchange takes them: 101.2 + 0.01 is 101.21, not 101.21000000000001 (the exchange rounds a price to its tick and truncates an amount to its step). A relaunch the exchange refuses once part of the order has filled, what is left being under the market's minimum for instance, ends the order as completed with what it filled. It has no option of its own. Like a `MARKET` order, it ignores the price an advice may give, which then only sizes a BUY without an amount and a SELL by `cost`.
 
 ### Exchange Modes
 
@@ -520,13 +524,15 @@ Control your subscriptions via Telegram commands:
 | Event Type           | Description                                                                                                                                  |
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
 | `strat_info`         | The strategy's log lines at `info`, `warn` and `error` (not `debug`), whatever `GEKKO_LOG_LEVEL`, the error line that stops the bot included |
-| `strat_create`       | New order signals from strategy                                                                                                              |
+| `strat_create`       | New order signals from strategy, with the size asked for: its amount (`auto` for an all-in order), its cost or its share                     |
 | `strat_cancel`       | Order cancellation signals from strategy                                                                                                     |
 | `order_init`         | Order submitted to exchange                                                                                                                  |
 | `order_cancel`       | Order cancellation confirmed, with what it filled first: `Filled amount: not reported` when the exchange reported no fill                    |
 | `order_error`        | Order execution failed, with a line saying so when the order may still be live on the exchange, to be checked there                          |
 | `order_complete`     | Order fully executed                                                                                                                         |
 | `roundtrip_complete` | Round trip closed, with its PnL and profit, `unknown` when no portfolio read valued it (needs the `RoundTripAnalyzer`)                       |
+
+A `strat_create` message gives the size the strategy asked for on its `Requested amount` line: the amount (`Requested amount: 0.5`), `auto` for an all-in order, a cost in the currency (`Requested amount: 100 USDT worth`) or a share with its base (`Requested amount: 25 % of the USDT` for a BUY, `25 % of the BTC` for a SELL).
 
 ### Example Notifications
 
