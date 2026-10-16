@@ -91,10 +91,11 @@ describe('CandleBucketBatcher', () => {
     });
 
     it.each`
-      case                   | minutes
-      ${'skips a minute'}    | ${[0, 2]}
-      ${'repeats a minute'}  | ${[0, 1, 1]}
-      ${'goes back in time'} | ${[0, 1, 0]}
+      case                                              | minutes
+      ${'skips a minute'}                               | ${[0, 2]}
+      ${'repeats a minute'}                             | ${[0, 1, 1]}
+      ${'goes back in time'}                            | ${[0, 1, 0]}
+      ${'starts less than a minute after the last one'} | ${[0, 0.5]}
     `('should throw when the next bucket $case', ({ minutes }) => {
       const last = minutes.at(-1);
       const previous = minutes.at(-2);

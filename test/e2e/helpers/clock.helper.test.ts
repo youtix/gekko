@@ -1,15 +1,69 @@
-import { describe, expect, it } from 'bun:test';
-import { minuteOf } from './clock.helper';
+import { ONE_SECOND } from '@constants/time.const';
+import { afterEach, describe, expect, it, jest } from 'bun:test';
+import { advanceClock, minuteOf, REALTIME_START, startFakeClock } from './clock.helper';
 
-describe('minuteOf', () => {
-  const minute = Date.parse('2024-01-01T00:01:00Z');
+describe('clock.helper', () => {
+  afterEach(() => jest.useRealTimers());
 
-  // This file keeps real minutes: ONE_MINUTE is not mocked here
-  it.each([
-    ['the start of a minute', minute, minute],
-    ['an instant inside a minute', minute + 30_000, minute],
-    ['the last millisecond of a minute', minute + 59_999, minute],
-  ])('should give the start of the minute holding %s', (_instant, timestamp, start) => {
-    expect(minuteOf(timestamp)).toBe(start);
+  describe('minuteOf', () => {
+    const minute = Date.parse('2024-01-01T00:01:00Z');
+
+    it.each([
+      ['the start of a minute', minute, minute],
+      ['an instant inside a minute', minute + 30_000, minute],
+      ['the last millisecond of a minute', minute + 59_999, minute],
+    ])('should give the start of the minute holding %s', (_instant, timestamp, start) => {
+      expect(minuteOf(timestamp)).toBe(start);
+    });
+  });
+
+  describe('startFakeClock', () => {
+    it.each([
+      ['REALTIME_START, 30 s into a minute, by default', undefined, Date.parse('2024-01-01T12:00:30Z')],
+      ['the instant given', Date.parse('2025-06-30T23:59:59Z'), Date.parse('2025-06-30T23:59:59Z')],
+    ])('should set Date to %s', (_instant, now, expected) => {
+      startFakeClock(now);
+      expect(Date.now()).toBe(expected);
+    });
+
+    it('should fake the timers too: one fires once the fake clock reaches it', () => {
+      startFakeClock();
+      let fired = false;
+      setTimeout(() => (fired = true), ONE_SECOND);
+      jest.advanceTimersByTime(ONE_SECOND);
+      expect(fired).toBe(true);
+    });
+  });
+
+  describe('advanceClock', () => {
+    it('should move the fake clock by the time asked, the last step shorter', async () => {
+      startFakeClock();
+      await advanceClock(90_500);
+      expect(Date.now() - REALTIME_START).toBe(90_500);
+    });
+
+    // A single advance of Bun's fake timers runs no process.nextTick callback: the timer it arms, due 1.5 s in, would wait for the
+    // next advance
+    it('should run within the advance what a timer started through process.nextTick, a second later at most', async () => {
+      startFakeClock();
+      let firedAt: number | undefined;
+      setTimeout(() => process.nextTick(() => setTimeout(() => (firedAt = Date.now()), 500)), 500);
+      await advanceClock(2 * ONE_SECOND);
+      expect(firedAt! - REALTIME_START).toBe(1_500);
+    });
+
+    it('should stop at the end of the second in which `until` came to hold', async () => {
+      startFakeClock();
+      await advanceClock(10 * ONE_SECOND, { until: () => Date.now() >= REALTIME_START + 2_500 });
+      expect(Date.now() - REALTIME_START).toBe(3 * ONE_SECOND);
+    });
+
+    it('should refuse to move the real clock', async () => {
+      const failure = await advanceClock(ONE_SECOND).then(
+        () => undefined,
+        (error: Error) => error.message,
+      );
+      expect(failure).toBe('advanceClock moves the fake clock: call startFakeClock() first');
+    });
   });
 });

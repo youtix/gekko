@@ -16,7 +16,7 @@ type PaperExchange = Extract<RawConfiguration['exchange'], { name: 'paper-binanc
  *
  * `raw` is read on every call of a getter, so that a test sets the configuration of its next run by changing what `raw` reads. The
  * schema is loaded by the factory of the mock, which Bun runs when the configuration is first imported, after the other mocks of the
- * file: under the clock of the realtime flows (mockRealtimeModules), its defaults and bounds are in fast minutes too.
+ * file: the helper loads nothing of src before them.
  */
 export const mockConfiguration = (raw: RawConfiguration | (() => RawConfiguration)) => {
   const read = typeof raw === 'function' ? raw : () => raw;
@@ -53,12 +53,11 @@ export const rawDaterange = ({ start, end }: { start: number; end: number }) => 
 });
 
 /**
- * The paper exchange of the realtime flows, with these balances. The Trader synchronizes at start and on order events only: its periodic
- * synchronization waits a real ten minutes, a literal rather than ten ONE_MINUTE, which is 500 ms on the clock of the realtime flows and
- * would come within a run. The orders are polled every orderSynchInterval, its default of twenty ONE_SECOND: 20 ms on that clock.
+ * The paper exchange of the realtime flows, with these balances and the synchronization periods the schema gives, real ones on the fake
+ * clock of the flows: the Trader reads the balances again every ten minutes, besides its start and the order events, and an open order
+ * is polled every twenty seconds. A scenario that needs another period sets it beside these.
  */
 export const paperExchange = (simulationBalance: PaperExchange['simulationBalance']): PaperExchange => ({
   name: 'paper-binance',
   simulationBalance,
-  exchangeSynchInterval: 10 * 60 * 1000,
 });

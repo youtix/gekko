@@ -1,11 +1,12 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { first } from 'lodash-es';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
-import { FAST_MINUTE, minuteOf } from '../../helpers/clock.helper';
+import { minuteOf, startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration } from '../../helpers/configuration.helper';
 import { cleanDatabase, countCandles } from '../../helpers/database.helper';
-import { endRealtimeRun, mockRealtimeModules } from '../../helpers/realtimeRun.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, findTextLines } from '../../mocks/winston.mock';
 
@@ -13,14 +14,8 @@ import { clearLogs, findTextLines } from '../../mocks/winston.mock';
 // MOCKS SETUP
 // --------------------------------------------------------------------------
 
-// Track candles emitted
-const TARGET_CANDLES = 10;
-
-// Wait for candles to be collected (with accelerated time, this should be fast)
-// We'll wait for TARGET_CANDLES * FAST_MINUTE to give buffer
-const TIMEOUT_MS = TARGET_CANDLES * FAST_MINUTE;
-
-// 1. Mock winston, the clock, ccxt and the fetcher, and end each test's run before the next test starts (see realtimeRun.helper)
+// 1. Mock winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, and ends its run before the next test
+// starts (see realtimeRun.helper)
 mockRealtimeModules();
 
 // 2. Mock Configuration
@@ -53,6 +48,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     clearLogs();
 
     MockCCXTExchange.reset();
+    startFakeClock();
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
@@ -60,7 +56,6 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
   it('Scenario A: Realtime candle recording to SQLite', async () => {
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference before pipeline runs
@@ -68,17 +63,13 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // Keep DB open for subsequent tests
     storage.close = () => {};
 
-    // Create a timeout promise to stop the pipeline after we collect enough candles
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // Each tick stores the minute that just closed
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
 
     const db = storage.db;
 
     // Verify tables exist and have data
     // We should have at least some candles recorded
-    // Due to the accelerated time, the exact count depends on timing
     expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThanOrEqual(5);
 
     // Verify data integrity - check first candle
@@ -103,17 +94,14 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // Storage is already configured with all pairs from the start
 
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference - close is already disabled from Scenario A
     const storage = inject.storage() as SQLiteStorage;
 
-    // Create a timeout promise to stop the pipeline after we collect enough candles
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // A few minutes of every pair
+    const pairs = ['BTC/USDT', 'ETH/USDT', 'LTC/USDT'] as const;
+    await runRealtimeUntil(() => pairs.every(pair => countCandles(storage, pair) >= 3), { maxMinutes: 6 });
 
     const db = storage.db;
 
@@ -179,19 +167,17 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     MockCCXTExchange.emitDuplicatesEveryXCandle = 3;
 
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
     const db = storage.db;
 
-    // Run the pipeline - this should NOT throw any errors even with duplicates
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
+    // Run the pipeline - this should NOT throw any errors even with duplicates. The fourth page, of minute 3, is the first stamped with
+    // minute 0: the minute it hides is asked for again, and stored, with the next tick
     // The key assertion here is that this does NOT throw
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    const isDuplicateWarned = () => findTextLines('Ignored a duplicate 1m candle', 'warn').length > 0;
+    await runRealtimeUntil(() => isDuplicateWarned() && countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
 
     // ASSERTION 1: The pipeline completed without errors (we got here = no error thrown)
 
@@ -217,19 +203,15 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     MockCCXTExchange.emitFutureCandles = true;
 
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
     const db = storage.db;
 
-    // Run the pipeline - this should NOT throw any errors even with future candles
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
+    // Run the pipeline - this should NOT throw any errors even with future candles: five pages, each opened by a future candle
     // The key assertion here is that this does NOT throw
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
 
     // ASSERTION 1: The pipeline completed without errors (we got here = no error thrown)
 
@@ -237,9 +219,9 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // The system should gracefully ignore future candles. The mock's future candle starts 5 minutes after the fetch, off
     // the minute boundaries; the closed minutes recorded during the run legitimately start after the run started, so the
     // check is: nothing stored is unaligned, in progress or in the future at the end of the run.
-    const currentFastMinute = minuteOf(Date.now());
+    const currentMinute = minuteOf(Date.now());
     const selectNotClosed = (table: string) =>
-      db.query(`SELECT * FROM ${table} WHERE start >= ? OR start % ? != 0`).all(currentFastMinute, FAST_MINUTE) as any[];
+      db.query(`SELECT * FROM ${table} WHERE start >= ? OR start % ? != 0`).all(currentMinute, ONE_MINUTE) as any[];
 
     // There should be NO future candles stored in the database
     expect(selectNotClosed('candles_BTC_USDT').length).toBe(0);
@@ -253,23 +235,23 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
   }, 30000);
 
   it('Scenario E: Filling candle gaps', async () => {
-    // Set the daterange to include gaps
-    MockCCXTExchange.simulatedGaps = [{ start: Date.now() + 2 * FAST_MINUTE, end: Date.now() + 5 * FAST_MINUTE }];
+    // The exchange has no candle of any pair for minutes 2 to 4 of the run. Computed from the minute the pipeline reads as the minute in
+    // progress, the fake clock still where the test set it: read on the wall clock before the pipeline was imported, a cold import
+    // could start the run after the gap, and the scenario passed without a minute filled.
+    const firstMinute = minuteOf(Date.now());
+    const gapEnd = firstMinute + 5 * ONE_MINUTE;
+    MockCCXTExchange.simulatedGaps = [{ start: firstMinute + 2 * ONE_MINUTE, end: gapEnd }];
 
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
     const db = storage.db;
 
-    // Run the pipeline - this should NOT throw any errors even with gaps
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
+    // Run the pipeline - this should NOT throw any errors even with gaps - until the minute after the gap is stored
     // CRITICAL: The pipeline should complete without throwing any errors
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT', { start: gapEnd, end: gapEnd }) === 1, { maxMinutes: 10 });
 
     // ASSERTION 1: The pipeline completed without errors (reaching here = success)
     // If the gap filling failed or threw an error, we wouldn't get here
@@ -287,7 +269,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
         const gap = btcCandles[i].start - btcCandles[i - 1].start;
         // Each candle should be exactly one minute after the previous one (no gaps)
         // The FillCandleGapStream fills missing candles with empty/synthetic candles
-        expect(gap).toBe(FAST_MINUTE);
+        expect(gap).toBe(ONE_MINUTE);
       }
     }
 
@@ -295,13 +277,13 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     const ethCandles = db.query('SELECT start FROM candles_ETH_USDT ORDER BY start ASC').all() as { start: number }[];
     for (let i = 1; i < ethCandles.length; i++) {
       const gap = ethCandles[i].start - ethCandles[i - 1].start;
-      expect(gap).toBe(FAST_MINUTE);
+      expect(gap).toBe(ONE_MINUTE);
     }
 
     const ltcCandles = db.query('SELECT start FROM candles_LTC_USDT ORDER BY start ASC').all() as { start: number }[];
     for (let i = 1; i < ltcCandles.length; i++) {
       const gap = ltcCandles[i].start - ltcCandles[i - 1].start;
-      expect(gap).toBe(FAST_MINUTE);
+      expect(gap).toBe(ONE_MINUTE);
     }
 
     // ASSERTION 4: Verify filled candles have valid OHLCV data
@@ -327,7 +309,6 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // or on finalize.
 
     // Dynamic imports to ensure mocks are applied first
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
     const { inject } = await import('@services/injecter/injecter');
 
     // Get storage reference - close is already disabled from previous scenarios
@@ -345,10 +326,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     expect(insertThreshold).toBe(1); // Realtime mode default
 
     // Run the pipeline
-    const pipelinePromise = gekkoPipeline();
-
-    // Use Promise.race with a timeout to stop waiting after enough time
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => countCandles(storage, 'BTC/USDT') >= 5, { maxMinutes: 8 });
 
     // ASSERTION 2: The pipeline completed without errors (we got here = no error thrown)
 
@@ -383,7 +361,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
       for (let i = 1; i < orderedCandles.length; i++) {
         const gap = orderedCandles[i].start - orderedCandles[i - 1].start;
         // Each candle should be exactly one minute after the previous one
-        expect(gap).toBe(FAST_MINUTE);
+        expect(gap).toBe(ONE_MINUTE);
       }
     }
   }, 30000);

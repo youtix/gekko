@@ -40,7 +40,7 @@ export const DUST_TOLERANCE = 0.01;
  * and caps that factor at 366; a longer horizon would understate the annualized figures of the runs of a few days, common in realtime.
  * A shorter period is annualized as if its returns had been spread over the day from its start: its annualized return, its annualized
  * net profit and its ratios alike, so that they agree with one another (see calculatePerformanceStatistics). A day of the calendar, as
- * the years it is set against are, and not 24 hours of ONE_MINUTE, which the realtime e2e flows shrink to speed their clock up.
+ * the years it is set against are.
  */
 export const MIN_ANNUALIZATION_HORIZON_MS = hoursToMilliseconds(24);
 

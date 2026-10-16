@@ -1,20 +1,17 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { FAST_MINUTE } from '../../helpers/clock.helper';
+import { startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration, paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules } from '../../helpers/realtimeRun.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, findLoggedObject, findTextLine, findTextLines, isTextLine, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
 // --------------------------------------------------------------------------
-const TARGET_CANDLES = 10; // Track candles emitted
 
-// Wait for candles to be collected (with accelerated time, this should be fast)
-// We'll wait for TARGET_CANDLES * FAST_MINUTE to give buffer
-const TIMEOUT_MS = TARGET_CANDLES * FAST_MINUTE;
-
-// 1. Mock winston, the clock, ccxt and the fetcher, and end each test's run before the next test starts (see realtimeRun.helper)
+// 1. Mock winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, and ends its run before the next test
+// starts (see realtimeRun.helper)
 mockRealtimeModules();
 // The flows read the strategy's debug lines from the winston mock: the logger hands a debug line to winston only when
 // GEKKO_LOG_LEVEL lets it through, and the logger is loaded after this, by the pipeline
@@ -45,6 +42,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
 
     // Reset mocks
     MockCCXTExchange.reset();
+    startFakeClock();
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
@@ -62,11 +60,9 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       { close: 125 }, // One more buffer candle
     ]);
 
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    // Start pipeline and wait for timeout
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // One candle a minute: the round trip exits on the second, and is reported with the third
+    const isRoundtrip = (message: Record<string, any>) => 'entryAt' in message && 'exitAt' in message && 'profit' in message;
+    await runRealtimeUntil(() => findLoggedObject(isRoundtrip) !== undefined, { maxMinutes: 5 });
 
     // Assert logs verify the execution of the e2e test
     expect(findTextLine('Trigger BUY for BTC/USDT')).toBeDefined();
@@ -74,7 +70,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
 
     // Assert roundtrip state from Final Trading Report logged by RoundTripAnalyzer
     // In realtime, processFinalize isn't called, so we check the individual roundtrip log
-    const roundtrip = findLoggedObject(message => 'entryAt' in message && 'exitAt' in message && 'profit' in message)!;
+    const roundtrip = findLoggedObject(isRoundtrip)!;
     expect(roundtrip).toBeDefined();
 
     // There should be exactly one completed roundtrip
@@ -96,7 +92,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
     expect(roundtrip.pnl).toBe(1009.79); // 311,009.79 - 310,000
     expect(roundtrip.profit).toBe(0.325738709677419); // 1,009.79 / 310,000 * 100, to 15 significant digits
     expect(roundtrip.maxAdverseExcursion).toBe(0);
-    expect(roundtrip.duration).toBe(FAST_MINUTE);
+    // Exited a minute after the entry, the SELL on the candle after the BUY's
+    expect(roundtrip.duration).toBe(ONE_MINUTE);
   });
   it('Scenario B: Trailing Stop Lifecycle', async () => {
     // Override strategy to use DebugTrailingStop with trailing stop config
@@ -111,10 +108,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       { close: 9800 },
     ]);
 
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // Until the stop's SELL, placed on the fourth candle, is reported completed with the fifth
+    await runRealtimeUntil(() => findTextLines('Trailing stop order completed').length >= 2, { maxMinutes: 8 });
 
     // Verify trailing stop BUY order was created by the strategy
     expect(findTextLine('Trailing stop BUY order created')).toBeDefined();
@@ -132,5 +127,17 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       `Trailing stop order completed: ${buyId}`,
       `Trailing stop order completed: ${sellId}`,
     ]);
+  });
+
+  it('Scenario C: The end of the run, by the abort of its signal, reported as its interruption', async () => {
+    mockStrategyConfig = { name: 'DebugRealtime' };
+    MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }, { close: 110 }, { close: 120 }]);
+    await runRealtimeUntil(() => findTextLine('Trigger SELL for BTC/USDT') !== undefined, { maxMinutes: 5 });
+
+    // The plugins are finalised with the AbortError as the failure that stopped the run, which the final report names. The harness
+    // destroyed the last stream without an error instead, so that the plugins were finalised as at the end of a completed run, an end no
+    // realtime run has in production.
+    await endRealtimeRun();
+    expect(findLoggedObject(message => message.id === 'TRADING REPORT')?.interruption).toBe('The operation was aborted.');
   });
 });

@@ -1,113 +1,308 @@
-import { afterEach, describe, expect, it } from 'bun:test';
-import { Readable, Writable } from 'node:stream';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
+import type { GekkoPipelineOptions } from '@models/pipeline.types';
+import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
 import { MockCCXTExchange } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
-import { MockHeart } from '../mocks/heart.mock';
 import { clearLogs, logStore, MockWinston, type LoggedLine } from '../mocks/winston.mock';
-import { FAST_MINUTE } from './clock.helper';
-import { endRealtimeRun, mockRealtimeModules } from './realtimeRun.helper';
+import { advanceClock, REALTIME_START, startFakeClock } from './clock.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  runRealtimeFor,
+  runRealtimeUntil,
+  runRealtimeUntilEnd,
+  startRealtimeRun,
+} from './realtimeRun.helper';
 
 mockRealtimeModules();
 
-describe('realtimeRun.helper', () => {
-  afterEach(() => clearLogs());
+/**
+ * The pipeline the helper runs, in place of gekkoPipeline: it never ends by itself unless `stopsAt` is set, and once its signal is
+ * aborted it rejects with an AbortError `endsAfterAbort` ms later, as the plugins are finalised.
+ */
+const pipeline = {
+  signal: undefined as AbortSignal | undefined,
+  startedAt: undefined as number | undefined,
+  endedAt: undefined as number | undefined,
+  stopsAt: undefined as number | undefined,
+  stop: new Error('Max consecutive order errors reached (5)'),
+  endsAfterAbort: 15 * ONE_SECOND,
+  ignoresAbort: false,
+  failsAsAborted: false,
+};
+const abortError = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+mock.module('@services/core/pipeline/pipeline', () => ({
+  gekkoPipeline: ({ signal }: GekkoPipelineOptions = {}) => {
+    pipeline.signal = signal;
+    pipeline.startedAt = Date.now();
+    return new Promise<void>((_resolve, reject) => {
+      const end = (failure: Error) => {
+        pipeline.endedAt = Date.now();
+        reject(failure);
+      };
+      if (pipeline.stopsAt !== undefined) setTimeout(() => end(pipeline.stop), pipeline.stopsAt - Date.now());
+      signal?.addEventListener('abort', () => {
+        if (pipeline.ignoresAbort) return;
+        setTimeout(() => end(pipeline.failsAsAborted ? new Error('A bucket failed') : abortError()), pipeline.endsAfterAbort);
+      });
+    });
+  },
+}));
 
-  it('should mock the modules of a realtime flow: the logger, the clock, the Heart, ccxt and the fetcher', async () => {
-    const [winston, { ONE_SECOND, ONE_MINUTE }, { Heart }, ccxt, { fetcher }] = await Promise.all([
-      import('winston'),
-      import('@constants/time.const'),
-      import('@services/core/heart/heart'),
-      import('ccxt'),
-      import('@services/fetcher/fetcher.service'),
-    ]);
-    expect<Record<string, unknown>>({
-      createLogger: winston.createLogger,
-      ONE_SECOND,
-      ONE_MINUTE,
-      Heart,
-      binance: ccxt.binance,
-      isFetcherMocked: fetcher instanceof MockFetcherService,
-    }).toEqual({
-      createLogger: MockWinston.createLogger,
-      ONE_SECOND: 1,
-      ONE_MINUTE: FAST_MINUTE,
-      Heart: MockHeart,
-      binance: MockCCXTExchange,
-      isFetcherMocked: true,
+/** What a promise rejected with, undefined when it resolved */
+const rejectionOf = (promise: Promise<unknown>) =>
+  promise.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+/** The message of what a promise rejected with, undefined when it resolved */
+const rejectionMessageOf = async (promise: Promise<unknown>) => ((await rejectionOf(promise)) as Error | undefined)?.message;
+
+describe('realtimeRun.helper', () => {
+  beforeEach(() => {
+    clearLogs();
+    Object.assign(pipeline, {
+      signal: undefined,
+      startedAt: undefined,
+      endedAt: undefined,
+      stopsAt: undefined,
+      endsAfterAbort: 15 * ONE_SECOND,
+      ignoresAbort: false,
+      failsAsAborted: false,
     });
   });
 
-  /**
-   * A stream pipeline as gekkoPipeline() runs it in realtime: from a source that never ends into a sink. Given a delay, the sink
-   * calls back that much later when it is destroyed, as PluginsStream does once the plugins are finalised.
-   */
-  const startRun = async (destroyDelay?: number) => {
-    const { pipeline } = await import('stream/promises');
-    const sink = new Writable({ objectMode: true, write: (_chunk, _encoding, done) => done() });
-    if (destroyDelay !== undefined) sink._destroy = (error, callback) => void setTimeout(() => callback(error), destroyDelay);
-    let isSettled = false;
-    pipeline(new Readable({ objectMode: true, read() {} }), sink).catch(() => (isSettled = true));
-    return { sink, isSettled: () => isSettled };
-  };
-
-  it('should destroy the last stream of the run in progress', async () => {
-    const { sink } = await startRun();
-    await endRealtimeRun();
-    expect(sink.destroyed).toBe(true);
+  afterEach(async () => {
+    // The end of a run a test left running, which the tests of endRealtimeRun check themselves
+    await rejectionOf(endRealtimeRun());
+    jest.useRealTimers();
   });
 
-  it.each([
-    ['at once', undefined],
-    ['30 ms later', 30],
-  ])('should return once the run is over, its last stream destroyed %s', async (_when, destroyDelay) => {
-    const { isSettled } = await startRun(destroyDelay);
-    await endRealtimeRun();
-    expect(isSettled()).toBe(true);
+  describe('mockRealtimeModules', () => {
+    it('should mock the logger, ccxt and the fetcher, and leave the clock real', async () => {
+      const [winston, ccxt, { fetcher }, { ONE_SECOND: second, ONE_MINUTE: minute }] = await Promise.all([
+        import('winston'),
+        import('ccxt'),
+        import('@services/fetcher/fetcher.service'),
+        import('@constants/time.const'),
+      ]);
+      expect<Record<string, unknown>>({
+        createLogger: winston.createLogger,
+        binance: ccxt.binance,
+        isFetcherMocked: fetcher instanceof MockFetcherService,
+        ONE_SECOND: second,
+        ONE_MINUTE: minute,
+      }).toEqual({
+        createLogger: MockWinston.createLogger,
+        binance: MockCCXTExchange,
+        isFetcherMocked: true,
+        ONE_SECOND: 1000,
+        ONE_MINUTE: 60_000,
+      });
+    });
+
+    it('should leave the Heart real: it ticks once pumped, then a grace period after each minute boundary', async () => {
+      const { Heart } = await import('@services/core/heart/heart');
+      startFakeClock();
+      const heart = new Heart(ONE_MINUTE, { gracePeriod: 2 * ONE_SECOND });
+      const ticks: string[] = [];
+      heart.on('tick', () => ticks.push(new Date(Date.now()).toISOString()));
+      heart.pump();
+      await advanceClock(2 * ONE_MINUTE);
+      heart.stop();
+      expect(ticks).toEqual(['2024-01-01T12:00:30.001Z', '2024-01-01T12:01:02.000Z', '2024-01-01T12:02:02.000Z']);
+    });
   });
 
-  it('should clear the intervals created since the previous run ended', async () => {
-    let ticks = 0;
-    setInterval(() => ticks++, 1);
-    await endRealtimeRun();
-    const ticksAtEnd = ticks;
-    await new Promise(resolve => setTimeout(resolve, 20));
-    expect(ticks).toBe(ticksAtEnd);
+  describe('startRealtimeRun', () => {
+    beforeEach(() => startFakeClock());
+
+    it('should start the pipeline at the instant the fake clock was set to', async () => {
+      await startRealtimeRun();
+      expect(pipeline.startedAt).toBe(REALTIME_START);
+    });
+
+    it('should hand the pipeline a signal', async () => {
+      await startRealtimeRun();
+      expect(pipeline.signal).toBeInstanceOf(AbortSignal);
+    });
+
+    it('should refuse to start a second run while one is in progress', async () => {
+      await startRealtimeRun();
+      expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run is in progress already: endRealtimeRun ends it');
+    });
+
+    it('should refuse to start a run on the real clock', async () => {
+      jest.useRealTimers();
+      expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run goes on the fake clock: call startFakeClock() first');
+    });
   });
 
-  it('should stop the hearts', async () => {
-    const heart = new MockHeart(1);
-    heart.pump();
-    await endRealtimeRun();
-    expect(heart.isHeartBeating()).toBe(false);
+  describe('runRealtimeUntil', () => {
+    beforeEach(() => startFakeClock());
+
+    it('should start a run when none is in progress', async () => {
+      await runRealtimeUntil(() => true, { maxMinutes: 1 });
+      expect(pipeline.startedAt).toBe(REALTIME_START);
+    });
+
+    it('should return at the end of the first minute the condition holds at', async () => {
+      await runRealtimeUntil(() => Date.now() >= REALTIME_START + 150 * ONE_SECOND, { maxMinutes: 5 });
+      expect(Date.now() - REALTIME_START).toBe(3 * ONE_MINUTE);
+    });
+
+    it('should return once maxMinutes are over when the condition never holds', async () => {
+      await runRealtimeUntil(() => false, { maxMinutes: 4 });
+      expect(Date.now() - REALTIME_START).toBe(4 * ONE_MINUTE);
+    });
+
+    it('should throw what ended the run when it ends before the condition holds', async () => {
+      pipeline.stopsAt = REALTIME_START + 90 * ONE_SECOND;
+      expect(await rejectionOf(runRealtimeUntil(() => false, { maxMinutes: 5 }))).toBe(pipeline.stop);
+    });
+
+    it('should stop the clock at the end of the second the run ended in', async () => {
+      pipeline.stopsAt = REALTIME_START + 90 * ONE_SECOND + 300;
+      await rejectionOf(runRealtimeUntil(() => false, { maxMinutes: 5 }));
+      expect(Date.now() - REALTIME_START).toBe(91 * ONE_SECOND);
+    });
   });
 
-  it.each<[string, Pick<LoggedLine, 'level' | 'message'>, string | undefined]>([
-    [
-      'should fail after a failure to finalise logged as a warning',
-      { level: 'warn', message: 'Finalization errors: boom' },
-      'A plugin failed to finalise: Finalization errors: boom',
-    ],
-    [
-      'should fail after a failure to finalise logged as an error',
-      { level: 'error', message: 'Trader failed to finalize: boom; CandleWriter failed to finalize: locked' },
-      'A plugin failed to finalise: Trader failed to finalize: boom; CandleWriter failed to finalize: locked',
-    ],
-    [
-      'should not fail after a line on the finalisation at info level',
-      { level: 'info', message: 'Finalization of the plugins' },
-      undefined,
-    ],
-    [
-      'should not fail after another warning',
-      { level: 'warn', message: 'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)' },
-      undefined,
-    ],
-  ])('%s', async (_title, line, failure) => {
-    logStore.push({ ...line, _tag: 'STREAM' });
-    const thrown = await endRealtimeRun().then(
-      () => undefined,
-      (error: Error) => error.message,
-    );
-    expect(thrown).toBe(failure);
+  describe('runRealtimeFor', () => {
+    beforeEach(() => startFakeClock());
+
+    it('should run for the minutes given', async () => {
+      await runRealtimeFor({ minutes: 3 });
+      expect(Date.now() - REALTIME_START).toBe(3 * ONE_MINUTE);
+    });
+
+    it('should throw what ended the run when it ends meanwhile', async () => {
+      pipeline.stopsAt = REALTIME_START + 2 * ONE_MINUTE;
+      expect(await rejectionOf(runRealtimeFor({ minutes: 3 }))).toBe(pipeline.stop);
+    });
+  });
+
+  describe('runRealtimeUntilEnd', () => {
+    beforeEach(() => startFakeClock());
+
+    it('should return what the run ended with', async () => {
+      pipeline.stopsAt = REALTIME_START + 4 * ONE_MINUTE;
+      expect(await runRealtimeUntilEnd({ maxMinutes: 10 })).toBe(pipeline.stop);
+    });
+
+    it('should return an Error saying the run did not end within maxMinutes', async () => {
+      const outcome = (await runRealtimeUntilEnd({ maxMinutes: 2 })) as Error;
+      expect(outcome.message).toBe('The realtime run did not end within 2 minutes');
+    });
+  });
+
+  describe('endRealtimeRun', () => {
+    describe('when a run is in progress', () => {
+      beforeEach(async () => {
+        startFakeClock();
+        await runRealtimeFor({ minutes: 1 });
+      });
+
+      it('should abort the signal of the run', async () => {
+        await endRealtimeRun();
+        expect(pipeline.signal?.aborted).toBe(true);
+      });
+
+      it('should move the fake clock until the aborted run has ended', async () => {
+        await endRealtimeRun();
+        expect(pipeline.endedAt! - (REALTIME_START + ONE_MINUTE)).toBe(15 * ONE_SECOND);
+      });
+
+      it('should put the real timers back', async () => {
+        await endRealtimeRun();
+        expect(jest.isFakeTimers()).toBe(false);
+      });
+
+      it('should drop the fake timers left, as the polls of the orders still open', async () => {
+        let polls = 0;
+        setInterval(() => polls++, ONE_SECOND);
+        await endRealtimeRun();
+        const pollsAtEnd = polls;
+        await new Promise(resolve => setTimeout(resolve, 30));
+        expect(polls).toBe(pollsAtEnd);
+      });
+
+      it.each<[string, Partial<typeof pipeline>, string]>([
+        [
+          'should fail when the run does not end within 75 s of its abort',
+          { ignoresAbort: true },
+          'The realtime run did not end within 75 s of its abort',
+        ],
+        [
+          'should fail when the run fails otherwise than with the AbortError as it is ended',
+          { failsAsAborted: true },
+          'The realtime run failed as it was ended: A bucket failed',
+        ],
+      ])('%s', async (_title, behaviour, failure) => {
+        Object.assign(pipeline, behaviour);
+        expect(await rejectionMessageOf(endRealtimeRun())).toBe(failure);
+      });
+    });
+
+    describe('when the run ended by itself', () => {
+      beforeEach(() => {
+        startFakeClock();
+        pipeline.stopsAt = REALTIME_START + 90 * ONE_SECOND;
+      });
+
+      it('should fail when no runRealtime… call reported the end to the test', async () => {
+        await startRealtimeRun();
+        await advanceClock(2 * ONE_MINUTE);
+        expect(await rejectionMessageOf(endRealtimeRun())).toBe(
+          'The realtime run ended by itself, unseen by the test: Max consecutive order errors reached (5)',
+        );
+      });
+
+      it('should end the test without a failure once runRealtimeUntilEnd returned the end', async () => {
+        await runRealtimeUntilEnd({ maxMinutes: 5 });
+        expect(await rejectionOf(endRealtimeRun())).toBeUndefined();
+      });
+
+      it('should not abort the signal of the run', async () => {
+        await runRealtimeUntilEnd({ maxMinutes: 5 });
+        await endRealtimeRun();
+        expect(pipeline.signal?.aborted).toBe(false);
+      });
+    });
+
+    it.each<[string, Pick<LoggedLine, 'level' | 'message'>, string | undefined]>([
+      [
+        'should fail after a failure to finalise logged as a warning',
+        { level: 'warn', message: 'Finalization errors: boom' },
+        'A plugin failed to finalise: Finalization errors: boom',
+      ],
+      [
+        'should fail after a failure to finalise logged as an error',
+        { level: 'error', message: 'Trader failed to finalize: boom; CandleWriter failed to finalize: locked' },
+        'A plugin failed to finalise: Trader failed to finalize: boom; CandleWriter failed to finalize: locked',
+      ],
+      [
+        'should not fail after a line on the finalisation at info level',
+        { level: 'info', message: 'Finalization of the plugins' },
+        undefined,
+      ],
+      [
+        'should not fail after the line PluginsStream logs as an aborted run closes',
+        {
+          level: 'error',
+          message: 'Gekko is closing the application due to an error: AbortError [ABORT_ERR]: The operation was aborted.',
+        },
+        undefined,
+      ],
+      [
+        'should not fail after another warning',
+        { level: 'warn', message: 'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)' },
+        undefined,
+      ],
+    ])('%s', async (_title, line, failure) => {
+      logStore.push({ ...line, _tag: 'STREAM' });
+      expect(await rejectionMessageOf(endRealtimeRun())).toBe(failure);
+    });
   });
 });

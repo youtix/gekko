@@ -1,10 +1,5 @@
-import { describe, expect, it, mock } from 'bun:test';
-import { FAST_MINUTE } from './clock.helper';
+import { describe, expect, it } from 'bun:test';
 import { mockConfiguration, paperExchange, rawDaterange, type RawConfiguration } from './configuration.helper';
-
-// The clock of the realtime flows, mocked as mockRealtimeModules mocks it: time.const is loaded already (clock.helper imports it), and
-// the configuration is first imported after
-mock.module('@constants/time.const', () => ({ ONE_SECOND: 1, ONE_MINUTE: FAST_MINUTE }));
 
 const realtime = (plugins: RawConfiguration['plugins']): RawConfiguration => ({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m' },
@@ -63,9 +58,10 @@ describe('mockConfiguration', () => {
     });
   });
 
-  it('should hand out the defaults of the schema at the clock mocked before it loaded: twenty ONE_SECOND of 1 ms', async () => {
+  it('should give the paper exchange the synchronization periods of the schema: ten minutes, twenty seconds an order', async () => {
     raw = realtime([{ name: 'Trader' }]);
-    expect((await configuration()).getExchange().orderSynchInterval).toBe(20);
+    const { exchangeSynchInterval, orderSynchInterval } = (await configuration()).getExchange();
+    expect({ exchangeSynchInterval, orderSynchInterval }).toEqual({ exchangeSynchInterval: 600_000, orderSynchInterval: 20_000 });
   });
 
   it('should read the configuration again on every call', async () => {

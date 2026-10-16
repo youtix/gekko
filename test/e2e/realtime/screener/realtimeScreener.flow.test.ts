@@ -1,8 +1,9 @@
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import type { DebugAdviceParams } from '@strategies/debug/debugAdvice.types';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
-import { FAST_MINUTE, minuteOf } from '../../helpers/clock.helper';
+import { minuteOf, startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration, paperExchange } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules } from '../../helpers/realtimeRun.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, runRealtimeUntilEnd } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService, SUBSCRIBE_ALL_UPDATES } from '../../mocks/fetcher.mock';
 import { clearLogs, findTextLines, logStore } from '../../mocks/winston.mock';
@@ -14,17 +15,11 @@ import { clearLogs, findTextLines, logStore } from '../../mocks/winston.mock';
 // DebugAdvice advises on every candle (each: 1), a SELL then a BUY, on every pair
 const DEFAULT_MOCK_STRATEGY_CONFIG: { name: string } & Partial<DebugAdviceParams> = { name: 'DebugAdvice', each: 1 };
 
-// Track candles emitted
-const TARGET_CANDLES = 10;
-
-// Wait for candles to be collected (with accelerated time, this should be fast)
-// We'll wait for TARGET_CANDLES * FAST_MINUTE to give buffer
-const TIMEOUT_MS = TARGET_CANDLES * FAST_MINUTE;
-
 const TELEGRAM_TOKEN = 'test-token';
 const TELEGRAM_USERNAME = 'test-bot';
 
-// 1. Mock winston, the clock, ccxt and the fetcher, and end each test's run before the next test starts (see realtimeRun.helper)
+// 1. Mock winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, and ends its run before the next test
+// starts (see realtimeRun.helper)
 mockRealtimeModules();
 // The flows read the strategy's debug lines from the winston mock: the logger hands a debug line to winston only when
 // GEKKO_LOG_LEVEL lets it through, and the logger is loaded after this, by the pipeline
@@ -32,6 +27,8 @@ process.env.GEKKO_LOG_LEVEL = 'debug';
 
 // 2. Mock Configuration
 let mockStrategyConfig = DEFAULT_MOCK_STRATEGY_CONFIG;
+// Left out, the default of the schema
+let mockOrderSynchInterval: number | undefined;
 mockConfiguration(() => ({
   watch: {
     mode: 'realtime',
@@ -41,11 +38,14 @@ mockConfiguration(() => ({
     tickrate: 100,
     warmup: { candleCount: 0, tickrate: 100 },
   },
-  exchange: paperExchange([
-    { assetName: 'BTC', balance: 100 },
-    { assetName: 'ETH', balance: 100 },
-    { assetName: 'USDT', balance: 300000 },
-  ]),
+  exchange: {
+    ...paperExchange([
+      { assetName: 'BTC', balance: 100 },
+      { assetName: 'ETH', balance: 100 },
+      { assetName: 'USDT', balance: 300000 },
+    ]),
+    orderSynchInterval: mockOrderSynchInterval,
+  },
   plugins: [
     { name: 'TradingAdvisor', strategyName: 'DebugAdvice' },
     { name: 'Trader' },
@@ -53,6 +53,12 @@ mockConfiguration(() => ({
   ],
   strategy: mockStrategyConfig,
 }));
+
+/** Whether a message the bot posted holds `text` */
+const isPosted = (text: string) => MockFetcherService.postedTexts().some(posted => posted.includes(text));
+
+/** How many messages the bot posted hold `text` */
+const countPosted = (text: string) => MockFetcherService.postedTexts().filter(posted => posted.includes(text)).length;
 
 describe('E2E: Realtime Screener Flow', () => {
   beforeEach(async () => {
@@ -80,18 +86,16 @@ describe('E2E: Realtime Screener Flow', () => {
 
     // Reset config defaults
     mockStrategyConfig = DEFAULT_MOCK_STRATEGY_CONFIG;
+    mockOrderSynchInterval = undefined;
+    startFakeClock();
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
   afterEach(() => endRealtimeRun());
 
   it('Scenario A: Standard Screener Flow (Buy/Sell Alert)', async () => {
-    // Dynamic imports
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    // Run pipeline
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // A SELL is advised on the first candle, a BUY on the second
+    await runRealtimeUntil(() => isPosted('BUY') && isPosted('SELL'), { maxMinutes: 5 });
 
     // Verify Telegram messages were sent
     // We expect at least one message for order placement (DebugAdvice advises on every candle with each: 1, a SELL then a BUY)
@@ -106,10 +110,7 @@ describe('E2E: Realtime Screener Flow', () => {
     // Both BTC and ETH are watched
     // Strategy triggers every candle (each: 1)
 
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => isPosted('BTC/USDT') && isPosted('ETH/USDT'), { maxMinutes: 5 });
 
     const texts = MockFetcherService.postedTexts();
     // Check we have messages for BOTH pairs
@@ -120,10 +121,7 @@ describe('E2E: Realtime Screener Flow', () => {
   });
 
   it('Scenario C: Strategy Creation order process', async () => {
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => ['advice', 'order created', 'order completed'].every(text => countPosted(text) >= 2), { maxMinutes: 8 });
 
     const texts = MockFetcherService.postedTexts();
 
@@ -133,11 +131,8 @@ describe('E2E: Realtime Screener Flow', () => {
   });
 
   it('Scenario D: Strategy Info Event Subscription (Logs)', async () => {
-    // Strategy triggers logs every candle
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    // Strategy triggers logs every candle: several candles, so that its debug lines would have been relayed
+    await runRealtimeUntil(() => countPosted('[INFO] (strategy)') > 5, { maxMinutes: 8 });
 
     const texts = MockFetcherService.postedTexts();
     expect(texts.length).toBeGreaterThan(0);
@@ -168,11 +163,12 @@ describe('E2E: Realtime Screener Flow', () => {
 
     // Configure strategy to cancel orders after 1 candle
     mockStrategyConfig = { ...DEFAULT_MOCK_STRATEGY_CONFIG, cancelAfter: 1 };
+    // Polled every 25 s rather than every 20 s, the default: at 20 s, an order placed on a tick is polled again on the next tick, its
+    // third poll, once the candle that tick fetched has moved the ticker, and the poll moves it to that candle's close, which the
+    // candle then fills before the strategy can cancel it. At 25 s, its polls before the next tick fall between the two.
+    mockOrderSynchInterval = 25 * ONE_SECOND;
 
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => isPosted('Strategy requested order cancellation') && isPosted('order canceled'), { maxMinutes: 8 });
 
     const texts = MockFetcherService.postedTexts();
     expect(texts.length).toBeGreaterThan(0);
@@ -207,18 +203,12 @@ describe('E2E: Realtime Screener Flow', () => {
 
     try {
       const { ApplicationStopError } = await import('@errors/applicationStop.error');
-      const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
 
-      // The breaker ends the run: waited for rather than raced against a timer, which a slow machine would lose
-      const pipelinePromise = gekkoPipeline();
-      try {
-        await pipelinePromise;
-        throw new Error('Pipeline should have thrown an error');
-      } catch (err: any) {
-        // The pipeline rejects with the ApplicationStopError itself (not a premature close), so main() can exit with 0
-        expect(err).toBeInstanceOf(ApplicationStopError);
-        expect(err.message).toBe('[STRATEGY] Max consecutive order errors reached (5)');
-      }
+      // The breaker ends the run, with the fourth bucket: waited for rather than raced against a timer, which a slow machine would lose
+      const err: any = await runRealtimeUntilEnd({ maxMinutes: 10 });
+      // The pipeline rejects with the ApplicationStopError itself (not a premature close), so main() can exit with 0
+      expect(err).toBeInstanceOf(ApplicationStopError);
+      expect(err.message).toBe('[STRATEGY] Max consecutive order errors reached (5)');
 
       // DebugAdvice logs "Order Errored: <id>" from onOrderErrored, which EventSubscriber posts as a strategy log, with the next bucket.
       // maxConsecutiveErrors defaults to 5: the strategy's onOrderErrored runs on the 5th error too, before the breaker throws, but its
@@ -240,15 +230,13 @@ describe('E2E: Realtime Screener Flow', () => {
   it('Scenario G: A pair without a candle in the first live minutes', async () => {
     // The exchange has no ETH candle for the first two minutes of the run, and with no warmup the gap filler has no earlier ETH candle
     // to fill those buckets with: they are dropped until ETH has one, instead of reaching the TradingAdvisor without ETH, which threw.
-    // Two minutes, so that the gap holds the first live minute even when a minute starts while the run is being built.
+    // Computed from the minute the pipeline reads as the minute in progress, the fake clock still where the test set it: read on the
+    // wall clock before the pipeline was imported, a cold import could start the run past the gap, which then held no live minute.
     const firstMinute = minuteOf(Date.now());
-    MockCCXTExchange.simulatedGaps = { 'ETH/USDT': [{ start: firstMinute, end: firstMinute + 2 * FAST_MINUTE }] };
-
-    const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
+    MockCCXTExchange.simulatedGaps = { 'ETH/USDT': [{ start: firstMinute, end: firstMinute + 2 * ONE_MINUTE }] };
 
     // Rejected, and so failing the test, if a bucket without ETH reached the TradingAdvisor
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
+    await runRealtimeUntil(() => logStore.some(log => log.message === 'Iteration: 0 for ETH/USDT'), { maxMinutes: 5 });
 
     // One warning per pair never seen at the first drop (the later drops are silent), then a summary at the first minute pushed
     const dropWarnings = findTextLines('dropping the leading buckets until every pair has a candle', 'warn');

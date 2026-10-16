@@ -278,6 +278,7 @@ describe('Pipeline Utils', () => {
           expect.any(RejectDuplicateCandleStream),
           expect.any(FillCandleGapStream),
           expect.any(PluginsStream),
+          { signal: undefined },
         ]);
       });
 
@@ -477,9 +478,10 @@ describe('Pipeline Utils', () => {
         expect((lastArgument() as { signal?: AbortSignal }).signal).toBe(signal);
       });
 
-      it.each(modes)('should hand pipeline() the streams alone, the plugins stream last, without a signal in %s mode', async mode => {
+      // pipeline() reads options without a signal as no options
+      it.each(modes)('should hand pipeline() options without a signal after the streams when given none in %s mode', async mode => {
         await streamPipelines[mode](mockPlugins);
-        expect(lastArgument()).toBeInstanceOf(PluginsStream);
+        expect(lastArgument()).toStrictEqual({ signal: undefined });
       });
     });
 
@@ -598,7 +600,11 @@ describe('Pipeline Utils', () => {
 
       it('should pipe the stored candles straight into the plugins', async () => {
         await launchBacktest();
-        expect(vi.mocked(pipeline).mock.lastCall).toEqual([expect.any(MultiAssetBacktestStream), expect.any(PluginsStream)]);
+        expect(vi.mocked(pipeline).mock.lastCall).toEqual([
+          expect.any(MultiAssetBacktestStream),
+          expect.any(PluginsStream),
+          { signal: undefined },
+        ]);
       });
 
       it('should read the stored candles of the watched pairs over daterange', async () => {
@@ -654,6 +660,7 @@ describe('Pipeline Utils', () => {
           expect.any(RejectFutureCandleStream),
           expect.any(FillCandleGapStream),
           expect.any(PluginsStream),
+          { signal: undefined },
         ]);
       });
 

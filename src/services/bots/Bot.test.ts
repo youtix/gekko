@@ -32,6 +32,12 @@ describe('Bot', () => {
       expect(bot.checkUpdates).toHaveBeenCalledTimes(3);
     });
 
+    it('checks for updates every second by default', async () => {
+      bot.listen();
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(bot.checkUpdates).toHaveBeenCalledTimes(3);
+    });
+
     it('stops checking for updates once closed', async () => {
       bot.listen(100);
       bot.close();
