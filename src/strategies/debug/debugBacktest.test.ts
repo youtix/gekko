@@ -51,6 +51,17 @@ describe('DebugBacktest', () => {
     ]);
   });
 
+  // An all-in order has no amount key at all, not one set to undefined, as a built-in strategy creates it: the Trader sizes it
+  it.each`
+    scenario                                                       | options                                 | buy                                                         | sell
+    ${'with allIn, a MARKET BUY and a MARKET SELL without amount'} | ${{ allIn: true }}                      | ${{ type: 'MARKET', side: 'BUY', symbol: BTC }}             | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
+    ${'with allIn and buyLimitPrice, a LIMIT BUY without amount'}  | ${{ allIn: true, buyLimitPrice: 9500 }} | ${{ type: 'LIMIT', side: 'BUY', price: 9500, symbol: BTC }} | ${{ type: 'MARKET', side: 'SELL', symbol: BTC }}
+    ${'with allIn false, orders of 1 unit as without it'}          | ${{ allIn: false }}                     | ${{ type: 'MARKET', side: 'BUY', amount: 1, symbol: BTC }}  | ${{ type: 'MARKET', side: 'SELL', amount: 1, symbol: BTC }}
+  `('sends $scenario', ({ options, buy, sell }) => {
+    play(2, { buyCandleIndex: 0, sellCandleIndex: 1, ...options });
+    expect(orders.advices).toStrictEqual([buy, sell]);
+  });
+
   it('orders on every watched pair', () => {
     play(2, { buyCandleIndex: 0, sellCandleIndex: 1 }, [BTC, ETH]);
     expect(orders.advices.map(({ side, symbol }) => `${side} ${symbol}`)).toEqual([
@@ -75,6 +86,23 @@ describe('debugBacktestStrategySchema: buyLimitPrice', () => {
   `('refuses $scenario, which no LIMIT order can rest at', ({ buyLimitPrice, code }) => {
     expect(debugBacktestStrategySchema.safeParse({ buyCandleIndex: 1, sellCandleIndex: 3, buyLimitPrice }).error?.issues).toMatchObject([
       { code, path: ['buyLimitPrice'] },
+    ]);
+  });
+});
+
+describe('debugBacktestStrategySchema: allIn', () => {
+  it('leaves allIn out of a block without it, for orders of 1 unit', () => {
+    expect(debugBacktestStrategySchema.parse({ buyCandleIndex: 1, sellCandleIndex: 3 })).not.toHaveProperty('allIn');
+  });
+
+  // A quoted boolean is no boolean: 'false' would read as true
+  it.each`
+    scenario              | allIn
+    ${'a quoted boolean'} | ${'false'}
+    ${'a number'}         | ${1}
+  `('refuses $scenario', ({ allIn }) => {
+    expect(debugBacktestStrategySchema.safeParse({ buyCandleIndex: 1, sellCandleIndex: 3, allIn }).error?.issues).toMatchObject([
+      { code: 'invalid_type', path: ['allIn'] },
     ]);
   });
 });

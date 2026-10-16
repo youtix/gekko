@@ -12,7 +12,11 @@ export const debugBacktestStrategySchema = z.strictObject({
   buyCandleIndex: candleIndexes,
   sellCandleIndex: candleIndexes,
   // A MARKET BUY fills with the candle it is sent with: a LIMIT BUY below the market rests until a candle reaches its price, its cost
-  // reserved meanwhile, for a backtest to show what a synchronization reads while an order is open
+  // reserved meanwhile, for a backtest or a paper session to show what a synchronization reads while an order is open
   /** The price of every BUY, sent as a LIMIT order; left out, the BUYs are MARKET orders */
   buyLimitPrice: z.number().positive().optional(),
+  // Every built-in strategy orders all-in, which an order of 1 never exercised: the Trader sizes such an order from the balance it read
+  // last, less what the orders placed since take from it, and caps it at the most the market takes in one order
+  /** Every order sent without an amount, all-in, for the Trader to size; left out, every order is of 1 unit */
+  allIn: z.boolean().optional(),
 });

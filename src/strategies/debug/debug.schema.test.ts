@@ -31,6 +31,8 @@ describe('debugAdviceStrategySchema', () => {
     ${'the paper trader e2e flow'}                                        | ${{ name: 'DebugAdvice', each: 2 }}
     ${'the screener e2e flow'}                                            | ${{ name: 'DebugAdvice', each: 1 }}
     ${'the screener e2e flow, which cancels its orders'}                  | ${{ name: 'DebugAdvice', each: 1, cancelAfter: 1 }}
+    ${'the STICKY orders e2e flow'}                                       | ${{ name: 'DebugAdvice', each: 3 }}
+    ${'the STICKY orders e2e flow, which cancels its order'}              | ${{ name: 'DebugAdvice', each: 10, cancelAfter: 1 }}
   `('accepts the block of $source', ({ block }) => {
     expect(debugAdviceStrategySchema.safeParse(omit(block, 'name')).success).toBe(true);
   });
@@ -56,10 +58,16 @@ describe('debugAdviceStrategySchema', () => {
 
 describe('debugBacktestStrategySchema', () => {
   it.each`
-    source                                                      | block
-    ${'the backtest e2e flow, scenario A: several trades'}      | ${{ name: 'DebugBacktest', buyCandleIndex: [1, 5], sellCandleIndex: [3, 8] }}
-    ${'the backtest e2e flow, scenarios B and D'}               | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3 }}
-    ${'the backtest e2e flow, scenario C: a resting LIMIT BUY'} | ${{ name: 'DebugBacktest', buyCandleIndex: 2, sellCandleIndex: 14, buyLimitPrice: 9500 }}
+    source                                                                                     | block
+    ${'the backtest e2e flow, scenario A: several trades'}                                     | ${{ name: 'DebugBacktest', buyCandleIndex: [1, 5], sellCandleIndex: [3, 8] }}
+    ${'the backtest e2e flow, scenarios B and D, and the reports and database file e2e flows'} | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3 }}
+    ${'the backtest e2e flow, scenario C: a resting LIMIT BUY'}                                | ${{ name: 'DebugBacktest', buyCandleIndex: 2, sellCandleIndex: 14, buyLimitPrice: 9500 }}
+    ${'the order sizing e2e flow: two all-in BUYs on one candle'}                              | ${{ name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3, allIn: true }}
+    ${'the order sizing e2e flow: all-in round trips'}                                         | ${{ name: 'DebugBacktest', buyCandleIndex: [1, 5], sellCandleIndex: [3, 7], allIn: true }}
+    ${'the order sizing e2e flow: SELLs alone'}                                                | ${{ name: 'DebugBacktest', buyCandleIndex: [], sellCandleIndex: [1, 2, 3] }}
+    ${'the warmup e2e flow: the first candle after the warmup'}                                | ${{ name: 'DebugBacktest', buyCandleIndex: 0, sellCandleIndex: [] }}
+    ${'the reports e2e flow: a BUY on every candle'}                                           | ${{ name: 'DebugBacktest', buyCandleIndex: [0, 1, 2, 3, 4, 5, 6], sellCandleIndex: [] }}
+    ${'the paper trader e2e flow, scenario C: a resting LIMIT BUY'}                            | ${{ name: 'DebugBacktest', buyCandleIndex: 0, sellCandleIndex: 4, buyLimitPrice: 9500 }}
   `('accepts the block of $source', ({ block }) => {
     expect(debugBacktestStrategySchema.safeParse(omit(block, 'name')).success).toBe(true);
   });
