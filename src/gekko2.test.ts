@@ -26,6 +26,22 @@ const startRealtimeRun = () =>
     void import('./gekko2'); // never settles, like `await main()` in a realtime run
   });
 
+/** SQLite's error behind the failure below: another connection held the write lock past the busy timeout */
+const lockError = new Error('database is locked');
+
+/**
+ * What SQLiteStorage.close() throws when its last insert fails. Built from the GekkoError class imported after vi.resetModules(), the
+ * one the copy of gekko2.ts under test checks against.
+ */
+const unwrittenMinutesError = async () => {
+  const { GekkoError } = await import('@errors/gekko.error');
+  return new GekkoError(
+    'storage',
+    'Could not write the buffered candles into /app/db/gekko.sql (database is locked): the minutes from 2023-11-14T22:13:00.000Z to 2023-11-14T23:13:00.000Z were not written, 61 of BTC/USDT. An import of that range writes them.',
+    { cause: lockError },
+  );
+};
+
 describe('main', () => {
   let initialExitCode: typeof process.exitCode;
 
@@ -55,6 +71,42 @@ describe('main', () => {
 
     it('closes the storage', () => {
       expect(inject.closeStorage).toHaveBeenCalledOnce();
+    });
+  });
+
+  describe('when the pipeline ends normally but closing the storage fails', () => {
+    let closeFailure: Error;
+
+    beforeEach(async () => {
+      closeFailure = await unwrittenMinutesError();
+      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(inject.closeStorage).mockImplementation(() => {
+        throw closeFailure;
+      });
+    });
+
+    it('ends the run without an error', async () => {
+      await expect(import('./gekko2')).resolves.toBeDefined();
+    });
+
+    it('logs the failure with its cause, once, at error level', async () => {
+      await import('./gekko2');
+
+      expect(vi.mocked(error).mock.calls).toEqual([
+        ['gekko', `Could not close the storage: ${closeFailure.message}\nCaused by: ${lockError.stack}`],
+      ]);
+    });
+
+    it('sets the exit code to 1', async () => {
+      await import('./gekko2');
+
+      expect(process.exitCode).toBe(1);
+    });
+
+    it('does not call process.exit', async () => {
+      await import('./gekko2');
+
+      expect(process.exit).not.toHaveBeenCalled();
     });
   });
 
@@ -154,6 +206,31 @@ describe('main', () => {
     });
   });
 
+  describe('when the pipeline stops with an ApplicationStopError and closing the storage fails', () => {
+    // As SQLite fails a WAL checkpoint that cannot write the database file
+    const checkpointError = new Error('disk I/O error');
+
+    beforeEach(async () => {
+      const { ApplicationStopError } = await import('@errors/applicationStop.error');
+      vi.mocked(gekkoPipeline).mockRejectedValue(new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)'));
+      vi.mocked(inject.closeStorage).mockImplementation(() => {
+        throw checkpointError;
+      });
+      await import('./gekko2');
+    });
+
+    it('logs the stop reason, then the failure to close the storage, at error level', () => {
+      expect(vi.mocked(error).mock.calls).toEqual([
+        ['gekko', 'Application stopped: [STRATEGY] Max consecutive order errors reached (5)'],
+        ['gekko', `Could not close the storage: ${checkpointError.stack}`],
+      ]);
+    });
+
+    it('still exits with code 0', () => {
+      expect(process.exit).toHaveBeenCalledExactlyOnceWith(0);
+    });
+  });
+
   describe('when the pipeline fails with a GekkoError', () => {
     let failure: Error;
 
@@ -174,6 +251,33 @@ describe('main', () => {
     });
 
     it('exits with code 1', () => {
+      expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+    });
+  });
+
+  describe('when the pipeline fails with a GekkoError and closing the storage fails', () => {
+    const checkpointError = new Error('disk I/O error');
+
+    beforeEach(async () => {
+      // As when a realtime run cannot read the open orders as it starts, before CandleWriter, which would have closed the storage,
+      // was initialised
+      const { GekkoError } = await import('@errors/gekko.error');
+      const failure = new GekkoError('exchange', 'binance GET https://api.binance.com/api/v3/openOrders 503 Service Unavailable');
+      vi.mocked(gekkoPipeline).mockRejectedValue(failure);
+      vi.mocked(inject.closeStorage).mockImplementation(() => {
+        throw checkpointError;
+      });
+      await import('./gekko2');
+    });
+
+    it('logs the failure of the run, then the failure to close the storage, at error level', () => {
+      expect(vi.mocked(error).mock.calls).toEqual([
+        ['gekko', '[EXCHANGE] binance GET https://api.binance.com/api/v3/openOrders 503 Service Unavailable'],
+        ['gekko', `Could not close the storage: ${checkpointError.stack}`],
+      ]);
+    });
+
+    it('still exits with code 1', () => {
       expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
     });
   });
@@ -340,9 +444,12 @@ describe('main', () => {
     });
 
     describe('when closing the storage throws', () => {
-      beforeEach(() => {
+      let closeFailure: Error;
+
+      beforeEach(async () => {
+        closeFailure = await unwrittenMinutesError();
         vi.mocked(inject.closeStorage).mockImplementation(() => {
-          throw new Error('database is locked');
+          throw closeFailure;
         });
       });
 
@@ -350,9 +457,34 @@ describe('main', () => {
         expect(onUncaughtException).not.toThrow();
       });
 
+      it('logs the exception, then the failure to close the storage with its cause, at error level', () => {
+        onUncaughtException();
+        expect(vi.mocked(error).mock.calls).toEqual([
+          ['gekko', `Uncaught exception: ${tickError.stack}`],
+          ['gekko', `Could not close the storage: ${closeFailure.message}\nCaused by: ${lockError.stack}`],
+        ]);
+      });
+
       it('still exits with code 1', () => {
         onUncaughtException();
         expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+      });
+
+      describe('and logging that failure throws', () => {
+        beforeEach(() => {
+          vi.mocked(error).mockImplementation((_tag, message) => {
+            if ((message as string).startsWith('Could not close the storage: ')) throw new Error('The logger failed');
+          });
+        });
+
+        it('does not throw', () => {
+          expect(onUncaughtException).not.toThrow();
+        });
+
+        it('still exits with code 1', () => {
+          onUncaughtException();
+          expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+        });
       });
     });
   });

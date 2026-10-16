@@ -62,7 +62,11 @@ export const main = async () => {
       exitCode = 1;
     }
   } finally {
-    closeStorage();
+    // A close that fails can leave buffered minutes out of the database: a run that had ended normally then ends with code 1, by
+    // itself as it would have (as after an unhandled rejection), and a stopped or failed run keeps its code. Thrown from here, the
+    // failure skipped the exit below, and Bun handed the rejected `await main()` to onUncaughtException, which reported an uncaught
+    // exception and exited 1 whatever the run's code
+    if (!closeStorageLoggingFailure() && exitCode === undefined) process.exitCode = 1;
   }
   // A stopped or failed run exits explicitly, after the cleanup: in realtime mode, timers (order polling, hearts) would keep it alive
   if (exitCode !== undefined) process.exit(exitCode);
@@ -100,12 +104,26 @@ const logFailure = (failure: unknown, prefix = '') => {
   if (isExpected) debug('gekko', `${prefix}${describeStack(failure)}`);
 };
 
+/**
+ * Closes the storage and logs its failure: when its last insert fails, the one that names the buffered minutes the database did not
+ * get, for an import of their range to write them (SQLiteStorage.close). False when the close failed.
+ */
+const closeStorageLoggingFailure = () => {
+  try {
+    closeStorage();
+    return true;
+  } catch (e) {
+    logFailure(e, 'Could not close the storage: ');
+    return false;
+  }
+};
+
 const onUncaughtException = (e: unknown) => {
   logFailure(e, 'Uncaught exception: ');
   try {
-    closeStorage();
+    closeStorageLoggingFailure(); // Its failure, which can name minutes the database did not get, was swallowed without a line
   } catch {
-    // Nothing may keep the process from exiting
+    // Nothing may keep the process from exiting, not even the logger failing on that line
   }
   process.exit(1);
 };
@@ -121,11 +139,7 @@ const onUnhandledRejection = (reason: unknown) => {
 // buffers are written. The exit code is 128 + the signal number, as a shell reports a process the signal killed.
 const onSignal = (signal: 'SIGINT' | 'SIGTERM', exitCode: number) => () => {
   warning('gekko', `Received ${signal}: closing the storage and exiting without finalising the plugins`);
-  try {
-    closeStorage();
-  } catch (e) {
-    logFailure(e, 'Could not close the storage: ');
-  }
+  closeStorageLoggingFailure();
   process.exit(exitCode);
 };
 
