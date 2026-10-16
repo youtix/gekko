@@ -1,77 +1,80 @@
-import type { SQLiteStorage as ISQLiteStorage } from '@services/storage/sqlite.storage';
-import { afterAll, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import type { SQLiteStorage as Storage } from '@services/storage/sqlite.storage';
+import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { cleanDatabase, countCandles, seedDatabaseWithCandles } from './database.helper';
 
-// Mocks for configuration must be defined before imports that evaluate them
+// Defined before the storage is imported, which reads the configuration as it loads
 mock.module('@services/configuration/configuration', () => ({
   config: {
     getStorage: () => ({ type: 'sqlite', database: ':memory:' }),
     getWatch: () => ({ mode: 'backtest' }),
   },
-  debug: () => {},
 }));
 
-describe('DatabaseHelper - seedDatabaseWithCandles', () => {
-  let storage: ISQLiteStorage;
+describe('database.helper', () => {
   const symbol = 'BTC/USDT';
-  let SQLiteStorage: any;
-  let cleanDatabase: any;
-  let seedDatabaseWithCandles: any;
+  const firstHour = { start: 0, end: 60 * 60_000 };
+  let SQLiteStorage: typeof Storage;
+  let storage: Storage;
 
   beforeAll(async () => {
     ({ SQLiteStorage } = await import('@services/storage/sqlite.storage'));
-    ({ cleanDatabase, seedDatabaseWithCandles } = await import('./database.helper'));
   });
 
   beforeEach(() => {
     storage = new SQLiteStorage([symbol]);
-    cleanDatabase(storage);
   });
 
-  afterAll(() => {
-    if (storage) {
-      storage.close();
-    }
+  afterEach(() => {
+    storage.close();
   });
 
-  it('should seed database with partial candles successfully', () => {
-    const testScenarioCandles = [
-      { start: 960000, open: 100, high: 105, low: 95, close: 100 },
-      { start: 1020000, open: 100, close: 110, volume: 50 },
-    ];
+  describe('seedDatabaseWithCandles', () => {
+    it('should store the candles as given, a field left out at 0 but the high and the low at those of the open and the close', () => {
+      seedDatabaseWithCandles(storage, symbol, [
+        { start: 960000, open: 100, high: 105, low: 95, close: 100 },
+        { start: 1020000, open: 100, close: 110, volume: 50 },
+      ]);
+      expect(storage.getCandles(symbol, firstHour)).toEqual([
+        { id: 1, start: 960000, open: 100, high: 105, low: 95, close: 100, volume: 0 },
+        { id: 2, start: 1020000, open: 100, high: 110, low: 100, close: 110, volume: 50 },
+      ]);
+    });
 
-    seedDatabaseWithCandles(storage, symbol, testScenarioCandles);
+    it.each(['1INCH/USDT', 'FLX-CRCL/USDC:USDC'])('should seed the table the storage reads for %s', pair => {
+      seedDatabaseWithCandles(storage, pair, [{ start: 960000 }]);
+      expect(storage.getCandles(pair, firstHour)).toHaveLength(1);
+    });
 
-    const inserted = storage.getCandles(symbol, { start: 900000, end: 1080000 });
+    it('should refuse a candle without a start', () => {
+      expect(() => seedDatabaseWithCandles(storage, symbol, [{ open: 100 }])).toThrow('Candle must have a start time');
+    });
 
-    expect(inserted).toHaveLength(2);
-
-    // First candle
-    expect(inserted[0].start).toBe(960000);
-    expect(inserted[0].open).toBe(100);
-    expect(inserted[0].high).toBe(105);
-    expect(inserted[0].low).toBe(95);
-    expect(inserted[0].close).toBe(100);
-    expect(inserted[0].volume).toBe(0); // Using default
-
-    // Second candle - testing defaults
-    expect(inserted[1].start).toBe(1020000);
-    expect(inserted[1].open).toBe(100);
-    expect(inserted[1].high).toBe(0); // Using default
-    expect(inserted[1].low).toBe(0); // Using default
-    expect(inserted[1].close).toBe(110);
-    expect(inserted[1].volume).toBe(50);
+    it('should store none of the candles when one has no start', () => {
+      try {
+        seedDatabaseWithCandles(storage, symbol, [{ start: 960000 }, { open: 100 }]);
+      } catch {
+        // Refused, as the previous test checks
+      }
+      expect(storage.getCandles(symbol, firstHour)).toEqual([]);
+    });
   });
 
-  it.each(['1INCH/USDT', 'FLX-CRCL/USDC:USDC'])('should seed the table the storage reads for %s', pair => {
-    seedDatabaseWithCandles(storage, pair, [{ start: 960000 }]);
-
-    expect(storage.getCandles(pair, { start: 900000, end: 1080000 })).toHaveLength(1);
+  describe('cleanDatabase', () => {
+    it('should empty a table whose name needs quoting', () => {
+      seedDatabaseWithCandles(storage, 'FLX-CRCL/USDC:USDC', [{ start: 960000 }]);
+      cleanDatabase(storage);
+      expect(storage.getCandles('FLX-CRCL/USDC:USDC', firstHour)).toEqual([]);
+    });
   });
 
-  it('should clean a table whose name needs quoting', () => {
-    seedDatabaseWithCandles(storage, 'FLX-CRCL/USDC:USDC', [{ start: 960000 }]);
-    cleanDatabase(storage);
-
-    expect(storage.getCandles('FLX-CRCL/USDC:USDC', { start: 900000, end: 1080000 })).toEqual([]);
+  describe('countCandles', () => {
+    it.each([
+      { within: 'every minute stored, without a range', range: undefined, count: 3 },
+      { within: 'a range, both bounds included', range: { start: 60000, end: 120000 }, count: 2 },
+      { within: 'a range between two candles', range: { start: 60001, end: 119999 }, count: 0 },
+    ])('should count $count candles within $within', ({ range, count }) => {
+      seedDatabaseWithCandles(storage, symbol, [{ start: 0 }, { start: 60000 }, { start: 120000 }]);
+      expect(countCandles(storage, symbol, range)).toBe(count);
+    });
   });
 });

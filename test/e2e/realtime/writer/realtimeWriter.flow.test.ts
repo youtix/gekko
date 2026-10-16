@@ -1,30 +1,17 @@
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
-import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { first } from 'lodash-es';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
-import { cleanDatabase } from '../../helpers/database.helper';
-import { endRealtimeRun, trackRealtimeRuns } from '../../helpers/realtimeRun.helper';
-import { createCcxtModuleMock, MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { MockHeart } from '../../mocks/heart.mock';
-import { MockWinston, clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
+import { FAST_MINUTE, minuteOf } from '../../helpers/clock.helper';
+import { mockConfiguration } from '../../helpers/configuration.helper';
+import { cleanDatabase, countCandles } from '../../helpers/database.helper';
+import { endRealtimeRun, mockRealtimeModules } from '../../helpers/realtimeRun.helper';
+import { MockCCXTExchange } from '../../mocks/ccxt.mock';
+import { clearLogs, findTextLines } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
 // --------------------------------------------------------------------------
-
-// 0. Mock Winston
-mock.module('winston', () => MockWinston);
-
-// 1. Mock Configuration
-// Configure all pairs from the start to ensure all tables are created
-const mockPairs = [
-  { symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT' },
-  { symbol: 'ETH/USDT', base: 'ETH', quote: 'USDT' },
-  { symbol: 'LTC/USDT', base: 'LTC', quote: 'USDT' },
-];
-
-// For realtime mode we use accelerated time (10ms = 1 minute)
-const FAST_MINUTE = 50;
 
 // Track candles emitted
 const TARGET_CANDLES = 10;
@@ -33,61 +20,29 @@ const TARGET_CANDLES = 10;
 // We'll wait for TARGET_CANDLES * FAST_MINUTE to give buffer
 const TIMEOUT_MS = TARGET_CANDLES * FAST_MINUTE;
 
-// 2. Mock Time Constants - Must be before other imports that use time
-mock.module('@constants/time.const', () => ({
-  ONE_SECOND: 1,
-  ONE_MINUTE: FAST_MINUTE,
-}));
+// 1. Mock winston, the clock, ccxt and the fetcher, and end each test's run before the next test starts (see realtimeRun.helper)
+mockRealtimeModules();
 
-// 3. Mock Configuration
-mock.module('@services/configuration/configuration', () => {
-  return {
-    config: {
-      getWatch: () => ({
-        mode: 'realtime',
-        pairs: mockPairs,
-        timeframe: '1m',
-        tickrate: 100,
-        warmup: { candleCount: 0, tickrate: 100 },
-      }),
-      showLogo: () => false,
-      getExchange: () => ({
-        name: 'binance',
-        verbose: false,
-      }),
-      getStorage: () => ({
-        type: 'sqlite',
-        database: ':memory:', // Isolated DB
-      }),
-      getPlugins: () => [
-        {
-          name: 'CandleWriter', // Enable writing to DB
-        },
-      ],
-      getStrategy: () => ({}),
-    },
-  };
+// 2. Mock Configuration
+// Configure all pairs from the start to ensure all tables are created
+mockConfiguration({
+  watch: {
+    mode: 'realtime',
+    assets: ['BTC', 'ETH', 'LTC'],
+    currency: 'USDT',
+    timeframe: '1m',
+    tickrate: 100,
+    warmup: { candleCount: 0, tickrate: 100 },
+  },
+  exchange: { name: 'binance' },
+  storage: { type: 'sqlite', database: ':memory:' },
+  plugins: [{ name: 'CandleWriter' }], // Enable writing to DB
 });
-
-// 4. Mock CCXT Library
-
-mock.module('ccxt', () => createCcxtModuleMock());
-
-// 5. Mock Heart
-mock.module('@services/core/heart/heart', () => ({
-  Heart: MockHeart,
-}));
-
-// 6. End each test's run before the next test starts (see realtimeRun.helper)
-trackRealtimeRuns();
 
 describe('E2E: Realtime Writer (Synthetic)', () => {
   // Reset MockCCXTExchange static state and inject singletons before each test
   // This is especially important when running all E2E tests together
   beforeEach(async () => {
-    // Stop all stale hearts from previous tests to prevent timer leakage
-    MockHeart.stopAll();
-
     // Reset inject singletons to get fresh storage/exchange for each test
     const { inject } = await import('@services/injecter/injecter');
     inject.reset();
@@ -97,14 +52,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     cleanDatabase(storage);
     clearLogs();
 
-    // Reset MockCCXTExchange static state
-    MockCCXTExchange.simulatedGaps = [];
-    MockCCXTExchange.shouldThrowError = false;
-    MockCCXTExchange.emitDuplicatesEveryXCandle = 0;
-    MockCCXTExchange.emitFutureCandles = false;
-    MockCCXTExchange.mockTrades = [];
-    MockCCXTExchange.shouldThrowOnCreateOrder = false;
-    MockCCXTExchange.simulateOpenOrders = false;
+    MockCCXTExchange.reset();
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
@@ -126,15 +74,12 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // Use Promise.race with a timeout to stop waiting after enough time
     await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
 
-    // Access private db instance for verification
-    const db = storage['db'];
+    const db = storage.db;
 
     // Verify tables exist and have data
-    const rowCountBTC = db.query('SELECT count(*) as count FROM candles_BTC_USDT').get() as { count: number };
-
     // We should have at least some candles recorded
     // Due to the accelerated time, the exact count depends on timing
-    expect(rowCountBTC.count).toBeGreaterThanOrEqual(5);
+    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThanOrEqual(5);
 
     // Verify data integrity - check first candle
     const rows = db.query('SELECT * FROM candles_BTC_USDT ORDER BY start ASC').all() as any[];
@@ -170,18 +115,13 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // Use Promise.race with a timeout to stop waiting after enough time
     await Promise.race([pipelinePromise, new Promise<void>(resolve => setTimeout(resolve, TIMEOUT_MS))]);
 
-    // Access private db instance for verification
-    const db = storage['db'];
+    const db = storage.db;
 
     // Verify each pair has its own table with data
-    const rowCountBTC = db.query('SELECT count(*) as count FROM candles_BTC_USDT').get() as { count: number };
-    const rowCountETH = db.query('SELECT count(*) as count FROM candles_ETH_USDT').get() as { count: number };
-    const rowCountLTC = db.query('SELECT count(*) as count FROM candles_LTC_USDT').get() as { count: number };
-
     // All pairs should have at least some candles recorded
-    expect(rowCountBTC.count).toBeGreaterThanOrEqual(1);
-    expect(rowCountETH.count).toBeGreaterThanOrEqual(1);
-    expect(rowCountLTC.count).toBeGreaterThanOrEqual(1);
+    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThanOrEqual(1);
+    expect(countCandles(storage, 'ETH/USDT')).toBeGreaterThanOrEqual(1);
+    expect(countCandles(storage, 'LTC/USDT')).toBeGreaterThanOrEqual(1);
 
     // Verify no cross-contamination - each table should only have candles
     // matching the expected synthetic data for that pair
@@ -244,7 +184,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
-    const db = storage['db'];
+    const db = storage.db;
 
     // Run the pipeline - this should NOT throw any errors even with duplicates
     const pipelinePromise = gekkoPipeline();
@@ -257,9 +197,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // ASSERTION 2: Verify duplicate detection via logs
     // The live stream asks for the minutes after the last one it pushed: it drops a minute served again, with a warning
-    const warningLogs = logStore
-      .filter(isTextLine)
-      .filter(({ level, message }) => level === 'warn' && message.includes('Ignored a duplicate 1m candle'));
+    const warningLogs = findTextLines('Ignored a duplicate 1m candle', 'warn');
     expect(warningLogs.length).toBeGreaterThan(0);
 
     // ASSERTION 3: Verify the stored candles are valid and not corrupted by duplicate handling
@@ -283,7 +221,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
-    const db = storage['db'];
+    const db = storage.db;
 
     // Run the pipeline - this should NOT throw any errors even with future candles
     const pipelinePromise = gekkoPipeline();
@@ -298,7 +236,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     // The system should gracefully ignore future candles. The mock's future candle starts 5 minutes after the fetch, off
     // the minute boundaries; the closed minutes recorded during the run legitimately start after the run started, so the
     // check is: nothing stored is unaligned, in progress or in the future at the end of the run.
-    const currentFastMinute = Math.floor(Date.now() / FAST_MINUTE) * FAST_MINUTE;
+    const currentFastMinute = minuteOf(Date.now());
     const selectNotClosed = (table: string) =>
       db.query(`SELECT * FROM ${table} WHERE start >= ? OR start % ? != 0`).all(currentFastMinute, FAST_MINUTE) as any[];
 
@@ -310,8 +248,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
     expect(selectNotClosed('candles_LTC_USDT').length).toBe(0);
 
     // ASSERTION 4: The future candle does not hide the closed minute served with it
-    const rowCountBTC = db.query('SELECT count(*) as count FROM candles_BTC_USDT').get() as { count: number };
-    expect(rowCountBTC.count).toBeGreaterThan(0);
+    expect(countCandles(storage, 'BTC/USDT')).toBeGreaterThan(0);
   }, 30000);
 
   it('Scenario E: Filling candle gaps', async () => {
@@ -324,7 +261,7 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
-    const db = storage['db'];
+    const db = storage.db;
 
     // Run the pipeline - this should NOT throw any errors even with gaps
     const pipelinePromise = gekkoPipeline();
@@ -394,12 +331,12 @@ describe('E2E: Realtime Writer (Synthetic)', () => {
 
     // Get storage reference - close is already disabled from previous scenarios
     const storage = inject.storage() as SQLiteStorage;
-    const db = storage['db'];
+    const db = storage.db;
 
     // Access the buffer and insertThreshold via the storage instance
     // Note: The buffer is protected, so we access it directly for testing
-    const getBufferLength = () => (storage as any).buffer.length;
-    const getInsertThreshold = () => (storage as any).insertThreshold;
+    const getBufferLength = () => storage['buffer'].length;
+    const getInsertThreshold = () => storage['insertThreshold'];
 
     // ASSERTION 1: Verify the insertThreshold is correctly set for realtime mode
     // In realtime mode, default is 1 (unless overridden in config)

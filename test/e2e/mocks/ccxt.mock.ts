@@ -36,6 +36,18 @@ export class MockCCXTExchange {
     this.predefinedCandlesIndex = {};
   }
 
+  /** Puts every static back as it is at load, so that a test does not run on the exchange the previous one set up */
+  public static reset() {
+    this.simulatedGaps = [];
+    this.shouldThrowError = false;
+    this.shouldThrowOnCreateOrder = false;
+    this.emitDuplicatesEveryXCandle = 0;
+    this.emitFutureCandles = false;
+    this.simulateOpenOrders = false;
+    this.mockTrades = [];
+    this.resetPredefinedCandles();
+  }
+
   public id = 'binance';
   public name = 'binance';
   public has = {
@@ -105,9 +117,8 @@ export class MockCCXTExchange {
     },
   };
 
-  constructor(_config: any) {
-    // console.log('MockCCXT initialized with', _config);
-  }
+  /** Built as a ccxt client is, with its options, which the mock does not read */
+  constructor(_config: any) {}
 
   async loadMarkets() {
     return this.markets;
@@ -161,7 +172,7 @@ export class MockCCXTExchange {
     };
   }
 
-  async fetchOHLCV(symbol: string, timeframe: string, since: number, limit: number) {
+  async fetchOHLCV(symbol: string, _timeframe: string, since: number, limit: number) {
     if (MockCCXTExchange.shouldThrowError) throw new Error('Simulated Network Error');
 
     // PREDEFINED CANDLES OVERRIDE

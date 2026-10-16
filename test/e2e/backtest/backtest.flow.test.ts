@@ -1,128 +1,72 @@
+import { ONE_MINUTE } from '@constants/time.const';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-
-import { cleanDatabase, seedDatabaseWithCandles } from '../helpers/database.helper';
-import { createCcxtModuleMock, MockCCXTExchange } from '../mocks/ccxt.mock';
-
-import { MockFetcherService } from '../mocks/fetcher.mock';
-import { MockHeart } from '../mocks/heart.mock';
-import { MockWinston, clearLogs, logStore } from '../mocks/winston.mock';
+import { mockConfiguration, rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
+import { seedDatabaseWithCandles } from '../helpers/database.helper';
+import { createCcxtModuleMock } from '../mocks/ccxt.mock';
+import { MockWinston, clearLogs, findLoggedObject } from '../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
 // --------------------------------------------------------------------------
-// DebugBacktest counts its candles from 0, the first after the warmup: with no warmup, index i is the candle seeded at i
-const DEFAULT_MOCK_STRATEGY_CONFIG = { name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 4 };
-const DEFAULT_MOCK_STRATEGY_NAME = 'DebugBacktest';
-
 const TARGET_CANDLES = 10;
 
 // 1. Mock Winston
 mock.module('winston', () => MockWinston);
 
-// 3. Mock Fetcher
-const subscriptionResponse = {
-  ok: true,
-  result: [
-    {
-      update_id: 1,
-      message: {
-        message_id: 1,
-        from: { id: 123, is_bot: false, first_name: 'Test', username: 'test' },
-        chat: { id: 123, first_name: 'Test', username: 'test', type: 'private' },
-        date: 1600000000,
-        text: '/subscribe_all@test-bot',
-      },
-    },
-  ],
-};
-
-mock.module('@services/fetcher/fetcher.service', () => ({
-  fetcher: new MockFetcherService(),
-}));
-
-// 4. Mock Configuration
-const startDate = new Date('2024-01-01T00:00:00Z').getTime();
-const endDate = startDate + (TARGET_CANDLES - 1) * 60 * 1000; // 10 candles total (0 to 9)
-
-let mockPairs = [{ symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT' }];
-let mockStrategyConfig: any = DEFAULT_MOCK_STRATEGY_CONFIG;
-let mockStrategyName = DEFAULT_MOCK_STRATEGY_NAME;
-
-mock.module('@services/configuration/configuration', () => {
-  return {
-    config: {
-      getWatch: () => ({
-        mode: 'backtest',
-        pairs: mockPairs,
-        timeframe: '1m',
-        tickrate: 100,
-        warmup: { candleCount: 0 },
-        assets: mockPairs.map(p => p.base),
-        currency: 'USDT',
-        daterange: { start: startDate, end: endDate - 1 },
-        batchSize: 1440,
-      }),
-      showLogo: () => false,
-      getExchange: () => ({
-        name: 'dummy-cex',
-        verbose: false,
-        simulationBalance: new Map([
-          ['BTC', 0],
-          ['ETH', 0],
-          ['USDT', 300000],
-        ]),
-        initialTicker: new Map([
-          ['BTC/USDT', { bid: 10000, ask: 10000 }],
-          ['ETH/USDT', { bid: 2000, ask: 2000 }],
-        ]),
-        marketData: new Map([
-          [
-            'BTC/USDT',
-            {
-              price: { min: 0, max: 1000000 },
-              amount: { min: 0, max: 1000 },
-              cost: { min: 0, max: 1000000 },
-              precision: { price: 0.01, amount: 0.000001 },
-              fee: { maker: 0.001, taker: 0.001 },
-            },
-          ],
-          [
-            'ETH/USDT',
-            {
-              price: { min: 0, max: 1000000 },
-              amount: { min: 0, max: 10000 },
-              cost: { min: 0, max: 1000000 },
-              precision: { price: 0.01, amount: 0.000001 },
-              fee: { maker: 0.001, taker: 0.001 },
-            },
-          ],
-        ]),
-        exchangeSynchInterval: 10 * 60 * 1000,
-      }),
-      getStorage: () => ({
-        type: 'sqlite',
-        database: ':memory:', // Isolated DB
-      }),
-      getPlugins: () => {
-        const analyzers =
-          mockPairs.length === 1
-            ? [{ name: 'RoundTripAnalyzer', enableConsoleTable: false }]
-            : [{ name: 'PortfolioAnalyzer', enableConsoleTable: false }];
-        return [{ name: 'TradingAdvisor', strategyName: mockStrategyName }, { name: 'Trader' }, ...analyzers];
-      },
-      getStrategy: () => mockStrategyConfig,
-    },
-  };
-});
-
-// 5. Mock CCXT Library
-
+// 2. Mock CCXT Library: a backtest builds no exchange client, but the injecter loads ccxt with CCXTExchange, and the mock spares this
+// flow the load of the real one (backtestMissingCandles.flow.test.ts loads it)
 mock.module('ccxt', () => createCcxtModuleMock());
 
-// 7. Mock Heart
-mock.module('@services/core/heart/heart', () => ({
-  Heart: MockHeart,
+// 3. Mock Configuration
+const startDate = new Date('2024-01-01T00:00:00Z').getTime();
+const endDate = startDate + (TARGET_CANDLES - 1) * ONE_MINUTE; // 10 candles total (0 to 9)
+
+/** The quote and the market of each asset a scenario can watch */
+const MARKETS = {
+  BTC: { price: 10000, amountMax: 1000 },
+  ETH: { price: 2000, amountMax: 10000 },
+};
+
+let mockAssets: (keyof typeof MARKETS)[] = ['BTC'];
+// DebugBacktest counts its candles from 0, the first after the warmup: with no warmup, index i is the candle seeded at i
+let mockStrategyConfig: RawConfiguration['strategy'];
+
+mockConfiguration(() => ({
+  watch: {
+    mode: 'backtest',
+    assets: mockAssets,
+    currency: 'USDT',
+    timeframe: '1m',
+    tickrate: 100,
+    warmup: { candleCount: 0 },
+    daterange: rawDaterange({ start: startDate, end: endDate - 1 }),
+    batchSize: 1440,
+  },
+  exchange: {
+    name: 'dummy-cex',
+    simulationBalance: [...mockAssets.map(assetName => ({ assetName, balance: 0 })), { assetName: 'USDT', balance: 300000 }],
+    initialTicker: mockAssets.map(asset => ({ symbol: `${asset}/USDT`, ticker: { bid: MARKETS[asset].price, ask: MARKETS[asset].price } })),
+    marketData: mockAssets.map(asset => ({
+      symbol: `${asset}/USDT`,
+      marketData: {
+        price: { min: 0, max: 1000000 },
+        amount: { min: 0, max: MARKETS[asset].amountMax },
+        cost: { min: 0, max: 1000000 },
+        precision: { price: 2, amount: 6 },
+        fee: { maker: 0.001, taker: 0.001 },
+      },
+    })),
+  },
+  storage: { type: 'sqlite', database: ':memory:' },
+  plugins: [
+    { name: 'TradingAdvisor', strategyName: 'DebugBacktest' },
+    { name: 'Trader' },
+    mockAssets.length === 1
+      ? { name: 'RoundTripAnalyzer', enableConsoleTable: false }
+      : { name: 'PortfolioAnalyzer', enableConsoleTable: false },
+  ],
+  strategy: mockStrategyConfig,
 }));
 
 // --------------------------------------------------------------------------
@@ -133,36 +77,14 @@ describe('E2E: Backtest Flow', () => {
   let storage: SQLiteStorage;
 
   beforeEach(async () => {
+    // Reset config defaults
+    mockAssets = ['BTC'];
+
     // Reset inject singletons
     const { inject } = await import('@services/injecter/injecter');
     inject.reset();
-
-    // Clean DB
     storage = inject.storage() as SQLiteStorage;
-    cleanDatabase(storage);
     clearLogs();
-
-    // Reset mocks
-    MockFetcherService.reset();
-
-    let getCallCount = 0;
-    MockFetcherService.when('getUpdates').thenReturn(() => {
-      if (++getCallCount === 1) return subscriptionResponse;
-      return { ok: true, result: [] };
-    });
-
-    MockCCXTExchange.simulatedGaps = [];
-    MockCCXTExchange.shouldThrowError = false;
-    MockCCXTExchange.emitDuplicatesEveryXCandle = 0;
-    MockCCXTExchange.emitFutureCandles = false;
-    MockCCXTExchange.mockTrades = [];
-    MockCCXTExchange.shouldThrowOnCreateOrder = false;
-    MockCCXTExchange.simulateOpenOrders = false;
-
-    // Reset config defaults
-    mockStrategyConfig = DEFAULT_MOCK_STRATEGY_CONFIG;
-    mockStrategyName = DEFAULT_MOCK_STRATEGY_NAME;
-    mockPairs = [{ symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT' }];
   });
   it('Scenario A: Complex PnL with Multiple Trades', async () => {
     // Override the mock strategy config for this test
@@ -173,7 +95,7 @@ describe('E2E: Backtest Flow', () => {
     // Trade 2: Buy at 11000 (candle 5), Sell at 9000 (candle 7) => Loss (Profit: -2000)
     // Net profit should be 0, Trade count: 2, Win rate: 50%
     const mockCandles = Array.from({ length: TARGET_CANDLES }).map((_, i) => {
-      const time = startDate + i * 60 * 1000;
+      const time = startDate + i * ONE_MINUTE;
       const open = 10000;
       let startPrice = 10000;
 
@@ -195,19 +117,11 @@ describe('E2E: Backtest Flow', () => {
 
     // 2. Start Pipeline
     const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    storage.close = () => {};
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise]);
+    await gekkoPipeline();
 
     // 3. Assert on final report logs
-    const isObject = (value: unknown) => typeof value === 'object' && value !== null;
-    const isFinalReport = (value: unknown) => isObject(value) && 'id' in value && value.id === 'TRADING REPORT';
-    const roundtripPayload = logStore.find(log => isFinalReport(log.message));
-    expect(roundtripPayload).toBeDefined();
-
-    const report = roundtripPayload!.message as any;
+    const report = findLoggedObject(message => message.id === 'TRADING REPORT')!;
+    expect(report).toBeDefined();
 
     expect(report.startPrice).toBe(10000);
     expect(report.endPrice).toBe(10000);
@@ -224,18 +138,15 @@ describe('E2E: Backtest Flow', () => {
   });
 
   it('Scenario B: Multi-Asset Concurrency', async () => {
-    // We update mockPairs to have two assets.
-    mockPairs = [
-      { symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT' },
-      { symbol: 'ETH/USDT', base: 'ETH', quote: 'USDT' },
-    ];
+    // We update the watched assets to have two.
+    mockAssets = ['BTC', 'ETH'];
     // Override the mock strategy config for this test: buy on 1, sell on 3
     mockStrategyConfig = { name: 'DebugBacktest', buyCandleIndex: 1, sellCandleIndex: 3 };
 
     // 1. Seed Database with 10 exact candles for BTC/USDT
     // Trade: Buy at 9000 (candle 1), Sell at 11000 (candle 3) => Win (Profit: 2000)
     const mockCandlesBTC = Array.from({ length: TARGET_CANDLES }).map((_, i) => {
-      const time = startDate + i * 60 * 1000;
+      const time = startDate + i * ONE_MINUTE;
       let startPrice = 10000;
       if (i === 1) startPrice = 9000; // BUY 1 here
       if (i === 3) startPrice = 11000; // SELL 1 here
@@ -246,7 +157,7 @@ describe('E2E: Backtest Flow', () => {
     // 2. Seed Database with 10 exact candles for ETH/USDT
     // Trade: Buy at 1800 (candle 1), Sell at 2200 (candle 3) => Win (Profit: 400)
     const mockCandlesETH = Array.from({ length: TARGET_CANDLES }).map((_, i) => {
-      const time = startDate + i * 60 * 1000;
+      const time = startDate + i * ONE_MINUTE;
       let startPrice = 2000;
       if (i === 1) startPrice = 1800; // BUY 1 here
       if (i === 3) startPrice = 2200; // SELL 1 here
@@ -256,20 +167,12 @@ describe('E2E: Backtest Flow', () => {
 
     // 3. Start Pipeline
     const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-
-    storage.close = () => {};
-
-    const pipelinePromise = gekkoPipeline();
-    await Promise.race([pipelinePromise]);
+    await gekkoPipeline();
 
     // 4. Assert on final report logs
     // Because the Trading Advisor triggers orders for all processed symbols, we should have combined PnL
-    const isObject = (value: unknown) => typeof value === 'object' && value !== null;
-    const isFinalReport = (value: unknown) => isObject(value) && 'id' in value && value.id === 'PORTFOLIO PROFIT REPORT';
-    const portfolioPayload = logStore.find(log => isFinalReport(log.message));
-    expect(portfolioPayload).toBeDefined();
-
-    const report = portfolioPayload!.message as any;
+    const report = findLoggedObject(message => message.id === 'PORTFOLIO PROFIT REPORT')!;
+    expect(report).toBeDefined();
 
     // BTC profit ≈ 2000, ETH profit ≈ 400. Total gross ≈ 2400.
     // Fees are deducted. Net profit should be 2376.

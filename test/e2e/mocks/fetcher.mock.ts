@@ -1,7 +1,23 @@
 import { Fetcher } from '@services/fetcher/fetcher.types';
 
+/** A getUpdates answer holding one command, /subscribe_all, sent to the bot from chat 123 */
+export const SUBSCRIBE_ALL_UPDATES = {
+  ok: true,
+  result: [
+    {
+      update_id: 1,
+      message: {
+        message_id: 1,
+        from: { id: 123, is_bot: false, first_name: 'Test', username: 'test' },
+        chat: { id: 123, first_name: 'Test', username: 'test', type: 'private' },
+        date: 1600000000,
+        text: '/subscribe_all@test-bot',
+      },
+    },
+  ],
+};
+
 export class MockFetcherService implements Fetcher {
-  public static shouldThrowError: boolean = false;
   public static callHistory: {
     method: 'GET' | 'POST';
     url: string;
@@ -23,9 +39,13 @@ export class MockFetcherService implements Fetcher {
   }
 
   public static reset() {
-    this.shouldThrowError = false;
     this.callHistory = [];
     this.mockResponses.clear();
+  }
+
+  /** The texts of the messages the bots posted so far (sendMessage, their only POST), oldest first */
+  public static postedTexts(): string[] {
+    return this.callHistory.filter(({ method }) => method === 'POST').map(({ payload }) => payload.text);
   }
 
   async get<T>({ url }: { url: string; retries?: number; attempt?: number }): Promise<T> {
@@ -43,10 +63,6 @@ export class MockFetcherService implements Fetcher {
       payload,
       timestamp: Date.now(),
     });
-
-    if (MockFetcherService.shouldThrowError) {
-      throw new Error('Simulated Network Error');
-    }
 
     // Check for specific mock responses
     for (const [key, response] of MockFetcherService.mockResponses) {

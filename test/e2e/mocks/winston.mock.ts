@@ -20,6 +20,19 @@ export const clearLogs = () => {
   logStore.length = 0;
 };
 
+/** The lines logged as text that include `text`, at `level` when one is given, oldest first */
+export const findTextLines = (text: string, level?: LogLevel): TextLine[] =>
+  logStore.filter(isTextLine).filter(line => line.message.includes(text) && (level === undefined || line.level === level));
+
+/** The first line logged as text that includes `text`, at `level` when one is given */
+export const findTextLine = (text: string, level?: LogLevel): TextLine | undefined => findTextLines(text, level).at(0);
+
+/** The first message logged as an object (a report, a round trip) that `matches` accepts */
+export const findLoggedObject = (matches: (message: Record<string, any>) => boolean): Record<string, any> | undefined =>
+  logStore
+    .map(({ message }) => message)
+    .find((message): message is Record<string, any> => typeof message === 'object' && message !== null && matches(message));
+
 export const MockWinstonLogger = {
   info: () => {},
   warn: () => {},
@@ -41,28 +54,15 @@ export const MockWinstonTransport = class {
   constructor() {}
 };
 
+/** The formats the logger builds its winston logger with */
 export const MockWinstonFormat = {
   combine: () => {},
   timestamp: () => {},
-  label: () => {},
   json: () => {},
-  printf: () => {},
-  colorize: () => {},
-  simple: () => {},
-  splat: () => {},
-  ms: () => {},
-  metadata: () => {},
-  padLevels: () => {},
-  prettyPrint: () => {},
 };
 
 export const MockWinston = {
   createLogger: () => MockWinstonLogger,
-  transports: {
-    Console: MockWinstonTransport,
-    File: MockWinstonTransport,
-    Http: MockWinstonTransport,
-    Stream: MockWinstonTransport,
-  },
+  transports: { Console: MockWinstonTransport },
   format: MockWinstonFormat,
 };
