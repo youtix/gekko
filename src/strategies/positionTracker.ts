@@ -58,7 +58,8 @@ const getHolding = (side: OrderSide, { order, exchange }: UnfinishedOrderParams,
  * The position of a strategy that trades all-in: flat or long, and its own orders whose outcome has not come yet. Gekko 2 relays
  * every advice, so a strategy advising on every candle of a trend placed an all-in order sized from what the previous one left,
  * then had it refused until maxConsecutiveErrors stopped the bot: the strategy buys only when flat and sells only when long, never
- * while an order of its own is pending, and this is the bookkeeping that tells it which.
+ * while an order of its own is pending, and this is the bookkeeping that tells it which. It follows one pair: a strategy that trades
+ * several keeps one per pair in a PositionBook, which also shares the currency among their BUYs.
  *
  * - It starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that
  *   ended without completing while the account held it (see settleUnfinished).
@@ -210,10 +211,11 @@ export class PositionTracker {
 }
 
 /**
- * The pair a single-pair strategy trades: the first of the bucket its init gets, which holds a candle of every watched pair in the
- * order of watch.assets. The strategies took it without a word: the other pairs were ignored, their candles still required every
- * minute. Called once, from init, it warns through the strategy's log when the bucket holds more than one pair, naming the pair traded
- * and the others.
+ * The pair a single-pair strategy trades, GridBot or a custom strategy that trades one pair (the seven signal strategies trade every
+ * watched pair, a position each, through a PositionBook): the first of the bucket its init gets, which holds a candle of every watched
+ * pair in the order of watch.assets. Taken without a word, it left the other pairs ignored, their candles still required every minute.
+ * Called once, from init, it warns through the strategy's log when the bucket holds more than one pair, naming the pair traded and the
+ * others.
  */
 export const pickTradedPair = (candle: CandleBucket, tools: Pick<Tools<unknown>, 'log'>): TradingPair => {
   const [pair, ...ignored] = candle.keys();
