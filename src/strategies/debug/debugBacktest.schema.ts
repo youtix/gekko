@@ -17,14 +17,15 @@ export const debugBacktestStrategySchema = z
     // reserved meanwhile, for a backtest or a paper session to show what a synchronization reads while an order is open
     /** The price of every BUY, sent as a LIMIT order; left out, the BUYs are MARKET orders */
     buyLimitPrice: z.number().positive().optional(),
-    // Every built-in strategy orders all-in, which an order of 1 never exercised: the Trader sizes such an order from the balance it
-    // read last, less what the orders placed since take from it, and caps it at the most the market takes in one order
+    // The signal strategies order all-in on one pair, which an order of 1 never exercised: the Trader sizes such an order from the
+    // balance it read last, less what the orders placed since take from it, and caps it at the most the market takes in one order
     /** Every order sent without an amount, all-in, for the Trader to size; left out, every order is of 1 unit */
     allIn: z.boolean().optional(),
-    // No built-in strategy orders by cost or by allocation, so no run exercised the Trader's sizing from a budget: the amount worked out
-    // at the price of the order, the budget of a BUY capped at what the BUYs placed since the last read leave, the warning of one below
-    // the market's minimum cost. Both are bounded as createOrder checks them: out of bounds, createOrder would refuse the first order,
-    // and stop the bot, only once the strategy placed it, where the schema refuses the block at start-up.
+    // No built-in strategy orders by cost, and by allocation only the signal strategies on several pairs, so no run of one pair exercised
+    // the Trader's sizing from a budget: the amount worked out at the price of the order, the budget of a BUY capped at what the BUYs
+    // placed since the last read leave, the warning of one below the market's minimum cost. Both are bounded as createOrder checks them:
+    // out of bounds, createOrder would refuse the first order, and stop the bot, only once the strategy placed it, where the schema
+    // refuses the block at start-up.
     /**
      * Every order sent with this cost in currency instead of an amount, for the Trader to size: what a BUY may spend, the 5 % kept back
      * for its fee included, the notional a SELL sells

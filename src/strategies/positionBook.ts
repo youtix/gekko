@@ -194,8 +194,9 @@ export class PositionBook {
    * currency would fund the BUYs of fewer pairs. Every BUY is checked then, that of the last pair not invested, all-in, included. The
    * estimate is the currency free in the portfolio, the share allocated of it (see getAllocatedShare), less the share DEFAULT_FEE_BUFFER
    * keeps back for the fee, all in decimal: the cost of a BUY sized from that budget before the amount step of the market, which can
-   * take it lower, the Trader warning of it then. Without the currency in the portfolio (no balance read yet), or without a minimum cost
-   * on the market, nothing is skipped: the Trader and the exchange say what they make of the BUY.
+   * take it lower (the Trader warns of a share so cut before it sends it, not of an all-in BUY, which the exchange refuses then).
+   * Without the currency in the portfolio (no balance read yet), or without a minimum cost on the market, nothing is skipped: the
+   * Trader and the exchange say what they make of the BUY.
    *
    * A book that tracks one pair never skips: its all-in BUY is sent as a single-pair strategy always sent it, and refused when the
    * currency is too little. That refusal is how its tracker learns of a holding present at start-up, read from the portfolio after it

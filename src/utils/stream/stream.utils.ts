@@ -21,7 +21,7 @@ export type SynchronizeStreamsOptions = {
 /**
  * Synchronizes the candle streams of several pairs by timestamp. It waits until every stream still going has a candle, then emits
  * the earliest minute as a CandleBucket holding the candle of each stream at that minute, in the order of the streams: the callers
- * pass them in the order of `watch.assets`, and a strategy trades the first pair of the bucket.
+ * pass them in the order of `watch.assets`: the signal strategies trade every pair of the bucket (see PositionBook), GridBot the first.
  *
  * A stream that ends lets the others go on, and is reported to `onPairEnd`. A stream that fails fails the output with its error, and
  * one that closes without ending (destroyed without an error) or delivers a candle whose start is not a finite number fails it with

@@ -10,7 +10,7 @@ const stepSchema = z.strictObject({
   /** A BUY of each pair of the step, sized by the position book, or an all-in SELL of each */
   side: z.enum(ORDER_SIDES),
   // Written as the configuration writes a symbol, in upper case around one slash: a pair spelt otherwise is no watched pair, which init
-  // refuses then, naming the pairs watched
+  // would refuse then, naming the pairs watched
   /** The pairs the step trades, in this order; left out, every watched pair, in the order of watch.assets */
   symbols: z.array(symbolSchema).min(1).optional(),
 });
