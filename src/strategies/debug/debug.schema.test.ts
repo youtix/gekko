@@ -6,6 +6,8 @@ import { debugBacktestStrategySchema } from './debugBacktest.schema';
 import { DebugBacktest } from './debugBacktest.strategy';
 import { debugOrderScriptStrategySchema } from './debugOrderScript.schema';
 import { DebugOrderScript } from './debugOrderScript.strategy';
+import { debugPositionBookStrategySchema } from './debugPositionBook.schema';
+import { DebugPositionBook } from './debugPositionBook.strategy';
 import { debugRealtimeStrategySchema } from './debugRealtime.schema';
 import { DebugRealtime } from './debugRealtime.strategy';
 import { debugTrailingStopStrategySchema } from './debugTrailingStop.schema';
@@ -18,6 +20,7 @@ describe('the debug strategies', () => {
     ${'DebugAdvice'}       | ${DebugAdvice}       | ${debugAdviceStrategySchema}
     ${'DebugBacktest'}     | ${DebugBacktest}     | ${debugBacktestStrategySchema}
     ${'DebugOrderScript'}  | ${DebugOrderScript}  | ${debugOrderScriptStrategySchema}
+    ${'DebugPositionBook'} | ${DebugPositionBook} | ${debugPositionBookStrategySchema}
     ${'DebugRealtime'}     | ${DebugRealtime}     | ${debugRealtimeStrategySchema}
     ${'DebugTrailingStop'} | ${DebugTrailingStop} | ${debugTrailingStopStrategySchema}
   `('$name declares the schema its strategy block is parsed with', ({ strategy, schema }) => {
@@ -186,6 +189,72 @@ describe('debugOrderScriptStrategySchema', () => {
     ${'cancelAfter 0'}           | ${orderWith({ cancelAfter: 0 })}          | ${'too_small'}         | ${['orders', 0, 'cancelAfter']}
   `('refuses $scenario', ({ block, code, path }) => {
     expect(debugOrderScriptStrategySchema.safeParse(block).error?.issues).toMatchObject([{ code, path }]);
+  });
+});
+
+describe('debugPositionBookStrategySchema', () => {
+  const BUY_IN_TURN = {
+    name: 'DebugPositionBook',
+    steps: [
+      { candle: 1, side: 'BUY', symbols: ['BTC/USDT', 'ETH/USDT'] },
+      { candle: 3, side: 'BUY', symbols: ['SOL/USDT'] },
+      { candle: 5, side: 'BUY', symbols: ['XRP/USDT'] },
+      { candle: 7, side: 'SELL' },
+    ],
+  };
+  const BUY_ON_THREE_CANDLES = {
+    name: 'DebugPositionBook',
+    steps: [
+      { candle: 1, side: 'BUY' },
+      { candle: 2, side: 'BUY' },
+      { candle: 3, side: 'BUY' },
+    ],
+  };
+  const SKIPPED_STEPS = {
+    name: 'DebugPositionBook',
+    steps: [
+      { candle: 0, side: 'SELL' },
+      { candle: 1, side: 'BUY', symbols: ['BTC/USDT'] },
+      { candle: 1, side: 'SELL', symbols: ['BTC/USDT'] },
+      { candle: 2, side: 'BUY' },
+      { candle: 3, side: 'SELL' },
+    ],
+  };
+  it.each`
+    source                                                                        | block
+    ${'the position book e2e flow, scenario A: four pairs bought in turn'}        | ${BUY_IN_TURN}
+    ${'the position book e2e flow, scenario A: three pairs bought on one candle'} | ${{ name: 'DebugPositionBook', steps: [{ candle: 1, side: 'BUY' }] }}
+    ${'the position book e2e flow, scenario B: a BUY of every pair on 3 candles'} | ${BUY_ON_THREE_CANDLES}
+    ${'the position book e2e flow, scenario C: the steps the position skips'}     | ${SKIPPED_STEPS}
+  `('accepts the block of $source', ({ block }) => {
+    expect(debugPositionBookStrategySchema.safeParse(omit(block, 'name')).success).toBe(true);
+  });
+
+  it('leaves the symbols out of a step without them, for every watched pair', () => {
+    expect(debugPositionBookStrategySchema.parse({ steps: [{ candle: 0, side: 'SELL' }] })).toEqual({
+      steps: [{ candle: 0, side: 'SELL' }],
+    });
+  });
+
+  /** A block of one step, a BUY on candle 0 but for `fields` */
+  const stepWith = (fields: Record<string, unknown>) => ({ steps: [{ candle: 0, side: 'BUY', ...fields }] });
+  // A symbol is written as the configuration writes one: lower case, or without its slash, it is no watched pair
+  it.each`
+    scenario                        | block                                  | code                   | path
+    ${'an unknown key (step)'}      | ${{ ...stepWith({}), step: [] }}       | ${'unrecognized_keys'} | ${[]}
+    ${'a block without steps'}      | ${{}}                                  | ${'invalid_type'}      | ${['steps']}
+    ${'an empty list of steps'}     | ${{ steps: [] }}                       | ${'too_small'}         | ${['steps']}
+    ${'an unknown step key (pair)'} | ${stepWith({ pair: 'BTC/USDT' })}      | ${'unrecognized_keys'} | ${['steps', 0]}
+    ${'a side in lower case'}       | ${stepWith({ side: 'buy' })}           | ${'invalid_value'}     | ${['steps', 0, 'side']}
+    ${'a quoted candle'}            | ${stepWith({ candle: '1' })}           | ${'invalid_type'}      | ${['steps', 0, 'candle']}
+    ${'a negative candle'}          | ${stepWith({ candle: -1 })}            | ${'too_small'}         | ${['steps', 0, 'candle']}
+    ${'a fractional candle'}        | ${stepWith({ candle: 0.5 })}           | ${'invalid_type'}      | ${['steps', 0, 'candle']}
+    ${'an empty list of symbols'}   | ${stepWith({ symbols: [] })}           | ${'too_small'}         | ${['steps', 0, 'symbols']}
+    ${'a symbol in lower case'}     | ${stepWith({ symbols: ['btc/usdt'] })} | ${'custom'}            | ${['steps', 0, 'symbols', 0]}
+    ${'a symbol without its slash'} | ${stepWith({ symbols: ['BTCUSDT'] })}  | ${'custom'}            | ${['steps', 0, 'symbols', 0]}
+    ${'a symbol given alone'}       | ${stepWith({ symbols: 'BTC/USDT' })}   | ${'invalid_type'}      | ${['steps', 0, 'symbols']}
+  `('refuses $scenario', ({ block, code, path }) => {
+    expect(debugPositionBookStrategySchema.safeParse(block).error?.issues).toMatchObject([{ code, path }]);
   });
 });
 

@@ -3,6 +3,7 @@ export * from './custom/index';
 export * from './debug/debugAdvice.strategy';
 export * from './debug/debugBacktest.strategy';
 export * from './debug/debugOrderScript.strategy';
+export * from './debug/debugPositionBook.strategy';
 export * from './debug/debugRealtime.strategy';
 export * from './debug/debugTrailingStop.strategy';
 export * from './dema/dema.strategy';
