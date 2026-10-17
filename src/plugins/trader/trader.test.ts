@@ -1858,10 +1858,79 @@ describe('Trader', () => {
         });
       });
 
+      // Both exchanges truncate the amount to the amount step of the market before they check its cost (see roundToMarketPrecision): the
+      // Trader values the amount so truncated. BTC at 60000, on Binance's step of 0.00001 BTC, 0.6 USDT.
+      describe('on a market whose minimum cost is 10 USDT and whose amount step is 0.00001 BTC', () => {
+        beforeEach(() => {
+          trader['prices'].set('BTC/USDT', 60000);
+          fakeExchange.getMarketData.mockReturnValue({ cost: { min: 10 }, precision: { amount: 0.00001 } });
+        });
+
+        // All but the last cost 10 USDT or more as sized, and 9.6 USDT once truncated to 0.00016 BTC: they were refused unwarned. The
+        // last was warned of with the cost of the amount sized, 9.49999999999998 USDT, where its refusal names the 9 USDT of 0.00015 BTC.
+        it.each`
+          description                           | advice                                   | message
+          ${'a BUY of 10.6 USDT'}               | ${order('BUY', { cost: 10.6 })}          | ${'BUY MARKET order of 10.6 USDT: 0.000167833333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a BUY of 1.07 %, 10.7 USDT'}       | ${order('BUY', { allocation: 1.07 })}    | ${'BUY MARKET order of 10.7 USDT (1.07 % of 1000 USDT): 0.000169416666666667 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a SELL of 10.1 USDT'}              | ${order('SELL', { cost: 10.1 })}         | ${'SELL MARKET order of 0.000168333333333333 BTC (10.1 USDT at 60000): 0.000168333333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a SELL of 0.0056 %, 0.000168 BTC'} | ${order('SELL', { allocation: 0.0056 })} | ${'SELL MARKET order of 0.000168 BTC (0.0056 % of 3 BTC): 0.000168 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a BUY of 10 USDT'}                 | ${order('BUY', { cost: 10 })}            | ${'BUY MARKET order of 10 USDT: 0.000158333333333333 BTC at 60000 sent, truncated to 0.00015 BTC on the amount step 0.00001 of the market, a cost of 9 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+        `('warns once of $description, with the amount the step cuts it to and its cost', async ({ advice, message }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // Left as it is by the step, the amount is said once, as on a market without a step
+        it.each`
+          description                                      | advice                                       | message
+          ${'a SELL of 9 USDT, 0.00015 BTC'}               | ${order('SELL', { cost: 9 })}                | ${'SELL MARKET order of 0.00015 BTC (9 USDT at 60000): 0.00015 BTC at 60000 sent, a cost of 9 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a LIMIT BUY of 9 USDT at 95000, 0.00009 BTC'} | ${order('BUY', { cost: 9 }, 'LIMIT', 95000)} | ${'BUY LIMIT order of 9 USDT: 0.00009 BTC at 95000 sent, a cost of 8.55 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+        `('warns once of $description, on the step, with its cost', async ({ advice, message }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // Refused for its amount, with the step (see OrderOutOfRangeError): not this warning's case, as an order sized to 0 is not
+        it.each`
+          description                                        | advice
+          ${'a BUY of 0.5 USDT, 0.00000791666666666667 BTC'} | ${order('BUY', { cost: 0.5 })}
+          ${'a SELL of 0.0002 %, 0.000006 BTC'}              | ${order('SELL', { allocation: 0.0002 })}
+        `('does not warn of $description, which the step cuts to 0', async ({ advice }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        it('places a SELL of 0.0002 % the step cuts to 0 for the 0.000006 BTC sized, for the exchange to refuse', async () => {
+          const advice = order('SELL', { allocation: 0.0002 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(0.000006);
+        });
+
+        it('logs at debug level the 0.000167833333333333 BTC a BUY of 10.6 USDT was sized to, before the step cuts it', async () => {
+          const advice = order('BUY', { cost: 10.6 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.debug).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] BUY MARKET order of 10.6 USDT sized to 0.000167833333333333 BTC at 60000`,
+          );
+        });
+      });
+
       // Worked out in decimal, as the exchanges check it: 0.00007 BTC at 100000 is 7 USDT, 6.999999999999999 in binary
       it('does not warn of a LIMIT SELL of 7 USDT at 100000 on a market whose minimum cost is 7 USDT', async () => {
         fakeExchange.getMarketData.mockReturnValue({ cost: { min: 7 } });
         await trader.onStrategyCreateOrder([order('SELL', { cost: 7 }, 'LIMIT', 100000)]);
+        expect(logger.warning).not.toHaveBeenCalled();
+      });
+
+      // Truncated to the step, then worked out in decimal: 0.00007 BTC at 100000 is 7 USDT, 6.999999999999999 in binary
+      it.each`
+        description                                 | advice
+        ${'a LIMIT BUY of 8 USDT, 0.000076 BTC'}    | ${order('BUY', { cost: 8 }, 'LIMIT', 100000)}
+        ${'a LIMIT SELL of 7.5 USDT, 0.000075 BTC'} | ${order('SELL', { cost: 7.5 }, 'LIMIT', 100000)}
+      `('does not warn of $description at 100000, 0.00007 BTC on a step of 0.00001, 7 USDT, the minimum cost', async ({ advice }) => {
+        fakeExchange.getMarketData.mockReturnValue({ cost: { min: 7 }, precision: { amount: 0.00001 } });
+        await trader.onStrategyCreateOrder([advice]);
         expect(logger.warning).not.toHaveBeenCalled();
       });
 

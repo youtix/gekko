@@ -22,6 +22,7 @@ import { debug, error, info, warning } from '@services/logger';
 import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { getMarketOrderLimits, toBound } from '@utils/market/market.utils';
+import { roundToStep } from '@utils/market/precision.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
@@ -436,24 +437,37 @@ export class Trader extends Plugin {
   }
 
   /**
-   * Says at debug level how an order sized by its cost or by its allocation came out, and warns before it is sent when its cost at its
-   * price, worked out in decimal as the exchanges work it out (see multiplyPrecise), is below the minimum cost of the market (see
-   * toBound): the market refuses it, an error counting towards the circuit breaker, whose reason names the cost of the order, not the
-   * budget or the share it came from. A BUY costs less than its budget, the share DEFAULT_FEE_BUFFER keeps back for the fee: one whose
-   * budget is the minimum cost is refused. Not an order sized to 0, which the market refuses for its amount, warned of with its cause
-   * (see sizeSell and sizeBudgetBuy). An order with an amount is not checked, its refusal naming the amount the strategy chose, nor an
-   * all-in one.
+   * Says at debug level how an order sized by its cost or by its allocation came out, and warns before it is sent when its cost is below
+   * the minimum cost of the market (see toBound): the market refuses it, an error counting towards the circuit breaker, whose reason names
+   * the cost of the order, not the budget or the share it came from. The cost is that of the amount the exchanges check, truncated to the
+   * amount step of the market as they send it (see roundToStep and roundToMarketPrecision; isSellable values a holding so), at the price of
+   * the order, in decimal (see multiplyPrecise). Valued as sized, an order the truncation took under the minimum was refused unwarned:
+   * 0.0000870833333333333 BTC at 60000 is 5.225 USDT, above a minimum of 5, and is sent as 0.00008 BTC, 4.8 USDT. The warning then says the
+   * amount truncated and the step. The price is the order's: an exchange checks a market order at its ticker, and rounds a limit price to
+   * its tick, which moves the cost by half a tick times the amount at most. A BUY costs less than its budget, the share DEFAULT_FEE_BUFFER
+   * keeps back for the fee: one whose budget is the minimum cost is refused. Not an order sized to 0, nor one the step cuts to 0, which the
+   * market refuses for its amount: the first is warned of with its cause (see sizeSell and sizeBudgetBuy), the refusal of the second names
+   * the step. An order with an amount is not checked, its refusal naming the amount the strategy chose, nor an all-in one.
    */
   private reportBudgetSizing({ side, symbol }: AdviceOrder, price: number, { label }: Budget, amount: number) {
     const [assetName, currencyName] = symbol.split('/');
     debug('trader', `${label} sized to ${amount} ${assetName} at ${price}`);
-    const minimum = toBound(this.getExchange().getMarketData(symbol).cost?.min);
-    const cost = multiplyPrecise(amount, price);
-    if (isNil(minimum) || !(amount > 0) || !(cost < minimum)) return;
+    const marketData = this.getExchange().getMarketData(symbol);
+    const minimum = toBound(marketData.cost?.min);
+    if (isNil(minimum)) return;
+    const step = toBound(marketData.precision?.amount);
+    const truncated = roundToStep(amount, step, 'down');
+    const cost = multiplyPrecise(truncated, price);
+    if (!(truncated > 0) || !(cost < minimum)) return;
     const sent = `${label}: ${amount} ${assetName} at ${price} sent`;
+    // An amount the step cuts is also said as the exchange takes it, the one whose cost the refusal names
+    const onStep =
+      isNil(step) || truncated === amount
+        ? ''
+        : `, truncated to ${formatEveryDecimal(truncated)} ${assetName} on the amount step ${formatEveryDecimal(step)} of the market`;
     const feeBuffer = side === 'BUY' ? ` once ${FEE_BUFFER_PERCENT} % is kept back for the fee` : '';
     const below = `below the minimum cost of ${formatEveryDecimal(minimum)} ${currencyName} on ${symbol}, which the market refuses`;
-    warning('trader', `${sent}, a cost of ${formatEveryDecimal(cost)} ${currencyName}${feeBuffer}, ${below}`);
+    warning('trader', `${sent}${onStep}, a cost of ${formatEveryDecimal(cost)} ${currencyName}${feeBuffer}, ${below}`);
   }
 
   /**
