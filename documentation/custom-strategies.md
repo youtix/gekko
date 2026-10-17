@@ -534,7 +534,8 @@ createOrder({ symbol: 'BTC/USDT', type: 'LIMIT', side: 'BUY', price: 42000, amou
 // 100 USDT of BTC, the 5% kept back for the fee included: 95 USDT worth at the last price
 createOrder({ symbol: 'BTC/USDT', type: 'MARKET', side: 'BUY', cost: 100 });
 
-// A quarter of the BTC the Trader read at its last synchronization
+// A quarter of the BTC the Trader read at its last synchronization. Completed, a SELL of yours cancels the trailing stops armed on
+// the pair, whatever it sold (see Trailing Stops below)
 createOrder({ symbol: 'BTC/USDT', type: 'MARKET', side: 'SELL', allocation: 25 });
 
 // Half of the USDT the Trader read last for each of two pairs: both BUYs go through on the same candle, where an all-in BUY on

@@ -84,8 +84,8 @@ export type Tools<T> = {
    *
    * At most one of `amount`, `cost` and `allocation` sizes the order, each a number above 0 or left out, `allocation` at most 100. The
    * Trader works out the amount of an order sized otherwise than by an amount from the free balances its last synchronization read (at
-   * start-up, at the end of the warmup, after the end of every order, and periodically: every exchangeSynchInterval in realtime), at
-   * the price of the order, else the last price of the pair:
+   * start-up, at the end of the warmup, after the end of every order, and periodically: every exchangeSynchInterval in realtime, every
+   * timeframe candle in a backtest, 10 minutes at least), at the price of the order, else the last price of the pair:
    * - `amount`, in the asset: a BUY with an amount is placed as asked.
    * - `cost`, in the currency of the pair (the USDT of BTC/USDT): a BUY spends at most that, the 5 % kept back for its fee included
    *   (DEFAULT_FEE_BUFFER), so it buys cost × 0.95 / price, and a cost of all the currency free is an all-in BUY; a SELL sells
@@ -102,9 +102,10 @@ export type Tools<T> = {
    * left to spend (none free, no balance read yet, or the BUYs placed since taking it all), it is sized to 0 and refused, as an all-in
    * BUY is, with a warning that says why. A SELL so sized is capped as a SELL of an amount is, at the asset free less what the SELLs
    * placed since then take. Every SELL, and every BUY without an amount, is also capped at the most the market takes in one order of
-   * its type, with a warning, the rest held or left unspent. A cost or an allocation that comes to less than the minimum cost of the
-   * market is warned of before the order is sent, and the exchange refuses it (onOrderErrored, which counts towards the circuit
-   * breaker).
+   * its type, with a warning, the rest held or left unspent. An order sized by a cost or an allocation whose amount, truncated to the
+   * amount step of the market as the exchange takes it, costs less at its price than the minimum cost of the market (a BUY costs 95 % of
+   * its budget at most) is warned of before it is sent, and the exchange refuses it (onOrderErrored, which counts towards the circuit
+   * breaker); one the step cuts to 0 is refused for its amount, its reason naming the step.
    *
    * A price left out is the last price of the pair: the limit of a LIMIT order, and what a BUY without an amount, or a SELL of a cost,
    * is sized at. Anything else (NaN, 0, a negative number, Infinity, a quoted number, an allocation above 100) throws a GekkoError

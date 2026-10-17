@@ -12,7 +12,10 @@ import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErrored
 type UnfinishedOrderParams = OnOrderCanceledEventParams<unknown> | OnOrderErroredEventParams<unknown>;
 /** What a cancelation reports its order executed: the amount filled, and what remains of the amount ordered */
 type Fill = { filled: number; remaining: number };
-/** An order of the tracker's own whose outcome has not come yet: its side, and the amount a SELL asked for, unknown when all-in or adopted */
+/**
+ * An order of the tracker's own whose outcome has not come yet: its side, and the amount a SELL asked for, unknown when all-in, sized
+ * by a cost or an allocation, or adopted
+ */
 type PendingOrder = { side: OrderSide; amount?: number };
 
 /** Whether a value above 0 is below a market minimum: one left undefined, 0 or below sets no bound, as for the orders (market.utils) */
@@ -102,7 +105,7 @@ export class PositionTracker {
 
   /**
    * Creates the order as a SELL through createOrder and keeps it pending until its outcome, with the amount it asks for, left out
-   * for an all-in SELL (see settleCompletedSell); returns its id
+   * for an all-in SELL and for one sized by a cost or an allocation (see settleCompletedSell); returns its id
    */
   sell(createOrder: Tools<unknown>['createOrder'], order: Omit<StrategyOrder, 'side' | 'trailing'>): UUID {
     const id = createOrder({ ...order, side: 'SELL' });
@@ -185,10 +188,11 @@ export class PositionTracker {
    * bought by a STICKY or a LIMIT BUY, read flat once its first SELL had completed, the rest held while the strategy ignored its SELL
    * signals and followed its BUY signals. A SELL that sold less than it asked for is read from the portfolio after it, as one that
    * did not complete: long when the asset free there is enough to sell (see isSellable), flat when it is not, or when the portfolio
-   * does not list the asset. So is an all-in SELL, which asks for all of the asset free, and an adopted one, whose amount is not known
-   * here: what is free after them is what they left. When the Trader could not read the portfolio again after the fill, it is the
-   * one known before, which may still show the asset free: read long, the position is settled by the next SELL, refused for lack of
-   * anything to sell. Read long, the position is logged at info level, through the strategy's log.
+   * does not list the asset. So is an all-in SELL, which asks for all of the asset free, one sized by a cost or an allocation, whose
+   * amount the Trader works out, and an adopted one, whose amount is not known here: what is free after them is what they left. When
+   * the Trader could not read the portfolio again after the fill, it is the one known before, which may still show the asset free:
+   * read long, the position is settled by the next SELL, refused for lack of anything to sell. Read long, the position is logged at
+   * info level, through the strategy's log.
    */
   private settleCompletedSell({ order, exchange, tools }: OnOrderCompletedEventParams<unknown>, asked?: number) {
     this.long = false;
