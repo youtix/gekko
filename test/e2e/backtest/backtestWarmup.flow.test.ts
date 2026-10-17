@@ -52,9 +52,9 @@ describe('E2E: Backtest warmup', () => {
     clearLogs();
   });
 
-  it('runs init on the first minute, reads the SMA through the warmup and buys on the first candle after it, all-in', async () => {
+  it('runs init on the first minute, reads the SMA through the warmup and buys on the first candle after it, half of the currency', async () => {
     // BTC trades at 10000, but for the 5-minute candles of 00:10 at 9900 and of 00:20 at 10100: each minute of a candle closes at its
-    // price. ETH, watched beside it, trades at 2000.
+    // price. ETH, watched and traded beside it, trades at 2000.
     const btcPrices = [10000, 9900, 10000, 10100, 10000];
     const btc = candlesOf(3, 29, n => (n < 5 ? 10000 : btcPrices[Math.floor((n - 5) / 5)]));
     const eth = candlesOf(3, 29, () => 2000);
@@ -65,9 +65,10 @@ describe('E2E: Backtest warmup', () => {
     });
 
     // The minutes 00:03 and 00:04 come before the first 5-minute boundary: the strategy gets the candles of 00:05 to 00:25, the first two
-    // its warmup, which the SMA of two closes reads all the same. Ready on the candle of 00:10, it puts the price below it, 9900 under
-    // (10000 + 9900) / 2: the candle of 00:15, the first after the warmup, crosses it, 10000 above 9950, and the strategy buys. The candle
-    // of 00:25 crosses it back, 10000 below (10100 + 10000) / 2, and the strategy sells.
+    // its warmup, which the SMA of two closes reads all the same. Ready on the candle of 00:10, it puts the BTC price below it, 9900 under
+    // (10000 + 9900) / 2: the candle of 00:15, the first after the warmup, crosses it, 10000 above 9950, and the strategy buys BTC. The
+    // candle of 00:25 crosses it back, 10000 below (10100 + 10000) / 2, and the strategy sells. ETH closes on its SMA on every candle,
+    // 2000: on neither side of it, it has no initial state and never crosses, and the strategy orders nothing of it.
     expect({
       failure,
       warnings: linesAt('warn'),
@@ -78,36 +79,37 @@ describe('E2E: Backtest warmup', () => {
       failure: undefined,
       warnings: [
         'STREAM | BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!',
-        // init picks the pair it trades on the first minute read, 00:03, before the batcher reads it: the batcher warns once a minute
-        // starts on a boundary, at 00:05, one batcher per pair, neither naming its pair
-        'STRATEGY | The strategy trades BTC/USDT only, the first pair watched (watch.assets): it ignores ETH/USDT, whose candles are still required every minute',
+        // The batcher warns once a minute starts on a boundary, at 00:05, one batcher per pair, neither naming its pair
         'CORE | Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
         'CORE | Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
       ],
       strategyLines: [
+        // init, on the first minute read, 00:03: the strategy trades both pairs
+        'STRATEGY | Trading BTC/USDT and ETH/USDT: each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset',
         // On the candle of 00:10, the last of the warmup
-        'STRATEGY | Initial state: price below SMA',
+        'STRATEGY | [BTC/USDT] Initial state: price below SMA',
         'STRATEGY | Strategy warmup done ! Sending first candle bucket (2024-01-01T00:15:00.000Z) to strategy',
-        'STRATEGY | SMA crossed DOWN price (9950.00000 < 10000.00000) => BUY',
-        'STRATEGY | SMA crossed UP price (10050.00000 > 10000.00000) => SELL',
+        'STRATEGY | [BTC/USDT] SMA crossed DOWN price (9950.00000 < 10000.00000) => BUY',
+        'STRATEGY | [BTC/USDT] SMA crossed UP price (10050.00000 > 10000.00000) => SELL',
       ],
       // Each order goes out with the last minute of its candle, filled at its close and dated at its end
       orderCalls: [
-        // The 300000 USDT read at the end of the warmup, less the 5 % kept back for the fee, at 10000: 285000 / 10000
-        filledMarketOrder(minute(20), 'BTC/USDT', 'BUY', 28.5, 1),
+        // ETH flat beside it, the BUY takes 50 % of the 300000 USDT read at the end of the warmup, 150000, less the 5 % kept back for the
+        // fee, at 10000: 142500 / 10000
+        filledMarketOrder(minute(20), 'BTC/USDT', 'BUY', 14.25, 1),
         // All the BTC free
-        filledMarketOrder(minute(30), 'BTC/USDT', 'SELL', 28.5, 2),
+        filledMarketOrder(minute(30), 'BTC/USDT', 'SELL', 14.25, 2),
       ],
       // After the TradingAdvisor's and the Trader's reads at start-up: the synchronization on the minute 00:10, a multiple of 10, then
       // that of the end of the warmup, which the BUY is sized from, and those after each fill and on the minute 00:20
       balanceReads: [
         unreservedRead(minute(11), { BTC: 0, ETH: 0, USDT: 300000 }),
         unreservedRead(minute(20), { BTC: 0, ETH: 0, USDT: 300000 }),
-        // 28.5 × 10000 × 1.001 = 285285 spent
-        unreservedRead(minute(20), { BTC: 28.5, ETH: 0, USDT: 14715 }),
-        unreservedRead(minute(21), { BTC: 28.5, ETH: 0, USDT: 14715 }),
-        // 28.5 × 10000 × 0.999 = 284715 brought in
-        unreservedRead(minute(30), { BTC: 0, ETH: 0, USDT: 299430 }),
+        // 14.25 × 10000 × 1.001 = 142642.5 spent: 300000 - 142642.5
+        unreservedRead(minute(20), { BTC: 14.25, ETH: 0, USDT: 157357.5 }),
+        unreservedRead(minute(21), { BTC: 14.25, ETH: 0, USDT: 157357.5 }),
+        // 14.25 × 10000 × 0.999 = 142357.5 brought in: 157357.5 + 142357.5
+        unreservedRead(minute(30), { BTC: 0, ETH: 0, USDT: 299715 }),
       ],
     });
   });
