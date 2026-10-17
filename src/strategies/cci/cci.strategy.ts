@@ -1,5 +1,5 @@
 import { TradingPair } from '@models/utility.types';
-import { pickTradedPair, PositionTracker } from '@strategies/positionTracker';
+import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,90 +9,101 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
+import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { cciStrategySchema } from './cci.schema';
 import { CCIStrategyParams, CCITrend } from './cci.types';
 
+/** Trades every watched pair (watch.assets), each with its own CCI, trend and position (see PositionBook) */
 export class CCI implements Strategy<CCIStrategyParams> {
   static schema = cciStrategySchema;
 
-  private trend: CCITrend;
-  private pair?: TradingPair;
-  // A trend starts again each time the CCI comes back from between the thresholds, and every order is all-in: the strategy buys only
-  // when flat and sells only when long, never while its order is pending. Advised on every new overbought (oversold) trend, each SELL
-  // (BUY) after the first was sized from what the previous one left, then refused once nothing was left, until maxConsecutiveErrors
-  // stopped the bot. The trend of an order canceled or errored stays adviced: the next order waits for the next trend.
-  private readonly position = new PositionTracker();
+  /** The trend of each pair, which init starts without a direction */
+  private readonly trends = new Map<TradingPair, CCITrend>();
+  // A trend starts again each time the CCI comes back from between the thresholds, and every order is all-in, but the BUY of a pair
+  // while other pairs are not invested, which takes a share of the currency: the strategy buys a pair only when flat there and sells it
+  // only when long, never while its order there is pending. Advised on every new overbought (oversold) trend, each SELL (BUY) after the
+  // first was sized from what the previous one left, then refused once nothing was left, until maxConsecutiveErrors stopped the bot.
+  // The trend of an order canceled or errored stays adviced, and so does that of a BUY the book skips, its share below the minimum cost
+  // of the market: the next order waits for the next trend.
+  private readonly book = new PositionBook();
 
-  constructor() {
-    this.trend = { direction: 'nodirection', duration: 0, persisted: false, adviced: false };
-  }
-
-  init({ candle, tools, addIndicator }: InitParams<CCIStrategyParams>): void {
-    this.pair = pickTradedPair(candle, tools);
-    addIndicator('CCI', this.pair, { period: tools.strategyParams.period });
-  }
-
-  onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
-    const { strategyParams, createOrder, log } = tools;
-    const [cci] = indicators;
-    if (!isFiniteNumber(cci.results) || !this.pair) return;
-
-    const { up, down, persistence } = strategyParams.thresholds;
-
-    if (cci.results >= up) {
-      if (this.trend.direction !== 'overbought') {
-        log('info', 'CCI: overbought trend detected');
-        this.trend = { direction: 'overbought', duration: 1, persisted: persistence === 0, adviced: false };
-      } else {
-        this.trend.duration++;
-        if (this.trend.duration >= persistence) this.trend.persisted = true;
-      }
-      // Left unadviced while flat or while an order is pending: a BUY that fills during the trend is sold on its next candle
-      if (this.trend.persisted && !this.trend.adviced && this.position.canSell()) {
-        this.trend.adviced = true;
-        this.position.sell(createOrder, { type: 'STICKY', symbol: this.pair });
-      }
-    } else if (cci.results <= down) {
-      if (this.trend.direction !== 'oversold') {
-        log('info', 'CCI: oversold trend detected');
-        this.trend = { direction: 'oversold', duration: 1, persisted: persistence === 0, adviced: false };
-      } else {
-        this.trend.duration++;
-        if (this.trend.duration >= persistence) this.trend.persisted = true;
-      }
-      if (this.trend.persisted && !this.trend.adviced && this.position.canBuy()) {
-        this.trend.adviced = true;
-        this.position.buy(createOrder, { type: 'STICKY', symbol: this.pair });
-      }
-    } else {
-      // Counted from 1, as a trend's first candle is: reset to 0, the first neutral candle after a trend logged "nodirection for 0",
-      // where the first of a run logs "for 1". Only the log reads it: a trend starts over on its first candle, whatever came before.
-      if (this.trend.direction !== 'nodirection') {
-        this.trend = { direction: 'nodirection', duration: 1, persisted: false, adviced: false };
-      } else {
-        this.trend.duration++;
-      }
+  init(params: InitParams<CCIStrategyParams>): void {
+    const { tools, addIndicator } = params;
+    this.book.track(params);
+    for (const pair of this.book.pairs) {
+      this.trends.set(pair, { direction: 'nodirection', duration: 0, persisted: false, adviced: false });
+      addIndicator('CCI', pair, { period: tools.strategyParams.period });
     }
+  }
 
-    log('debug', `Trend: ${this.trend.direction} for ${this.trend.duration}`);
+  onTimeframeCandleAfterWarmup(params: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
+    const { strategyParams, log } = params.tools;
+    const { up, down, persistence } = strategyParams.thresholds;
+    const bySymbol = indicatorsBySymbol(indicators);
+
+    for (const pair of this.book.pairs) {
+      const [cci] = bySymbol.get(pair) ?? [];
+      let trend = this.trends.get(pair);
+      if (!isFiniteNumber(cci?.results) || !trend) continue;
+
+      if (cci.results >= up) {
+        if (trend.direction !== 'overbought') {
+          log('info', `[${pair}] CCI: overbought trend detected`);
+          trend = { direction: 'overbought', duration: 1, persisted: persistence === 0, adviced: false };
+        } else {
+          trend.duration++;
+          if (trend.duration >= persistence) trend.persisted = true;
+        }
+        // Left unadviced while flat or while an order of the pair is pending: a BUY that fills during the trend is sold on its next candle
+        if (trend.persisted && !trend.adviced && this.book.canSell(pair)) {
+          trend.adviced = true;
+          this.book.sell({ type: 'STICKY', symbol: pair }, params);
+        }
+      } else if (cci.results <= down) {
+        if (trend.direction !== 'oversold') {
+          log('info', `[${pair}] CCI: oversold trend detected`);
+          trend = { direction: 'oversold', duration: 1, persisted: persistence === 0, adviced: false };
+        } else {
+          trend.duration++;
+          if (trend.duration >= persistence) trend.persisted = true;
+        }
+        if (trend.persisted && !trend.adviced && this.book.canBuy(pair)) {
+          trend.adviced = true;
+          this.book.buy({ type: 'STICKY', symbol: pair }, params);
+        }
+      } else {
+        // Counted from 1, as a trend's first candle is: reset to 0, the first neutral candle after a trend logged "nodirection for 0",
+        // where the first of a run logs "for 1". Only the log reads it: a trend starts over on its first candle, whatever came before.
+        if (trend.direction !== 'nodirection') {
+          trend = { direction: 'nodirection', duration: 1, persisted: false, adviced: false };
+        } else {
+          trend.duration++;
+        }
+      }
+
+      this.trends.set(pair, trend);
+      log('debug', `[${pair}] Trend: ${trend.direction} for ${trend.duration}`);
+    }
   }
 
   log({ tools }: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
-    const [cci] = indicators;
-    if (!isFiniteNumber(cci.results)) return;
-    tools.log('debug', `CCI: ${cci.results.toFixed(2)}`);
+    const bySymbol = indicatorsBySymbol(indicators);
+    for (const pair of this.book.pairs) {
+      const [cci] = bySymbol.get(pair) ?? [];
+      if (isFiniteNumber(cci?.results)) tools.log('debug', `[${pair}] CCI: ${cci.results.toFixed(2)}`);
+    }
   }
 
   onOrderCompleted(params: OnOrderCompletedEventParams<CCIStrategyParams>): void {
-    this.position.onOrderCompleted(params);
+    this.book.onOrderCompleted(params);
   }
 
   onOrderCanceled(params: OnOrderCanceledEventParams<CCIStrategyParams>): void {
-    this.position.onOrderCanceled(params);
+    this.book.onOrderCanceled(params);
   }
 
   onOrderErrored(params: OnOrderErroredEventParams<CCIStrategyParams>): void {
-    this.position.onOrderErrored(params);
+    this.book.onOrderErrored(params);
   }
 }
