@@ -1,15 +1,19 @@
 import type { StrategyOrder } from '@models/advice.types';
 import type { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
-import { ETH_IGNORED_WARNING, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
+import { Portfolio } from '@models/portfolio.types';
+import { TradingPair } from '@models/utility.types';
+import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@strategies/positionBook.mock';
+import { logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
 import { InitParams, OnCandleEventParams } from '@strategies/strategy.types';
 import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MACD } from './macd.strategy';
 import { MACDStrategyParams } from './macd.types';
 
-const symbol = 'BTC/USDT';
-const makeIndicator = (res: any) => [{ results: res, symbol }] as any;
+const BTC: TradingPair = 'BTC/USDT';
+const ETH: TradingPair = 'ETH/USDT';
+const makeIndicator = (res: any) => [{ results: res, symbol: BTC }] as any;
 // The MACD result of each step of the scenarios played below (hist = macd - signal), with one field only beyond the thresholds
 // 0.5 / -0.5: only the field macdSrc names can make a trend. up and down move the MACD line, which the suite trades (macdSrc: 'macd'),
 // signalUp and signalDown the signal line, histUp and histDown the histogram. Null is what the indicator gives until it is ready.
@@ -23,9 +27,18 @@ const MACD_RESULTS = {
   histDown: { macd: -0.4, signal: 0.4, hist: -0.8 },
   null: null,
 } as const;
+/** What the MACD indicator gives the hooks, null until it is ready */
+type MACDResult = IndicatorRegistry['MACD']['output'];
+// The periods of the strategy parameters below, which init hands each MACD
+const PERIODS = { short: 12, long: 26, signal: 9 };
 // All-in, as the strategy creates them: without amount, the Trader sizes them from all the free currency (BUY) or asset (SELL)
-const allInBuy = { type: 'STICKY', side: 'BUY', symbol } satisfies StrategyOrder;
-const allInSell = { type: 'STICKY', side: 'SELL', symbol } satisfies StrategyOrder;
+const allInBuy = { type: 'STICKY', side: 'BUY', symbol: BTC } satisfies StrategyOrder;
+const allInSell = { type: 'STICKY', side: 'SELL', symbol: BTC } satisfies StrategyOrder;
+/** A BUY of `symbol` as the strategy creates it on several pairs: all-in, or with the share of the free currency it takes, in % */
+const buyOf = (symbol: TradingPair, allocation?: number): StrategyOrder =>
+  allocation === undefined ? { type: 'STICKY', side: 'BUY', symbol } : { type: 'STICKY', side: 'BUY', symbol, allocation };
+/** A SELL of `symbol` as the strategy creates it: all-in */
+const sellOf = (symbol: TradingPair): StrategyOrder => ({ type: 'STICKY', side: 'SELL', symbol });
 
 describe('MACD Strategy', () => {
   let strategy: MACD;
@@ -34,25 +47,41 @@ describe('MACD Strategy', () => {
   let logs: { level: LogLevel; message: string }[];
   let tools: any;
   let bucket: CandleBucket;
+  let portfolio: Portfolio;
   let addIndicator: any;
 
-  /** Plays the steps (see playSteps): a MACD result (see MACD_RESULTS) is a candle */
+  /** Builds the strategy and plays its init on a bucket of `pairs`, in their order (that of watch.assets) */
+  const initOn = (pairs: TradingPair[]) => {
+    strategy = new MACD();
+    bucket = flatBucket(Object.fromEntries(pairs.map(pair => [pair, 1])));
+    strategy.init({ candle: bucket, portfolio, tools, addIndicator } as unknown as InitParams<MACDStrategyParams>);
+  };
+  /** The params of a candle hook: the bucket of init, the portfolio of the test and the tools */
+  const candleParams = () => ({ candle: bucket, portfolio, tools }) as unknown as OnCandleEventParams<MACDStrategyParams>;
+  /**
+   * Plays the steps (see playSteps): a candle is the MACD result of each pair of the bucket, in its order, separated by commas (see
+   * MACD_RESULTS): 'up' on BTC/USDT alone, 'up,none' on BTC/USDT and ETH/USDT
+   */
   const play = (steps: string) =>
     playSteps(steps, strategy, orders, step => {
+      const names = step.split(',');
       // A misspelt step would be an undefined result, a candle skipped
-      if (!(step in MACD_RESULTS)) throw new Error(`No step named ${step}, in "${steps}"`);
-      strategy.onTimeframeCandleAfterWarmup(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<MACDStrategyParams>,
-        ...makeIndicator(MACD_RESULTS[step as keyof typeof MACD_RESULTS]),
-      );
+      if (names.length !== bucket.size || !names.every(name => name in MACD_RESULTS)) {
+        throw new Error(`No step named ${step} on ${[...bucket.keys()].join(', ')}, in "${steps}"`);
+      }
+      const results = [...bucket.keys()].map((symbol, index) => ({
+        results: MACD_RESULTS[names[index] as keyof typeof MACD_RESULTS],
+        symbol,
+      }));
+      strategy.onTimeframeCandleAfterWarmup(candleParams(), ...results);
     });
   const sides = () => advices.map(({ side }) => side);
 
   beforeEach(() => {
-    strategy = new MACD();
     orders = new OrderRecorder();
     advices = orders.advices;
     logs = [];
+    portfolio = new Map();
     addIndicator = vi.fn();
 
     tools = {
@@ -66,32 +95,39 @@ describe('MACD Strategy', () => {
       createOrder: orders.createOrder,
       cancelOrder: vi.fn(),
       log: vi.fn((level: LogLevel, message: string) => logs.push({ level, message })),
+      marketData: new Map(),
     };
 
-    bucket = new Map();
-    bucket.set(symbol, { close: 1 } as any);
-
-    strategy.init({ candle: bucket, tools, addIndicator } as unknown as InitParams<MACDStrategyParams>);
+    initOn([BTC]);
   });
 
   describe('init', () => {
     it('should add MACD indicator with strategy parameters', () => {
-      expect(addIndicator).toHaveBeenCalledWith('MACD', symbol, { short: 12, long: 26, signal: 9 });
+      expect(addIndicator).toHaveBeenCalledWith('MACD', BTC, { short: 12, long: 26, signal: 9 });
     });
 
-    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades the first one only
+    // The bucket holds a candle of every watched pair, in the order of watch.assets: each pair gets a MACD of its own, in that order
     it.each`
-      case           | pairs                       | expected
-      ${'one pair'}  | ${['BTC/USDT']}             | ${[]}
-      ${'two pairs'} | ${['BTC/USDT', 'ETH/USDT']} | ${[ETH_IGNORED_WARNING]}
-    `('should warn once, at init, when it ignores watched pairs: $case', ({ pairs, expected }) => {
+      case                    | pairs         | expected
+      ${'BTC/USDT, ETH/USDT'} | ${[BTC, ETH]} | ${[['MACD', BTC, PERIODS], ['MACD', ETH, PERIODS]]}
+      ${'ETH/USDT, BTC/USDT'} | ${[ETH, BTC]} | ${[['MACD', ETH, PERIODS], ['MACD', BTC, PERIODS]]}
+    `('should add a MACD on each watched pair, in the order of watch.assets: $case', ({ pairs, expected }) => {
+      expect(indicatorsAtInit(new MACD(), pairs, tools.strategyParams)).toEqual(expected);
+    });
+
+    // The position book says once which pairs the strategy trades, and how: on one pair, init logs nothing, as it always did
+    it.each`
+      case           | pairs         | expected
+      ${'one pair'}  | ${[BTC]}      | ${[]}
+      ${'two pairs'} | ${[BTC, ETH]} | ${[BTC_ETH_TRADED_INFO]}
+    `('should say once, at init, which pairs it trades, without a warning: $case', ({ pairs, expected }) => {
       expect(logsAtInit(new MACD(), pairs, tools.strategyParams)).toEqual(expected);
     });
   });
 
   describe('onTimeframeCandleAfterWarmup', () => {
-    // An uptrend over the persistence, which buys once init has picked the pair: before it, the order would have no symbol
-    it('should do nothing before init has picked the pair', () => {
+    // An uptrend over the persistence, which buys once init has tracked the pairs: before it, the strategy knows no pair to trade
+    it('should do nothing before init has tracked the pairs', () => {
       strategy = new MACD();
       play('up up');
       expect({ advices, logs }).toEqual({ advices: [], logs: [] });
@@ -111,10 +147,7 @@ describe('MACD Strategy', () => {
       ${{ macd: 1, signal: NaN, hist: 0 }}
       ${{ macd: 1, signal: 1, hist: -Infinity }}
     `('should do nothing when MACD result is invalid ($macdRes)', ({ macdRes }) => {
-      strategy.onTimeframeCandleAfterWarmup(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<MACDStrategyParams>,
-        ...makeIndicator(macdRes),
-      );
+      strategy.onTimeframeCandleAfterWarmup(candleParams(), ...makeIndicator(macdRes));
       expect({ advices, logs }).toEqual({ advices: [], logs: [] });
     });
 
@@ -158,7 +191,7 @@ describe('MACD Strategy', () => {
 
     it('should log when no trend detected, and advise nothing', () => {
       play('none');
-      expect({ advices, logs }).toEqual({ advices: [], logs: [{ level: 'debug', message: 'MACD: no trend detected' }] });
+      expect({ advices, logs }).toEqual({ advices: [], logs: [{ level: 'debug', message: '[BTC/USDT] MACD: no trend detected' }] });
     });
   });
 
@@ -212,20 +245,112 @@ describe('MACD Strategy', () => {
       ${{ macd: NaN, signal: 0, hist: 0 }}
       ${{ macd: 1, signal: 0, hist: Infinity }}
     `('should not log when MACD result is missing or invalid ($macdRes)', ({ macdRes }) => {
-      strategy.log({ candle: bucket, tools } as unknown as OnCandleEventParams<MACDStrategyParams>, ...makeIndicator(macdRes));
+      strategy.log(candleParams(), ...makeIndicator(macdRes));
       expect(logs).toHaveLength(0);
     });
 
+    // A result the indicator can produce: its hist is macd - signal, 1 exactly in binary
     it('should log MACD properties', () => {
-      strategy.log(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<MACDStrategyParams>,
-        ...makeIndicator({ macd: 1.12345678, signal: 2.12345678, hist: 3.12345678 }),
-      );
+      strategy.log(candleParams(), ...makeIndicator({ macd: 3.12345678, signal: 2.12345678, hist: 1 }));
       expect(logs).toEqual([
-        { level: 'debug', message: 'macd: 1.12345678' },
-        { level: 'debug', message: 'signal: 2.12345678' },
-        { level: 'debug', message: 'hist: 3.12345678' },
+        { level: 'debug', message: '[BTC/USDT] macd: 3.12345678' },
+        { level: 'debug', message: '[BTC/USDT] signal: 2.12345678' },
+        { level: 'debug', message: '[BTC/USDT] hist: 1.00000000' },
       ]);
+    });
+  });
+
+  describe('on two pairs', () => {
+    // The line init logs on two pairs is asserted with init: the rows below read the lines of their candles alone
+    beforeEach(() => {
+      initOn([BTC, ETH]);
+      logs = [];
+    });
+
+    it('should log the trend of each pair, each line prefixed with its pair', () => {
+      play('up,down');
+      expect(logs).toEqual([
+        { level: 'info', message: '[BTC/USDT] MACD: up trend detected' },
+        { level: 'debug', message: '[BTC/USDT] In uptrend since 1 candle' },
+        { level: 'info', message: '[ETH/USDT] MACD: down trend detected' },
+        { level: 'debug', message: '[ETH/USDT] In downtrend since 1 candle' },
+      ]);
+    });
+
+    // Each pair counts the candles of its own trend: the uptrend of ETH starts on the second candle of that of BTC
+    it('should count the candles of each trend on its own pair', () => {
+      play('up,none up,up');
+      expect(logs).toEqual([
+        { level: 'info', message: '[BTC/USDT] MACD: up trend detected' },
+        { level: 'debug', message: '[BTC/USDT] In uptrend since 1 candle' },
+        { level: 'debug', message: '[ETH/USDT] MACD: no trend detected' },
+        { level: 'debug', message: '[BTC/USDT] In uptrend since 2 candles' },
+        { level: 'info', message: '[ETH/USDT] MACD: up trend detected' },
+        { level: 'debug', message: '[ETH/USDT] In uptrend since 1 candle' },
+      ]);
+    });
+
+    it('should log the MACD of each pair, each line prefixed with its pair', () => {
+      strategy.log(candleParams(), ...indicatorArguments<MACDResult>({ [BTC]: [MACD_RESULTS.up], [ETH]: [MACD_RESULTS.down] }));
+      expect(logs).toEqual([
+        { level: 'debug', message: '[BTC/USDT] macd: 0.80000000' },
+        { level: 'debug', message: '[BTC/USDT] signal: 0.40000000' },
+        { level: 'debug', message: '[BTC/USDT] hist: 0.40000000' },
+        { level: 'debug', message: '[ETH/USDT] macd: -0.80000000' },
+        { level: 'debug', message: '[ETH/USDT] signal: -0.40000000' },
+        { level: 'debug', message: '[ETH/USDT] hist: -0.40000000' },
+      ]);
+    });
+
+    // A pair whose MACD is not ready yet (null) is skipped alone, and so is one whose MACD the arguments leave out, which the
+    // StrategyManager never does: the MACD of ETH, at 0, is read as usual
+    const btcNotReady = indicatorArguments({ [BTC]: [null], [ETH]: [MACD_RESULTS.none] });
+    const btcLeftOut = indicatorArguments({ [ETH]: [MACD_RESULTS.none] });
+    const ethNoTrend = ['[ETH/USDT] MACD: no trend detected'];
+    const ethMacdAtZero = ['[ETH/USDT] macd: 0.00000000', '[ETH/USDT] signal: 0.00000000', '[ETH/USDT] hist: 0.00000000'];
+    it.each`
+      hook                              | case                               | indicators     | expected
+      ${'onTimeframeCandleAfterWarmup'} | ${'BTC not ready yet'}             | ${btcNotReady} | ${ethNoTrend}
+      ${'onTimeframeCandleAfterWarmup'} | ${'BTC left out of the arguments'} | ${btcLeftOut}  | ${ethNoTrend}
+      ${'log'}                          | ${'BTC not ready yet'}             | ${btcNotReady} | ${ethMacdAtZero}
+      ${'log'}                          | ${'BTC left out of the arguments'} | ${btcLeftOut}  | ${ethMacdAtZero}
+    `('should read ETH alone in $hook: $case', ({ hook, indicators, expected }) => {
+      strategy[hook as 'onTimeframeCandleAfterWarmup' | 'log'](candleParams(), ...indicators);
+      expect(logs.map(({ message }) => message)).toEqual(expected);
+    });
+
+    // Each pair has its own position, which the outcomes of its own orders alone settle. The BUY of a pair takes 50 % of the free
+    // currency while the other pair is not invested (flat, its BUY pending or not), all of it once the other is long (its SELL pending
+    // or not)
+    it.each`
+      case                                                          | steps                                                             | expected
+      ${'both flat: a BUY of each, 50 % each'}                      | ${'up,up up,up'}                                                  | ${[buyOf(BTC, 50), buyOf(ETH, 50)]}
+      ${'BTC not ready on a candle: ETH buys first, 50 % each'}     | ${'up,up null,up up,up'}                                          | ${[buyOf(ETH, 50), buyOf(BTC, 50)]}
+      ${'BTC long: the BUY of ETH all-in'}                          | ${'up,none up,none completed:1 none,up none,up'}                  | ${[buyOf(BTC, 50), buyOf(ETH)]}
+      ${'BTC long, ETH flat: BTC sells as ETH buys, all-in'}        | ${'up,none up,none completed:1 down,up down,up'}                  | ${[buyOf(BTC, 50), sellOf(BTC), buyOf(ETH)]}
+      ${'the BUY of ETH completed: ETH sells, BTC still pending'}   | ${'up,up up,up completed:2 down,down down,down'}                  | ${[buyOf(BTC, 50), buyOf(ETH, 50), sellOf(ETH)]}
+      ${'the BUY of BTC canceled: ETH still long, BTC buys all-in'} | ${'up,up up,up completed:2 canceled:1 down,none up,none up,none'} | ${[buyOf(BTC, 50), buyOf(ETH, 50), buyOf(BTC)]}
+    `('should trade each pair on its own position: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // 10 USDT free and a minimum cost of 10 USDT on both markets: a share of 50 %, 5 USDT, costs 4.75 once 5 % is kept back for the
+    // fee, and the book skips it, with a warning, then debug lines. The strategy takes a skipped BUY as placed: its trend adviced, it
+    // asks again on the next uptrend only
+    it.each`
+      case                              | steps                                          | expected
+      ${'an uptrend that continues'}    | ${'up,none up,none up,none'}                   | ${['warn']}
+      ${'an uptrend after a downtrend'} | ${'up,none up,none down,none up,none up,none'} | ${['warn', 'debug']}
+    `('should spend the signal of a BUY the book skips: $case', ({ steps, expected }) => {
+      portfolio = new Map([['USDT', { free: 10, used: 0, total: 10 }]]);
+      tools.marketData = new Map([
+        [BTC, { cost: { min: 10 } }],
+        [ETH, { cost: { min: 10 } }],
+      ]);
+      play(steps);
+      const skips = logs.filter(({ message }) => message.startsWith('[BTC/USDT] BUY skipped')).map(({ level }) => level);
+      expect({ advices, skips }).toEqual({ advices: [], skips: expected });
     });
   });
 
