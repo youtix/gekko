@@ -84,9 +84,10 @@ const ORDER_END_EVENTS = [ORDER_COMPLETED_EVENT, ORDER_CANCELED_EVENT, ORDER_ERR
 
 /**
  * Warns when a plugin creates orders that no plugin executes. Without a Trader (a screener meant to alert only), no order ever ended:
- * a strategy that waits for its order to end before it advises again, as every built-in strategy does, advised once per run, and
- * nothing said why. A plugin that only hears of the orders, the EventSubscriber, ends none. Not refused: a strategy that never creates
- * orders needs no Trader, which only its run can tell, and where no paper exchange exists (hyperliquid) the Trader trades for real.
+ * a strategy that waits for its order to end before it advises again, as every built-in strategy does, advised once per run on each
+ * pair, and nothing said why. A plugin that only hears of the orders, the EventSubscriber, ends none. Not refused: a strategy that
+ * never creates orders needs no Trader, which only its run can tell, and where no paper exchange exists (hyperliquid) the Trader
+ * trades for real.
  */
 export const checkPluginsOrderExecution = async (context: PipelineContext) => {
   const hasOrderExecutor = some(context, ({ eventsEmitted }) => ORDER_END_EVENTS.every(event => eventsEmitted?.includes(event)));
@@ -99,7 +100,7 @@ export const checkPluginsOrderExecution = async (context: PipelineContext) => {
         `${name} emits ${STRATEGY_CREATE_ORDER_EVENT}, but no configured plugin executes orders and ends each one with`,
         `${ORDER_COMPLETED_EVENT}, ${ORDER_CANCELED_EVENT} or ${ORDER_ERRORED_EVENT}, as the Trader does.`,
         'Every order of the strategy stays pending, so a strategy that waits for its order to end before it advises again,',
-        'as every built-in strategy does, advises once per run.',
+        'as every built-in strategy does, advises once per run on each pair.',
         'Add a Trader (on paper-binance or dummy-cex, it only simulates the orders), unless the strategy never creates orders.',
       ].join(' '),
     );

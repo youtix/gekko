@@ -282,8 +282,8 @@ describe('Pipeline Service', () => {
         [
           'TradingAdvisor emits strategyCreateOrder, but no configured plugin executes orders and ends each one with orderCompleted,',
           'orderCanceled or orderErrored, as the Trader does. Every order of the strategy stays pending, so a strategy that waits for its',
-          'order to end before it advises again, as every built-in strategy does, advises once per run. Add a Trader (on paper-binance or',
-          'dummy-cex, it only simulates the orders), unless the strategy never creates orders.',
+          'order to end before it advises again, as every built-in strategy does, advises once per run on each pair. Add a Trader (on',
+          'paper-binance or dummy-cex, it only simulates the orders), unless the strategy never creates orders.',
         ].join(' '),
       );
     });
