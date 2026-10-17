@@ -1,13 +1,18 @@
 import { StrategyOrder } from '@models/advice.types';
 import { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
-import { ETH_IGNORED_WARNING, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
+import { Portfolio } from '@models/portfolio.types';
+import { TradingPair } from '@models/utility.types';
+import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@strategies/positionBook.mock';
+import { LoggedLine, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
 import { InitParams, OnCandleEventParams } from '@strategies/strategy.types';
-import { omit } from 'lodash-es';
+import { omit, pick } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { DEMA } from './dema.strategy';
 import { DEMAStrategyParams } from './dema.types';
 
+const BTC: TradingPair = 'BTC/USDT';
+const ETH: TradingPair = 'ETH/USDT';
 // The DEMA and SMA results of each step of the scenarios played below: diff = SMA - DEMA against the thresholds 0.5 / -0.5. Null is
 // what an indicator gives until it is ready: the DEMA, ready later than the SMA of its period, or the SMA.
 const TRENDS = {
@@ -17,86 +22,123 @@ const TRENDS = {
   demaNull: { dema: null, sma: 2 },
   smaNull: { dema: 2, sma: null },
 } as const;
-// All-in, as the strategy creates them: without amount, the Trader sizes them from all the free currency (BUY) or asset (SELL)
+// The close of the candles of each pair, which its lines quote
+const CLOSES: Record<TradingPair, number> = { [BTC]: 10, [ETH]: 20 };
+// All-in, as the strategy creates them on one pair: without amount, the Trader sizes them from all the free currency (BUY) or asset (SELL)
 const allInBuy = { type: 'STICKY', side: 'BUY', symbol: 'BTC/USDT' } satisfies StrategyOrder;
 const allInSell = { type: 'STICKY', side: 'SELL', symbol: 'BTC/USDT' } satisfies StrategyOrder;
+/** The STICKY BUY of `symbol` allocated that share of the free currency, in %, or all-in, without the key, when left out */
+const buy = (symbol: TradingPair, allocation?: number): StrategyOrder =>
+  allocation === undefined ? { type: 'STICKY', side: 'BUY', symbol } : { type: 'STICKY', side: 'BUY', symbol, allocation };
+/** The all-in STICKY SELL of `symbol` */
+const sell = (symbol: TradingPair): StrategyOrder => ({ type: 'STICKY', side: 'SELL', symbol });
+// The lines of a candle on each pair, at the close of its candles (see CLOSES): its trend (a diff of 1, -1 or 0, see TRENDS), then the
+// advice the position allows
+const LINES = {
+  btcUp: { level: 'debug', message: '[BTC/USDT] We are currently in uptrend: @ 10.00000000 (1.00000/1.00000)' },
+  btcBuy: { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: @ 10.00000000 (1.00000/1.00000)' },
+  btcDown: { level: 'debug', message: '[BTC/USDT] We are currently in a downtrend: @ 10.00000000 (1.00000/-1.00000)' },
+  btcSell: { level: 'info', message: '[BTC/USDT] Executing short advice due to detected downtrend: @ 10.00000000 (1.00000/-1.00000)' },
+  btcNeutral: { level: 'debug', message: '[BTC/USDT] We are currently not in an up or down trend: @ 10.00000000 (1.00000/0.00000)' },
+  ethUp: { level: 'debug', message: '[ETH/USDT] We are currently in uptrend: @ 20.00000000 (1.00000/1.00000)' },
+  ethBuy: { level: 'info', message: '[ETH/USDT] Executing long advice due to detected uptrend: @ 20.00000000 (1.00000/1.00000)' },
+  ethDown: { level: 'debug', message: '[ETH/USDT] We are currently in a downtrend: @ 20.00000000 (1.00000/-1.00000)' },
+  ethSell: { level: 'info', message: '[ETH/USDT] Executing short advice due to detected downtrend: @ 20.00000000 (1.00000/-1.00000)' },
+  ethNeutral: { level: 'debug', message: '[ETH/USDT] We are currently not in an up or down trend: @ 20.00000000 (1.00000/0.00000)' },
+} satisfies Record<string, LoggedLine>;
+// What the book warns when it skips its first BUY of BTC/USDT: 50 % of the 10 USDT free is 5 USDT, which buys 4.75 USDT once 5 % is
+// kept back for the fee, below the minimum cost of 10 USDT of the market
+const BTC_BUY_SKIPPED: LoggedLine = {
+  level: 'warn',
+  message:
+    '[BTC/USDT] BUY skipped: 50 % of the 10 USDT free, 4.75 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account; the next skips of this pair are logged at debug level until a BUY of it is placed',
+};
 
 describe('DEMA Strategy', () => {
   let strategy: DEMA;
   let orders: OrderRecorder;
   let advices: StrategyOrder[];
-  let logs: { level: LogLevel; message: string }[];
+  let logs: LoggedLine[];
   let tools: any;
+  let pairs: TradingPair[];
   let bucket: CandleBucket;
+  let portfolio: Portfolio;
   let addIndicator: any;
 
-  /** Plays the steps (see playSteps): the DEMA and SMA results of a trend (see TRENDS) are a candle */
+  /** A new strategy, its init played on a bucket of the pairs `watched`, in their order (watch.assets); `logs` keeps what it logs next */
+  const initOn = (...watched: TradingPair[]) => {
+    pairs = watched;
+    bucket = flatBucket(pick(CLOSES, watched));
+    strategy = new DEMA();
+    strategy.init({ candle: bucket, portfolio, tools, addIndicator } as unknown as InitParams<DEMAStrategyParams>);
+    logs = [];
+  };
+  /** The params of a candle hook, on the bucket of the pairs watched unless another `candle` is given */
+  const hookParams = (candle = bucket) => ({ candle, portfolio, tools }) as unknown as OnCandleEventParams<DEMAStrategyParams>;
+  /**
+   * Plays the steps (see playSteps): a candle gives each pair watched the DEMA and SMA results of a trend (see TRENDS), in the order of
+   * the pairs, separated by a slash ('up/neutral' is an uptrend on BTC/USDT and no trend on ETH/USDT)
+   */
   const play = (steps: string) =>
     playSteps(steps, strategy, orders, step => {
-      if (!(step in TRENDS)) throw new Error(`No step named ${step}, in "${steps}"`);
-      const { dema, sma } = TRENDS[step as keyof typeof TRENDS];
-      strategy.onTimeframeCandleAfterWarmup(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
-        { results: dema, symbol: 'BTC/USDT' },
-        { results: sma, symbol: 'BTC/USDT' },
-      );
+      const trends = step.split('/');
+      const isCandle = trends.length === pairs.length && trends.every(trend => trend in TRENDS);
+      if (!isCandle) throw new Error(`No step named ${step}, in "${steps}"`);
+      const results = pairs.map((pair, index) => {
+        const { dema, sma } = TRENDS[trends[index] as keyof typeof TRENDS];
+        return [pair, [dema, sma]] as const;
+      });
+      strategy.onTimeframeCandleAfterWarmup(hookParams(), ...indicatorArguments(Object.fromEntries(results)));
     });
   const sides = () => advices.map(({ side }) => side);
 
   beforeEach(() => {
-    strategy = new DEMA();
     orders = new OrderRecorder();
     advices = orders.advices;
     logs = [];
     addIndicator = vi.fn();
+    portfolio = new Map();
 
     tools = {
       strategyParams: { period: 14, thresholds: { up: 0.5, down: -0.5 } },
+      marketData: new Map(),
       createOrder: orders.createOrder,
       cancelOrder: vi.fn(),
       log: vi.fn((level: LogLevel, message: string) => logs.push({ level, message })),
     };
 
-    bucket = new Map();
-    bucket.set('BTC/USDT', { close: 10 } as any);
-
-    strategy.init({ candle: bucket, tools, addIndicator } as unknown as InitParams<DEMAStrategyParams>);
+    initOn(BTC);
   });
 
   describe('init', () => {
-    it('should add DEMA indicator with strategy period', () => {
-      expect(addIndicator).toHaveBeenCalledWith('DEMA', 'BTC/USDT', { period: 14 });
-    });
-
-    it('should add SMA indicator with strategy period', () => {
-      expect(addIndicator).toHaveBeenCalledWith('SMA', 'BTC/USDT', { period: 14 });
-    });
-
-    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades the first one only
     it.each`
-      case           | pairs                       | expected
-      ${'one pair'}  | ${['BTC/USDT']}             | ${[]}
-      ${'two pairs'} | ${['BTC/USDT', 'ETH/USDT']} | ${[ETH_IGNORED_WARNING]}
-    `('should warn once, at init, when it ignores watched pairs: $case', ({ pairs, expected }) => {
-      expect(logsAtInit(new DEMA(), pairs, tools.strategyParams)).toEqual(expected);
+      case           | watched       | expected
+      ${'one pair'}  | ${[BTC]}      | ${[['DEMA', BTC, { period: 14 }], ['SMA', BTC, { period: 14 }]]}
+      ${'two pairs'} | ${[BTC, ETH]} | ${[['DEMA', BTC, { period: 14 }], ['SMA', BTC, { period: 14 }], ['DEMA', ETH, { period: 14 }], ['SMA', ETH, { period: 14 }]]}
+    `('should add a DEMA then an SMA of the strategy period on each pair, pair by pair: $case', ({ watched, expected }) => {
+      expect(indicatorsAtInit(new DEMA(), watched, tools.strategyParams)).toEqual(expected);
+    });
+
+    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades them all, ignoring none
+    it.each`
+      case           | watched       | expected
+      ${'one pair'}  | ${[BTC]}      | ${[]}
+      ${'two pairs'} | ${[BTC, ETH]} | ${[BTC_ETH_TRADED_INFO]}
+    `('should warn of no pair at init, and name the pairs it trades when there are several: $case', ({ watched, expected }) => {
+      expect(logsAtInit(new DEMA(), watched, tools.strategyParams)).toEqual(expected);
     });
   });
 
   describe('onTimeframeCandleAfterWarmup', () => {
-    // An uptrend, which buys once init has picked the pair
-    it('should do nothing before init has picked the pair', () => {
+    // An uptrend, which buys once init has tracked the pairs
+    it('should do nothing before init has tracked the pairs', () => {
       strategy = new DEMA();
       play('up');
       expect({ advices, logs }).toEqual({ advices: [], logs: [] });
     });
 
     it('should do nothing if candle for the pair is not found', () => {
-      const emptyBucket = new Map();
-      strategy.onTimeframeCandleAfterWarmup(
-        { candle: emptyBucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
-        { results: 1, symbol: 'BTC/USDT' },
-        { results: 2, symbol: 'BTC/USDT' },
-      );
+      strategy.onTimeframeCandleAfterWarmup(hookParams(new Map()), { results: 1, symbol: 'BTC/USDT' }, { results: 2, symbol: 'BTC/USDT' });
       expect(advices).toHaveLength(0);
     });
 
@@ -115,7 +157,7 @@ describe('DEMA Strategy', () => {
       ${1}         | ${Infinity}
     `('should do nothing when results are invalid (sma: $smaRes, dema: $demaRes)', ({ smaRes, demaRes }) => {
       strategy.onTimeframeCandleAfterWarmup(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
+        hookParams(),
         { results: demaRes, symbol: 'BTC/USDT' },
         { results: smaRes, symbol: 'BTC/USDT' },
       );
@@ -141,6 +183,15 @@ describe('DEMA Strategy', () => {
       expect(advices).toStrictEqual(expected);
     });
 
+    // On one pair the book never skips: the exchange refuses a BUY of too little currency, which is how the strategy learns of a holding
+    // present at start-up
+    it('should send its all-in BUY on one pair, below the minimum cost of the market too', () => {
+      portfolio = new Map([['USDT', { free: 10, used: 0, total: 10 }]]);
+      tools.marketData = new Map([[BTC, { cost: { min: 10 } }]]);
+      play('up');
+      expect(advices).toStrictEqual([allInBuy]);
+    });
+
     it.each`
       case                                     | steps                                      | expectedSides
       ${'an uptrend that continues'}           | ${'up up up'}                              | ${['BUY']}
@@ -158,16 +209,16 @@ describe('DEMA Strategy', () => {
       expect(sides()).toEqual(expectedSides);
     });
 
-    it('should log when not in an up or down trend', () => {
-      strategy.onTimeframeCandleAfterWarmup(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
-        { results: 1, symbol: 'BTC/USDT' },
-        { results: 1, symbol: 'BTC/USDT' },
-      ); // Diff = 0
-      expect(logs).toContainEqual({
-        level: 'debug',
-        message: 'We are currently not in an up or down trend: @ 10.00000000 (1.00000/0.00000)',
-      });
+    it.each`
+      case                                | steps                    | expected
+      ${'an uptrend when flat'}           | ${'up'}                  | ${[LINES.btcUp, LINES.btcBuy]}
+      ${'an uptrend while the BUY pends'} | ${'up up'}               | ${[LINES.btcUp, LINES.btcBuy, LINES.btcUp]}
+      ${'a downtrend when flat'}          | ${'down'}                | ${[LINES.btcDown]}
+      ${'a downtrend when long'}          | ${'up completed:1 down'} | ${[LINES.btcUp, LINES.btcBuy, LINES.btcDown, LINES.btcSell]}
+      ${'not an up or down trend'}        | ${'neutral'}             | ${[LINES.btcNeutral]}
+    `('should log the trend of each candle and its advice, prefixed with the pair: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(logs).toEqual(expected);
     });
   });
 
@@ -202,24 +253,106 @@ describe('DEMA Strategy', () => {
       ${NaN}       | ${2}         | ${0}
       ${1}         | ${-Infinity} | ${0}
     `('should not log when results are missing (sma: $smaRes, dema: $demaRes)', ({ smaRes, demaRes, expectedLogsLength }) => {
-      strategy.log(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
-        { results: demaRes, symbol: 'BTC/USDT' },
-        { results: smaRes, symbol: 'BTC/USDT' },
-      );
+      strategy.log(hookParams(), { results: demaRes, symbol: 'BTC/USDT' }, { results: smaRes, symbol: 'BTC/USDT' });
       expect(logs).toHaveLength(expectedLogsLength);
     });
 
     it('should log DEMA and SMA properties', () => {
-      strategy.log(
-        { candle: bucket, tools } as unknown as OnCandleEventParams<DEMAStrategyParams>,
-        { results: 1.23456, symbol: 'BTC/USDT' },
-        { results: 2.34567, symbol: 'BTC/USDT' },
-      );
+      strategy.log(hookParams(), { results: 1.23456, symbol: 'BTC/USDT' }, { results: 2.34567, symbol: 'BTC/USDT' });
       expect(logs).toContainEqual({
         level: 'debug',
-        message: 'Calculated DEMA and SMA properties for candle: DEMA: 1.23456 SMA: 2.34567',
+        message: '[BTC/USDT] Calculated DEMA and SMA properties for candle: DEMA: 1.23456 SMA: 2.34567',
       });
+    });
+  });
+
+  describe('on two pairs', () => {
+    const btcProperties = {
+      level: 'debug',
+      message: '[BTC/USDT] Calculated DEMA and SMA properties for candle: DEMA: 1.23456 SMA: 2.34567',
+    };
+    const ethProperties = {
+      level: 'debug',
+      message: '[ETH/USDT] Calculated DEMA and SMA properties for candle: DEMA: 3.45678 SMA: 4.56789',
+    };
+
+    beforeEach(() => {
+      initOn(BTC, ETH);
+    });
+
+    // Each BUY takes an equal share of the free currency among the pairs not long, the pair buying and a pair whose BUY is pending
+    // included: 50 % while the other pair is not long, all of it, without an allocation, once that pair is (its SELL pending too)
+    it.each`
+      case                                                        | steps                                                           | expected
+      ${'both flat, on one candle'}                               | ${'up/up'}                                                      | ${[buy(BTC, 50), buy(ETH, 50)]}
+      ${'ETH while the BUY of BTC pends'}                         | ${'up/neutral neutral/up'}                                      | ${[buy(BTC, 50), buy(ETH, 50)]}
+      ${'ETH once BTC is long'}                                   | ${'up/neutral completed:1 neutral/up'}                          | ${[buy(BTC, 50), buy(ETH)]}
+      ${'ETH on the candle BTC sells'}                            | ${'up/neutral completed:1 down/up'}                             | ${[buy(BTC, 50), sell(BTC), buy(ETH)]}
+      ${'ETH once BTC has sold'}                                  | ${'up/neutral completed:1 down/neutral completed:2 neutral/up'} | ${[buy(BTC, 50), sell(BTC), buy(ETH, 50)]}
+      ${'ETH once the BUY of BTC was canceled, no fill reported'} | ${'up/neutral canceled:1 neutral/up'}                           | ${[buy(BTC, 50), buy(ETH, 50)]}
+      ${'ETH once the BUY of BTC errored, 1 BTC free after it'}   | ${'up/neutral errored:1:1 neutral/up'}                          | ${[buy(BTC, 50), buy(ETH)]}
+    `('should allocate each BUY its share of the currency: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // The outcome of an order settles the position of its own pair, and leaves the other's as it was
+    it.each`
+      case                                                            | steps                                                  | expected
+      ${'BTC long sells, ETH not while its BUY pends'}                | ${'up/up completed:1 down/down'}                       | ${[buy(BTC, 50), buy(ETH, 50), sell(BTC)]}
+      ${'ETH long sells, BTC not while its BUY pends'}                | ${'up/up completed:2 down/down'}                       | ${[buy(BTC, 50), buy(ETH, 50), sell(ETH)]}
+      ${'both long, both sell'}                                       | ${'up/up completed:1 completed:2 down/down'}           | ${[buy(BTC, 50), buy(ETH, 50), sell(BTC), sell(ETH)]}
+      ${'ETH canceled: BTC long sells, ETH buys on its next uptrend'} | ${'up/up completed:1 canceled:2 down/down neutral/up'} | ${[buy(BTC, 50), buy(ETH, 50), sell(BTC), buy(ETH)]}
+      ${'BTC errored: ETH long sells, BTC buys on its next uptrend'}  | ${'up/up errored:1 completed:2 down/down up/neutral'}  | ${[buy(BTC, 50), buy(ETH, 50), sell(ETH), buy(BTC)]}
+      ${'another order completed: both BUYs still pending'}           | ${'up/up completed:unknown down/down'}                 | ${[buy(BTC, 50), buy(ETH, 50)]}
+    `('should keep a position per pair: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    it.each`
+      case                                                     | steps                                        | expected
+      ${'an uptrend on BTC and a downtrend on ETH, both flat'} | ${'up/down'}                                 | ${[LINES.btcUp, LINES.btcBuy, LINES.ethDown]}
+      ${'no trend on BTC and an uptrend on ETH'}               | ${'neutral/up'}                              | ${[LINES.btcNeutral, LINES.ethUp, LINES.ethBuy]}
+      ${'a downtrend on both, both long'}                      | ${'up/up completed:1 completed:2 down/down'} | ${[LINES.btcUp, LINES.btcBuy, LINES.ethUp, LINES.ethBuy, LINES.btcDown, LINES.btcSell, LINES.ethDown, LINES.ethSell]}
+    `('should log the trend and the advice of each pair, prefixed with it, in the order of the pairs: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(logs).toEqual(expected);
+    });
+
+    // A pair skipped as on one pair: in a run, every bucket holds every pair, and every hook gets the indicators of each
+    it.each`
+      case                                | candle                       | indicators
+      ${'without the candle of BTC'}      | ${flatBucket({ [ETH]: 20 })} | ${indicatorArguments({ [BTC]: [1, 2], [ETH]: [1, 2] })}
+      ${'without the indicators of BTC'}  | ${flatBucket(CLOSES)}        | ${indicatorArguments({ [ETH]: [1, 2] })}
+      ${'with the DEMA of BTC not ready'} | ${flatBucket(CLOSES)}        | ${indicatorArguments({ [BTC]: [null, 2], [ETH]: [1, 2] })}
+    `('should skip a pair it cannot read and buy the other its share: $case', ({ candle, indicators }) => {
+      strategy.onTimeframeCandleAfterWarmup(hookParams(candle), ...indicators);
+      expect(advices).toStrictEqual([buy(ETH, 50)]);
+    });
+
+    // 10 USDT free, and a minimum cost of 10 USDT on the market of BTC/USDT alone: the book skips its BUY, which spends its uptrend all
+    // the same, as a refused BUY does
+    it.each`
+      case                                                        | steps                                   | expected
+      ${'the next candles of its uptrend advise nothing'}         | ${'up/neutral up/neutral'}              | ${{ orders: [], lines: [LINES.btcBuy, BTC_BUY_SKIPPED] }}
+      ${'the next uptrend advises again, skipped at debug level'} | ${'up/neutral down/neutral up/neutral'} | ${{ orders: [], lines: [LINES.btcBuy, BTC_BUY_SKIPPED, LINES.btcBuy] }}
+      ${'ETH buys its share beside it'}                           | ${'up/up'}                              | ${{ orders: [buy(ETH, 50)], lines: [LINES.btcBuy, BTC_BUY_SKIPPED, LINES.ethBuy] }}
+    `('should take a BUY the book skips as advised, nothing sent: $case', ({ steps, expected }) => {
+      portfolio = new Map([['USDT', { free: 10, used: 0, total: 10 }]]);
+      tools.marketData = new Map([[BTC, { cost: { min: 10 } }]]);
+      play(steps);
+      expect({ orders: advices, lines: logs.filter(({ level }) => level !== 'debug') }).toStrictEqual(expected);
+    });
+
+    it.each`
+      case                               | indicators                                                                      | expected
+      ${'both ready'}                    | ${indicatorArguments({ [BTC]: [1.23456, 2.34567], [ETH]: [3.45678, 4.56789] })} | ${[btcProperties, ethProperties]}
+      ${'the DEMA of BTC not ready'}     | ${indicatorArguments({ [BTC]: [null, 2.34567], [ETH]: [3.45678, 4.56789] })}    | ${[ethProperties]}
+      ${'without the indicators of BTC'} | ${indicatorArguments({ [ETH]: [3.45678, 4.56789] })}                            | ${[ethProperties]}
+    `('should log the DEMA and SMA properties of each pair ready, prefixed with it: $case', ({ indicators, expected }) => {
+      strategy.log(hookParams(), ...indicators);
+      expect(logs).toEqual(expected);
     });
   });
 
