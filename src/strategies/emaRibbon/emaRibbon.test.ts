@@ -1,7 +1,9 @@
 import type { StrategyOrder } from '@models/advice.types';
 import type { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
-import { ETH_IGNORED_WARNING, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
+import type { Portfolio } from '@models/portfolio.types';
+import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@strategies/positionBook.mock';
+import { logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
 import { InitParams, OnCandleEventParams } from '@strategies/strategy.types';
 import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -9,10 +11,14 @@ import { EMARibbon } from './emaRibbon.strategy';
 import { EMARibbonStrategyParams } from './emaRibbon.types';
 
 const symbol = 'BTC/USDT';
+/** The second pair, watched after BTC/USDT */
+const ETH = 'ETH/USDT';
 /** The indicator arguments of a hook: the EMARibbon result given, on the pair traded */
 const indicatorOf = (results: unknown) => [{ results, symbol }] as any;
 /** The indicator's result for these EMAs, the fastest first, with their spread as the EMARibbon indicator computes it */
-const ribbonOf = (emas: readonly number[]) => indicatorOf({ results: [...emas], spread: Math.max(...emas) - Math.min(...emas) });
+const resultOf = (emas: readonly number[]) => ({ results: [...emas], spread: Math.max(...emas) - Math.min(...emas) });
+/** The indicator arguments of a hook: the result for these EMAs (see resultOf), on the pair traded */
+const ribbonOf = (emas: readonly number[]) => indicatorOf(resultOf(emas));
 // Ribbons of EMAs 2, 3 and 4, the fastest first, exactly as the EMARibbon indicator computes them from the closes given. On a straight
 // rise of s a candle each EMA lags the close by (period - 1) × s / 2: the ribbon is bullish, its spread s. The scenarios chain them by
 // their spreads, against a threshold of 1. Some also follow one another as consecutive candles: tight, tight+1 and tight+2; tight,
@@ -40,6 +46,12 @@ const RIBBONS = {
 // All-in, as the strategy creates them: without amount, the Trader sizes them from all the free currency (BUY) or asset (SELL)
 const allInBuy = { type: 'STICKY', side: 'BUY', symbol } satisfies StrategyOrder;
 const allInSell = { type: 'STICKY', side: 'SELL', symbol } satisfies StrategyOrder;
+// On two pairs, a BUY takes half of the free currency while the other pair is not invested either (see PositionBook.buy), all of it
+// once the other pair is long; a SELL is all-in on its pair
+const halfBuy = { ...allInBuy, allocation: 50 } satisfies StrategyOrder;
+const ethHalfBuy = { ...halfBuy, symbol: ETH } satisfies StrategyOrder;
+const ethAllInBuy = { ...allInBuy, symbol: ETH } satisfies StrategyOrder;
+const ethAllInSell = { ...allInSell, symbol: ETH } satisfies StrategyOrder;
 
 describe('EMARibbon', () => {
   let strategy: EMARibbon;
@@ -49,13 +61,14 @@ describe('EMARibbon', () => {
   let logs: { level: LogLevel; message: string }[];
   let tools: any;
   let bucket: CandleBucket;
+  let portfolio: Portfolio;
 
   /**
    * Plays a timeframe candle as the StrategyManager does: onEachTimeframeCandle on every candle, the warmup included, then, once the
    * warmup is over, onTimeframeCandleAfterWarmup with the same results
    */
   const playCandle = (indicators: any[], afterWarmup = true) => {
-    const params = { candle: bucket, tools } as unknown as OnCandleEventParams<EMARibbonStrategyParams>;
+    const params = { candle: bucket, portfolio, tools } as unknown as OnCandleEventParams<EMARibbonStrategyParams>;
     strategy.onEachTimeframeCandle(params, ...indicators);
     if (afterWarmup) strategy.onTimeframeCandleAfterWarmup(params, ...indicators);
   };
@@ -73,6 +86,31 @@ describe('EMARibbon', () => {
     });
   const sides = () => advices.map(({ side }) => side);
 
+  /** Makes the strategy anew on a bucket of BTC/USDT then ETH/USDT, as init gets it, and forgets the line the book logs there */
+  const initOnTwoPairs = () => {
+    strategy = new EMARibbon();
+    bucket = flatBucket({ [symbol]: 100, [ETH]: 100 });
+    strategy.init({ candle: bucket, portfolio, tools, addIndicator } as unknown as InitParams<EMARibbonStrategyParams>);
+    logs = [];
+  };
+
+  /**
+   * Plays the steps as play does, on a strategy that watches BTC/USDT and ETH/USDT (see initOnTwoPairs): a candle names the ribbon of
+   * each pair, BTC's then ETH's, '<btc>/<eth>', and '-' a pair whose ribbon the hooks do not get
+   */
+  const playPairs = (steps: string, ribbons: Record<string, readonly number[]> = RIBBONS) =>
+    playSteps(steps, strategy, orders, step => {
+      const isWarmup = step.startsWith('(') && step.endsWith(')');
+      const names = (isWarmup ? step.slice(1, -1) : step).split('/');
+      if (names.length !== 2) throw new Error(`No ribbon of each pair on the candle ${step}, in "${steps}"`);
+      const [btc, eth] = names.map(name => {
+        if (name === '-') return [];
+        if (name !== 'none' && !ribbons[name]) throw new Error(`No ribbon named ${name}, in "${steps}"`);
+        return [name === 'none' ? null : resultOf(ribbons[name])];
+      });
+      playCandle(indicatorArguments({ [symbol]: btc, [ETH]: eth }), !isWarmup);
+    });
+
   beforeEach(() => {
     strategy = new EMARibbon();
     orders = new OrderRecorder();
@@ -84,6 +122,7 @@ describe('EMARibbon', () => {
       log: vi.fn((level: LogLevel, message: string) => logs.push({ level, message })),
       strategyParams: { src: 'close', count: 3, start: 2, step: 1, spreadCompressionThreshold: 1 },
     };
+    portfolio = new Map();
 
     bucket = new Map();
     bucket.set(symbol, { close: 100 } as any);
@@ -92,23 +131,30 @@ describe('EMARibbon', () => {
   });
 
   describe('init', () => {
-    it('adds the EMARibbon indicator with the ribbon parameters', () => {
-      expect(addIndicator).toHaveBeenCalledWith('EMARibbon', symbol, { src: 'close', count: 3, start: 2, step: 1 });
+    const ribbonParams = { src: 'close', count: 3, start: 2, step: 1 };
+
+    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades every one, a ribbon each
+    it.each`
+      case           | pairs            | expected
+      ${'one pair'}  | ${[symbol]}      | ${[['EMARibbon', symbol, ribbonParams]]}
+      ${'two pairs'} | ${[symbol, ETH]} | ${[['EMARibbon', symbol, ribbonParams], ['EMARibbon', ETH, ribbonParams]]}
+    `('adds an EMARibbon indicator with the ribbon parameters on each pair, in their order: $case', ({ pairs, expected }) => {
+      expect(indicatorsAtInit(new EMARibbon(), pairs, tools.strategyParams)).toEqual(expected);
     });
 
-    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades the first one only
+    // On several pairs the position book says, once, which pairs the strategy trades and how they share the currency
     it.each`
-      case           | pairs                       | expected
-      ${'one pair'}  | ${['BTC/USDT']}             | ${[]}
-      ${'two pairs'} | ${['BTC/USDT', 'ETH/USDT']} | ${[ETH_IGNORED_WARNING]}
-    `('warns once, at init, when it ignores watched pairs: $case', ({ pairs, expected }) => {
+      case           | pairs            | expected
+      ${'one pair'}  | ${[symbol]}      | ${[]}
+      ${'two pairs'} | ${[symbol, ETH]} | ${[BTC_ETH_TRADED_INFO]}
+    `('says once, at init, which pairs it trades, but for one pair: $case', ({ pairs, expected }) => {
       expect(logsAtInit(new EMARibbon(), pairs, tools.strategyParams)).toEqual(expected);
     });
   });
 
   describe('onTimeframeCandleAfterWarmup', () => {
-    // A ribbon that buys once init has picked the pair: before it, the order would have no symbol
-    it('does nothing before init has picked the pair', () => {
+    // A ribbon that buys once init has tracked the pairs: before it, the strategy trades no pair
+    it('does nothing before init has tracked the pairs', () => {
       strategy = new EMARibbon();
       play('tight');
       expect({ advices, logs }).toEqual({ advices: [], logs: [] });
@@ -200,6 +246,73 @@ describe('EMARibbon', () => {
     });
   });
 
+  describe('on two pairs', () => {
+    beforeEach(initOnTwoPairs);
+
+    // Each BUY takes an equal share of the free currency among the pairs not invested, the pair asking and a pair whose BUY is pending
+    // among them, and all of it when the other pair is long, its SELL pending included (see PositionBook.buy)
+    it.each`
+      case                                             | steps                                                   | expected
+      ${'both flat, a BUY of each: half each'}         | ${'tight/tight'}                                        | ${[halfBuy, ethHalfBuy]}
+      ${'BTC again, while the BUY of ETH pends: half'} | ${'tight/tight canceled:1 tight+1/tight+1'}             | ${[halfBuy, ethHalfBuy, halfBuy]}
+      ${'BTC again, while ETH is long: all'}           | ${'tight/tight completed:2 canceled:1 tight+1/tight+1'} | ${[halfBuy, ethHalfBuy, allInBuy]}
+      ${'ETH again, while BTC is long: all'}           | ${'tight/tight completed:1 canceled:2 tight+1/tight+1'} | ${[halfBuy, ethHalfBuy, ethAllInBuy]}
+      ${'ETH again, while the SELL of BTC pends: all'} | ${'tight/tight completed:1 canceled:2 tighter/tight+1'} | ${[halfBuy, ethHalfBuy, allInSell, ethAllInBuy]}
+      ${'neither ribbon ready'}                        | ${'none/none'}                                          | ${[]}
+    `('buys each pair with its share of the currency: $case', ({ steps, expected }) => {
+      playPairs(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // A pair whose ribbon the hooks do not get is left as one whose ribbon is not ready yet: no order, and no spread to compare the
+    // next one with. BTC, flat, still counts among the pairs not invested.
+    it.each`
+      case                                                        | steps                  | expected
+      ${'BTC without a ribbon: ETH buys, half'}                   | ${'-/tight'}           | ${[ethHalfBuy]}
+      ${'BTC without, then with one: nothing before it, it buys'} | ${'-/tight tighter/-'} | ${[ethHalfBuy, halfBuy]}
+    `('leaves alone a pair it gets no ribbon of: $case', ({ steps, expected }) => {
+      playPairs(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // The outcome of an order settles the position of its own pair, the other pair's left as it was
+    it.each`
+      case                                              | steps                                                    | expected
+      ${'BTC long, the BUY of ETH pending: BTC sells'}  | ${'tight/tight completed:1 tighter/tighter'}             | ${[halfBuy, ethHalfBuy, allInSell]}
+      ${'ETH long, the BUY of BTC pending: ETH sells'}  | ${'tight/tight completed:2 tighter/tighter'}             | ${[halfBuy, ethHalfBuy, ethAllInSell]}
+      ${'both long: each sells'}                        | ${'tight/tight completed:1 completed:2 tighter/tighter'} | ${[halfBuy, ethHalfBuy, allInSell, ethAllInSell]}
+      ${'the BUY of ETH errored: ETH alone buys again'} | ${'tight/tight errored:2 tight+1/tight+1'}               | ${[halfBuy, ethHalfBuy, ethHalfBuy]}
+      ${'another order completed: both still pending'}  | ${'tight/tight completed:unknown tighter/tight+1'}       | ${[halfBuy, ethHalfBuy]}
+    `('keeps a position per pair: $case', ({ steps, expected }) => {
+      playPairs(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // 15 USDT free: half of it, 7.5 USDT, costs 7.125 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT. The book
+    // sends neither BUY, and leaves nothing pending: each ribbon, still signaling on the next candle, asks again, its skip logged at
+    // debug level from then on.
+    it('asks again, on each candle of its signal, for a BUY skipped below the minimum cost of the market, nothing sent', () => {
+      portfolio = new Map([['USDT', { free: 15, used: 0, total: 15 }]]);
+      tools.marketData = new Map([
+        [symbol, { cost: { min: 10 } }],
+        [ETH, { cost: { min: 10 } }],
+      ]);
+      const skipped = (pair: string) =>
+        `[${pair}] BUY skipped: 50 % of the 15 USDT free, 7.125 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account`;
+      const nextSkips = '; the next skips of this pair are logged at debug level until a BUY of it is placed';
+      playPairs('tight/tight tight+1/tight+1');
+      expect({ advices, logs }).toEqual({
+        advices: [],
+        logs: [
+          { level: 'warn', message: `${skipped(symbol)}${nextSkips}` },
+          { level: 'warn', message: `${skipped(ETH)}${nextSkips}` },
+          { level: 'debug', message: skipped(symbol) },
+          { level: 'debug', message: skipped(ETH) },
+        ],
+      });
+    });
+  });
+
   describe('the first candle after the warmup', () => {
     const WARMUP_RIBBONS = {
       // EMAs 2, 3 and 4 as the StrategyManager computed them over closes rising by 2 from 100 through a warmup of 6 candles, spread 2
@@ -242,6 +355,21 @@ describe('EMARibbon', () => {
     it('advises nothing during the warmup, even on a ribbon that would buy', () => {
       play('(flat) (up) (up)', WARMUP_RIBBONS);
       expect(advices).toHaveLength(0);
+    });
+
+    describe('on two pairs', () => {
+      beforeEach(initOnTwoPairs);
+
+      // Each pair's spread is compared with its own on the last warmup candle: the rising pair's narrows from 2 to 1.47, the flat
+      // pair's widens from 0 to 0.8. Compared with the other pair's, the rising pair's would widen from 0 and the flat pair's narrow.
+      it.each`
+        case                         | steps                                                | expected
+        ${'BTC narrower, ETH wider'} | ${'(rise4/flat) (rise5/flat) (rise6/flat) flat7/up'} | ${[ethHalfBuy]}
+        ${'BTC wider, ETH narrower'} | ${'(flat/rise4) (flat/rise5) (flat/rise6) up/flat7'} | ${[halfBuy]}
+      `('compares the spread of each pair with its own on the last warmup candle: $case', ({ steps, expected }) => {
+        playPairs(steps, WARMUP_RIBBONS);
+        expect(advices).toStrictEqual(expected);
+      });
     });
   });
 
@@ -319,12 +447,39 @@ describe('EMARibbon', () => {
       expect(logs).toEqual([]);
     });
 
-    it('logs the EMAs of the ribbon and its spread', () => {
+    it('logs the EMAs of the ribbon and its spread, named by the pair', () => {
       strategy.log({ candle: bucket, tools } as unknown as OnCandleEventParams<EMARibbonStrategyParams>, ...ribbonOf(RIBBONS.tight));
       expect(logs).toEqual([
-        { level: 'debug', message: 'Ribbon results: [100.5 / 100.25 / 100]' },
-        { level: 'debug', message: 'Ribbon Spread: 0.5' },
+        { level: 'debug', message: '[BTC/USDT] Ribbon results: [100.5 / 100.25 / 100]' },
+        { level: 'debug', message: '[BTC/USDT] Ribbon Spread: 0.5' },
       ]);
+    });
+
+    describe('on two pairs', () => {
+      // A tight ribbon of BTC and a bearish one of ETH, with the lines they are logged with
+      const btcRibbon = resultOf(RIBBONS.tight);
+      const ethRibbon = resultOf(RIBBONS.bearish);
+      const BTC_LINES = [
+        { level: 'debug', message: '[BTC/USDT] Ribbon results: [100.5 / 100.25 / 100]' },
+        { level: 'debug', message: '[BTC/USDT] Ribbon Spread: 0.5' },
+      ];
+      const ETH_LINES = [
+        { level: 'debug', message: '[ETH/USDT] Ribbon results: [100 / 100.25 / 100.5]' },
+        { level: 'debug', message: '[ETH/USDT] Ribbon Spread: 0.5' },
+      ];
+
+      beforeEach(initOnTwoPairs);
+
+      // In the order of the pairs, each line named by its pair; a pair whose ribbon the hook does not get logs nothing
+      it.each`
+        case                           | ribbons                                          | expected
+        ${'both ribbons'}              | ${{ [symbol]: [btcRibbon], [ETH]: [ethRibbon] }} | ${[...BTC_LINES, ...ETH_LINES]}
+        ${'the ribbon of BTC missing'} | ${{ [ETH]: [ethRibbon] }}                        | ${ETH_LINES}
+      `('logs the EMAs and the spread of the ribbon of each pair: $case', ({ ribbons, expected }) => {
+        const params = { candle: bucket, tools } as unknown as OnCandleEventParams<EMARibbonStrategyParams>;
+        strategy.log(params, ...(indicatorArguments(ribbons) as any[]));
+        expect(logs).toEqual(expected);
+      });
     });
   });
 
