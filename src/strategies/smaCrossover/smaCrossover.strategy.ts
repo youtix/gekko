@@ -1,5 +1,5 @@
 import { TradingPair } from '@models/utility.types';
-import { pickTradedPair, PositionTracker } from '@strategies/positionTracker';
+import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,15 +9,24 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
+import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { compareWithTolerance, isFiniteNumber } from '@utils/math/math.utils';
 import { smaCrossoverStrategySchema } from './smaCrossover.schema';
 import { SMACrossoverStrategyParams } from './smaCrossover.types';
 
 /**
+ * Whether the price of a pair was above its SMA before the candle in progress, and whether it is at that candle: null until it is first
+ * off a ready SMA
+ */
+type PriceSide = { wasPriceAboveSMA: boolean | null; isPriceAboveSMA: boolean | null };
+
+/**
  * Simple Moving Average Crossover Strategy
  *
+ * Trades every watched pair, each with its own SMA and its own position:
  * - When MA crosses UP the market price => SELL (market order, all in), when long
- * - When MA crosses DOWN the market price => BUY (market order, all in), when flat
+ * - When MA crosses DOWN the market price => BUY (market order, an equal share of the free currency among the pairs not invested, all
+ *   in on one pair: see PositionBook.buy), when flat
  *
  * The market price is the close of the candle, whatever source (`src`) the SMA averages. A crossover is detected by comparing the
  * previous relative position of the price vs the SMA to the current one. A price within the tolerance of the SMA (see
@@ -27,21 +36,23 @@ import { SMACrossoverStrategyParams } from './smaCrossover.types';
 export class SMACrossover implements Strategy<SMACrossoverStrategyParams> {
   static schema = smaCrossoverStrategySchema;
 
-  // Whether the price was above the SMA before the candle in progress, and whether it is at that candle: null until it is first off a
-  // ready SMA. Both are recorded on every candle, the warmup included: recorded after the warmup only, the side of the last warmup
-  // candle was unknown and the first candle after it only recorded where the price was, so a crossover between the two was missed.
-  private wasPriceAboveSMA: boolean | null = null;
-  private isPriceAboveSMA: boolean | null = null;
-  private pair?: TradingPair;
-  // Every order is all-in: the strategy buys only when flat and sells only when long, never while its order is pending. A crossover
-  // the position does not allow is skipped: advised anyway, a first SELL had nothing to sell and was refused. An order canceled or
-  // errored is not placed again: the next one waits for the next crossover.
-  private readonly position = new PositionTracker();
+  // The side of the price of each pair, set at init for every pair of the book, in its order. Both are recorded on every candle, the
+  // warmup included: recorded after the warmup only, the side of the last warmup candle was unknown and the first candle after it only
+  // recorded where the price was, so a crossover between the two was missed.
+  private readonly sides = new Map<TradingPair, PriceSide>();
+  // A position per pair: the strategy buys a pair only when flat there and sells it only when long, never while an order of that pair
+  // is pending. A crossover the position does not allow is skipped: advised anyway, a first SELL had nothing to sell and was refused. An
+  // order canceled or errored, or a BUY the book skips, is not placed again: the next one waits for the next crossover of its pair.
+  private readonly book = new PositionBook();
 
-  init({ candle, tools, addIndicator }: InitParams<SMACrossoverStrategyParams>): void {
+  init(params: InitParams<SMACrossoverStrategyParams>): void {
+    const { tools, addIndicator } = params;
     const { period, src } = tools.strategyParams;
-    this.pair = pickTradedPair(candle, tools);
-    addIndicator('SMA', this.pair, { period, src });
+    this.book.track(params);
+    for (const pair of this.book.pairs) {
+      this.sides.set(pair, { wasPriceAboveSMA: null, isPriceAboveSMA: null });
+      addIndicator('SMA', pair, { period, src });
+    }
   }
 
   // Runs before onTimeframeCandleAfterWarmup on each candle, the warmup included: the side it moves aside is the previous candle's
@@ -49,71 +60,82 @@ export class SMACrossover implements Strategy<SMACrossoverStrategyParams> {
     { candle, tools }: OnCandleEventParams<SMACrossoverStrategyParams>,
     ...indicators: IndicatorResults<number | null>[]
   ): void {
-    const [sma] = indicators;
-    this.wasPriceAboveSMA = this.isPriceAboveSMA;
-    const price = this.pair ? candle.get(this.pair)?.close : undefined;
-    if (!isFiniteNumber(price) || !isFiniteNumber(sma.results)) return;
+    const bySymbol = indicatorsBySymbol(indicators);
+    for (const [pair, side] of this.sides) {
+      // init adds an SMA on every pair: a pair whose SMA the hooks do not get is skipped, as one whose SMA is not ready, here and in the
+      // other hooks
+      const sma = bySymbol.get(pair)?.[0];
+      side.wasPriceAboveSMA = side.isPriceAboveSMA;
+      const price = candle.get(pair)?.close;
+      if (!isFiniteNumber(price) || !isFiniteNumber(sma?.results)) continue;
 
-    // On a flat window the SMA is the price in exact arithmetic, but its running sum leaves it a few ulps off, on either side: compared
-    // strictly, that noise crossed the price on about half the flat windows, a round trip of fees on a market that had not moved, and
-    // an exact tie counted as below, a SELL. Within the tolerance the price is on the SMA: no crossover, the side it was on is kept,
-    // and the first side it takes is the initial state.
-    const priceToSMA = compareWithTolerance(price, sma.results);
-    if (priceToSMA === 0) return;
-    this.isPriceAboveSMA = priceToSMA > 0;
-    if (this.wasPriceAboveSMA === null) tools.log('info', `Initial state: price ${this.isPriceAboveSMA ? 'above' : 'below'} SMA`);
+      // On a flat window the SMA is the price in exact arithmetic, but its running sum leaves it a few ulps off, on either side:
+      // compared strictly, that noise crossed the price on about half the flat windows, a round trip of fees on a market that had not
+      // moved, and an exact tie counted as below, a SELL. Within the tolerance the price is on the SMA: no crossover, the side it was on
+      // is kept, and the first side it takes is the initial state.
+      const priceToSMA = compareWithTolerance(price, sma.results);
+      if (priceToSMA === 0) continue;
+      side.isPriceAboveSMA = priceToSMA > 0;
+      if (side.wasPriceAboveSMA === null)
+        tools.log('info', `[${pair}] Initial state: price ${side.isPriceAboveSMA ? 'above' : 'below'} SMA`);
+    }
   }
 
   onTimeframeCandleAfterWarmup(
-    { candle, tools }: OnCandleEventParams<SMACrossoverStrategyParams>,
+    params: OnCandleEventParams<SMACrossoverStrategyParams>,
     ...indicators: IndicatorResults<number | null>[]
   ): void {
-    const { log, createOrder } = tools;
-    const [sma] = indicators;
+    const { candle, tools } = params;
+    const { log } = tools;
+    const bySymbol = indicatorsBySymbol(indicators);
 
-    if (!this.pair) return;
-    const currentCandle = candle.get(this.pair);
-    if (!currentCandle) return;
-    const price = currentCandle.close;
+    for (const [pair, side] of this.sides) {
+      const sma = bySymbol.get(pair)?.[0];
+      const currentCandle = candle.get(pair);
+      if (!currentCandle) continue;
+      const price = currentCandle.close;
 
-    if (!isFiniteNumber(sma.results)) return;
+      if (!isFiniteNumber(sma?.results)) continue;
 
-    // Detect crossovers: the price on the other side of the SMA than before this candle. None while the side before is unknown (the
-    // first candle off a ready SMA only records it), nor while the price stays on its side or on the SMA.
-    if (this.wasPriceAboveSMA === null || this.wasPriceAboveSMA === this.isPriceAboveSMA) return;
-    if (this.wasPriceAboveSMA && this.position.canSell()) {
-      // Price crossed below SMA => SMA crossed UP the price => SELL
-      log('info', `SMA crossed UP price (${sma.results.toFixed(5)} > ${price.toFixed(5)}) => SELL`);
-      this.position.sell(createOrder, { type: 'MARKET', symbol: this.pair });
-    } else if (!this.wasPriceAboveSMA && this.position.canBuy()) {
-      // Price crossed above SMA => SMA crossed DOWN the price => BUY
-      log('info', `SMA crossed DOWN price (${sma.results.toFixed(5)} < ${price.toFixed(5)}) => BUY`);
-      this.position.buy(createOrder, { type: 'MARKET', symbol: this.pair });
+      // Detect crossovers: the price on the other side of the SMA than before this candle. None while the side before is unknown (the
+      // first candle off a ready SMA only records it), nor while the price stays on its side or on the SMA.
+      if (side.wasPriceAboveSMA === null || side.wasPriceAboveSMA === side.isPriceAboveSMA) continue;
+      if (side.wasPriceAboveSMA && this.book.canSell(pair)) {
+        // Price crossed below SMA => SMA crossed UP the price => SELL
+        log('info', `[${pair}] SMA crossed UP price (${sma.results.toFixed(5)} > ${price.toFixed(5)}) => SELL`);
+        this.book.sell({ type: 'MARKET', symbol: pair }, params);
+      } else if (!side.wasPriceAboveSMA && this.book.canBuy(pair)) {
+        // Price crossed above SMA => SMA crossed DOWN the price => BUY
+        log('info', `[${pair}] SMA crossed DOWN price (${sma.results.toFixed(5)} < ${price.toFixed(5)}) => BUY`);
+        this.book.buy({ type: 'MARKET', symbol: pair }, params);
+      }
     }
   }
 
   log({ candle, tools }: OnCandleEventParams<SMACrossoverStrategyParams>, ...indicators: IndicatorResults<number | null>[]): void {
     const { log } = tools;
-    const [sma] = indicators;
+    const bySymbol = indicatorsBySymbol(indicators);
 
-    if (!this.pair) return;
-    const currentCandle = candle.get(this.pair);
-    if (!currentCandle) return;
+    for (const pair of this.book.pairs) {
+      const sma = bySymbol.get(pair)?.[0];
+      const currentCandle = candle.get(pair);
+      if (!currentCandle) continue;
 
-    if (!isFiniteNumber(sma.results)) return;
+      if (!isFiniteNumber(sma?.results)) continue;
 
-    log('debug', `SMA: ${sma.results.toFixed(5)} | Price: ${currentCandle.close.toFixed(5)}`);
+      log('debug', `[${pair}] SMA: ${sma.results.toFixed(5)} | Price: ${currentCandle.close.toFixed(5)}`);
+    }
   }
 
   onOrderCompleted(params: OnOrderCompletedEventParams<SMACrossoverStrategyParams>): void {
-    this.position.onOrderCompleted(params);
+    this.book.onOrderCompleted(params);
   }
 
   onOrderCanceled(params: OnOrderCanceledEventParams<SMACrossoverStrategyParams>): void {
-    this.position.onOrderCanceled(params);
+    this.book.onOrderCanceled(params);
   }
 
   onOrderErrored(params: OnOrderErroredEventParams<SMACrossoverStrategyParams>): void {
-    this.position.onOrderErrored(params);
+    this.book.onOrderErrored(params);
   }
 }
