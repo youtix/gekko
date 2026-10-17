@@ -1,5 +1,5 @@
 import { TradingPair } from '@models/utility.types';
-import { pickTradedPair, PositionTracker } from '@strategies/positionTracker';
+import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,75 +9,88 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
+import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { pluralize } from '@utils/string/string.utils';
 import { rsiStrategySchema } from './rsi.schema';
 import { RSICurrentTrend, RSIStrategyParams } from './rsi.types';
 
+/** Trades every watched pair, each with its own RSI, its own trend and its own position (see PositionBook) */
 export class RSI implements Strategy<RSIStrategyParams> {
   static schema = rsiStrategySchema;
 
-  private trend: RSICurrentTrend;
-  private pair?: TradingPair;
+  // The trend of each pair, none at init
+  private readonly trends = new Map<TradingPair, RSICurrentTrend>();
   // A trend starts again when the RSI crosses the other threshold, even for fewer candles than the persistence, and every order is
-  // all-in: the strategy buys only when flat and sells only when long, never while its order is pending. A blip shorter than the
-  // persistence advised the same side again, a BUY sized from what the previous one left, or a SELL with nothing left to sell. The
-  // trend of an order canceled or errored stays adviced: the next order waits for the next trend.
-  private readonly position = new PositionTracker();
+  // all-in, a BUY on its share of the currency while several pairs are not invested (see PositionBook.buy): on each pair, the strategy
+  // buys only when flat and sells only when long, never while its order is pending there. A blip shorter than the persistence advised
+  // the same side again, a BUY sized from what the previous one left, or a SELL with nothing left to sell. The trend of an order
+  // canceled or errored stays adviced, as does that of a BUY the book skips: the next order waits for the next trend.
+  private readonly book = new PositionBook();
 
-  constructor() {
-    this.trend = { direction: 'none', duration: 0, adviced: false };
-  }
-
-  init({ candle, tools, addIndicator }: InitParams<RSIStrategyParams>): void {
+  init(params: InitParams<RSIStrategyParams>): void {
+    const { tools, addIndicator } = params;
     const { period, src } = tools.strategyParams;
-    this.pair = pickTradedPair(candle, tools);
-    addIndicator('RSI', this.pair, { period, src });
+    this.book.track(params);
+    for (const pair of this.book.pairs) {
+      this.trends.set(pair, { direction: 'none', duration: 0, adviced: false });
+      addIndicator('RSI', pair, { period, src });
+    }
   }
 
-  onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<RSIStrategyParams>, ...indicators: IndicatorResults<number | null>[]): void {
-    const { strategyParams, log, createOrder } = tools;
-    const [rsi] = indicators;
-    if (!isFiniteNumber(rsi.results) || !this.pair) return;
-    const { thresholds } = strategyParams;
-
-    if (rsi.results > thresholds.high) {
-      if (this.trend.direction !== 'high') {
-        log('info', 'RSI: high trend detected');
-        this.trend = { duration: 0, direction: 'high', adviced: false };
-      }
-      this.trend.duration++;
-      log('debug', `In high trend since ${this.trend.duration} ${pluralize('candle', this.trend.duration)}`);
-
-      // Left unadviced while flat or while an order is pending: a BUY that fills during the trend is sold on its next candle
-      if (this.trend.duration >= thresholds.persistence && !this.trend.adviced && this.position.canSell()) {
-        this.trend.adviced = true;
-        this.position.sell(createOrder, { type: 'STICKY', symbol: this.pair });
-      }
-    } else if (rsi.results < thresholds.low) {
-      if (this.trend.direction !== 'low') {
-        log('info', 'RSI: low trend detected');
-        this.trend = { duration: 0, direction: 'low', adviced: false };
-      }
-      this.trend.duration++;
-      log('debug', `In low trend since ${this.trend.duration} ${pluralize('candle', this.trend.duration)}`);
-
-      if (this.trend.duration >= thresholds.persistence && !this.trend.adviced && this.position.canBuy()) {
-        this.trend.adviced = true;
-        this.position.buy(createOrder, { type: 'STICKY', symbol: this.pair });
-      }
+  onTimeframeCandleAfterWarmup(params: OnCandleEventParams<RSIStrategyParams>, ...indicators: IndicatorResults<number | null>[]): void {
+    const bySymbol = indicatorsBySymbol(indicators);
+    for (const pair of this.book.pairs) {
+      const [rsi] = bySymbol.get(pair) ?? [];
+      if (isFiniteNumber(rsi?.results)) this.followTrend(pair, rsi.results, params);
     }
   }
 
   onOrderCompleted(params: OnOrderCompletedEventParams<RSIStrategyParams>): void {
-    this.position.onOrderCompleted(params);
+    this.book.onOrderCompleted(params);
   }
 
   onOrderCanceled(params: OnOrderCanceledEventParams<RSIStrategyParams>): void {
-    this.position.onOrderCanceled(params);
+    this.book.onOrderCanceled(params);
   }
 
   onOrderErrored(params: OnOrderErroredEventParams<RSIStrategyParams>): void {
-    this.position.onOrderErrored(params);
+    this.book.onOrderErrored(params);
+  }
+
+  /** Follows the trend of `pair` on its RSI, advising its order once it has lasted the persistence, if the pair's position allows it */
+  private followTrend(pair: TradingPair, rsi: number, params: OnCandleEventParams<RSIStrategyParams>): void {
+    const { strategyParams, log } = params.tools;
+    const { thresholds } = strategyParams;
+    let trend = this.trends.get(pair)!;
+
+    if (rsi > thresholds.high) {
+      if (trend.direction !== 'high') {
+        log('info', `[${pair}] RSI: high trend detected`);
+        trend = { duration: 0, direction: 'high', adviced: false };
+        this.trends.set(pair, trend);
+      }
+      trend.duration++;
+      log('debug', `[${pair}] In high trend since ${trend.duration} ${pluralize('candle', trend.duration)}`);
+
+      // Left unadviced while flat or while an order is pending: a BUY that fills during the trend is sold on its next candle
+      if (trend.duration >= thresholds.persistence && !trend.adviced && this.book.canSell(pair)) {
+        trend.adviced = true;
+        this.book.sell({ type: 'STICKY', symbol: pair }, params);
+      }
+    } else if (rsi < thresholds.low) {
+      if (trend.direction !== 'low') {
+        log('info', `[${pair}] RSI: low trend detected`);
+        trend = { duration: 0, direction: 'low', adviced: false };
+        this.trends.set(pair, trend);
+      }
+      trend.duration++;
+      log('debug', `[${pair}] In low trend since ${trend.duration} ${pluralize('candle', trend.duration)}`);
+
+      if (trend.duration >= thresholds.persistence && !trend.adviced && this.book.canBuy(pair)) {
+        trend.adviced = true;
+        this.book.buy({ type: 'STICKY', symbol: pair }, params);
+      }
+    }
   }
 }
