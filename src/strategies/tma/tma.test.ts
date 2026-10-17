@@ -1,14 +1,19 @@
 import type { StrategyOrder } from '@models/advice.types';
 import type { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
-import { ETH_IGNORED_WARNING, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
+import type { Portfolio } from '@models/portfolio.types';
+import type { TradingPair } from '@models/utility.types';
+import type { MarketData } from '@services/exchange/exchange.types';
+import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@strategies/positionBook.mock';
+import { logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
 import { IndicatorResults, InitParams, OnCandleEventParams } from '@strategies/strategy.types';
 import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { TMA } from './tma.strategy';
 import { TMAStrategyParams } from './tma.types';
 
-const symbol = 'BTC/USDT';
+const BTC: TradingPair = 'BTC/USDT';
+const ETH: TradingPair = 'ETH/USDT';
 const ULP = 2 ** -46; // the gap between 100 and the next double
 // The short, medium and long SMAs of each alignment. On a flat stretch the SMAs holding only its price are equal in exact arithmetic,
 // their running sums leave them a few ulps apart: 'flatRise' has the short one ulp above the medium, itself one ulp above the long,
@@ -34,8 +39,15 @@ const ALIGNMENTS = {
   shortNull: [null, 5, 2],
 } as const;
 // All-in, as the strategy creates them: without amount, the Trader sizes them from all the free currency (BUY) or asset (SELL)
-const allInBuy = { type: 'STICKY', side: 'BUY', symbol } satisfies StrategyOrder;
-const allInSell = { type: 'STICKY', side: 'SELL', symbol } satisfies StrategyOrder;
+const allInBuy = { type: 'STICKY', side: 'BUY', symbol: BTC } satisfies StrategyOrder;
+const allInSell = { type: 'STICKY', side: 'SELL', symbol: BTC } satisfies StrategyOrder;
+/** The STICKY BUY of `pair` the strategy creates: allocated `allocation` % of the free currency, all-in without (see PositionBook.buy) */
+const buyOf = (pair: TradingPair, allocation?: number): StrategyOrder =>
+  allocation === undefined ? { type: 'STICKY', side: 'BUY', symbol: pair } : { type: 'STICKY', side: 'BUY', symbol: pair, allocation };
+/** The all-in STICKY SELL of `pair` the strategy creates */
+const sellOf = (pair: TradingPair): StrategyOrder => ({ type: 'STICKY', side: 'SELL', symbol: pair });
+/** A portfolio holding `free` USDT, the currency of both pairs */
+const usdt = (free: number): Portfolio => new Map([['USDT', { free, used: 0, total: free }]]);
 
 describe('TMA Strategy', () => {
   let strategy: TMA;
@@ -44,20 +56,31 @@ describe('TMA Strategy', () => {
   let logs: { level: LogLevel; message: string }[];
   let tools: any;
   let bucket: CandleBucket;
+  let portfolio: Portfolio;
   let addIndicator: any;
 
-  // The short, medium and long SMA results of a candle, in that order
-  const onCandle = (...smas: unknown[]) =>
+  // The short, medium and long SMA results of each pair, in that order, the pairs in the order of watch.assets
+  const onCandles = (smasByPair: Record<TradingPair, readonly unknown[]>) =>
     strategy.onTimeframeCandleAfterWarmup(
-      { candle: bucket, tools } as unknown as OnCandleEventParams<TMAStrategyParams>,
-      ...smas.map((results): IndicatorResults<number | null> => ({ results: results as number | null, symbol })),
+      { candle: bucket, portfolio, tools } as unknown as OnCandleEventParams<TMAStrategyParams>,
+      ...(indicatorArguments(smasByPair) as IndicatorResults<number | null>[]),
     );
+  // The short, medium and long SMA results of a candle of BTC/USDT, in that order
+  const onCandle = (...smas: unknown[]) => onCandles({ [BTC]: smas });
 
-  /** Plays the steps (see playSteps): an alignment (see ALIGNMENTS) is a candle */
+  /** The SMAs of the alignment `name` (see ALIGNMENTS), a step of `steps` */
+  const alignment = (name: string, steps: string) => {
+    if (!(name in ALIGNMENTS)) throw new Error(`No step named ${name}, in "${steps}"`);
+    return ALIGNMENTS[name as keyof typeof ALIGNMENTS];
+  };
+  /**
+   * Plays the steps (see playSteps): a candle is an alignment (see ALIGNMENTS) of BTC/USDT, or an alignment of BTC/USDT and one of
+   * ETH/USDT, separated by a comma ('tickRise,flat')
+   */
   const play = (steps: string) =>
     playSteps(steps, strategy, orders, step => {
-      if (!(step in ALIGNMENTS)) throw new Error(`No step named ${step}, in "${steps}"`);
-      onCandle(...ALIGNMENTS[step as keyof typeof ALIGNMENTS]);
+      const [btc, eth] = step.split(',');
+      onCandles(eth === undefined ? { [BTC]: alignment(btc, steps) } : { [BTC]: alignment(btc, steps), [ETH]: alignment(eth, steps) });
     });
 
   beforeEach(() => {
@@ -65,43 +88,57 @@ describe('TMA Strategy', () => {
     orders = new OrderRecorder();
     advices = orders.advices;
     logs = [];
+    portfolio = new Map();
     addIndicator = vi.fn();
 
     tools = {
       strategyParams: { short: 3, medium: 5, long: 8, src: 'close' },
+      marketData: new Map(),
       createOrder: orders.createOrder,
       cancelOrder: vi.fn(),
       log: vi.fn((level: LogLevel, message: string) => logs.push({ level, message })),
     };
 
     bucket = new Map();
-    bucket.set(symbol, { close: 1 } as any);
+    bucket.set(BTC, { close: 1 } as any);
 
-    strategy.init({ candle: bucket, tools, addIndicator } as unknown as InitParams<TMAStrategyParams>);
+    strategy.init({ candle: bucket, portfolio, tools, addIndicator } as unknown as InitParams<TMAStrategyParams>);
   });
 
   describe('init', () => {
     it('should add three SMA indicators with correct periods and src', () => {
       expect(addIndicator.mock.calls).toEqual([
-        ['SMA', symbol, { period: 3, src: 'close' }],
-        ['SMA', symbol, { period: 5, src: 'close' }],
-        ['SMA', symbol, { period: 8, src: 'close' }],
+        ['SMA', BTC, { period: 3, src: 'close' }],
+        ['SMA', BTC, { period: 5, src: 'close' }],
+        ['SMA', BTC, { period: 8, src: 'close' }],
       ]);
     });
 
-    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades the first one only
+    // The bucket holds a candle of every watched pair, in the order of watch.assets: the strategy trades them all, its SMAs on each
+    it('should add the three SMAs of every watched pair, pair by pair', () => {
+      expect(indicatorsAtInit(new TMA(), [BTC, ETH], tools.strategyParams)).toEqual([
+        ['SMA', BTC, { period: 3, src: 'close' }],
+        ['SMA', BTC, { period: 5, src: 'close' }],
+        ['SMA', BTC, { period: 8, src: 'close' }],
+        ['SMA', ETH, { period: 3, src: 'close' }],
+        ['SMA', ETH, { period: 5, src: 'close' }],
+        ['SMA', ETH, { period: 8, src: 'close' }],
+      ]);
+    });
+
+    // Where it warned that it traded the first pair alone, the book says once which pairs it trades, and nothing on one pair
     it.each`
-      case           | pairs                       | expected
-      ${'one pair'}  | ${['BTC/USDT']}             | ${[]}
-      ${'two pairs'} | ${['BTC/USDT', 'ETH/USDT']} | ${[ETH_IGNORED_WARNING]}
-    `('should warn once, at init, when it ignores watched pairs: $case', ({ pairs, expected }) => {
+      case           | pairs         | expected
+      ${'one pair'}  | ${[BTC]}      | ${[]}
+      ${'two pairs'} | ${[BTC, ETH]} | ${[BTC_ETH_TRADED_INFO]}
+    `('should say once, at init, which pairs it trades, on several only, without a warning: $case', ({ pairs, expected }) => {
       expect(logsAtInit(new TMA(), pairs, tools.strategyParams)).toEqual(expected);
     });
   });
 
   describe('onTimeframeCandleAfterWarmup', () => {
-    // An uptrend, which buys once init has picked the pair: before it, the order would have no symbol
-    it('should do nothing before init has picked the pair', () => {
+    // An uptrend, which buys once init has tracked the pairs: before it, the strategy trades none
+    it('should do nothing before init has tracked the pairs', () => {
       strategy = new TMA();
       play('up');
       expect({ advices, logs }).toEqual({ advices: [], logs: [] });
@@ -148,7 +185,7 @@ describe('TMA Strategy', () => {
 
     it('should log the long advice with the three SMAs', () => {
       play('up');
-      expect(logs).toContainEqual({ level: 'info', message: 'Executing long advice due to detected uptrend: 10/5/2' });
+      expect(logs).toContainEqual({ level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 10/5/2' });
     });
 
     it.each`
@@ -173,7 +210,7 @@ describe('TMA Strategy', () => {
       onCandle(shortRes, mediumRes, longRes);
       expect(logs).toContainEqual({
         level: 'info',
-        message: `Executing short advice due to detected downtrend: ${shortRes}/${mediumRes}/${longRes}`,
+        message: `[BTC/USDT] Executing short advice due to detected downtrend: ${shortRes}/${mediumRes}/${longRes}`,
       });
     });
 
@@ -194,12 +231,12 @@ describe('TMA Strategy', () => {
 
     it('should log debug when the alignment is fully bearish', () => {
       play('bearish');
-      expect(logs).toContainEqual({ level: 'debug', message: 'No clear trend detected: 2/5/10' });
+      expect(logs).toContainEqual({ level: 'debug', message: '[BTC/USDT] No clear trend detected: 2/5/10' });
     });
 
     it('should not emit advice and log debug when no clear trend', () => {
       onCandle(5, 5, 5);
-      expect(logs).toContainEqual({ level: 'debug', message: 'No clear trend detected: 5/5/5' });
+      expect(logs).toContainEqual({ level: 'debug', message: '[BTC/USDT] No clear trend detected: 5/5/5' });
     });
   });
 
@@ -246,7 +283,7 @@ describe('TMA Strategy', () => {
 
     it('should log no clear trend when two SMAs are within the tolerance', () => {
       play('pairOver');
-      expect(logs).toContainEqual({ level: 'debug', message: `No clear trend detected: ${100 + ULP}/100/99` });
+      expect(logs).toContainEqual({ level: 'debug', message: `[BTC/USDT] No clear trend detected: ${100 + ULP}/100/99` });
     });
   });
 
@@ -267,6 +304,100 @@ describe('TMA Strategy', () => {
     `('should track $case', ({ steps, expectedSides }) => {
       play(steps);
       expect(advices.map(({ side }) => side)).toEqual(expectedSides);
+    });
+  });
+
+  describe('on two pairs', () => {
+    // BTC/USDT then ETH/USDT, the order of watch.assets: each pair has its SMAs and its position, and a BUY takes an equal share of the
+    // free currency among the pairs not invested (flat, a BUY pending or not), all of it once the other pair is long (see
+    // PositionBook.buy). The candles are real alignments: 'tickRise' an uptrend, 'tickPeak' a mixed one, 'flat' none.
+    beforeEach(() => {
+      strategy = new TMA();
+      bucket = flatBucket({ [BTC]: 100, [ETH]: 100 });
+      strategy.init({ candle: bucket, portfolio, tools, addIndicator } as unknown as InitParams<TMAStrategyParams>);
+      logs = []; // the line init logs is asserted with init's
+    });
+
+    it.each`
+      case                                                      | steps                                                                      | expected
+      ${'both rising: a BUY of each, of 50 %'}                  | ${'tickRise,tickRise'}                                                     | ${[buyOf(BTC, 50), buyOf(ETH, 50)]}
+      ${'BTC rising alone: its BUY of 50 %'}                    | ${'tickRise,flat'}                                                         | ${[buyOf(BTC, 50)]}
+      ${'the BUY of BTC pending: that of ETH of 50 %'}          | ${'tickRise,flat flat,tickRise'}                                           | ${[buyOf(BTC, 50), buyOf(ETH, 50)]}
+      ${'BTC long: the BUY of ETH all-in'}                      | ${'tickRise,flat completed:1 tickRise,tickRise'}                           | ${[buyOf(BTC, 50), buyOf(ETH)]}
+      ${'BTC long, its SELL pending: the BUY of ETH all-in'}    | ${'tickRise,flat completed:1 tickPeak,tickRise'}                           | ${[buyOf(BTC, 50), sellOf(BTC), buyOf(ETH)]}
+      ${'BTC sold: the BUY of ETH of 50 % again'}               | ${'tickRise,flat completed:1 tickPeak,flat completed:2 flat,tickRise'}     | ${[buyOf(BTC, 50), sellOf(BTC), buyOf(ETH, 50)]}
+      ${'both long: each sells all of it on its own downtrend'} | ${'tickRise,tickRise completed:1 completed:2 tickPeak,flat flat,tickPeak'} | ${[buyOf(BTC, 50), buyOf(ETH, 50), sellOf(BTC), sellOf(ETH)]}
+    `('should trade each pair on its own position, its BUY allocated while the other is not invested: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    // A pair that neither buys on an uptrend nor sells on a mixed alignment has its order pending; one that sells, or beside which the
+    // other pair buys all-in, is long
+    it.each`
+      case                                                     | steps                                                                                      | expected
+      ${'the BUY of BTC completed: that of ETH still pending'} | ${'tickRise,tickRise completed:1 tickPeak,tickRise flat,tickPeak'}                         | ${[buyOf(BTC, 50), buyOf(ETH, 50), sellOf(BTC)]}
+      ${'the BUY of ETH canceled: that of BTC still pending'}  | ${'tickRise,tickRise canceled:2 tickRise,tickRise tickPeak,flat'}                          | ${[buyOf(BTC, 50), buyOf(ETH, 50), buyOf(ETH, 50)]}
+      ${'the BUY of ETH errored: BTC still long'}              | ${'tickRise,tickRise completed:1 errored:2 tickRise,tickRise'}                             | ${[buyOf(BTC, 50), buyOf(ETH, 50), buyOf(ETH)]}
+      ${'the SELL of BTC errored: ETH still long'}             | ${'tickRise,tickRise completed:1 completed:2 tickPeak,flat errored:3 tickPeak,tickPeak'}   | ${[buyOf(BTC, 50), buyOf(ETH, 50), sellOf(BTC), sellOf(BTC), sellOf(ETH)]}
+      ${'the SELL of BTC completed: ETH still long'}           | ${'tickRise,tickRise completed:1 completed:2 tickPeak,flat completed:3 tickRise,tickPeak'} | ${[buyOf(BTC, 50), buyOf(ETH, 50), sellOf(BTC), buyOf(BTC), sellOf(ETH)]}
+    `('should leave the position of the other pair as it was on an outcome: $case', ({ steps, expected }) => {
+      play(steps);
+      expect(advices).toStrictEqual(expected);
+    });
+
+    it('should log the lines of each pair, prefixed with the pair', () => {
+      play('tickRise,flat flat,tickRise completed:1 completed:2 tickPeak,tickPeak');
+      expect(logs).toEqual([
+        { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
+        { level: 'debug', message: '[ETH/USDT] No clear trend detected: 100/100/100' },
+        { level: 'debug', message: '[BTC/USDT] No clear trend detected: 100/100/100' },
+        { level: 'info', message: '[ETH/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
+        { level: 'info', message: '[BTC/USDT] Executing short advice due to detected downtrend: 100/100.01/100' },
+        { level: 'info', message: '[ETH/USDT] Executing short advice due to detected downtrend: 100/100.01/100' },
+      ]);
+    });
+
+    // The StrategyManager hands each hook the results of every indicator added: a pair without any is not traded, the others are
+    it('should trade the pairs whose SMAs the hook gets, skipping a pair without any', () => {
+      onCandles({ [ETH]: ALIGNMENTS.tickRise });
+      expect(advices).toStrictEqual([buyOf(ETH, 50)]);
+    });
+
+    describe('a BUY the book skips', () => {
+      // 50 % of 10 USDT is 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT: the book sends nothing and
+      // leaves the pair flat, nothing pending (see PositionBook.buy). ETH, flat on a mixed alignment, has nothing to sell.
+      beforeEach(() => {
+        portfolio = usdt(10);
+        tools.marketData = new Map<TradingPair, MarketData>([
+          [BTC, { cost: { min: 10 } }],
+          [ETH, { cost: { min: 10 } }],
+        ]);
+      });
+
+      it('should send nothing', () => {
+        play('tickRise,tickPeak');
+        expect(advices).toStrictEqual([]);
+      });
+
+      // The pair still flat, nothing pending, the next candle of the uptrend asks for the BUY again: sent once the currency funds it
+      it('should ask for it again on the next candle of the uptrend', () => {
+        play('tickRise,tickPeak');
+        portfolio = usdt(100);
+        play('tickRise,tickPeak');
+        expect(advices).toStrictEqual([buyOf(BTC, 50)]);
+      });
+
+      // The advice on every candle of the uptrend, then the line of the book: a warning the first time, at debug level after it
+      it('should log the advice on every candle of the uptrend, the skip of the book after it', () => {
+        play('tickRise,tickPeak tickRise,tickPeak');
+        expect(logs).toEqual([
+          { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
+          { level: 'warn', message: expect.stringMatching(/^\[BTC\/USDT\] BUY skipped: 50 % of the 10 USDT free, /) },
+          { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
+          { level: 'debug', message: expect.stringMatching(/^\[BTC\/USDT\] BUY skipped: 50 % of the 10 USDT free, /) },
+        ]);
+      });
     });
   });
 

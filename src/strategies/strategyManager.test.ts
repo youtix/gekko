@@ -537,7 +537,7 @@ describe('StrategyManager', () => {
         expect(target['age']).toBe(age);
       });
 
-      // TMA registers three SMAs on its pair, DEMA a DEMA then an SMA: handed their results in another order, such a strategy would take
+      // TMA registers three SMAs on each pair, DEMA a DEMA then an SMA: handed their results in another order, such a strategy would take
       // one for another
       describe('with two indicators init registers on one pair, an SMA of 1 candle then an SMA of 2', () => {
         type OrderHook = 'onOrderCompleted' | 'onOrderCanceled' | 'onOrderErrored';
