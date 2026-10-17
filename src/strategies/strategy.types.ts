@@ -255,8 +255,9 @@ export interface Strategy<T> {
    *
    * `orderId` is the MARKET SELL the StrategyManager has just created for the stop, of the amount the stop protects (state.amount). From
    * now on it is an order of the strategy's own: its outcome comes through onOrderCompleted, onOrderCanceled or onOrderErrored, under
-   * that id, and a strategy that tracks its position adopts it as its pending SELL (see PositionTracker.adoptSell). Not adopted, it
-   * leaves the strategy long once the stop has sold everything, and the SELL the strategy advises next is refused: nothing is left.
+   * that id, and a strategy that tracks its position adopts it as its pending SELL (PositionTracker.adoptSell, or
+   * PositionBook.adoptSell(orderId, state.symbol) for the tracker of the stop's pair). Not adopted, it leaves the strategy long once
+   * the stop has sold everything, and the SELL the strategy advises next is refused: nothing is left.
    *
    * The stop sells until that SELL ends (state.status 'selling', state.sellOrderId). Completed for all the stop sells, the stop is
    * over. So it is when that SELL errors or is canceled after a reported fill (order.filled) of all of it, said at info level under

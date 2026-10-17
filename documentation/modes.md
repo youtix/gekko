@@ -296,7 +296,7 @@ plugins:
 ```
 
 > [!IMPORTANT]
-> Keep the `Trader`, even for alerts: it is the only plugin that executes the orders the strategy creates, and every built-in strategy waits for its order to end (completed, canceled or errored) before it advises again. Without a Trader, the first order never ends, the strategy advises once per run, and Gekko warns at start-up (`warn` level, so set `GEKKO_LOG_LEVEL` to `warn` or `info` to see it). On `paper-binance` the orders are only simulated, from `simulationBalance`. `hyperliquid` has no paper exchange: there, the Trader places the orders on the account, or on its testnet with `sandbox: true`.
+> Keep the `Trader`, even for alerts: it is the only plugin that executes the orders the strategy creates, and every built-in strategy waits for its order to end (completed, canceled or errored) before it advises again. Without a Trader, the first order never ends, the strategy advises once per run on each pair, and Gekko warns at start-up (`warn` level, so set `GEKKO_LOG_LEVEL` to `warn` or `info` to see it). On `paper-binance` the orders are only simulated, from `simulationBalance`. `hyperliquid` has no paper exchange: there, the Trader places the orders on the account, or on its testnet with `sandbox: true`.
 
 The alerts are the strategy's orders (`/sub_strat_create`) and its log lines at the `info`, `warn` and `error` levels (`/sub_strat_info`), the error line that stops the bot included; its `debug` lines are not sent.
 

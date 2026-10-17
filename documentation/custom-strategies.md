@@ -165,7 +165,7 @@ A strategy lives in one of two places, which decide how Gekko finds it and what 
 |----------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
 | Selected by          | `strategyPath`, its file, and `strategyName`, the class it exports    | `strategyName` alone, once your class is exported from `src/strategies/custom/index.ts`                           |
 | Loaded               | From its file, each time Gekko starts: no build needed after a change | Compiled into `dist/gekko2` by `bun run build:exec`, like the built-in strategies                                 |
-| Imports from Gekko 2 | Types only                                                            | Anything: types, the [PositionTracker](#tracking-your-position), the utilities                                    |
+| Imports from Gekko 2 | Types only                                                            | Anything: types, the [PositionTracker and the PositionBook](#tracking-your-position), the utilities               |
 | Packages (`zod`, …)  | Installed next to its file (see below)                                | Those of the checkout                                                                                             |
 | Type-checked         | No: Bun loads TypeScript without checking it                          | By `bun run type:check`, not by the pre-commit hook; its tests run with `bun run test`, never in CI               |
 | Git                  | Yours                                                                 | Gitignored, but for a placeholder `index.ts` that `bun install` marks skip-worktree: your exports stay out of git |
@@ -174,7 +174,7 @@ A file loaded through `strategyPath` can import Gekko 2's types (`@strategies/st
 
 A package your strategy imports is looked up from the folder of its file: install it there (`bun add zod` in that folder), unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it. The compiled executable, though, only finds a package by the `index.js` at its root, whatever its `package.json` names as its entry: `zod` has one, but `lodash-es`, which Gekko 2 itself uses, has none, and is not found even installed next to the strategy (`… ResolveMessage: Cannot find package 'lodash-es' from '…'`). Import such a package by its files (`import isNil from 'lodash-es/isNil.js'`), or run Gekko from source (`bun run dev`), which follows the `package.json`.
 
-To build on a built-in strategy, or to use the PositionTracker, keep your strategy in `src/strategies/custom/` and export it from the placeholder, which holds `export {};` until then:
+To build on a built-in strategy, or to use the PositionTracker or the PositionBook, keep your strategy in `src/strategies/custom/` and export it from the placeholder, which holds `export {};` until then:
 
 ```typescript
 // src/strategies/custom/index.ts
@@ -508,7 +508,7 @@ type StrategyOrder = {
 
 - **`amount`, `cost` and `allocation` left out**: the order is all-in. A BUY spends the free currency less what the BUYs sent before it may spend, sized at `price` with 5 % kept back for the fee, in decimal (600 USDT at 100 buy 5.7 BTC); a SELL sells the free asset less what the SELLs sent before it take, until the Trader reads the balance again.
 - **`cost`**: a sum in the currency of the pair, the USDT of BTC/USDT. A BUY may spend it, the 5 % kept back for the fee included, and is sized at `price` as an all-in BUY is: a `cost` of 600 USDT at 100 buys 5.7 BTC, as an all-in BUY of 600 free USDT does. A SELL sells that worth of the asset at `price`, its fee coming out of the proceeds: a `cost` of 600 USDT at 100 sells 6 BTC.
-- **`allocation`**: a share, in percent, above 0 and at most 100 (`25` for 25 %), of the free balance the Trader read at its last synchronization: a BUY spends that share of the currency, sized as a BUY by `cost` is, and `allocation: 100` makes it all-in; a SELL sells that share of the asset. The share is of the balance read, not of what the orders sent since leave: with 1000 USDT read, two BUYs of `allocation: 50` sent on one candle, on BTC/USDT and ETH/USDT, spend 500 USDT each (4.75 BTC at 100), where an all-in BUY on the first pair would leave the second nothing. Like an all-in order, it is sized from the balance as of that synchronization, which comes every `exchangeSynchInterval` in realtime (an `exchange` option, 10 minutes by default), every `watch.timeframe` in a backtest (10 minutes at least), and after the end of each order: a deposit, or a trade made by hand or by another bot, counts from the next one.
+- **`allocation`**: a share, in percent, above 0 and at most 100 (`25` for 25 %), of the free balance the Trader read at its last synchronization: a BUY spends that share of the currency, sized as a BUY by `cost` is, and `allocation: 100` makes it all-in; a SELL sells that share of the asset. The share is of the balance read, not of what the orders sent since leave: with 1000 USDT read, two BUYs of `allocation: 50` sent on one candle, on BTC/USDT and ETH/USDT, spend 500 USDT each (4.75 BTC at 100), where an all-in BUY on the first pair would leave the second nothing. Like an all-in order, it is sized from the balance as of that synchronization, which comes every `exchangeSynchInterval` in realtime (an `exchange` option, 10 minutes by default), every `watch.timeframe` in a backtest (10 minutes at least), and after the end of each order: a deposit, or a trade made by hand or by another bot, counts from the next one. The built-in signal strategies share the currency so among the pairs they trade, through the [PositionBook](#tracking-your-position) (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital) for the share each BUY takes).
 - **`price` left out**: the last price of the pair, the close of the last one-minute candle or the bid read at the Trader's last synchronization, whichever came last. It is the limit of a `LIMIT` order, and what a BUY without an `amount`, or a SELL by `cost`, is sized at.
 - **A SELL is capped to the free balance** of its asset, as the Trader read it at its last synchronization, less what the SELLs it placed since take from it, with a warning (`[<id>] SELL MARKET order of 0.3 BTC above the free balance: 0.2992 BTC sent, all that can be sold (…)`). An all-in SELL is sized from that remainder; a SELL by `cost` or `allocation` is capped at it, its warning naming the cost or the share it asked for.
 - **An all-in BUY is sized from what the BUYs before it leave** of the free currency as the Trader read it at its last synchronization: each BUY placed since counts for its cost at its price plus the 5 % kept back for its fee, an all-in BUY for all it was sized from, a BUY by `cost` or `allocation` for its budget once capped. The Trader warns (`[<id>] All-in BUY MARKET order sized from 500 USDT: 4.75 BTC sent (1000 USDT free at the last synchronization, less 500 USDT for the BUYs placed since, the 5 % kept back for their fee included)`). So the second of two all-in BUYs sent on one candle is sized to 0 and refused: an `onOrderErrored` that counts towards `maxConsecutiveErrors`. Send one, or share the currency with `allocation`. A BUY with an `amount` is placed as asked.
@@ -574,9 +574,9 @@ A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows th
 - the SELL a trailing stop sends is the strategy's own from `onTrailingStopTriggered` on: it adopts that id as a pending SELL;
 - it starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that ended without completing while the account held the asset.
 
-A strategy that trades several pairs of one currency keeps this bookkeeping pair by pair, and gives each BUY a share of the currency with `allocation` rather than all of it: all-in, the first BUY of a candle leaves the others nothing to spend, and each of their refusals counts towards the circuit breaker (see [Order Parameters](#order-parameters)).
+A strategy that trades several pairs of one currency keeps this bookkeeping pair by pair, and gives each BUY a share of the currency with `allocation` rather than all of it: all-in, the first BUY of a candle leaves the others nothing to spend, and each of their refusals counts towards the circuit breaker (see [Order Parameters](#order-parameters)). The PositionBook below does both, as the built-in signal strategies do.
 
-**The PositionTracker, the recommended way.** The built-in signal strategies keep this bookkeeping in a `PositionTracker` (`src/strategies/positionTracker.ts`), which a strategy of your checkout's `src/strategies/custom/` can use as they do:
+**The PositionTracker, for one pair.** A `PositionTracker` (`src/strategies/positionTracker.ts`) keeps this bookkeeping for one pair, and a strategy of your checkout's `src/strategies/custom/` can use it, here on the first pair watched, taken with `pickTradedPair` as GridBot takes its own:
 
 ```typescript
 import { pickTradedPair, PositionTracker } from '@strategies/positionTracker';
@@ -627,7 +627,68 @@ export class MyTrackedStrategy implements Strategy<MyParams> {
 
 For an order canceled or errored, the tracker reads the fill a cancelation reports, else the free balance of the asset in the portfolio after the order, truncated to the lot step of the market and checked against its minimum amount and cost, the cost worked out in decimal, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. It reads a completed SELL from that free balance too when the SELL sold less than it asked for, as it reads every SELL without an `amount`, all-in or by `cost` or `allocation`, and every adopted one, which ask for all of the asset free or for an amount it does not know: long when enough is left to sell, logged then. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` and `playSteps` helpers of `src/strategies/positionTracker.mock.ts`.
 
-A strategy loaded through `strategyPath` cannot import the PositionTracker (see [Where Your Strategy Lives](#where-your-strategy-lives)): the class of the [Lifecycle Methods](#lifecycle-methods) and the [Complete Example](#complete-example) keep the same bookkeeping by hand.
+**The PositionBook, for several pairs.** The built-in signal strategies trade every watched pair through a `PositionBook` (`src/strategies/positionBook.ts`), which keeps one `PositionTracker` per pair and gives each BUY its pair's share of the currency (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital) for the share, and for the BUYs it skips). A strategy of your checkout's `src/strategies/custom/` can trade through it as they do:
+
+```typescript
+import { PositionBook } from '@strategies/positionBook';
+import { indicatorsBySymbol } from '@strategies/strategy.utils';
+import { compareWithTolerance } from '@utils/math/math.utils';
+
+export class MyMultiPairStrategy implements Strategy<MyParams> {
+  private readonly book = new PositionBook();
+
+  init(params: InitParams<MyParams>): void {
+    const { tools, addIndicator } = params;
+    // Every pair of watch.assets, in its order, each flat with nothing pending; with several, an info line names them
+    this.book.track(params);
+    for (const pair of this.book.pairs) {
+      addIndicator('EMA', pair, { period: tools.strategyParams.short });
+      addIndicator('EMA', pair, { period: tools.strategyParams.long });
+    }
+  }
+
+  onTimeframeCandleAfterWarmup(params: OnCandleEventParams<MyParams>, ...indicators: IndicatorResults[]): void {
+    // The indicator arguments of each pair, in the order init added them
+    const byPair = indicatorsBySymbol(indicators);
+    for (const pair of this.book.pairs) {
+      const [shortEma, longEma] = byPair.get(pair) ?? [];
+      if (typeof shortEma?.results !== 'number' || typeof longEma?.results !== 'number') continue;
+      const shortToLong = compareWithTolerance(shortEma.results, longEma.results);
+      // canBuy and canSell read the pair's own position: an order pending on another pair holds nothing back here
+      if (shortToLong > 0 && this.book.canBuy(pair)) {
+        // Sent with the pair's share of the currency, and kept pending; on several pairs, undefined when that share costs less than
+        // the minimum cost of the market: the book then sends nothing, and says so
+        const id = this.book.buy({ type: 'STICKY', symbol: pair, trailing: { percentage: 5 } }, params);
+        if (id) params.tools.log('info', `[${pair}] EMA crossover: BUY ${id}`);
+      } else if (shortToLong < 0 && this.book.canSell(pair)) {
+        this.book.sell({ type: 'STICKY', symbol: pair }, params);
+      }
+    }
+  }
+
+  // Handed over whole: the book hands each event to the tracker of the order's pair
+  onOrderCompleted(params: OnOrderCompletedEventParams<MyParams>): void {
+    this.book.onOrderCompleted(params);
+  }
+
+  onOrderCanceled(params: OnOrderCanceledEventParams<MyParams>): void {
+    this.book.onOrderCanceled(params);
+  }
+
+  onOrderErrored(params: OnOrderErroredEventParams<MyParams>): void {
+    this.book.onOrderErrored(params);
+  }
+
+  // The SELL of a trailing stop, adopted by the tracker of the stop's pair
+  onTrailingStopTriggered(orderId: UUID, state: TrailingStopState): void {
+    this.book.adoptSell(orderId, state.symbol);
+  }
+}
+```
+
+`track`, called once, from `init`, tracks every pair of `candle`, in the order of `watch.assets`, and `pairs` lists them; with several, it logs one `info` line naming them and how they share the currency. `indicatorsBySymbol` (`src/strategies/strategy.utils.ts`) groups the hooks' indicator arguments by pair, each pair's in the order `init` added them. `canBuy(pair)` and `canSell(pair)`, like `isLong(pair)` and `isPendingOrder(pair)`, read the tracker of the pair, and are false for a pair the book does not track. `buy(order, params)` takes the order without its side and its size, and the hook's params whole, for the portfolio and the tools: it sends the BUY with its pair's share of the currency, keeps it pending and returns its id, or, on several pairs, skips it and returns `undefined` (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital)). A skipped BUY is not refused either, so the tracker of its pair does not read a holding of the asset as its position, as it does after a refusal: until a BUY of that pair is sent, the strategy stays flat there beside the holding. A book that tracks one pair never skips: its all-in BUY is sent, and refused when the currency is too little, as a tracker's always was (see [Position and Orders](./built-in-strategies.md#position-and-orders)). `sell(order, params)` sends an all-in SELL of the pair. The three order hooks hand each event to the tracker of the order's pair, and return whether the order was one of its own; `adoptSell(orderId, symbol)` adopts the SELL of a trailing stop on the stop's pair, `state.symbol`. A symbol the book does not track, given to `buy`, `sell` or `adoptSell`, throws a `GekkoError`, which stops Gekko (`[STRATEGY] Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)`), and so does a second call of `track`. Name the pair in the lines you log about it, as the built-in strategies do (`[BTC/USDT] …`): on several pairs, a line that does not say which is hard to follow. The tests of such a strategy can drive it with the helpers of `src/strategies/positionBook.mock.ts`, beside those of `positionTracker.mock.ts`.
+
+A strategy loaded through `strategyPath` can import neither the PositionTracker nor the PositionBook (see [Where Your Strategy Lives](#where-your-strategy-lives)): the class of the [Lifecycle Methods](#lifecycle-methods) and the [Complete Example](#complete-example) keep the same bookkeeping by hand, on one pair.
 
 ---
 
@@ -799,7 +860,8 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 
   init({ candle, addIndicator, tools }: InitParams<EMACrossoverParams>): void {
     const { src, shortPeriod, longPeriod } = tools.strategyParams;
-    // candle holds one candle per watched pair, in the order of watch.assets: this strategy trades the first one
+    // candle holds one candle per watched pair, in the order of watch.assets: this strategy trades the first one alone. A file loaded
+    // through strategyPath cannot import the PositionBook, which trades every pair as the built-in signal strategies do
     const [pair, ...ignored] = candle.keys();
     if (ignored.length) tools.log('warn', `EMACrossover trades ${pair} only, and ignores ${ignored.join(', ')}`);
     this.pair = pair;
@@ -892,7 +954,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 }
 ```
 
-`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)).
+`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)). So it trades the first watched pair alone, warning of the others: a strategy that trades every pair lives in `src/strategies/custom/`, where it can trade through the [PositionBook](#tracking-your-position).
 
 ### Configuration File: `ema-crossover-config.yaml`
 
@@ -1107,7 +1169,7 @@ Your strategy called `createOrder` before the warmup was over: from `init`, or f
 
 Followed by `Order 'amount' with value 0 is invalid`, the exchange refusing the order. The end of the warning says why nothing was left to spend:
 
-- `(1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since, …)`: your strategy sent an all-in BUY after other BUYs (two entry conditions on one candle, two pairs of one currency) before the Trader read the balance again, and the first took all the currency (see [Order Parameters](#order-parameters)). Send one BUY per candle, the second entry as an `else if`.
+- `(1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since, …)`: your strategy sent an all-in BUY after other BUYs (two entry conditions on one candle, two pairs of one currency) before the Trader read the balance again, and the first took all the currency (see [Order Parameters](#order-parameters)). Send one BUY per candle, the second entry as an `else if`, or, for several pairs, give each BUY a share of the currency with `allocation`, as the [PositionBook](#tracking-your-position) does.
 - `which the market refuses (0 USDT free at the last synchronization)`: the account holds none of the currency. In a backtest or paper trading, `simulationBalance` gives it none.
 - `which the market refuses (no balance read from the exchange yet)`: every synchronization of the Trader failed so far.
 
@@ -1118,6 +1180,10 @@ A BUY your strategy gave a `cost` or an `allocation` is warned of the same way w
 ### "… below the minimum cost of … on …"
 
 An order your strategy gave a `cost` or an `allocation` came out too small for the market: its amount, truncated to the amount step of the market as the exchange takes it, costs less at its price than the minimum cost of the market (`cost.min` in `tools.marketData`); the line names that amount and the step when the step cut it (`truncated to 0.00008 BTC on the amount step 0.00001 of the market`). The Trader sends it all the same, and the exchange refuses it (`Order 'cost' with value …`, the cost the warning quotes): an `onOrderErrored` that counts towards `maxConsecutiveErrors`. Give a larger `cost` or `allocation`, minding the 5 % a BUY keeps back for the fee (a `cost` of 10 USDT places 9.5 USDT worth) and the step, which can take up to a step's worth off (0.6 USDT on BTC/USDT at 60000: a `cost` of 5.5 USDT places 4.8 USDT worth), or check the balance the share is taken from: a BUY capped at what the BUYs before it left comes out smaller (see [Order Parameters](#order-parameters)).
+
+### "[…] BUY skipped: … is below the minimum cost of … of the market"
+
+The [PositionBook](#tracking-your-position) of a strategy that trades several pairs sent no BUY: the share of the free currency the pair takes, all of it for the last pair not invested, less the 5 % kept back for the fee, costs less than the minimum cost of the market, which would refuse it (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital)). Nothing was sent, so nothing counts towards `maxConsecutiveErrors`, and the next skips of the pair are logged at the `debug` level until a BUY of it is placed. Watch fewer pairs, for a larger share each, or fund the account.
 
 ### "Impossible to add the … indicator on …", "… indicator not found." or "Indicator …: …"
 
