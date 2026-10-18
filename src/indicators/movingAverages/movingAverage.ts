@@ -1,6 +1,6 @@
 import { Indicator } from '@indicators/indicator';
 import type { IndicatorNames } from '@indicators/indicator.types';
-import { getInputSource } from '@indicators/indicator.utils';
+import { getInputSource } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
 import { InputSources } from '@models/inputSources.types';
 

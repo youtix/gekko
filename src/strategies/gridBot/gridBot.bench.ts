@@ -8,7 +8,7 @@ import type { UUID } from 'node:crypto';
 import { describe } from 'vitest';
 import { GridBot } from './gridBot.strategy';
 import type { GridBotStrategyParams } from './gridBot.types';
-import { getGridFunding } from './gridBot.utils';
+import { getGridFunding } from './gridBot.helper';
 
 // The fixtures used to have other shapes than what the StrategyManager hands a strategy, behind `as any`: a bare candle, the market
 // data of the pair alone, and a portfolio keyed 'asset' and 'currency'. Every bench threw at init and measured nothing, reported as

@@ -7,11 +7,7 @@ import { splitIntervals, toISOString } from '@utils/date/date.utils';
 import { differenceInMinutes, Interval } from 'date-fns';
 import { Readable } from 'node:stream';
 import { MissingCandlesError } from './backtest.error';
-
-interface BacktestStreamParams {
-  daterange: Interval<EpochTimeStamp, EpochTimeStamp>;
-  symbol: TradingPair;
-}
+import { BacktestStreamParams } from './backtest.types';
 
 /** Reads the stored 1-minute candles of one pair, one batch of `watch.batchSize` minutes per read */
 export class BacktestStream extends Readable {

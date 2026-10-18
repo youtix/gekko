@@ -1,4 +1,4 @@
-import { describeError, toError } from '@errors/error.utils';
+import { describeError, toError } from '@errors/error.helper';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';

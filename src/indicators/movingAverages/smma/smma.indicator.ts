@@ -1,4 +1,4 @@
-import { checkInputSource, checkInteger } from '@indicators/indicator.utils';
+import { checkInputSource, checkInteger } from '@indicators/indicator.helper';
 import { WilderSmoothing } from '../wilderSmoothing/wilderSmoothing.indicator';
 
 /**

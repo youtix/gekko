@@ -1,5 +1,6 @@
 import { GekkoError } from '@errors/gekko.error';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
+import { ETH_IGNORED_WARNING, logsAtInit } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { Candle } from '@models/candle.types';
 import type { CandleBucket } from '@models/event.types';
 import type { LogLevel } from '@models/logLevel.types';
@@ -8,12 +9,11 @@ import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import type { TradingPair } from '@models/utility.types';
 import { dummyExchangeSchema } from '@services/exchange/dummy/dummyCentralizedExchange.schema';
 import type { MarketData, OpenOrder, OpenOrderType } from '@services/exchange/exchange.types';
-import { ETH_IGNORED_WARNING, logsAtInit } from '@strategies/positionTracker.mock';
 import type { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { GridBot } from './gridBot.strategy';
 import type { GridBotStrategyParams } from './gridBot.types';
-import * as GridBotUtils from './gridBot.utils';
+import * as GridBotUtils from './gridBot.helper';
 
 const defaultParams: GridBotStrategyParams = {
   buyLevels: 2,

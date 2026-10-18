@@ -1,46 +1,24 @@
 import { COST_DECIMALS } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
+import { AsyncMutex } from '@helpers/async/asyncMutex';
+import { assertOrderWithinLimits, getMarketOrderLimits } from '@helpers/market/market.helper';
+import { clonePortfolio, initializePortfolio } from '@helpers/portfolio/portfolio.helper';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { OrderSide, OrderState } from '@models/order.types';
-import { BalanceDetail, Portfolio } from '@models/portfolio.types';
+import { Portfolio } from '@models/portfolio.types';
 import { Trade } from '@models/trade.types';
 import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { DUMMY_CANDLE_BUFFER_SIZE, DUMMY_CANDLE_BUFFER_TRIM_MARGIN, LIMITS } from '@services/exchange/exchange.const';
 import { InvalidOrder, OrderNotFound } from '@services/exchange/exchange.error';
 import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from '@services/exchange/exchange.types';
-import { AsyncMutex } from '@utils/async/asyncMutex';
-import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/market.utils';
 import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { round, shiftDecimalPoint } from '@utils/math/round.utils';
-import { clonePortfolio, initializePortfolio } from '@utils/portfolio/portfolio.utils';
-import { formatEveryDecimal } from '@utils/string/string.utils';
 import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
+import { addToBalance, describeShortfall, roundToMarketPrecision } from './dummyCentralizedExchange.helper';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
-import { roundToMarketPrecision } from './dummyCentralizedExchange.utils';
-
-/**
- * Why an order is refused for want of a free balance: what the portfolio holds free and what the order needs of it, the currency a BUY
- * costs, or the amount of the asset a SELL sells, each with every decimal (see formatEveryDecimal). Written by String, a dust balance
- * read 5e-7, and a limit SELL's amount was labelled its order cost.
- */
-const describeShortfall = (side: OrderSide, free: number, need: number) =>
-  side === 'BUY'
-    ? `Insufficient currency balance (portfolio: ${formatEveryDecimal(free)}, order cost: ${formatEveryDecimal(need)})`
-    : `Insufficient asset balance (portfolio: ${formatEveryDecimal(free)}, amount: ${formatEveryDecimal(need)})`;
-
-/**
- * Adds each change to its part of the balance (free, used or total) in decimal, as addPrecise does: an exchange books decimals. Added in
- * binary, the parts drifted from what was booked: 0.05 BTC sold as five SELLs of 0.01 left 0.009999999999999997 free after the fourth,
- * and the fifth was refused; the SELLs of a grid, all canceled, left 8.9e-16 BTC used, and free + used no longer made the total.
- * Exact as long as addPrecise is: up to some 67 million for a balance of 8 decimals (2 ** 26, from where doubles are more than 1e-8 apart).
- */
-const addToBalance = (balance: BalanceDetail, changes: Partial<BalanceDetail>) => {
-  for (const [part, change] of Object.entries(changes) as [keyof BalanceDetail, number][])
-    balance[part] = addPrecise(balance[part], change);
-};
 
 export class DummyCentralizedExchange implements Exchange {
   private readonly mutex = new AsyncMutex();

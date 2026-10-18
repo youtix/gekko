@@ -1,5 +1,5 @@
 import { Candle } from '@models/candle.types';
-import { hl2, hlc3, ohlc4 } from '@utils/candle/candle.utils';
+import { hl2, hlc3, ohlc4 } from '@helpers/candle/candle.helper';
 
 export const INPUT_SOURCES = {
   open: (candle: Candle) => candle.open,

@@ -1,5 +1,5 @@
 import { ONE_SECOND } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { getAssetBalance } from '@helpers/portfolio/portfolio.helper';
 import { AdviceOrder } from '@models/advice.types';
 import {
   CandleBucket,
@@ -18,40 +18,13 @@ import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@services/logger';
 import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
 import { isFiniteNumber } from '@utils/math/math.utils';
-import { getAssetBalance } from '@utils/portfolio/portfolio.utils';
 import { formatAmount, formatPercent, pluralize } from '@utils/string/string.utils';
 import { bindAll, filter, isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
+import { MAX_PENDING_NOTIFICATIONS } from './eventSubscriber.const';
+import { describeNotSent, describeRequestedAmount } from './eventSubscriber.helper';
 import { eventSubscriberSchema } from './eventSubscriber.schema';
-import { Event, EVENT_NAMES, EventSubscriberConfig } from './eventSubscriber.types';
-
-/**
- * The most notifications waiting for their turn, the one being sent aside. With Telegram unreachable, each send takes every attempt
- * of the fetcher, about two minutes, and they would pile up for as long as the outage lasts: past this many, each new one drops the
- * oldest, the least worth reading once Telegram answers again. A burst must fit while Telegram answers, since no send ends while a
- * flush queues notifications (no handler waits on the network): a grid strategy placing N orders in one loop queues N strat_create,
- * N order_init and its logs in one flush. Their texts are short, so a full queue costs little memory.
- */
-const MAX_PENDING_NOTIFICATIONS = 1000;
-
-/** A message waiting for its turn, with the event it notifies of, which the logs name */
-type PendingNotification = { event: Event; text: string };
-
-/** How the logs say that a notification was not sent */
-const describeNotSent = (event: Event, err: unknown) => `The ${event} notification was not sent: ${describeError(err)}`;
-
-/**
- * What an advice asks to trade, as its strat_create notification writes it: the amount the strategy gave, else its cost in the
- * currency, else its share of the currency a BUY spends or of the asset a SELL sells, else auto for an all-in order. createOrder
- * relays at most one of the three, and null from an untyped strategy as it was given, which the Trader reads as left out.
- */
-const describeRequestedAmount = ({ symbol, side, amount, cost, allocation }: AdviceOrder) => {
-  const [asset, currency] = symbol.split('/');
-  if (!isNil(amount)) return formatAmount(amount);
-  if (!isNil(cost)) return `${formatAmount(cost)} ${currency} worth`;
-  if (!isNil(allocation)) return `${formatAmount(allocation)} % of the ${side === 'BUY' ? currency : asset}`;
-  return 'auto';
-};
+import { Event, EVENT_NAMES, EventSubscriberConfig, PendingNotification } from './eventSubscriber.types';
 
 export class EventSubscriber extends Plugin {
   private bot: TelegramBot;

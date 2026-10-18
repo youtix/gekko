@@ -1,6 +1,6 @@
+import type { OrderRecorder } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { CandleBucket } from '@models/event.types';
 import type { TradingPair } from '@models/utility.types';
-import type { OrderRecorder } from '@strategies/positionTracker.mock';
 import type { Strategy, Tools } from '@strategies/strategy.types';
 import { noop } from 'lodash-es';
 

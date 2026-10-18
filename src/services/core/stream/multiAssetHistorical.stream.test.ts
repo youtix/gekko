@@ -1,12 +1,12 @@
 import { TradingPair } from '@models/utility.types';
-import { synchronizeStreams } from '@utils/stream/stream.utils';
+import { synchronizeStreams } from '@helpers/stream/stream.helper';
 import { PassThrough, Readable } from 'stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { HistoricalCandleStream } from './historicalCandle/historicalCandle.stream';
 import { MultiAssetStream } from './multiAsset.stream';
 import { MultiAssetHistoricalStream } from './multiAssetHistorical.stream';
 
-vi.mock('@utils/stream/stream.utils', () => ({ synchronizeStreams: vi.fn() }));
+vi.mock('@helpers/stream/stream.helper', () => ({ synchronizeStreams: vi.fn() }));
 vi.mock('./historicalCandle/historicalCandle.stream', () => ({
   HistoricalCandleStream: vi.fn(function () {
     return new Readable({ objectMode: true, read() {} });

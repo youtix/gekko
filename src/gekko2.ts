@@ -15,7 +15,7 @@
 */
 
 import { ApplicationStopError } from '@errors/applicationStop.error';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { debug, error, info, warning } from '@services/logger';
 import { logVersion } from '@utils/process/process.utils';

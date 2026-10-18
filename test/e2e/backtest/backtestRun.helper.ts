@@ -1,5 +1,5 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import type { Candle } from '@models/candle.types';
 import type { OrderSide, OrderState } from '@models/order.types';
 import type { BalanceDetail } from '@models/portfolio.types';

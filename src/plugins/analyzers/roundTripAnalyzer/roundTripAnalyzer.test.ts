@@ -5,26 +5,30 @@ import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from
 import { Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
 import { debug, error, info, warning } from '@services/logger';
-import * as statsUtils from '@utils/finance/stats.utils';
-import { calculatePairEquity, getAssetBalance } from '@utils/portfolio/portfolio.utils';
+import * as statsUtils from '@helpers/finance/stats.helper';
+import { calculatePairEquity, getAssetBalance } from '@helpers/portfolio/portfolio.helper';
 import type { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { OpenRoundTrip, TradingReport } from './roundTrip.types';
 import { RoundTripAnalyzer } from './roundTripAnalyzer';
 import { EMPTY_TRADING_REPORT, LATE_FILL_CANDLES, PLUGIN_NAME } from './roundTripAnalyzer.const';
-import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
+import { logFinalize, logRoundtrip } from './roundTripAnalyzer.helper';
 
 // Mocks
 vi.mock('@services/logger');
-vi.mock('@utils/finance/stats.utils');
+vi.mock('@helpers/finance/stats.helper');
 // The math helpers stay actual, round included: the decimal ones work out the equities and the P&L, as in a run
 // The two the tests drive; isFetchedPortfolio stays actual, an automock would read every portfolio as one the Trader never fetched
-vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => ({
-  ...(await importOriginal<typeof import('@utils/portfolio/portfolio.utils')>()),
+vi.mock('@helpers/portfolio/portfolio.helper', async importOriginal => ({
+  ...(await importOriginal<typeof import('@helpers/portfolio/portfolio.helper')>()),
   calculatePairEquity: vi.fn(),
   getAssetBalance: vi.fn(),
 }));
-vi.mock('./roundTripAnalyzer.utils');
+vi.mock('./roundTripAnalyzer.helper', async importOriginal => ({
+  ...(await importOriginal<typeof import('./roundTripAnalyzer.helper')>()),
+  logFinalize: vi.fn(),
+  logRoundtrip: vi.fn(),
+}));
 
 // Mock Configuration
 vi.mock('@services/configuration/configuration', () => {
@@ -114,7 +118,7 @@ describe('RoundTripAnalyzer', () => {
       }
     });
     // The profit of a round trip is its total return (see measureRoundTrip): actual, as the decimal helpers are
-    const actualStats = await vi.importActual<typeof import('@utils/finance/stats.utils')>('@utils/finance/stats.utils');
+    const actualStats = await vi.importActual<typeof import('@helpers/finance/stats.helper')>('@helpers/finance/stats.helper');
     vi.mocked(statsUtils.calculateTotalReturnPct).mockImplementation(actualStats.calculateTotalReturnPct);
 
     vi.mocked(warning).mockClear();
@@ -1694,8 +1698,10 @@ describe('RoundTripAnalyzer', () => {
       deferredEmitSpy.mock.calls.filter(([name]) => name === ROUNDTRIP_COMPLETED_EVENT).map(([, roundTrip]) => roundTrip);
 
     beforeEach(async () => {
-      const actualPortfolio = await vi.importActual<typeof import('@utils/portfolio/portfolio.utils')>('@utils/portfolio/portfolio.utils');
-      const actualStats = await vi.importActual<typeof import('@utils/finance/stats.utils')>('@utils/finance/stats.utils');
+      const actualPortfolio = await vi.importActual<typeof import('@helpers/portfolio/portfolio.helper')>(
+        '@helpers/portfolio/portfolio.helper',
+      );
+      const actualStats = await vi.importActual<typeof import('@helpers/finance/stats.helper')>('@helpers/finance/stats.helper');
       vi.mocked(calculatePairEquity).mockImplementation(actualPortfolio.calculatePairEquity);
       vi.mocked(getAssetBalance).mockImplementation(actualPortfolio.getAssetBalance);
       for (const [name, implementation] of Object.entries(actualStats))

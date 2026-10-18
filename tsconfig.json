@@ -17,7 +17,8 @@
       "@services/*": ["./src/services/*"],
       "@indicators/*": ["./src/indicators/*"],
       "@strategies/*": ["./src/strategies/*"],
-      "@plugins/*": ["./src/plugins/*"]
+      "@plugins/*": ["./src/plugins/*"],
+      "@helpers/*": ["./src/helpers/*"]
     }
   },
   "include": ["**/*.ts", "scripts/release/version.cjs"]

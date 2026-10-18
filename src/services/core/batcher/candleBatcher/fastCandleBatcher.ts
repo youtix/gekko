@@ -1,22 +1,11 @@
-import { ONE_MINUTE } from '@constants/time.const';
+import { getCandleTimeOffset } from '@helpers/candle/candle.helper';
 import { Candle } from '@models/candle.types';
 import { warning } from '@services/logger';
-import { getCandleTimeOffset } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
+import { MAX_VOLUME_FACTOR } from './candleBatcher.const';
+import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
-
-/**
- * Tells whether the 1-minute candle starting at `start` is the last one of a timeframe candle of `candleSize` minutes: the next minute
- * starts a timeframe candle. Read on the calendar of getCandleTimeOffset, the one getCandleStart places the warmup and the backtest
- * candles on: a second copy of it here could be changed alone, and the batcher would then close its candles off their boundaries.
- */
-export const isTimeframeCandleClose = (candleSize: CandleSize, start: EpochTimeStamp): boolean =>
-  getCandleTimeOffset(candleSize, start + ONE_MINUTE) === 0;
-
-/** Most decimals a volume is summed with: beyond, the scaled sum would exceed the integers a double holds exactly */
-const MAX_VOLUME_DECIMALS = 15;
-const MAX_VOLUME_FACTOR = 10 ** MAX_VOLUME_DECIMALS;
 
 /**
  * Optimized candle batcher: aggregates the 1-minute candles of one pair in place, in a single object per timeframe candle.

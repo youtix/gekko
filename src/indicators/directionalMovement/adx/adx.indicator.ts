@@ -1,5 +1,5 @@
 import { Indicator } from '@indicators/indicator';
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { WilderSmoothing } from '@indicators/movingAverages/wilderSmoothing/wilderSmoothing.indicator';
 import { Candle } from '@models/candle.types';
 import { isNil } from 'lodash-es';

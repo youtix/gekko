@@ -4,8 +4,9 @@ import { warning } from '@services/logger';
 import { toISOString, toTimestamp } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
+import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
-import { FastCandleBatcher, isTimeframeCandleClose } from './fastCandleBatcher';
+import { FastCandleBatcher } from './fastCandleBatcher';
 
 vi.mock('@services/logger', () => ({ warning: vi.fn() }));
 

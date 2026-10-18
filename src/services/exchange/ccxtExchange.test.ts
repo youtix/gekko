@@ -3,27 +3,28 @@ import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { config } from '@services/configuration/configuration';
 import * as logger from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
-import { assertOrderWithinLimits } from '@utils/market/market.utils';
+import { assertOrderWithinLimits } from '@helpers/market/market.helper';
 import ccxt from 'ccxt';
 import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
-import { CCXTExchange, type CCXTExchangeConfig } from './ccxtExchange';
+import { CCXTExchange } from './ccxtExchange';
 import { BROKER_MAX_RETRIES_ON_FAILURE, LIMITS, MAX_MY_TRADES_PAGES } from './exchange.const';
 import { ExchangeNetworkError, InvalidOrder, OrderNotFound, OrderOutcomeUnknown } from './exchange.error';
-import { checkMandatoryFeatures, createExchange, mapCcxtOrderToOrder, mapCcxtTradeToTrade, mapOhlcvToCandles } from './exchange.utils';
+import { checkMandatoryFeatures, createExchange, mapCcxtOrderToOrder, mapCcxtTradeToTrade, mapOhlcvToCandles } from './exchange.helper';
+import type { CCXTExchangeConfig } from './exchange.types';
 
 vi.mock('@services/configuration/configuration', () => ({
   config: { getWatch: vi.fn(), getExchange: vi.fn() },
 }));
 vi.mock('@services/core/heart/heart');
 // The real validation runs (vi.fn(impl) survives mockReset), spied to check how the exchange calls it
-vi.mock('@utils/market/market.utils', async importOriginal => {
-  const actual = await importOriginal<typeof import('@utils/market/market.utils')>();
+vi.mock('@helpers/market/market.helper', async importOriginal => {
+  const actual = await importOriginal<typeof import('@helpers/market/market.helper')>();
   return { ...actual, assertOrderWithinLimits: vi.fn(actual.assertOrderWithinLimits) };
 });
 
 // retry, translateErrors and the translation of the ccxt errors are the real ones: the tests see the errors CCXTExchange throws
-vi.mock('./exchange.utils', async importOriginal => ({
-  ...(await importOriginal<typeof import('./exchange.utils')>()),
+vi.mock('./exchange.helper', async importOriginal => ({
+  ...(await importOriginal<typeof import('./exchange.helper')>()),
   createExchange: vi.fn(),
   checkMandatoryFeatures: vi.fn(),
   mapCcxtOrderToOrder: vi.fn(),

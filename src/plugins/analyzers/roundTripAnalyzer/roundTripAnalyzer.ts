@@ -1,97 +1,33 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
-import { BOOKED_CURRENCY_UNIT } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
+import { calculateMarketReturnPct, calculateWinRate, extractTopMAEs } from '@helpers/finance/stats.helper';
+import { calculatePairEquity, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@models/event.types';
-import { OrderSide } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
 import { Asset, TradingPair } from '@models/utility.types';
 import { debug, error, info, warning } from '@services/logger';
-import { RingBuffer } from '@utils/collection/ringBuffer';
 import { toISOString } from '@utils/date/date.utils';
-import { calculateMarketReturnPct, calculateTotalReturnPct, calculateWinRate, extractTopMAEs } from '@utils/finance/stats.utils';
-import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
-import { calculatePairEquity, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
+import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
 import { formatAmount, formatSignedPercent, pluralize } from '@utils/string/string.utils';
 import { first, isNil, sumBy } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
+import { calculatePerformanceStatistics } from '../analyzer.helper';
 import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
-import { calculatePerformanceStatistics } from '../analyzer.utils';
 import { DateRange, ExcursionCandle, Fill, OpenRoundTrip, OrderFill, Start, TradingReport } from './roundTrip.types';
 import { EMPTY_TRADING_REPORT, LATE_FILL_CANDLES, PLUGIN_NAME } from './roundTripAnalyzer.const';
-import { logFinalize, logRoundtrip } from './roundTripAnalyzer.utils';
-
-/** A mean price weighted by amounts, once one more price is added with its amount */
-const addToMeanPrice = (meanPrice: number, amount: number, price: number, addedAmount: number) =>
-  (meanPrice * amount + price * addedAmount) / (amount + addedAmount);
-
-/**
- * What a fill changes the pair equity by, valued at `price`, in currency: the asset it moves valued at that price, less the currency it
- * moves for it at its own price, less its fee (see PendingEntry). Worked out in decimal, as the pair equity it is taken off is (see
- * valueEntryEquity).
- */
-const getEquityChange = (side: OrderSide, { price: fillPrice, amount, fee }: Fill, price: number) =>
-  addPrecise(multiplyPrecise(side === 'BUY' ? amount : -amount, addPrecise(price, -fillPrice)), -fee);
-
-/**
- * The P&L and the profit of a round trip, from its entry equity to its exit equity, in decimal: the profit as the total return of a
- * report is computed (see calculateTotalReturnPct), where (100 * exit) / entry - 100 left ±1.42e-14 on a round trip that made nothing.
- * Two equities less than BOOKED_CURRENCY_UNIT apart, or equal within compareWithTolerance once past what the decimal helpers keep
- * exact, broke even: P&L and profit 0, no win. Unknown (NaN) without an entry equity above 0 or without an exit equity: valued with the
- * empty portfolio of a Trader that had read none, a BUY of 1 BTC at 100 entered at its fee, 0.1 USDT, and its round trip made
- * +1,009,690 % (see PendingEntry).
- */
-const measureRoundTrip = (entryEquity: number, exitEquity: number): Pick<RoundTrip, 'pnl' | 'profit'> => {
-  if (!(entryEquity > 0) || !isFiniteNumber(exitEquity)) return { pnl: NaN, profit: NaN };
-  const pnl = addPrecise(exitEquity, -entryEquity);
-  if (Math.abs(pnl) < BOOKED_CURRENCY_UNIT || compareWithTolerance(exitEquity, entryEquity) === 0) return { pnl: 0, profit: 0 };
-  return { pnl, profit: calculateTotalReturnPct(exitEquity, entryEquity) };
-};
-
-/**
- * Counts a one-minute candle in the adverse excursion of a round trip if it closed after the first BUY of the round trip filled: its
- * low, measured from the entry price the round trip has then. A candle that deepens the excursion is noted (see ExcursionDeepening),
- * for a SELL heard after it to take it back (see measureAdverseExcursion). Returns the round trip, as RingBuffer.reduce hands it on.
- *
- * A round trip reads the candles that close while its position is held: after its first BUY fills, and by the time the SELL that ends
- * it fills. Opened by a fill dated inside minute m, its first millisecond included, and ended by one dated inside minute n, it reads
- * the candles of minutes m to n - 1, in every mode. A backtest and paper trading date a fill at the close of the last candle the
- * simulated exchange processed, the start of the next minute: the round trip of a strategy that buys on the candle of minute a and
- * sells on that of minute b fills at the start of minutes a + 1 and b + 1, and reads the candles of minutes a + 1 to b. Live, the same
- * orders fill a few seconds into minutes a + 1 and b + 1: the same candles, that of minute a + 1 held from the BUY on, that of minute
- * b + 1, held for the seconds before the SELL, left out.
- *
- * The same candles whenever the end of an order is heard. A backtest delivers it with the bucket the order filled in, once the
- * analyzers have read that bucket; realtime, paper trading included, with the first bucket flushed after the Trader has reported it,
- * most often a later one. A candle that closed after a BUY before the BUY was heard is counted when it is (see recentCandles), and one
- * counted that closed after a SELL before the SELL was heard is taken back when it is. Counted as each bucket arrived, a round trip of
- * paper or live trading skipped the first minute it held and read the minute after its SELL: the same candles gave another adverse
- * excursion than in a backtest. Up to LATE_FILL_CANDLES minutes late: a BUY heard later counts the candles of the last LATE_FILL_CANDLES
- * minutes alone, and a SELL heard later may keep candles that closed after it.
- */
-const countCandle = (roundTrip: OpenRoundTrip, { start, low }: ExcursionCandle): OpenRoundTrip => {
-  const closeAt = start + ONE_MINUTE;
-  // Closed by the time the BUY filled: read before the BUY was heard, or after it by a live stream catching up on minutes it fell behind on
-  if (closeAt <= roundTrip.entryAt) return roundTrip;
-  const excursion = ((roundTrip.entryPrice - low) / roundTrip.entryPrice) * 100;
-  // An excursion that is not a number deepens nothing
-  if (!(excursion > roundTrip.maxAdverseExcursion)) return roundTrip;
-  const deepenings = roundTrip.excursionDeepenings;
-  deepenings.push({ closeAt, previous: roundTrip.maxAdverseExcursion });
-  if (deepenings.length > LATE_FILL_CANDLES) deepenings.shift();
-  roundTrip.maxAdverseExcursion = excursion;
-  return roundTrip;
-};
-
-/**
- * The adverse excursion a round trip ends with, its SELL filled at `exitAt`: that of the candles counted that closed by then (see
- * countCandle). One that closed after it, read before the SELL was heard, took nothing from the position: the round trip ends with the
- * deepest excursion before the first of them that deepened it, or with the deepest of all when none did.
- */
-const measureAdverseExcursion = ({ maxAdverseExcursion, excursionDeepenings }: OpenRoundTrip, exitAt: EpochTimeStamp) =>
-  excursionDeepenings.find(({ closeAt }) => closeAt > exitAt)?.previous ?? maxAdverseExcursion;
+import {
+  addToMeanPrice,
+  countCandle,
+  getEquityChange,
+  logFinalize,
+  logRoundtrip,
+  measureAdverseExcursion,
+  measureRoundTrip,
+} from './roundTripAnalyzer.helper';
 
 export class RoundTripAnalyzer extends Plugin {
   /**

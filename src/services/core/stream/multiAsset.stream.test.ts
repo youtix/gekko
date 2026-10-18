@@ -1,10 +1,10 @@
 import { TradingPair } from '@models/utility.types';
-import { synchronizeStreams } from '@utils/stream/stream.utils';
+import { synchronizeStreams } from '@helpers/stream/stream.helper';
 import { PassThrough, Readable } from 'stream';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MultiAssetStream } from './multiAsset.stream';
 
-vi.mock('@utils/stream/stream.utils', () => ({ synchronizeStreams: vi.fn() }));
+vi.mock('@helpers/stream/stream.helper', () => ({ synchronizeStreams: vi.fn() }));
 
 const pairs: { symbol: TradingPair }[] = [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }];
 const settle = () => new Promise(resolve => setImmediate(resolve));

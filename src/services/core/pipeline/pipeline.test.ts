@@ -13,13 +13,13 @@ import * as injecter from '@services/injecter/injecter';
 import { warning } from '@services/logger';
 import { CandleDateranges } from '@services/storage/storage.types';
 import { useTimeZone } from '@utils/date/date.mock';
-import { SequentialEventEmitter } from '@utils/event/sequentialEventEmitter';
+import { SequentialEventEmitter } from '@helpers/event/sequentialEventEmitter';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import * as pipelineModule from './pipeline';
 import { PluginsEmitSameEventError } from './pipeline.error';
-import { streamPipelines } from './pipeline.utils';
+import { streamPipelines } from './pipeline.helper';
 
 vi.mock('@services/configuration/configuration', () => ({
   config: {
@@ -40,7 +40,7 @@ vi.mock('@services/logger', () => ({
   warning: vi.fn(),
 }));
 
-vi.mock('./pipeline.utils', () => ({
+vi.mock('./pipeline.helper', () => ({
   streamPipelines: {
     realtime: vi.fn(),
     backtest: vi.fn(),

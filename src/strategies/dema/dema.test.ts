@@ -1,10 +1,10 @@
+import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@helpers/strategy/positionBook/positionBook.mock';
+import { LoggedLine, logsAtInit, OrderRecorder, playSteps } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import { StrategyOrder } from '@models/advice.types';
 import { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
 import { Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
-import { BTC_ETH_TRADED_INFO, flatBucket, indicatorArguments, indicatorsAtInit } from '@strategies/positionBook.mock';
-import { LoggedLine, logsAtInit, OrderRecorder, playSteps } from '@strategies/positionTracker.mock';
 import { InitParams, OnCandleEventParams } from '@strategies/strategy.types';
 import { omit, pick } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';

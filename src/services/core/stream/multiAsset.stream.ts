@@ -1,5 +1,5 @@
 import { TradingPair } from '@models/utility.types';
-import { synchronizeStreams } from '@utils/stream/stream.utils';
+import { synchronizeStreams } from '@helpers/stream/stream.helper';
 import { Readable } from 'stream';
 
 /**

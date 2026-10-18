@@ -1,9 +1,9 @@
 import { Indicator } from '@indicators/indicator';
 import type { MovingAverageClasses } from '@indicators/indicator.types';
-import { checkInteger, checkOneOf } from '@indicators/indicator.utils';
+import { checkInteger, checkOneOf } from '@indicators/indicator.helper';
 import { MOVING_AVERAGE_TYPES, MOVING_AVERAGES } from '@indicators/movingAverages/movingAverages.const';
 import { Candle } from '@models/candle.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { compareWithTolerance } from '@utils/math/math.utils';
 import { isNil } from 'lodash-es';
 

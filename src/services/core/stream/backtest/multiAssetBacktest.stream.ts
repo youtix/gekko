@@ -1,12 +1,6 @@
-import { TradingPair } from '@models/utility.types';
-import { Interval } from 'date-fns';
 import { MultiAssetStream } from '../multiAsset.stream';
 import { BacktestStream } from './backtest.stream';
-
-export type MultiAssetBacktestStreamParams = {
-  pairs: { symbol: TradingPair }[];
-  daterange: Interval<EpochTimeStamp, EpochTimeStamp>;
-};
+import { MultiAssetBacktestStreamParams } from './backtest.types';
 
 /** The stored candles of every pair, as synchronised `CandleBucket`s */
 export class MultiAssetBacktestStream extends MultiAssetStream {

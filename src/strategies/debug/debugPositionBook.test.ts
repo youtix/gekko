@@ -1,9 +1,16 @@
 import { GekkoError } from '@errors/gekko.error';
+import { BTC_ETH_TRADED_INFO } from '@helpers/strategy/positionBook/positionBook.mock';
+import {
+  LoggedLine,
+  logsAtInit,
+  OrderOutcome,
+  OrderRecorder,
+  OutcomeFacts,
+  relayOrderOutcome,
+} from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { Portfolio } from '@models/portfolio.types';
 import type { TradingPair } from '@models/utility.types';
 import type { MarketData } from '@services/exchange/exchange.types';
-import { BTC_ETH_TRADED_INFO } from '@strategies/positionBook.mock';
-import { LoggedLine, logsAtInit, OrderOutcome, OrderRecorder, OutcomeFacts, relayOrderOutcome } from '@strategies/positionTracker.mock';
 import type { Tools } from '@strategies/strategy.types';
 import { noop } from 'lodash-es';
 import { beforeEach, describe, expect, it } from 'vitest';

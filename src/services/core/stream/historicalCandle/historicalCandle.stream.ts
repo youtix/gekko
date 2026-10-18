@@ -10,16 +10,10 @@ import { inject } from '@services/injecter/injecter';
 import { info, warning } from '@services/logger';
 import { formatDurationUTC, startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
-import { Interval, isAfter } from 'date-fns';
+import { isAfter } from 'date-fns';
 import { last } from 'lodash-es';
 import { Readable } from 'stream';
-
-export interface HistoricalCandleStreamParams {
-  daterange: Interval<EpochTimeStamp, EpochTimeStamp>;
-  /** Minimum delay in ms between the starts of two requests to the exchange */
-  tickrate: number;
-  symbol: TradingPair;
-}
+import { HistoricalCandleStreamParams } from './historicalCandle.types';
 
 /**
  * Reads the 1-minute candles of one pair from the exchange, page by page, from `daterange.start` to `daterange.end` (both

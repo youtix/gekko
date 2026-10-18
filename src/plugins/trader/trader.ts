@@ -8,9 +8,12 @@ import {
   ORDER_STATUS_CHANGED_EVENT,
   PORTFOLIO_CHANGE_EVENT,
 } from '@constants/event.const';
-import { DEFAULT_FEE_BUFFER } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
+import { getFirstCandleFromBucket } from '@helpers/candle/candle.helper';
+import { getMarketOrderLimits, toBound } from '@helpers/market/market.helper';
+import { roundToStep } from '@helpers/market/precision.helper';
+import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -19,21 +22,15 @@ import { Plugin } from '@plugins/plugin';
 import { config } from '@services/configuration/configuration';
 import { OrderErrorEventPayload, OrderSummary } from '@services/core/order/order.types';
 import { debug, error, info, warning } from '@services/logger';
-import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
 import { toISOString } from '@utils/date/date.utils';
-import { getMarketOrderLimits, toBound } from '@utils/market/market.utils';
-import { roundToStep } from '@utils/market/precision.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
-import { shiftDecimalPoint } from '@utils/math/round.utils';
-import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
 import { filter, isNil, noop, pick, uniq } from 'lodash-es';
 import { UUID } from 'node:crypto';
-import { ORDER_FACTORY } from './trader.const';
-import { traderSchema } from './trader.schema';
-import { CheckOrderSummaryParams, TraderOrderMetadata } from './trader.types';
+import { FEE_BUFFER_PERCENT, ORDER_FACTORY, SIZING_KEYS } from './trader.const';
 import {
   computeOrderPricing,
+  describeBuysPlacedSince,
   getAllInBuyAmount,
   getAllocatedShare,
   getBacktestModeIntervalSyncTime,
@@ -42,53 +39,19 @@ import {
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
   ShouldEmitPortfolioParams,
-} from './trader.utils';
-
-/**
- * The keys with which a strategy sizes an order otherwise than by its amount: every event of the order relays them as the strategy gave
- * them, left out when it gave none (see OrderEvent)
- */
-const SIZING_KEYS = ['cost', 'allocation'] as const;
-
-/** The share of its currency DEFAULT_FEE_BUFFER keeps back for the fee of a BUY sized from the currency, in %, as the logs write it */
-const FEE_BUFFER_PERCENT = shiftDecimalPoint(DEFAULT_FEE_BUFFER, 2);
-
-type OrderInstance = TraderOrderMetadata['orderInstance'];
-/** An order, as the events relayed to the strategy describe it */
-type RelayedOrder = OrderInitiatedEvent['order'];
-/** What an order reports with ORDER_INVALID_EVENT (see Order.orderRejected): `filled` says whether it executed part of its amount */
-type OrderRejection = { reason: string; status: string; filled: boolean };
-/** What an order reports with ORDER_CANCELED_EVENT (see Order.orderCanceled): relayed as is */
-type OrderCancelation = { timestamp: EpochTimeStamp } & Pick<OrderCanceledEvent['order'], 'filled' | 'remaining'>;
-/**
- * An order the balance read last may not show (see Trader.unreadOrders): what it takes from the free balance of `assetName`, the asset
- * of a SELL, the currency of a BUY
- */
-type UnreadOrder = { assetName: string; amount: number; synchronizationCount: number };
-/** The free balance of an asset a SELL can take, or of the currency a BUY can spend (see Trader.getFreeBalanceLeft) */
-type FreeBalanceLeft = {
-  /** What the last synchronization read */
-  read: number;
-  /** What the orders placed since take from it: the SELLs of the asset, the BUYs of the currency */
-  taken: number;
-  /** What is left of it, never below 0 */
-  free: number;
-};
-/**
- * What an order sized by its cost or by its allocation asks for, before any cap (see Trader.getBudget): the currency a BUY may spend, or
- * the amount of the asset a SELL sells, and `label`, the order and its sizing as the logs name them
- */
-type Budget = { asked: number; label: string };
-
-/**
- * What the BUYs placed since the last synchronization take from the currency it read, as a warning of a BUY sized from what they leave
- * says it: what each may spend, the share DEFAULT_FEE_BUFFER keeps back for its fee included (see getBuyBudget)
- */
-const describeBuysPlacedSince = ({ read, taken }: FreeBalanceLeft, currencyName: string) => {
-  const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
-  const feeBuffer = `the ${FEE_BUFFER_PERCENT} % kept back for their fee included`;
-  return `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
-};
+} from './trader.helper';
+import { traderSchema } from './trader.schema';
+import {
+  Budget,
+  CheckOrderSummaryParams,
+  FreeBalanceLeft,
+  OrderCancelation,
+  OrderInstance,
+  OrderRejection,
+  RelayedOrder,
+  TraderOrderMetadata,
+  UnreadOrder,
+} from './trader.types';
 
 export class Trader extends Plugin {
   private readonly orders: Map<UUID, TraderOrderMetadata>;

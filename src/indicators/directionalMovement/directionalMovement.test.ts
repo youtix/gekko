@@ -1,5 +1,5 @@
 import { approximately, illiquidCandles, resultsOf } from '@indicators/indicator.mock';
-import { getTrueRange } from '@indicators/volatility/trueRange/trueRange.utils';
+import { getTrueRange } from '@indicators/volatility/trueRange/trueRange.helper';
 import { Candle } from '@models/candle.types';
 import { describe, expect, it, vi } from 'vitest';
 import { ADX } from './adx/adx.indicator';
@@ -11,8 +11,8 @@ import { PlusDI } from './plusDI/plusDI.indicator';
 import { PlusDM } from './plusDM/plusDM.indicator';
 
 // The real true range runs (vi.fn(impl) survives mockReset), spied to count how often each candle's is computed
-vi.mock('@indicators/volatility/trueRange/trueRange.utils', async importOriginal => {
-  const actual = await importOriginal<typeof import('@indicators/volatility/trueRange/trueRange.utils')>();
+vi.mock('@indicators/volatility/trueRange/trueRange.helper', async importOriginal => {
+  const actual = await importOriginal<typeof import('@indicators/volatility/trueRange/trueRange.helper')>();
   return { getTrueRange: vi.fn(actual.getTrueRange) };
 });
 

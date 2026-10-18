@@ -1,4 +1,4 @@
-import { checkInputSource, checkInteger } from '@indicators/indicator.utils';
+import { checkInputSource, checkInteger } from '@indicators/indicator.helper';
 import { MovingAverage } from '@indicators/movingAverages/movingAverage';
 import { isNil } from 'lodash-es';
 import { EMA } from '../ema/ema.indicator';

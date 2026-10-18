@@ -1,7 +1,7 @@
 import { GekkoError } from '@errors/gekko.error';
+import { PositionBook } from '@helpers/strategy/positionBook/positionBook';
 import { OrderSide } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
-import { PositionBook } from '@strategies/positionBook';
 import {
   InitParams,
   OnCandleEventParams,

@@ -1,4 +1,4 @@
-import { checkAtMost, checkNumber } from '@indicators/indicator.utils';
+import { checkAtMost, checkNumber } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
 import { Indicator } from '../../indicator';
 

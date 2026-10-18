@@ -1,5 +1,4 @@
 import { TRAILING_STOP_ACTIVATED, TRAILING_STOP_TRIGGERED } from '@constants/event.const';
-import { StrategyOrder } from '@models/advice.types';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { info, warning } from '@services/logger';
@@ -7,17 +6,8 @@ import { addPrecise } from '@utils/math/math.utils';
 import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
-import { TrailingStopState, TriggerHold } from './trailingStopManager.types';
-
-type AddOrderParams = Pick<StrategyOrder, 'symbol' | 'trailing'> & {
-  id: UUID;
-  /** The amount the BUY filled (see TrailingStopState.amount) */
-  amount: number;
-  createdAt: number;
-};
-
-/** What a listener receives: a copy of the stop, its config included, so that what the listener changes does not reach the stop */
-const copyState = (order: TrailingStopState): TrailingStopState => ({ ...order, config: { ...order.config } });
+import { copyState } from './trailingStopManager.helper';
+import { AddOrderParams, TrailingStopState, TriggerHold } from './trailingStopManager.types';
 
 export class TrailingStopManager extends EventEmitter {
   private orders = new Map<UUID, TrailingStopState>();

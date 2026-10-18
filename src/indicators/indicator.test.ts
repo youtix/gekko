@@ -1,7 +1,7 @@
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { InputSources } from '@models/inputSources.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { describe, expect, it, vi } from 'vitest';
 import * as indicators from './index';
 import { Indicator } from './indicator';

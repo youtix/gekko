@@ -7,7 +7,7 @@ import { binanceExchangeSchema } from '@services/exchange/binance/binance.schema
 import { dummyExchangeSchema } from '@services/exchange/dummy/dummyCentralizedExchange.schema';
 import { hyperliquidExchangeSchema } from '@services/exchange/hyperliquid/hyperliquid.schema';
 import { paperBinanceExchangeSchema } from '@services/exchange/paper/paperTradingBinanceExchange.schema';
-import { getCandleStart, getCandleTimeOffset } from '@utils/candle/candle.utils';
+import { getCandleStart, getCandleTimeOffset } from '@helpers/candle/candle.helper';
 import { startOfMinuteUTC, toISOString, toTimestamp } from '@utils/date/date.utils';
 import { difference, find, some } from 'lodash-es';
 import { z } from 'zod';

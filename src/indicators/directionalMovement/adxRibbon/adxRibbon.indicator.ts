@@ -1,4 +1,4 @@
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { Indicator } from '../../indicator';

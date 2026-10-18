@@ -1,7 +1,5 @@
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { PERCENT_ROUNDING } from '@plugins/analyzers/analyzer.const';
-import { PortfolioReport } from '@plugins/analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
-import { TradingReport } from '@plugins/analyzers/roundTripAnalyzer/roundTrip.types';
 import { Plugin } from '@plugins/plugin';
 import { lockSync as defaultLockSync } from '@services/fs/fs.service';
 import { Fs } from '@services/fs/fs.types';
@@ -11,28 +9,10 @@ import { formatPercent, formatRatio, toPlainNumber } from '@utils/string/string.
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
 import { random } from 'lodash-es';
 import path from 'path';
+import { BYTE_ORDER_MARK, REPORT_TYPES } from './performanceReporter.const';
+import { generateStrategyId, portfolioOnly, toCsvCell, tradingOnly } from './performanceReporter.helper';
 import { performanceReporterSchema } from './performanceReporter.schema';
 import { CsvColumn, PerformanceReport, PerformanceReporterConfig } from './performanceReporter.types';
-import { generateStrategyId, toCsvCell } from './performanceReporter.utils';
-
-/** Written at the start of a UTF-8 file by the spreadsheets that save it back on Windows (Excel, LibreOffice). */
-const BYTE_ORDER_MARK = '\uFEFF';
-
-/** The value of the `report type` column, for each report this plugin writes. */
-const REPORT_TYPES: Record<PerformanceReport['id'], string> = {
-  'PORTFOLIO PROFIT REPORT': 'Portfolio',
-  'TRADING REPORT': 'Trading',
-};
-
-const portfolioOnly =
-  (value: (report: PortfolioReport) => string | number) =>
-  (report: PerformanceReport): string | number =>
-    report.id === 'PORTFOLIO PROFIT REPORT' ? value(report) : '';
-
-const tradingOnly =
-  (value: (report: TradingReport) => string | number) =>
-  (report: PerformanceReport): string | number =>
-    report.id === 'TRADING REPORT' ? value(report) : '';
 
 export class PerformanceReporter extends Plugin {
   private readonly filePath: string;

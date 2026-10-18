@@ -1,5 +1,5 @@
+import { OrderRecorder } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { TradingPair } from '@models/utility.types';
-import { OrderRecorder } from '@strategies/positionTracker.mock';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { playCandles, toolsOf } from './debug.mock';
 import { debugBacktestStrategySchema } from './debugBacktest.schema';

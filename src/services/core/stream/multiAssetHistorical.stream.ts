@@ -1,13 +1,6 @@
-import { TradingPair } from '@models/utility.types';
-import { Interval } from 'date-fns';
 import { HistoricalCandleStream } from './historicalCandle/historicalCandle.stream';
 import { MultiAssetStream } from './multiAsset.stream';
-
-export type MultiAssetHistoricalStreamParams = {
-  pairs: { symbol: TradingPair }[];
-  daterange: Interval<EpochTimeStamp, EpochTimeStamp>;
-  tickrate: number;
-};
+import { MultiAssetHistoricalStreamParams } from './multiAssetHistorical.types';
 
 /** The exchange history of every pair, as synchronised `CandleBucket`s */
 export class MultiAssetHistoricalStream extends MultiAssetStream {

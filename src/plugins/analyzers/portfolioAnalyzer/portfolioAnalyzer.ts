@@ -1,6 +1,6 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@constants/event.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import {
   CandleBucket,
   EquitySnapshot,
@@ -12,19 +12,19 @@ import {
 import { Portfolio } from '@models/portfolio.types';
 import { Asset, TradingPair } from '@models/utility.types';
 import { error, info, warning } from '@services/logger';
-import { getFirstCandleFromBucket } from '@utils/candle/candle.utils';
+import { getFirstCandleFromBucket } from '@helpers/candle/candle.helper';
 import { toISOString } from '@utils/date/date.utils';
-import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '@utils/finance/stats.utils';
-import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
+import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '@helpers/finance/stats.helper';
+import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { first, isNil, omit } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
-import { calculatePerformanceStatistics } from '../analyzer.utils';
+import { calculatePerformanceStatistics } from '../analyzer.helper';
 import { DEFAULT_BENCHMARK_ASSET, EMPTY_PORTFOLIO_REPORT, PLUGIN_NAME } from './portfolioAnalyzer.const';
 import { PortfolioReport } from './portfolioAnalyzer.types';
-import { logPortfolioReport } from './portfolioAnalyzer.utils';
+import { logPortfolioReport } from './portfolioAnalyzer.helper';
 
 export class PortfolioAnalyzer extends Plugin {
   // Configuration

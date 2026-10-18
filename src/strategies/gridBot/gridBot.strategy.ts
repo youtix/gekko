@@ -1,10 +1,10 @@
 import { GekkoError } from '@errors/gekko.error';
+import { pickTradedPair } from '@helpers/strategy/positionTracker/positionTracker.helper';
 import type { LogLevel } from '@models/logLevel.types';
 import type { OrderSide } from '@models/order.types';
 import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import type { MarketData, OpenOrder } from '@services/exchange/exchange.types';
-import { pickTradedPair } from '@strategies/positionTracker';
 import {
   InitParams,
   OnCandleEventParams,
@@ -36,7 +36,7 @@ import {
   inferPricePrecision,
   roundPrice,
   validateConfig,
-} from './gridBot.utils';
+} from './gridBot.helper';
 
 /**
  * GridBot Strategy

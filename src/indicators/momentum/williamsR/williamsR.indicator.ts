@@ -1,7 +1,7 @@
 import { Indicator } from '@indicators/indicator';
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 
 export class WilliamsR extends Indicator<'WilliamsR'> {
   private ringBufferHigh: RingBuffer<number>;

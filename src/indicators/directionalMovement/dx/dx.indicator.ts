@@ -1,6 +1,6 @@
 import { DirectionalMovement } from '@indicators/directionalMovement/directionalMovement';
 import { Indicator } from '@indicators/indicator';
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
 import { isNil } from 'lodash-es';
 

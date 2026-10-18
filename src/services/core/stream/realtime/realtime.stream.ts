@@ -1,6 +1,6 @@
 import { REALTIME_GRACE_PERIOD, REALTIME_MAX_CANDLES_PER_FETCH, REALTIME_MAX_TICKS_WITHOUT_CANDLE } from '@constants/realtime.const';
 import { ONE_MINUTE } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { TradingPair } from '@models/utility.types';

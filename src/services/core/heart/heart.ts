@@ -1,11 +1,7 @@
 import { GekkoError } from '@errors/gekko.error';
 import { debug } from '@services/logger';
 import EventEmitter from 'node:events';
-
-export type HeartOptions = {
-  /** How long after each multiple of the tick rate (in epoch time) a tick fires, in ms. Must stay below the tick rate. */
-  gracePeriod?: number;
-};
+import { HeartOptions } from './heart.types';
 
 /**
  * Emits 'tick' once right after pump(), then once per tick rate, `gracePeriod` ms after each multiple of the tick rate in epoch

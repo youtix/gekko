@@ -1,7 +1,7 @@
+import { PositionBook } from '@helpers/strategy/positionBook/positionBook';
+import { indicatorsBySymbol } from '@helpers/strategy/strategy.helper';
 import { TradingPair } from '@models/utility.types';
-import { PositionBook } from '@strategies/positionBook';
 import {
-  IndicatorResults,
   InitParams,
   OnCandleEventParams,
   OnOrderCanceledEventParams,
@@ -9,12 +9,9 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
-import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { compareWithTolerance } from '@utils/math/math.utils';
 import { emaRibbonStrategySchema } from './emaRibbon.schema';
-import type { EMARibbonStrategyParams } from './emaRibbon.types';
-
-type RibbonResults = IndicatorResults<IndicatorRegistry['EMARibbon']['output']>;
+import type { EMARibbonStrategyParams, RibbonResults } from './emaRibbon.types';
 
 /** Trades every watched pair, each with its own ribbon, its own spreads and its own position (see PositionBook) */
 export class EMARibbon implements Strategy<EMARibbonStrategyParams> {

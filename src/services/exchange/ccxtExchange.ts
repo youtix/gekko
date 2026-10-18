@@ -1,5 +1,6 @@
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
+import { assertOrderWithinLimits, getMarketOrderLimits } from '@helpers/market/market.helper';
 import { Candle } from '@models/candle.types';
 import { OrderSide, OrderState } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -8,19 +9,16 @@ import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { debug, error, warning } from '@services/logger';
 import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
-import { assertOrderWithinLimits, getMarketOrderLimits } from '@utils/market/market.utils';
 import { addPrecise } from '@utils/math/math.utils';
 import { formatEveryDecimal, pluralize } from '@utils/string/string.utils';
 import ccxt, { Exchange as CCXT, Order as CCXTOrder, Trade as CCXTTrade } from 'ccxt';
 import { first, isNil, last, partition } from 'lodash-es';
-import { z } from 'zod';
-import type { binanceExchangeSchema } from './binance/binance.schema';
 import { LIMITS, MAX_MY_TRADES_PAGES, PARAMS, PRICE_SIGNIFICANT_DIGITS } from './exchange.const';
 import { OrderOutcomeUnknown } from './exchange.error';
-import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from './exchange.types';
 import {
   checkMandatoryFeatures,
   createExchange,
+  getTradeKey,
   isExecutedTrade,
   mapCcxtOrderToOpenOrder,
   mapCcxtOrderToOrder,
@@ -28,20 +26,8 @@ import {
   mapOhlcvToCandles,
   retry,
   translateErrors,
-} from './exchange.utils';
-import type { hyperliquidExchangeSchema } from './hyperliquid/hyperliquid.schema';
-
-type BinanceExchangeConfig = z.infer<typeof binanceExchangeSchema>;
-type HyperliquidExchangeConfig = z.infer<typeof hyperliquidExchangeSchema>;
-export type CCXTExchangeConfig = BinanceExchangeConfig | HyperliquidExchangeConfig;
-
-/**
- * What tells a ccxt trade from the others, for CCXTExchange.fetchMyTrades to keep once a trade fetched on two pages: its id, with the
- * id of its order, both sides of a self-trade (two orders of the account matched together) sharing the id of the trade. A trade without
- * an id is told by its time, side, price and amount, as in ccxt's removeRepeatedTradesFromArray.
- */
-const getTradeKey = ({ id, order, timestamp, side, price, amount }: CCXTTrade) =>
-  JSON.stringify(isNil(id) ? [order, timestamp, side, price, amount] : [order, id]);
+} from './exchange.helper';
+import { CCXTExchangeConfig, Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from './exchange.types';
 
 /**
  * A real exchange reached through ccxt. Every call goes through one of two wrappers of exchange.utils, which both translate the

@@ -1,37 +1,17 @@
 import { ApplicationStopError } from '@errors/applicationStop.error';
-import { describeError, toError } from '@errors/error.utils';
+import { describeError, toError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Nullable } from '@models/utility.types';
 import { Plugin } from '@plugins/plugin';
+import { isDummyExchange } from '@services/exchange/exchange.helper';
 import { DummyExchange } from '@services/exchange/exchange.types';
-import { isDummyExchange } from '@services/exchange/exchange.utils';
 import { inject } from '@services/injecter/injecter';
 import { info, error as logError, warning } from '@services/logger';
 import { partition } from 'lodash-es';
 import { Writable } from 'node:stream';
-
-/** A plugin that failed on a bucket or in its finalisation, and what it threw */
-type PluginFailure = { plugin: Plugin; reason: unknown };
-
-/** Whether a plugin failed: its processing of the bucket, or its finalisation, rejected */
-const isRejected = (result: PromiseSettledResult<void>): result is PromiseRejectedResult => result.status === 'rejected';
-
-/** The plugins whose call rejected, each with what it threw, in the order of `plugins`, which `results` follows */
-const collectFailures = (plugins: Plugin[], results: PromiseSettledResult<void>[]): PluginFailure[] =>
-  results.flatMap((result, index) => (isRejected(result) ? [{ plugin: plugins[index], reason: result.reason }] : []));
-
-/**
- * A failure in one line, as main() starts reporting it: a GekkoError's message explains it, any other error is named, and any other
- * value is written as describeError writes it. Not String() for a value that is not an error, which gives '[object Object]' for an
- * object and throws for one without a prototype; nor util.inspect, which wrote Bun's ResolveMessage, the rejection of a dynamic
- * import() of a file that cannot be found, as 'ResolveMessage {}'.
- */
-const describeReason = (reason: unknown) => {
-  if (reason instanceof GekkoError) return reason.message;
-  if (reason instanceof Error) return String(reason); // "<name>: <message>"
-  return describeError(reason);
-};
+import { collectFailures, describeReason, isRejected } from './plugins.helper';
+import { PluginFailure } from './plugins.types';
 
 export class PluginsStream extends Writable {
   private readonly plugins: Plugin[];

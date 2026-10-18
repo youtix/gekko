@@ -7,7 +7,8 @@ import { toISOString } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
 import { MAX_GAP_FILL_MINUTES } from './fillCandleGap.const';
-import { FillCandleGapOptions, FillCandleGapStream } from './fillCandleGap.stream';
+import { FillCandleGapStream } from './fillCandleGap.stream';
+import { FillCandleGapOptions } from './fillCandleGap.types';
 
 vi.mock('@services/logger', () => ({ warning: vi.fn() }));
 

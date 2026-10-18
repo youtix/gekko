@@ -1,6 +1,6 @@
 import { Indicator } from '@indicators/indicator';
 import { Candle } from '@models/candle.types';
-import { getTrueRange } from './trueRange.utils';
+import { getTrueRange } from './trueRange.helper';
 
 export class TrueRange extends Indicator<'TrueRange'> {
   private prevCandle?: Candle;

@@ -11,7 +11,7 @@ import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { OrderState } from '@models/order.types';
 import { ExchangeNetworkError, InvalidOrder, OrderNotFound } from '@services/exchange/exchange.error';
 import * as logger from '@services/logger';
-import { assertOrderWithinLimits } from '@utils/market/market.utils';
+import { assertOrderWithinLimits } from '@helpers/market/market.helper';
 import { round } from '@utils/math/round.utils';
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';

@@ -1,5 +1,5 @@
+import { PositionBook } from '@helpers/strategy/positionBook/positionBook';
 import { TradingPair } from '@models/utility.types';
-import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,7 +9,7 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
-import { indicatorsBySymbol } from '@strategies/strategy.utils';
+import { indicatorsBySymbol } from '@helpers/strategy/strategy.helper';
 import { compareWithTolerance, isFiniteNumber } from '@utils/math/math.utils';
 import { tmaStrategySchema } from './tma.schema';
 import { TMAStrategyParams } from './tma.types';

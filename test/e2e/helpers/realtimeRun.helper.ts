@@ -1,5 +1,5 @@
 import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { LAST_FLUSH_TIMEOUT } from '@services/bots/telegram/telegram.const';
 import { jest, mock, setDefaultTimeout } from 'bun:test';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';

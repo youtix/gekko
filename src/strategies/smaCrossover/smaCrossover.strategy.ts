@@ -1,5 +1,6 @@
+import { PositionBook } from '@helpers/strategy/positionBook/positionBook';
+import { indicatorsBySymbol } from '@helpers/strategy/strategy.helper';
 import { TradingPair } from '@models/utility.types';
-import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,16 +10,9 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
-import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { compareWithTolerance, isFiniteNumber } from '@utils/math/math.utils';
 import { smaCrossoverStrategySchema } from './smaCrossover.schema';
-import { SMACrossoverStrategyParams } from './smaCrossover.types';
-
-/**
- * Whether the price of a pair was above its SMA before the candle in progress, and whether it is at that candle: null until it is first
- * off a ready SMA
- */
-type PriceSide = { wasPriceAboveSMA: boolean | null; isPriceAboveSMA: boolean | null };
+import { PriceSide, SMACrossoverStrategyParams } from './smaCrossover.types';
 
 /**
  * Simple Moving Average Crossover Strategy

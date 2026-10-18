@@ -1,12 +1,9 @@
 import { ONE_SECOND } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { error } from '@services/logger';
 import { wait } from '@utils/process/process.utils';
+import { MAX_BACKOFF_FACTOR } from './bots.const';
 import { HandleCommand } from './bots.types';
-
-// After a failed check, each wait doubles, up to this many intervals (a minute with the default interval): a network that stays
-// down is then tried, and its failure logged, about once a minute rather than at every interval.
-const MAX_BACKOFF_FACTOR = 60;
 
 export abstract class Bot {
   protected handleCommand?: HandleCommand;

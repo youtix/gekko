@@ -1,5 +1,5 @@
 import { Indicator } from '@indicators/indicator';
-import { checkInteger, checkOneOf } from '@indicators/indicator.utils';
+import { checkInteger, checkOneOf } from '@indicators/indicator.helper';
 import { MOVING_AVERAGE_TYPES } from '@indicators/movingAverages/movingAverages.const';
 import { RSI } from '@indicators/oscillators/rsi/rsi.indicator';
 import { Candle } from '@models/candle.types';

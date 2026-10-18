@@ -1,4 +1,4 @@
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { fetcher } from '@services/fetcher/fetcher.service';
 import { debug, info, warning } from '@services/logger';
@@ -7,48 +7,10 @@ import { isString } from 'lodash-es';
 import { z } from 'zod';
 import { Bot } from '../Bot';
 import { HandleCommand } from '../bots.types';
+import { COMMAND } from './telegram.const';
+import { describeChat, splitIntoMessages } from './telegram.helper';
 import { getUpdatesAnswerSchema } from './telegram.schema';
-import { TelegramMessage, TelegramUpdate } from './telegram.types';
-
-// Bot API, sendMessage: a text of "1-4096 characters after entities parsing" (https://core.telegram.org/bots/api#sendmessage).
-// Compared with String.length, which counts UTF-16 code units: never fewer than the characters.
-const MAX_MESSAGE_LENGTH = 4096;
-
-/**
- * Cuts a text into consecutive slices that each fit in a message: concatenated, they give the text back. A slice ends just
- * after the last line break in reach, so that log lines and stack frames stay whole. A line longer than a message is cut at
- * the limit, or one code unit short of it when a surrogate pair (an emoji, say) straddles it.
- */
-const splitIntoMessages = (text: string) => {
-  const parts: string[] = [];
-  let rest = text;
-  while (rest.length > MAX_MESSAGE_LENGTH) {
-    const lineEnd = rest.lastIndexOf('\n', MAX_MESSAGE_LENGTH - 1) + 1; // 0 when no line break is in reach
-    const straddles = rest.codePointAt(MAX_MESSAGE_LENGTH - 1)! > 0xffff; // A pair starts on the last code unit in reach
-    const end = lineEnd > 0 ? lineEnd : straddles ? MAX_MESSAGE_LENGTH - 1 : MAX_MESSAGE_LENGTH;
-    parts.push(rest.slice(0, end));
-    rest = rest.slice(end);
-  }
-  return [...parts, rest];
-};
-
-// A command is the first token of a text when it is a slash and a name: '/help', or '/help@bot_username' to single out one bot
-// in a group (https://core.telegram.org/bots/features#commands). The tokens after it, if any, are its arguments.
-const COMMAND = /^(\/[^\s@]+)(?:@(\S*))?/;
-
-/**
- * How the logs name the chat of a message, besides its id: 'private chat with @user', 'group "Title"', or undefined when the message
- * does not tell. A name its owner typed is written as a JSON string, whose escapes keep it on one line.
- */
-const describeChat = ({ chat, from }: TelegramMessage) => {
-  if (chat.type === 'private') {
-    const username = chat.username ?? from?.username;
-    if (username) return `private chat with @${username}`;
-    return from?.first_name ? `private chat with ${JSON.stringify(from.first_name)}` : 'private chat';
-  }
-  // A group, a supergroup or a channel
-  return chat.type && chat.title ? `${chat.type} ${JSON.stringify(chat.title)}` : chat.type;
-};
+import { TelegramUpdate } from './telegram.types';
 
 export class TelegramBot extends Bot {
   private readonly apiUrl: string;

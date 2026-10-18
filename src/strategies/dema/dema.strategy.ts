@@ -1,5 +1,6 @@
+import { PositionBook } from '@helpers/strategy/positionBook/positionBook';
+import { indicatorsBySymbol } from '@helpers/strategy/strategy.helper';
 import { TradingPair } from '@models/utility.types';
-import { PositionBook } from '@strategies/positionBook';
 import {
   IndicatorResults,
   InitParams,
@@ -9,20 +10,9 @@ import {
   OnOrderErroredEventParams,
   Strategy,
 } from '@strategies/strategy.types';
-import { indicatorsBySymbol } from '@strategies/strategy.utils';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { demaStrategySchema } from './dema.schema';
-import { DEMAStrategyParams } from './dema.types';
-
-/** The trend of a pair */
-type PairTrend = {
-  currentTrend?: 'down' | 'up';
-  /**
-   * Whether the current trend has placed its order. It waits while the strategy holds the other position on the pair or an order is
-   * pending there: a BUY that fills during a downtrend is sold on the next candle of that downtrend.
-   */
-  isTrendAdviced: boolean;
-};
+import { DEMAStrategyParams, PairTrend } from './dema.types';
 
 /** Trades every watched pair, each with its own DEMA and SMA, its own trend and its own position (see PositionBook) */
 export class DEMA implements Strategy<DEMAStrategyParams> {

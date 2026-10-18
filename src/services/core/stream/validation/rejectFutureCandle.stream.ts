@@ -1,7 +1,7 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import { CandleBucket } from '@models/event.types';
 import { warning } from '@services/logger';
-import { getBucketTimestamp } from '@utils/candle/candle.utils';
+import { getBucketTimestamp } from '@helpers/candle/candle.helper';
 import { toISOString } from '@utils/date/date.utils';
 import { Transform, TransformCallback } from 'node:stream';
 

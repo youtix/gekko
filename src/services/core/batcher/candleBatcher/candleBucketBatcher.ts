@@ -2,10 +2,11 @@ import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
-import { getBucketTimestamp } from '@utils/candle/candle.utils';
+import { getBucketTimestamp } from '@helpers/candle/candle.helper';
 import { toISOString } from '@utils/date/date.utils';
+import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
-import { FastCandleBatcher, isTimeframeCandleClose } from './fastCandleBatcher';
+import { FastCandleBatcher } from './fastCandleBatcher';
 
 /**
  * Batches 1-minute CandleBuckets into higher timeframe CandleBuckets.

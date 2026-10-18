@@ -1,5 +1,5 @@
 import { ONE_SECOND } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { debug } from '@services/logger';
 import { getRetryDelay } from '@utils/fetch/fetch.utils';
 import { wait } from '@utils/process/process.utils';

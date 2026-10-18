@@ -4,7 +4,7 @@ import { Asset, TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { Exchange } from '@services/exchange/exchange.types';
 import { Storage } from '@services/storage/storage';
-import { SequentialEventEmitter } from '@utils/event/sequentialEventEmitter';
+import { SequentialEventEmitter } from '@helpers/event/sequentialEventEmitter';
 import { PluginMissingServiceError } from './plugin.error';
 
 export abstract class Plugin extends SequentialEventEmitter {

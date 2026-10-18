@@ -1,6 +1,6 @@
 import { LogLevel } from '@models/logLevel.types';
 import { Tag } from '@models/tag.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { isString, upperCase } from 'lodash-es';
 import { createLogger, format, transports } from 'winston';
 import { BufferedLog, LogInput } from './logger.types';

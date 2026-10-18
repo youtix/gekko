@@ -3,9 +3,7 @@ import { Nullable } from '@models/utility.types';
 import { CandleDateranges } from '@services/storage/storage.types';
 import { toISOString } from '@utils/date/date.utils';
 import { Interval } from 'date-fns';
-
-/** Candle counts of a batch read during the backtest, when the read finds fewer candles than the date range check did */
-export type BatchCandleCount = { expected: number; received: number };
+import { BatchCandleCount } from './backtest.types';
 
 export class MissingCandlesError extends GekkoError {
   constructor(

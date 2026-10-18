@@ -1,8 +1,6 @@
-import { getTrueRange } from '@indicators/volatility/trueRange/trueRange.utils';
+import { getTrueRange } from '@indicators/volatility/trueRange/trueRange.helper';
 import { Candle } from '@models/candle.types';
-
-/** The side of a directional movement: up for +DM and +DI, down for −DM and −DI */
-export type Direction = 'plus' | 'minus';
+import { Direction } from './directionalMovement.types';
 
 /**
  * Wilder's directional movement, which +DM, −DM, +DI, −DI and DX read. From the second candle, each candle gives a true range and

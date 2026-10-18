@@ -6,7 +6,7 @@ import {
   ORDER_PARTIALLY_FILLED_EVENT,
   ORDER_STATUS_CHANGED_EVENT,
 } from '@constants/event.const';
-import { describeError, toError } from '@errors/error.utils';
+import { describeError, toError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { Watch } from '@models/configuration.types';
 import { OrderSide, OrderState, OrderType } from '@models/order.types';
@@ -22,7 +22,7 @@ import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { OrderCancelDetails, OrderCancelEventPayload, OrderErrorEventPayload, OrderStatus, OrderSummary, Transaction } from './order.types';
-import { createOrderSummary, getWeightedAverage } from './order.utils';
+import { createOrderSummary, getWeightedAverage } from './order.helper';
 
 export abstract class Order extends EventEmitter {
   private status: OrderStatus;

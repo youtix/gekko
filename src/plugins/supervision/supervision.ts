@@ -1,8 +1,7 @@
 import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { Candle } from '@models/candle.types';
-import { Timeframe } from '@models/configuration.types';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
 import { Plugin } from '@plugins/plugin';
@@ -16,26 +15,9 @@ import { toISOString } from '@utils/date/date.utils';
 import { shallowObjectDiff } from '@utils/object/object.utils';
 import { pluralize } from '@utils/string/string.utils';
 import { filter, isEmpty } from 'lodash-es';
+import { NATIVE_TIMEFRAMES, STOPPING_ANSWER } from './supervision.const';
 import { supervisionSchema } from './supervision.schema';
-import { Subscription, SUBSCRIPTION_NAMES, SupervisionConfig } from './supervision.types';
-
-/**
- * The timeframes whose candles each exchange serves through ccxt 4.5.39 (its `timeframes`), paper-binance reading Binance's. ccxt
- * sends any other one as is and the exchange refuses it (a BadRequest from Binance), so the candle check batches those candles from
- * 1-minute ones instead, as it does for every timeframe of an exchange missing here.
- */
-const BINANCE_TIMEFRAMES: Timeframe[] = ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '12h', '1d', '1w', '1M'];
-const NATIVE_TIMEFRAMES: Record<string, Timeframe[]> = {
-  binance: BINANCE_TIMEFRAMES,
-  'paper-binance': BINANCE_TIMEFRAMES,
-  hyperliquid: ['1m', '3m', '5m', '15m', '30m', '1h', '2h', '4h', '8h', '12h', '1d', '1w', '1M'],
-};
-
-/** The answer to a subscription once processFinalize has started */
-const STOPPING_ANSWER = 'Gekko is stopping: no monitoring can start any more';
-
-/** The checks that alert when a usage exceeds its threshold, as their alerts name them */
-type ThresholdCheck = 'CPU' | 'Memory';
+import { Subscription, SUBSCRIPTION_NAMES, SupervisionConfig, ThresholdCheck } from './supervision.types';
 
 export class Supervision extends Plugin {
   private bot: TelegramBot;

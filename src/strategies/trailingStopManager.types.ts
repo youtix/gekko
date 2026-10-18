@@ -1,4 +1,4 @@
-import { TrailingConfig } from '@models/advice.types';
+import { StrategyOrder, TrailingConfig } from '@models/advice.types';
 import { TradingPair } from '@models/utility.types';
 import { UUID } from 'node:crypto';
 
@@ -53,3 +53,10 @@ export type TrailingStopState = {
  * stayed under its stop price, until the circuit breaker stopped the bot. Nothing is held back when no hold is given.
  */
 export type TriggerHold = (stop: TrailingStopState, price: number) => boolean;
+
+export type AddOrderParams = Pick<StrategyOrder, 'symbol' | 'trailing'> & {
+  id: UUID;
+  /** The amount the BUY filled (see TrailingStopState.amount) */
+  amount: number;
+  createdAt: number;
+};

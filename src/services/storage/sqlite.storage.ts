@@ -1,5 +1,5 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
@@ -14,9 +14,8 @@ import { each } from 'lodash-es';
 import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Storage } from './storage';
+import { IN_MEMORY } from './storage.const';
 import { CandleDateranges, MissingCandleCount } from './storage.types';
-
-const IN_MEMORY = ':memory:';
 
 export class SQLiteStorage extends Storage {
   db: Database;

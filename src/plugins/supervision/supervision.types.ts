@@ -6,3 +6,6 @@ export const SUBSCRIPTION_NAMES = ['cpu_check', 'memory_check', 'candle_check', 
 export type Subscription = (typeof SUBSCRIPTION_NAMES)[number];
 
 export type SupervisionConfig = z.infer<typeof supervisionSchema>;
+
+/** The checks that alert when a usage exceeds its threshold, as their alerts name them */
+export type ThresholdCheck = 'CPU' | 'Memory';

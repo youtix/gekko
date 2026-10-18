@@ -1,3 +1,4 @@
+import { OrderCanceledEvent, OrderInitiatedEvent } from '@models/event.types';
 import { OrderSide, OrderType } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
 import { Order as AbstractOrder } from '@services/core/order/order';
@@ -45,3 +46,30 @@ export type CheckOrderSummaryParams = {
   orderCreationDate: EpochTimeStamp;
   summary: OrderSummary;
 };
+
+export type OrderInstance = TraderOrderMetadata['orderInstance'];
+/** An order, as the events relayed to the strategy describe it */
+export type RelayedOrder = OrderInitiatedEvent['order'];
+/** What an order reports with ORDER_INVALID_EVENT (see Order.orderRejected): `filled` says whether it executed part of its amount */
+export type OrderRejection = { reason: string; status: string; filled: boolean };
+/** What an order reports with ORDER_CANCELED_EVENT (see Order.orderCanceled): relayed as is */
+export type OrderCancelation = { timestamp: EpochTimeStamp } & Pick<OrderCanceledEvent['order'], 'filled' | 'remaining'>;
+/**
+ * An order the balance read last may not show (see Trader.unreadOrders): what it takes from the free balance of `assetName`, the asset
+ * of a SELL, the currency of a BUY
+ */
+export type UnreadOrder = { assetName: string; amount: number; synchronizationCount: number };
+/** The free balance of an asset a SELL can take, or of the currency a BUY can spend (see Trader.getFreeBalanceLeft) */
+export type FreeBalanceLeft = {
+  /** What the last synchronization read */
+  read: number;
+  /** What the orders placed since take from it: the SELLs of the asset, the BUYs of the currency */
+  taken: number;
+  /** What is left of it, never below 0 */
+  free: number;
+};
+/**
+ * What an order sized by its cost or by its allocation asks for, before any cap (see Trader.getBudget): the currency a BUY may spend, or
+ * the amount of the asset a SELL sells, and `label`, the order and its sizing as the logs name them
+ */
+export type Budget = { asked: number; label: string };

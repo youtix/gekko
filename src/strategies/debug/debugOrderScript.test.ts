@@ -1,6 +1,6 @@
+import { LoggedLine, OrderOutcome, OrderRecorder, relayOrderOutcome } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent } from '@models/event.types';
 import type { TradingPair } from '@models/utility.types';
-import { LoggedLine, OrderOutcome, OrderRecorder, relayOrderOutcome } from '@strategies/positionTracker.mock';
 import type { Tools } from '@strategies/strategy.types';
 import { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it } from 'vitest';

@@ -1,12 +1,10 @@
+import { hlc3 } from '@helpers/candle/candle.helper';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { Indicator } from '@indicators/indicator';
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
-import { hlc3 } from '@utils/candle/candle.utils';
-import { RingBuffer } from '@utils/collection/ringBuffer';
 import { compareWithTolerance } from '@utils/math/math.utils';
-
-/** Adds a typical price's distance from the mean to the sum, as CCI always has. Made once: a closure over the mean is one per candle */
-const addDeviation = (sum: number, price: number, mean: number) => Math.abs(price - mean) + sum;
+import { addDeviation } from './cci.helper';
 
 /**
  * TA-Lib's CCI: how far the typical price is from its mean over period, in units of 0.015 × their mean deviation, from candle period

@@ -1,7 +1,7 @@
 import { Indicator } from '@indicators/indicator';
-import { checkInteger } from '@indicators/indicator.utils';
+import { checkInteger } from '@indicators/indicator.helper';
 import { Candle } from '@models/candle.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 
 /** Rate of change: the percent change of the close over `period` candles. Its first value comes at candle period + 1, as in TA-Lib. */
 export class ROC extends Indicator<'ROC'> {

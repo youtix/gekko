@@ -1,5 +1,5 @@
 import type { MovingAverageClasses } from '@indicators/indicator.types';
-import { checkInputSource, checkInteger, checkOneOf, getInputSource } from '@indicators/indicator.utils';
+import { checkInputSource, checkInteger, checkOneOf, getInputSource } from '@indicators/indicator.helper';
 import { MOVING_AVERAGE_TYPES, MOVING_AVERAGES } from '@indicators/movingAverages/movingAverages.const';
 import { Candle } from '@models/candle.types';
 import { isNil } from 'lodash-es';

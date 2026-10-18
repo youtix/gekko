@@ -5,16 +5,16 @@ import { CandleBucket } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
 import { error, info, warning } from '@services/logger';
-import { calculatePortfolioTotalValue, createEmptyPortfolio } from '@utils/portfolio/portfolio.utils';
+import { calculatePortfolioTotalValue, createEmptyPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { PortfolioAnalyzer } from './portfolioAnalyzer';
 import { EMPTY_PORTFOLIO_REPORT } from './portfolioAnalyzer.const';
 import { PortfolioReport } from './portfolioAnalyzer.types';
-import { logPortfolioReport } from './portfolioAnalyzer.utils';
+import { logPortfolioReport } from './portfolioAnalyzer.helper';
 
 // Mock dependencies
-vi.mock('./portfolioAnalyzer.utils', () => ({
+vi.mock('./portfolioAnalyzer.helper', () => ({
   logPortfolioReport: vi.fn(),
 }));
 
@@ -33,8 +33,8 @@ vi.mock('@services/logger', () => ({
 }));
 
 // The actual valuation, watched: how often the analyzer values a portfolio, and with what
-vi.mock('@utils/portfolio/portfolio.utils', async importOriginal => {
-  const actual = await importOriginal<typeof import('@utils/portfolio/portfolio.utils')>();
+vi.mock('@helpers/portfolio/portfolio.helper', async importOriginal => {
+  const actual = await importOriginal<typeof import('@helpers/portfolio/portfolio.helper')>();
   return { ...actual, calculatePortfolioTotalValue: vi.fn(actual.calculatePortfolioTotalValue) };
 });
 

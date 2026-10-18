@@ -3,7 +3,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Plugin } from '@plugins/plugin';
 import { error, info, warning } from '@services/logger';
-import { SequentialEventEmitter } from '@utils/event/sequentialEventEmitter';
+import { SequentialEventEmitter } from '@helpers/event/sequentialEventEmitter';
 import { noop } from 'lodash-es';
 import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';

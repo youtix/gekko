@@ -13,7 +13,7 @@ import { compact, each, filter, flatMap, map, some } from 'lodash-es';
 import { z } from 'zod';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import { PluginsEmitSameEventError } from './pipeline.error';
-import { streamPipelines } from './pipeline.utils';
+import { streamPipelines } from './pipeline.helper';
 
 export const launchStream = async (context: PipelineContext, { signal }: GekkoPipelineOptions = {}) => {
   const plugins = compact(map(context, p => p.plugin));

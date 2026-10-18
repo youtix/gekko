@@ -1,4 +1,4 @@
-import { checkBelow, checkInteger } from '@indicators/indicator.utils';
+import { checkBelow, checkInteger } from '@indicators/indicator.helper';
 import { EMA } from '@indicators/movingAverages/ema/ema.indicator';
 import { Candle } from '@models/candle.types';
 import { isNil } from 'lodash-es';

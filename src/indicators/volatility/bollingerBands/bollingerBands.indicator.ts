@@ -1,14 +1,12 @@
+import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { Indicator } from '@indicators/indicator';
+import { checkInteger, checkNumber, checkOneOf } from '@indicators/indicator.helper';
 import type { MovingAverageClasses } from '@indicators/indicator.types';
-import { checkInteger, checkNumber, checkOneOf } from '@indicators/indicator.utils';
 import { MOVING_AVERAGE_TYPES, MOVING_AVERAGES } from '@indicators/movingAverages/movingAverages.const';
 import { Candle } from '@models/candle.types';
-import { RingBuffer } from '@utils/collection/ringBuffer';
 import { compareWithTolerance } from '@utils/math/math.utils';
 import { isNil } from 'lodash-es';
-
-/** Adds a close's squared distance from the mean to the sum, as stdev() does. Made once: a closure over the mean is one per candle */
-const addSquare = (sum: number, close: number, mean: number) => sum + Math.pow(close - mean, 2);
+import { addSquare } from './bollingerBands.helper';
 
 /**
  * TA-Lib's BBANDS: a middle band, the maType average of the close over period, and an upper and a lower band stdevUp and stdevDown

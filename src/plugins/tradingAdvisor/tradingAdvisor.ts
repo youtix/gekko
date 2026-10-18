@@ -6,7 +6,7 @@ import {
   TIMEFRAME_CANDLE_EVENT,
 } from '@constants/event.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
-import { describeError } from '@errors/error.utils';
+import { describeError } from '@errors/error.helper';
 import { AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -17,7 +17,7 @@ import { CandleBucketBatcher } from '@services/core/batcher/candleBatcher/candle
 import { MarketData, OpenOrder } from '@services/exchange/exchange.types';
 import { error, info } from '@services/logger';
 import { StrategyManager } from '@strategies/strategyManager';
-import { isFetchedPortfolio } from '@utils/portfolio/portfolio.utils';
+import { isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { bindAll, filter } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { tradingAdvisorSchema } from './tradingAdvisor.schema';
