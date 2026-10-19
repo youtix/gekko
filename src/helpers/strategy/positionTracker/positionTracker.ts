@@ -6,7 +6,7 @@ import { getHolding, isSellable } from './positionTracker.helper';
 import { Fill, PendingOrder, UnfinishedOrderParams } from './positionTracker.types';
 
 /**
- * The position of a strategy that trades all-in: flat or long, and its own orders whose outcome has not come yet. Gekko 2 relays
+ * The position of a strategy that trades all-in: flat or long, and its own orders whose outcome has not come yet. Gekko relays
  * every advice, so a strategy advising on every candle of a trend placed an all-in order sized from what the previous one left,
  * then had it refused until maxConsecutiveErrors stopped the bot: the strategy buys only when flat and sells only when long, never
  * while an order of its own is pending, and this is the bookkeeping that tells it which. It follows one pair: a strategy that trades
