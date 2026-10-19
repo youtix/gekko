@@ -1,7 +1,7 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import { AdviceOrder } from '@models/advice.types';
+import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
 import { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent, RoundTrip } from '@models/event.types';
-import { BalanceDetail } from '@models/portfolio.types';
+import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
 import { TelegramBot } from '@services/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@services/logger';
@@ -21,7 +21,12 @@ vi.mock('@services/configuration/configuration', () => {
   const Configuration = vi.fn(function () {
     return {
       getWatch: vi.fn(() => ({
-        pairs: [{ symbol: 'BTC/USD', timeframe: '1m' }],
+        pairs: [
+          { symbol: 'BTC/USD', timeframe: '1m' },
+          { symbol: 'ETH/USD', timeframe: '1m' },
+        ],
+        assets: ['BTC', 'ETH'],
+        currency: 'USD',
         mode: 'realtime',
         warmup: {},
       })),
@@ -83,6 +88,17 @@ describe('EventSubscriber', () => {
     const bucket = new Map([['BTC/USD', { close }]]);
     plugin['processOneMinuteBucket'](bucket as any);
     expect(plugin['prices'].get('BTC/USD')).toBe(close);
+  });
+
+  // Every candle of a bucket starts on its minute: the prices are those of the close of the bucket
+  it('dates the prices with the close of the last bucket processed', () => {
+    const start = toTimestamp('2024-01-01T12:02:00Z');
+    const bucket = new Map([
+      ['BTC/USD', { start, close: 110 }],
+      ['ETH/USD', { start, close: 2200 }],
+    ]);
+    plugin['processOneMinuteBucket'](bucket as any);
+    expect(plugin['pricesAt']).toBe(toTimestamp('2024-01-01T12:03:00Z'));
   });
 
   describe('event notifications', () => {
@@ -191,6 +207,7 @@ describe('EventSubscriber', () => {
     const onOrderCompleted = (p: EventSubscriber, overrides = {}) => p.onOrderCompleted([makeOrderCompletedEvent(overrides)]);
     const makeRoundTrip = (overrides: Partial<RoundTrip> = {}): RoundTrip => ({
       id: 1,
+      symbol: 'BTC/USD',
       entryAt: 1000,
       entryPrice: 100,
       entryEquity: 1000,
@@ -208,9 +225,11 @@ describe('EventSubscriber', () => {
     // logs), or for the round trips, which have none, by their exit times
     const [firstId, secondId] = ['11111111-1111-4111-8111-111111111111', '22222222-2222-4222-8222-222222222222'] as UUID[];
     const [firstExit, secondExit] = ['2022-01-01T01:00:00.000Z', '2022-01-01T02:00:00.000Z'];
+    /** A cancel request as the StrategyManager relays it for an order it created and that has not ended: with its pair */
+    const cancelRequest = (id: UUID): AdviceCancelOrder => ({ id, symbol });
     const notifyStrategyInfos = (p: EventSubscriber) => p.onStrategyInfo([firstId, secondId].map(message => makeStrategyInfo({ message })));
     const notifyAdviceOrders = (p: EventSubscriber) => p.onStrategyCreateOrder([firstId, secondId].map(id => makeAdviceOrder({ id })));
-    const notifyCancelRequests = (p: EventSubscriber) => p.onStrategyCancelOrder([firstId, secondId]);
+    const notifyCancelRequests = (p: EventSubscriber) => p.onStrategyCancelOrder([firstId, secondId].map(cancelRequest));
     const notifyInitiatedOrders = (p: EventSubscriber) =>
       p.onOrderInitiated([firstId, secondId].map(id => makeOrderInitiatedEvent({ order: { id } })));
     const notifyCanceledOrders = (p: EventSubscriber) =>
@@ -458,7 +477,7 @@ describe('EventSubscriber', () => {
       const blocked = 'HTTP 403 Forbidden: Forbidden: bot was blocked by the user';
       const notSent = `The strat_cancel notification was not sent: ${blocked}`;
       const failNextSends = (count: number) => range(count).forEach(() => fakeBot.sendMessage.mockRejectedValueOnce(new Error(blocked)));
-      const requestCancels = (count: number) => plugin.onStrategyCancelOrder(range(count).map(() => firstId));
+      const requestCancels = (count: number) => plugin.onStrategyCancelOrder(range(count).map(() => cancelRequest(firstId)));
 
       beforeEach(() => {
         plugin['handleCommand']('/sub_strat_cancel');
@@ -607,7 +626,7 @@ describe('EventSubscriber', () => {
       it('names a single notification given up in the singular', async () => {
         plugin['handleCommand']('/sub_strat_cancel');
         fakeBot.sendMessage.mockReturnValueOnce(new Promise(() => {}));
-        plugin.onStrategyCancelOrder([firstId]);
+        plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
         plugin['processFinalize']();
         await vi.advanceTimersByTimeAsync(15000);
         expect(warning).toHaveBeenCalledWith('event subscriber', '1 notification given up: not sent within 15 s');
@@ -626,7 +645,7 @@ describe('EventSubscriber', () => {
         };
         // Queues a cancel request as the loop sending the first one ends, before the wait looks again: registered before the wait, on
         // the promise of that loop, its callback runs first
-        const requestCancelAsTheLoopEnds = () => plugin['sending'].then(() => plugin.onStrategyCancelOrder([secondId]));
+        const requestCancelAsTheLoopEnds = () => plugin['sending'].then(() => plugin.onStrategyCancelOrder([cancelRequest(secondId)]));
 
         beforeEach(() => {
           plugin['handleCommand']('/sub_strat_cancel');
@@ -635,7 +654,7 @@ describe('EventSubscriber', () => {
         it('waits for one queued right after it started, while none was being sent', async () => {
           fakeBot.sendMessage.mockReturnValueOnce(new Promise(() => {}));
           finalize();
-          plugin.onStrategyCancelOrder([firstId]);
+          plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
           await vi.advanceTimersByTimeAsync(0);
           expect(isFinalized).toBe(false);
         });
@@ -643,7 +662,7 @@ describe('EventSubscriber', () => {
         it('waits for one queued as the loop it was waiting for ended', async () => {
           const firstSend = Promise.withResolvers<void>();
           fakeBot.sendMessage.mockReturnValueOnce(firstSend.promise).mockReturnValueOnce(new Promise(() => {}));
-          plugin.onStrategyCancelOrder([firstId]);
+          plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
           requestCancelAsTheLoopEnds();
           finalize();
           firstSend.resolve();
@@ -660,7 +679,7 @@ describe('EventSubscriber', () => {
           fakeBot.sendMessage
             .mockReturnValueOnce(new Promise<void>(resolve => setTimeout(resolve, 10000)))
             .mockReturnValueOnce(new Promise(() => {}));
-          plugin.onStrategyCancelOrder([firstId]);
+          plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
           requestCancelAsTheLoopEnds();
           finalize();
           await vi.advanceTimersByTimeAsync(elapsed);
@@ -669,7 +688,7 @@ describe('EventSubscriber', () => {
 
         it('gives up the one queued as the loop it was waiting for ended', async () => {
           fakeBot.sendMessage.mockReturnValueOnce(Promise.resolve()).mockReturnValueOnce(new Promise(() => {}));
-          plugin.onStrategyCancelOrder([firstId]);
+          plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
           requestCancelAsTheLoopEnds();
           finalize();
           await vi.advanceTimersByTimeAsync(15000);
@@ -679,7 +698,7 @@ describe('EventSubscriber', () => {
         it('leaves no timer behind once the one queued meanwhile is out', async () => {
           const firstSend = Promise.withResolvers<void>();
           fakeBot.sendMessage.mockReturnValueOnce(firstSend.promise);
-          plugin.onStrategyCancelOrder([firstId]);
+          plugin.onStrategyCancelOrder([cancelRequest(firstId)]);
           requestCancelAsTheLoopEnds();
           finalize();
           firstSend.resolve();
@@ -755,8 +774,20 @@ describe('EventSubscriber', () => {
       firstSend.resolve();
       await settle();
       expect(fakeBot.sendMessage).toHaveBeenLastCalledWith(
-        ['Strategy requested order cancellation', `Order Id: ${secondId}`, 'At time: 2022-01-01T00:00:00.000Z'].join('\n'),
+        ['Strategy requested order cancellation for BTC/USD', `Order Id: ${secondId}`, 'At time: 2022-01-01T00:00:00.000Z'].join('\n'),
       );
+    });
+
+    // The StrategyManager names the pair of an order it created and that has not ended, and knows no other (see AdviceCancelOrder)
+    it.each`
+      request                    | line
+      ${{ id: firstId, symbol }} | ${'Strategy requested order cancellation for BTC/USD'}
+      ${{ id: firstId }}         | ${'Strategy requested order cancellation for an order it did not create, or that had ended'}
+    `('opens the notification of a cancel request with "$line"', async ({ request, line }) => {
+      plugin['handleCommand']('/sub_strat_cancel');
+      plugin.onStrategyCancelOrder([request]);
+      await settle();
+      expect(fakeBot.sendMessage.mock.calls[0][0].split('\n')[0]).toBe(line);
     });
 
     // The Trader places an advice of any type at its price, or without one (none given, or an indicator still null) at the market
@@ -874,6 +905,19 @@ describe('EventSubscriber', () => {
       expect(fakeBot.sendMessage).not.toHaveBeenCalledWith(expect.stringContaining('Remaining amount'));
     });
 
+    // An order without a price (a MARKET or a STICKY one) is priced at the last close of its pair
+    it.each`
+      event             | notify                                                                          | line
+      ${'order_init'}   | ${(p: EventSubscriber) => onOrderInitiated(p, { order: { price: undefined } })} | ${'Target price: 42 USD'}
+      ${'order_cancel'} | ${(p: EventSubscriber) => onOrderCanceled(p, { order: { price: undefined } })}  | ${'Current price: 42 USD'}
+    `('writes "$line" in the $event notification of an order without a price', async ({ event, notify, line }) => {
+      plugin['processOneMinuteBucket'](new Map([[symbol, { close: 42 }]]) as any);
+      plugin['handleCommand'](`/sub_${event}`);
+      notify(plugin);
+      await settle();
+      expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+    });
+
     it('reports the limit price of a canceled LIMIT order', async () => {
       plugin['handleCommand']('/sub_order_cancel');
       onOrderCanceled(plugin, { order: { type: 'LIMIT', side: 'SELL', amount: 2, filled: 1, remaining: 1, price: 999 } });
@@ -981,7 +1025,7 @@ describe('EventSubscriber', () => {
         await notifyRoundTrip({ exitAt: toTimestamp(firstExit) });
         expect(fakeBot.sendMessage).toHaveBeenCalledExactlyOnceWith(
           [
-            'Roundtrip completed',
+            'Roundtrip completed for BTC/USD',
             'PnL: 100',
             'Profit: 10%',
             'Duration: 1 second',
@@ -992,6 +1036,11 @@ describe('EventSubscriber', () => {
             '------',
           ].join('\n'),
         );
+      });
+
+      it('names the pair of the round trip', async () => {
+        await notifyRoundTrip({ symbol: 'ETH/USD' });
+        expect(fakeBot.sendMessage.mock.calls[0][0].split('\n')[0]).toBe('Roundtrip completed for ETH/USD');
       });
 
       it.each`
@@ -1025,9 +1074,119 @@ describe('EventSubscriber', () => {
         });
       });
     });
+
+    // What /portfolio answers with: the last portfolio the Trader read, as the events bring it, dated with its reception, since no event
+    // says when the Trader read it
+    describe('the portfolio it keeps', () => {
+      const receivedAt = toTimestamp('2024-01-01T12:00:02Z');
+      /** A portfolio the Trader read, told apart from the others by the BTC it holds */
+      const read = (btc: number): Portfolio =>
+        new Map([
+          ['BTC', { free: btc, used: 0, total: btc }],
+          ['USD', { free: 100, used: 0, total: 100 }],
+        ]);
+      const kept = () => ({ portfolio: plugin['portfolio'], portfolioAt: plugin['portfolioAt'] });
+
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'], now: receivedAt });
+      });
+
+      it('keeps the last portfolio of a batch of portfolio changes, dated with its reception', () => {
+        plugin.onPortfolioChange([read(1), read(2)]);
+        expect(kept()).toEqual({ portfolio: read(2), portfolioAt: receivedAt });
+      });
+
+      // A portfolio change is queued as the Trader reads the account: the same balances read again are dated anew
+      it('dates anew a portfolio change holding the balances it keeps', () => {
+        plugin.onPortfolioChange([read(1)]);
+        vi.setSystemTime(receivedAt + ONE_MINUTE);
+        plugin.onPortfolioChange([read(1)]);
+        expect(plugin['portfolioAt']).toBe(receivedAt + ONE_MINUTE);
+      });
+
+      it('keeps its portfolio through an empty batch of portfolio changes', () => {
+        plugin.onPortfolioChange([read(1)]);
+        plugin.onPortfolioChange([]);
+        expect(kept()).toEqual({ portfolio: read(1), portfolioAt: receivedAt });
+      });
+
+      // The Trader's portfolioUpdates filter holds a small change back from the portfolio events, that of a fill included: the end of an
+      // order carries the read made once the order had ended
+      describe.each`
+        event               | notifyEnds
+        ${'order_cancel'}   | ${(p: EventSubscriber, ends: Portfolio[]) => p.onOrderCanceled(ends.map(portfolio => makeOrderCanceledEvent({ exchange: { portfolio } })))}
+        ${'order_error'}    | ${(p: EventSubscriber, ends: Portfolio[]) => p.onOrderErrored(ends.map(portfolio => makeOrderErroredEvent({ exchange: { portfolio } })))}
+        ${'order_complete'} | ${(p: EventSubscriber, ends: Portfolio[]) => p.onOrderCompleted(ends.map(portfolio => makeOrderCompletedEvent({ exchange: { portfolio } })))}
+      `('on the end of an order ($event)', ({ notifyEnds }) => {
+        beforeEach(() => {
+          plugin.onPortfolioChange([read(1)]);
+          vi.setSystemTime(receivedAt + ONE_MINUTE);
+        });
+
+        it('keeps the portfolio it carries, dated with its reception, while the chat is subscribed to nothing', () => {
+          notifyEnds(plugin, [read(2)]);
+          expect(kept()).toEqual({ portfolio: read(2), portfolioAt: receivedAt + ONE_MINUTE });
+        });
+
+        it('keeps the portfolio of the last end of its batch', () => {
+          notifyEnds(plugin, [read(2), read(3)]);
+          expect(plugin['portfolio']).toEqual(read(3));
+        });
+
+        // An end whose read failed, or an order refused before it was placed, carries the last read as it stands: dated anew, it would
+        // read as fresh
+        it('leaves the date of the balances it keeps', () => {
+          notifyEnds(plugin, [read(1)]);
+          expect(plugin['portfolioAt']).toBe(receivedAt);
+        });
+
+        // The empty portfolio the Trader starts with, until one of its synchronizations succeeds, is no read
+        it('leaves out the empty portfolio of a Trader that has read none', () => {
+          notifyEnds(plugin, [new Map()]);
+          expect(kept()).toEqual({ portfolio: read(1), portfolioAt: receivedAt });
+        });
+
+        it('changes nothing on an empty batch', () => {
+          notifyEnds(plugin, []);
+          expect(kept()).toEqual({ portfolio: read(1), portfolioAt: receivedAt });
+        });
+      });
+
+      // A handler that throws ends the run
+      it.each`
+        handler
+        ${'onOrderCanceled'}
+        ${'onOrderErrored'}
+        ${'onOrderCompleted'}
+      `('does not throw on an end without its exchange part ($handler)', ({ handler }) => {
+        const unreadable = { order: makeOrderCompletedEvent().order } as any;
+        expect(() => plugin[handler as 'onOrderCompleted']([unreadable])).not.toThrow();
+      });
+
+      // It carries the Trader's last read as it stands, up to exchangeSynchInterval old: dated with its reception, it would read as fresh
+      it('changes neither its portfolio nor its date on an order initiated carrying other balances', () => {
+        plugin.onPortfolioChange([read(1)]);
+        vi.setSystemTime(receivedAt + ONE_MINUTE);
+        plugin.onOrderInitiated([makeOrderInitiatedEvent({ exchange: { portfolio: read(2) } })]);
+        expect(kept()).toEqual({ portfolio: read(1), portfolioAt: receivedAt });
+      });
+
+      it('answers /portfolio with the balances an order end brought, the chat subscribed to nothing', () => {
+        plugin.onOrderCompleted([makeOrderCompletedEvent({ exchange: { portfolio: read(2) } })]);
+        expect(plugin['handleCommand']('/portfolio').split('\n')[1]).toBe('BTC: 2 (free 2, used 0)');
+      });
+    });
   });
 
   describe('commands', () => {
+    it.each`
+      command
+      ${'/foo'}
+      ${'/sub_foo'}
+    `('answers $command with Unknown command', ({ command }) => {
+      expect(plugin['handleCommand'](command)).toBe('Unknown command');
+    });
+
     it.each`
       preSubscribed | expected
       ${false}      | ${'Subscribed to order_init'}
@@ -1078,12 +1237,72 @@ sub_roundtrip_complete - Notify on roundtrip completion
 subscribe_all - Subscribe to all notifications
 unsubscribe_all - Unsubscribe from all notifications
 subscriptions - View current subscriptions
+portfolio - Show the balances, the last prices and the total value
 help - Show help information`);
+    });
+
+    // Answered at once, from what the plugin holds: the balances the Trader read last as the events brought them, the closes of the
+    // last bucket processed, and the total value at those closes
+    describe('/portfolio', () => {
+      beforeEach(() => {
+        vi.useFakeTimers({ toFake: ['Date'], now: toTimestamp('2024-01-01T12:00:02Z') });
+      });
+
+      it('answers before any portfolio or bucket came that there is none yet', () => {
+        expect(plugin['handleCommand']('/portfolio')).toBe(
+          [
+            'No balance received from the Trader yet (no Trader configured, or its first read still on its way)',
+            'No price yet: no 1-minute candle has been processed',
+          ].join('\n'),
+        );
+      });
+
+      // The total value: the 1,000 USD, plus the 0.5 BTC, 0.1 of it reserved by an open order, at 110 (55), plus the 0 ETH at 2,200
+      it('answers with the balances of the watched assets and the currency, the closes of the pairs and the total value', () => {
+        plugin.onPortfolioChange([
+          new Map([
+            ['BTC', { free: 0.4, used: 0.1, total: 0.5 }],
+            ['ETH', { free: 0, used: 0, total: 0 }],
+            ['USD', { free: 1000, used: 0, total: 1000 }],
+          ]),
+        ]);
+        const start = toTimestamp('2024-01-01T12:02:00Z');
+        const bucket = new Map([
+          ['BTC/USD', { start, close: 110 }],
+          ['ETH/USD', { start, close: 2200 }],
+        ]);
+        plugin['processOneMinuteBucket'](bucket as any);
+        vi.setSystemTime(toTimestamp('2024-01-01T12:03:14Z'));
+        expect(plugin['handleCommand']('/portfolio')).toBe(
+          [
+            'Balances read by the Trader, received at 2024-01-01T12:00:02.000Z (3 minutes 12 seconds ago)',
+            'BTC: 0.5 (free 0.4, used 0.1)',
+            'ETH: 0 (free 0, used 0)',
+            'USD: 1,000 (free 1,000, used 0)',
+            'Prices at the close of 2024-01-01T12:03:00.000Z',
+            'BTC/USD: 110 USD',
+            'ETH/USD: 2,200 USD',
+            'Total value: 1,055 USD',
+          ].join('\n'),
+        );
+      });
+
+      // Not through the notifications, which wait for a subscription: the bot sends the answer itself
+      it('sends nothing through the notifications', async () => {
+        plugin['handleCommand']('/portfolio');
+        await settle();
+        expect(fakeBot.sendMessage).not.toHaveBeenCalled();
+      });
     });
   });
 
   it('getStaticConfiguration returns meta', () => {
     const meta = EventSubscriber.getStaticConfiguration();
     expect(meta).toMatchObject({ schema: eventSubscriberSchema, name: 'EventSubscriber' });
+  });
+
+  // The pipeline wires an event to the handler of its name: the portfolio changes reach onPortfolioChange
+  it('listens to the portfolio changes', () => {
+    expect(EventSubscriber.getStaticConfiguration().eventsHandlers).toContain('onPortfolioChange');
   });
 });

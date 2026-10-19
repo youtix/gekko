@@ -1,6 +1,6 @@
-import { ONE_SECOND } from '@constants/time.const';
-import { getAssetBalance } from '@helpers/portfolio/portfolio.helper';
-import { AdviceOrder } from '@models/advice.types';
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
+import { getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
+import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
 import {
   CandleBucket,
   OrderCanceledEvent,
@@ -9,6 +9,7 @@ import {
   OrderInitiatedEvent,
   RoundTrip,
 } from '@models/event.types';
+import { Portfolio } from '@models/portfolio.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
 import { TradingPair } from '@models/utility.types';
 import { PERCENT_ROUNDING } from '@plugins/analyzers/analyzer.const';
@@ -19,16 +20,25 @@ import { debug, info, warning } from '@services/logger';
 import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { formatAmount, formatPercent, pluralize } from '@utils/string/string.utils';
-import { bindAll, filter, isNil } from 'lodash-es';
-import { UUID } from 'node:crypto';
+import { bindAll, filter, isEqual, isNil } from 'lodash-es';
 import { MAX_PENDING_NOTIFICATIONS } from './eventSubscriber.const';
-import { describeNotSent, describeRequestedAmount } from './eventSubscriber.helper';
+import { describeNotSent, describePortfolioAnswer, describeRequestedAmount } from './eventSubscriber.helper';
 import { eventSubscriberSchema } from './eventSubscriber.schema';
 import { Event, EVENT_NAMES, EventSubscriberConfig, PendingNotification } from './eventSubscriber.types';
 
 export class EventSubscriber extends Plugin {
   private bot: TelegramBot;
+  /** The close of each pair's last 1-minute candle, which the notifications and /portfolio price things at */
   private prices = new Map<TradingPair, number>();
+  /** The close of the last 1-minute bucket processed, that of `prices`: undefined until one is */
+  private pricesAt?: EpochTimeStamp;
+  /**
+   * The last portfolio the Trader read, as the events brought it (see keepPortfolio and refreshPortfolio), which /portfolio answers
+   * with: undefined until one comes. Not fetched: the plugin is given no exchange, and a command is answered synchronously.
+   */
+  private portfolio?: Portfolio;
+  /** When `portfolio` was received, which /portfolio dates it with: no event says when the Trader read it (see keepPortfolio) */
+  private portfolioAt?: EpochTimeStamp;
   private subscriptions = new Set<Event>();
   /** The notifications waiting for their turn, oldest first: see notify */
   private pending: PendingNotification[] = [];
@@ -65,6 +75,7 @@ export class EventSubscriber extends Plugin {
           'subscribe_all - Subscribe to all notifications',
           'unsubscribe_all - Unsubscribe from all notifications',
           'subscriptions - View current subscriptions',
+          'portfolio - Show the balances, the last prices and the total value',
           'help - Show help information',
         ].join('\n');
       case '/subscribe_all':
@@ -75,6 +86,18 @@ export class EventSubscriber extends Plugin {
         return 'Unsubscribed from all events';
       case '/subscriptions':
         return this.subscriptions.size ? [...this.subscriptions].join('\n') : 'No subscriptions';
+      case '/portfolio':
+        // Answered at once, subscribed or not, from what the plugin holds
+        return describePortfolioAnswer({
+          portfolio: this.portfolio,
+          portfolioAt: this.portfolioAt,
+          prices: this.prices,
+          pricesAt: this.pricesAt,
+          pairs: this.pairs,
+          assets: this.assets,
+          currency: this.currency,
+          now: Date.now(),
+        });
       default:
         if (command.startsWith('/sub_')) {
           const event = command.replace('/sub_', '') as Event;
@@ -209,6 +232,30 @@ export class EventSubscriber extends Plugin {
     );
   }
 
+  /**
+   * Keeps a portfolio the Trader read, dated with its reception, since no event says when the Trader read it: within the minute of the
+   * read for a portfolio event, which the Trader queues as it reads the account, and for the end of an order, which carries the read
+   * made once the order had ended (see Trader.relayError), both delivered once the next bucket is processed.
+   */
+  private keepPortfolio(portfolio: Portfolio) {
+    this.portfolio = portfolio;
+    this.portfolioAt = Date.now();
+  }
+
+  /**
+   * Keeps the portfolio the last of these order ends carries, which the Trader read once the order had ended (see Trader.relayError),
+   * so that a fill reaches /portfolio although the Trader's portfolioUpdates filter holds a small change back from the portfolio events.
+   * Only when it holds other balances than the one kept, and not the empty portfolio the Trader starts with, which is no read (see
+   * isFetchedPortfolio): an end whose read failed, or an order refused before it was placed, carries the last read as it stands, maybe
+   * minutes old, which dated anew would read as fresh. The creation of an order refreshes nothing for that reason: orderInitiated
+   * carries the last read as it stands, up to exchangeSynchInterval old. Run before the notification, subscribed or not, and never
+   * throws: a handler that throws ends the run.
+   */
+  private refreshPortfolio(payloads: OrderInitiatedEvent[]) {
+    const portfolio = payloads.at(-1)?.exchange?.portfolio;
+    if (portfolio && isFetchedPortfolio(portfolio) && !isEqual(portfolio, this.portfolio)) this.keepPortfolio(portfolio);
+  }
+
   // --- BEGIN LISTENERS ---
   public onStrategyInfo(payloads: StrategyInfo[]) {
     this.notify(
@@ -241,6 +288,7 @@ export class EventSubscriber extends Plugin {
     });
   }
 
+  // Its portfolio is the Trader's last read as it stands, maybe minutes old: it refreshes nothing (see refreshPortfolio)
   public onOrderInitiated(payloads: OrderInitiatedEvent[]) {
     this.notify('order_init', payloads, ({ order, exchange }) => {
       const { portfolio } = exchange;
@@ -264,6 +312,7 @@ export class EventSubscriber extends Plugin {
   }
 
   public onOrderCanceled(payloads: OrderCanceledEvent[]) {
+    this.refreshPortfolio(payloads);
     this.notify('order_cancel', payloads, ({ order }) => {
       const { id, amount, side, type, price, orderCancelationDate, filled, remaining, symbol } = order;
       const [asset, currency] = symbol.split('/');
@@ -291,6 +340,7 @@ export class EventSubscriber extends Plugin {
   }
 
   public onOrderErrored(payloads: OrderErroredEvent[]) {
+    this.refreshPortfolio(payloads);
     this.notify('order_error', payloads, ({ order }) => {
       const { id, amount, side, type, reason, orderErrorDate, symbol, mayBeLive } = order;
       const [, currency] = symbol.split('/');
@@ -309,6 +359,7 @@ export class EventSubscriber extends Plugin {
   }
 
   public onOrderCompleted(payloads: OrderCompletedEvent[]) {
+    this.refreshPortfolio(payloads);
     this.notify('order_complete', payloads, ({ order, exchange }) => {
       const { portfolio } = exchange;
       const { id, amount, side, type, orderExecutionDate, effectivePrice, feePercent, fee, symbol } = order;
@@ -334,18 +385,29 @@ export class EventSubscriber extends Plugin {
     });
   }
 
-  public onStrategyCancelOrder(payloads: UUID[]) {
+  public onStrategyCancelOrder(payloads: AdviceCancelOrder[]) {
     // When the requests arrived, which their payloads do not say, one time for the batch: not when the messages go out, maybe much later
     const requestedAt = Date.now();
-    this.notify('strat_cancel', payloads, id =>
-      ['Strategy requested order cancellation', `Order Id: ${id}`, `At time: ${toISOString(requestedAt)}`].join('\n'),
+    this.notify('strat_cancel', payloads, ({ id, symbol }) =>
+      [
+        // The StrategyManager names the pair of an order it created and that has not ended, and knows no other (see AdviceCancelOrder)
+        `Strategy requested order cancellation for ${isNil(symbol) ? 'an order it did not create, or that had ended' : symbol}`,
+        `Order Id: ${id}`,
+        `At time: ${toISOString(requestedAt)}`,
+      ].join('\n'),
     );
   }
 
+  /** Keeps the last portfolio of the batch, the latest the Trader read (see keepPortfolio) */
+  public onPortfolioChange(payloads: Portfolio[]) {
+    const portfolio = payloads.at(-1);
+    if (portfolio) this.keepPortfolio(portfolio);
+  }
+
   public onRoundtripCompleted(payloads: RoundTrip[]) {
-    this.notify('roundtrip_complete', payloads, ({ pnl, profit, duration, entryPrice, exitPrice, maxAdverseExcursion, exitAt }) =>
+    this.notify('roundtrip_complete', payloads, ({ symbol, pnl, profit, duration, entryPrice, exitPrice, maxAdverseExcursion, exitAt }) =>
       [
-        'Roundtrip completed',
+        `Roundtrip completed for ${symbol}`,
         // A round trip that no portfolio read valued has neither (see RoundTrip): written as they come, they read NaN
         `PnL: ${isFiniteNumber(pnl) ? formatAmount(pnl) : 'unknown'}`,
         // Rounded as the console table rounds them (see PERCENT_ROUNDING): rounded half up here, a round trip of 2.345 % read 2.35 %,
@@ -376,6 +438,8 @@ export class EventSubscriber extends Plugin {
   protected processOneMinuteBucket(bucket: CandleBucket) {
     for (const [symbol, candle] of bucket) {
       this.prices.set(symbol, candle.close);
+      // Every candle of a bucket starts on its minute: the close of the bucket, which /portfolio dates the prices with
+      this.pricesAt = candle.start + ONE_MINUTE;
     }
   }
 
