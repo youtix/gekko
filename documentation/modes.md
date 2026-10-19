@@ -300,7 +300,7 @@ plugins:
 
 The alerts are the strategy's orders (`/sub_strat_create`) and its log lines at the `info`, `warn` and `error` levels (`/sub_strat_info`), the error line that stops the bot included; its `debug` lines are not sent.
 
-Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: the EventSubscriber sends nothing until its chat subscribes. `/sub_strat_create` and `/sub_strat_info` subscribe to these alerts alone (each `/sub_…` command toggles its subscription, and `/help` lists them). The subscriptions are kept in memory only, so a restart forgets them; with `chatId` set, a command your chat sent the bot while Gekko was not running is handled as it starts.
+Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: the EventSubscriber sends nothing until its chat subscribes. `/sub_strat_create` and `/sub_strat_info` subscribe to these alerts alone (each `/sub_…` command toggles its subscription, and `/help` lists them). The subscriptions are kept in memory only, so a restart forgets them; with `chatId` set, a command your chat sent the bot while Gekko was not running is handled as it starts. `/portfolio` answers at any time, subscribed or not, with the balances the Trader read last (on `paper-binance`, the simulated ones), the last prices and the total value (see [Telegram Commands](./plugins.md#telegram-commands) in the plugins guide).
 
 #### 2. Sandbox Trading (Paper Money)
 

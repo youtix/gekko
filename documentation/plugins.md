@@ -305,7 +305,7 @@ The report holds the fields of `Report` (`src/models/event.types.ts`), and those
 | `portfolioChangeCount`                       | Portfolio | Deliveries of portfolio changes: the changes the Trader queues before one flush are delivered together and count once                                                                                |
 | `benchmarkAsset`                             | Portfolio | Asset whose price gives the market return                                                                                                                                                            |
 
-A `roundtripCompleted` payload (`RoundTrip`) holds the round trip's `id` (0 for the first one of the run), `entryAt`, `entryPrice`, `entryEquity`, `exitAt`, `exitPrice`, `exitEquity`, `duration` (milliseconds), `pnl`, `profit` (%) and `maxAdverseExcursion` (%): `entryEquity`, `exitEquity`, `pnl` and `profit` are NaN when no portfolio the Trader read valued the round trip. An `equitySnapshot` payload is a `{ date, totalValue }` point of the equity curve.
+A `roundtripCompleted` payload (`RoundTrip`) holds the round trip's `id` (0 for the first one of the run), `symbol` (its pair), `entryAt`, `entryPrice`, `entryEquity`, `exitAt`, `exitPrice`, `exitEquity`, `duration` (milliseconds), `pnl`, `profit` (%) and `maxAdverseExcursion` (%): `entryEquity`, `exitEquity`, `pnl` and `profit` are NaN when no portfolio the Trader read valued the round trip. An `equitySnapshot` payload is a `{ date, totalValue }` point of the equity curve.
 
 ### How the Statistics Are Computed
 
@@ -501,20 +501,35 @@ plugins:
 - `OrderCanceled` — Canceled orders
 - `OrderErrored` — Failed orders
 - `OrderCompleted` — Filled orders
+- `PortfolioChange` — The balances the Trader read, which `/portfolio` shows
 - `RoundtripCompleted` — Closed round trips (sent by the RoundTripAnalyzer)
 
 ### Telegram Commands
 
-Control your subscriptions via Telegram commands:
+Control your subscriptions, or ask for the portfolio, via Telegram commands:
 
-| Command                   | Description                                |
-|---------------------------|--------------------------------------------|
-| `/help`                   | Show all available commands                |
-| `/start`                  | Same as `/help` (sent by the Start button) |
-| `/subscribe_all`          | Subscribe to all event types               |
-| `/unsubscribe_all`        | Unsubscribe from all events                |
-| `/subscriptions`          | List current active subscriptions          |
-| `/sub_<event>`            | Toggle subscription for specific event     |
+| Command                   | Description                                            |
+|---------------------------|--------------------------------------------------------|
+| `/help`                   | Show all available commands                            |
+| `/start`                  | Same as `/help` (sent by the Start button)             |
+| `/subscribe_all`          | Subscribe to all event types                           |
+| `/unsubscribe_all`        | Unsubscribe from all events                            |
+| `/subscriptions`          | List current active subscriptions                      |
+| `/sub_<event>`            | Toggle subscription for specific event                 |
+| `/portfolio`              | Show the balances, the last prices and the total value |
+
+`/portfolio` answers at once, whatever the chat is subscribed to, with what the EventSubscriber received through the events: it asks the exchange nothing. Its balances, total, free and used for each watched asset and the currency, are those of the last portfolio the Trader read, as a `portfolioChange` or the end of an order (`orderCompleted`, `orderCanceled`, `orderErrored`) brought it, dated when it arrived (within the minute of the read) and with their age, `just now` within a second or when the clock was set back. The Trader reads the account at start-up, every `exchangeSynchInterval` in realtime (10 minutes by default) and after each order's end; its `portfolioUpdates` filter holds back the `portfolioChange` of a small change, not the end of an order. The creation of an order changes nothing there, since `orderInitiated` carries the Trader's last read as it stands, up to `exchangeSynchInterval` old, and neither does the end of an order that carries the balances already received (its read failed, or the order was refused before it was placed): they keep their date. Without a Trader, or until its first read arrives with the first 1-minute candle processed, the answer opens with `No balance received from the Trader yet (no Trader configured, or its first read still on its way)` instead, and lists no balance. Its prices are each watched pair's close in the last 1-minute candle processed, dated by the end of that minute, and its total value is the currency plus each watched asset at that price (an asset that is not watched, such as BNB kept for the fees, is left out):
+
+```
+Balances read by the Trader, received at 2024-01-15T14:30:02.000Z (3 minutes 12 seconds ago)
+BTC: 0.5 (free 0.4, used 0.1)
+ETH: 0 (free 0, used 0)
+USDT: 10,000 (free 10,000, used 0)
+Prices at the close of 2024-01-15T14:33:00.000Z
+BTC/USDT: 42,500 USDT
+ETH/USDT: 2,550 USDT
+Total value: 31,250 USDT
+```
 
 > [!NOTE]
 > A command can also be addressed to the bot, as `/help@your_bot`, to single it out in a group with other bots. A command addressed to another bot is ignored.
@@ -525,14 +540,16 @@ Control your subscriptions via Telegram commands:
 |----------------------|----------------------------------------------------------------------------------------------------------------------------------------------|
 | `strat_info`         | The strategy's log lines at `info`, `warn` and `error` (not `debug`), whatever `GEKKO_LOG_LEVEL`, the error line that stops the bot included |
 | `strat_create`       | New order signals from strategy, with the size asked for: its amount (`auto` for an all-in order), its cost or its share                     |
-| `strat_cancel`       | Order cancellation signals from strategy                                                                                                     |
+| `strat_cancel`       | Order cancellation signals from strategy, naming the order's pair, or saying the strategy did not create the order or that it had ended      |
 | `order_init`         | Order submitted to exchange                                                                                                                  |
 | `order_cancel`       | Order cancellation confirmed, with what it filled first: `Filled amount: not reported` when the exchange reported no fill                    |
 | `order_error`        | Order execution failed, with a line saying so when the order may still be live on the exchange, to be checked there                          |
 | `order_complete`     | Order fully executed                                                                                                                         |
-| `roundtrip_complete` | Round trip closed, with its PnL and profit, `unknown` when no portfolio read valued it (needs the `RoundTripAnalyzer`)                       |
+| `roundtrip_complete` | Round trip closed, naming its pair, with its PnL and profit, `unknown` when no portfolio read valued it (needs the `RoundTripAnalyzer`)      |
 
 A `strat_create` message gives the size the strategy asked for on its `Requested amount` line: the amount (`Requested amount: 0.5`), `auto` for an all-in order, a cost in the currency (`Requested amount: 100 USDT worth`) or a share with its base (`Requested amount: 25 % of the USDT` for a BUY, `25 % of the BTC` for a SELL).
+
+A `strat_cancel` message names the pair on its first line, `Strategy requested order cancellation for BTC/USDT`, for an order the strategy created in this run whose end it has not heard of yet. For any other id it reads `Strategy requested order cancellation for an order it did not create, or that had ended`, and the Trader, which does not know that order either, warns `[<id>] Impossible to cancel order: Unknown Order`. It can warn so of a request that names its pair too, for an order that has just ended, its report still on its way to the strategy.
 
 ### Example Notifications
 
@@ -552,7 +569,7 @@ Current portfolio: 0.5 BTC / 47,500 USDT
 
 **Roundtrip Completed** (a BUY of 1 BTC at 40,000 and its SELL at 41,000, a 0.1 % fee each, from a pair equity of 100,000 USDT, the price down to 39,500 in between):
 ```
-Roundtrip completed
+Roundtrip completed for BTC/USDT
 PnL: 919
 Profit: 0.91%
 Duration: 3 days 4 hours
@@ -734,7 +751,7 @@ graph TD
     AN -->|"PerformanceReport"| PR
     AN -->|"RoundtripCompleted<br>(RoundTripAnalyzer)"| ES
     TA -->|"StrategyInfo<br>StrategyCreateOrder<br>StrategyCancelOrder"| ES
-    TR -->|"Order Events"| ES
+    TR -->|"Order Events<br>PortfolioChange"| ES
     
     style TA fill:#4CAF50,color:white
     style TR fill:#2196F3,color:white
