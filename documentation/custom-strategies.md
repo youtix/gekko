@@ -1,6 +1,6 @@
 # Custom Strategies
 
-This guide explains how to create your own custom trading strategies and run them with Gekko 2. Custom strategies live **outside** the Gekko 2 codebase, enabling you to develop and iterate on your trading logic independently; a private strategy can also live inside your checkout, in `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+This guide explains how to create your own custom trading strategies and run them with Gekko. Custom strategies live **outside** the Gekko codebase, enabling you to develop and iterate on your trading logic independently; a private strategy can also live inside your checkout, in `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
 
 ---
 
@@ -27,8 +27,8 @@ This guide explains how to create your own custom trading strategies and run the
 
 Custom strategies allow you to:
 
-- **Develop independently** — Keep your proprietary trading logic separate from the Gekko 2 core
-- **Iterate quickly** — Modify and test strategies without rebuilding Gekko 2
+- **Develop independently** — Keep your proprietary trading logic separate from the Gekko core
+- **Iterate quickly** — Modify and test strategies without rebuilding Gekko
 - **Use any indicators** — Access all 31 built-in technical indicators
 - **Handle order events** — React to order completions, cancellations, and errors
 - **Protect a position** — Attach a trailing stop to a BUY: Gekko trails it and sells for you when it is hit
@@ -78,7 +78,7 @@ export class MyStrategy implements Strategy<MyStrategyParams> {
 }
 ```
 
-The file imports nothing from Gekko 2 but types, which Bun drops as it loads the file: this is what lets it live anywhere (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+The file imports nothing from Gekko but types, which Bun drops as it loads the file: this is what lets it live anywhere (see [Where Your Strategy Lives](#where-your-strategy-lives)).
 
 ### 2. Create Your Configuration File
 
@@ -152,7 +152,7 @@ A backtest reads its candles from `storage.database`, and refuses to start while
 
 ```bash
 # Using the compiled executable (bun run build:exec builds it, see Running with Executable)
-GEKKO_CONFIG_FILE_PATH=./config.yaml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config.yaml ./dist/gekko
 ```
 
 ---
@@ -161,18 +161,18 @@ GEKKO_CONFIG_FILE_PATH=./config.yaml ./dist/gekko2
 
 A strategy lives in one of two places, which decide how Gekko finds it and what it can import:
 
-|                      | Outside the codebase (this guide)                                     | In your checkout, in `src/strategies/custom/`                                                                     |
-|----------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
-| Selected by          | `strategyPath`, its file, and `strategyName`, the class it exports    | `strategyName` alone, once your class is exported from `src/strategies/custom/index.ts`                           |
-| Loaded               | From its file, each time Gekko starts: no build needed after a change | Compiled into `dist/gekko2` by `bun run build:exec`, like the built-in strategies                                 |
-| Imports from Gekko 2 | Types only                                                            | Anything: types, the [PositionTracker and the PositionBook](#tracking-your-position), the utilities               |
-| Packages (`zod`, …)  | Installed next to its file (see below)                                | Those of the checkout                                                                                             |
-| Type-checked         | No: Bun loads TypeScript without checking it                          | By `bun run type:check`, not by the pre-commit hook; its tests run with `bun run test`, never in CI               |
-| Git                  | Yours                                                                 | Gitignored, but for a placeholder `index.ts` that `bun install` marks skip-worktree: your exports stay out of git |
+|                     | Outside the codebase (this guide)                                     | In your checkout, in `src/strategies/custom/`                                                                     |
+|---------------------|-----------------------------------------------------------------------|-------------------------------------------------------------------------------------------------------------------|
+| Selected by         | `strategyPath`, its file, and `strategyName`, the class it exports    | `strategyName` alone, once your class is exported from `src/strategies/custom/index.ts`                           |
+| Loaded              | From its file, each time Gekko starts: no build needed after a change | Compiled into `dist/gekko` by `bun run build:exec`, like the built-in strategies                                  |
+| Imports from Gekko  | Types only                                                            | Anything: types, the [PositionTracker and the PositionBook](#tracking-your-position), the utilities               |
+| Packages (`zod`, …) | Installed next to its file (see below)                                | Those of the checkout                                                                                             |
+| Type-checked        | No: Bun loads TypeScript without checking it                          | By `bun run type:check`, not by the pre-commit hook; its tests run with `bun run test`, never in CI               |
+| Git                 | Yours                                                                 | Gitignored, but for a placeholder `index.ts` that `bun install` marks skip-worktree: your exports stay out of git |
 
-A file loaded through `strategyPath` can import Gekko 2's types (`@strategies/strategy.types`, `@models/…`), because Bun drops an import that is only used as a type, but nothing else of Gekko 2: the compiled executable resolves none of the `@strategies/…` or `@utils/…` paths of a file it loads as it starts, and Gekko run from source (`bun run dev`) resolves them only for a file inside the checkout. Such an import stops Gekko at start-up with `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@helpers/strategy/positionTracker/positionTracker' from '…/myStrategy.strategy.ts'`. So model an external strategy on the [Complete Example](#complete-example), not on a built-in strategy: those import Gekko 2 modules, and a copy of `dema.strategy.ts` placed outside the codebase stops with that very line.
+A file loaded through `strategyPath` can import Gekko's types (`@strategies/strategy.types`, `@models/…`), because Bun drops an import that is only used as a type, but nothing else of Gekko: the compiled executable resolves none of the `@strategies/…` or `@utils/…` paths of a file it loads as it starts, and Gekko run from source (`bun run dev`) resolves them only for a file inside the checkout. Such an import stops Gekko at start-up with `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@helpers/strategy/positionTracker/positionTracker' from '…/myStrategy.strategy.ts'`. So model an external strategy on the [Complete Example](#complete-example), not on a built-in strategy: those import Gekko modules, and a copy of `dema.strategy.ts` placed outside the codebase stops with that very line.
 
-A package your strategy imports is looked up from the folder of its file: install it there (`bun add zod` in that folder), unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it. The compiled executable, though, only finds a package by the `index.js` at its root, whatever its `package.json` names as its entry: `zod` has one, but `lodash-es`, which Gekko 2 itself uses, has none, and is not found even installed next to the strategy (`… ResolveMessage: Cannot find package 'lodash-es' from '…'`). Import such a package by its files (`import isNil from 'lodash-es/isNil.js'`), or run Gekko from source (`bun run dev`), which follows the `package.json`.
+A package your strategy imports is looked up from the folder of its file: install it there (`bun add zod` in that folder), unless the file sits inside a Gekko checkout, whose `node_modules` has it. The compiled executable, though, only finds a package by the `index.js` at its root, whatever its `package.json` names as its entry: `zod` has one, but `lodash-es`, which Gekko itself uses, has none, and is not found even installed next to the strategy (`… ResolveMessage: Cannot find package 'lodash-es' from '…'`). Import such a package by its files (`import isNil from 'lodash-es/isNil.js'`), or run Gekko from source (`bun run dev`), which follows the `package.json`.
 
 To build on a built-in strategy, or to use the PositionTracker or the PositionBook, keep your strategy in `src/strategies/custom/` and export it from the placeholder, which holds `export {};` until then:
 
@@ -189,7 +189,7 @@ plugins:
 
 Give your class a name of its own. A copy of a built-in strategy that keeps its class name, `dema.strategy.ts` exporting `DEMA`, makes the name ambiguous, and Gekko's strategies then hold neither class: `bun run type:check` reports `TS2308: Module './custom/index' has already exported a member named 'DEMA'`, `bun run build:exec` builds without either, and `strategyName: DEMA` stops Gekko with `[TRADING ADVISOR] Cannot find internal DEMA strategy`.
 
-`bun install` marks the placeholder skip-worktree (`git update-index --skip-worktree`; outside a git checkout it does nothing): `git status` does not show your copy, `git commit -a` does not take it, and it survives `git stash`, `git reset --hard`, `git checkout -- .`, `git restore .` and a commit the pre-commit hook refuses. That hook type-checks what is committed, where the placeholder is `export {};`, and so leaves your strategies out: `bun run type:check` checks them. An update of Gekko 2 that changes the placeholder stops `git pull` (`Your local changes to the following files would be overwritten by merge: src/strategies/custom/index.ts`), which keeps your copy. Copy your exports aside, run `git update-index --no-skip-worktree src/strategies/custom/index.ts` and `git checkout -- src/strategies/custom/index.ts`, pull again, write your exports into the new placeholder, then run `bun install`, which marks it again.
+`bun install` marks the placeholder skip-worktree (`git update-index --skip-worktree`; outside a git checkout it does nothing): `git status` does not show your copy, `git commit -a` does not take it, and it survives `git stash`, `git reset --hard`, `git checkout -- .`, `git restore .` and a commit the pre-commit hook refuses. That hook type-checks what is committed, where the placeholder is `export {};`, and so leaves your strategies out: `bun run type:check` checks them. An update of Gekko that changes the placeholder stops `git pull` (`Your local changes to the following files would be overwritten by merge: src/strategies/custom/index.ts`), which keeps your copy. Copy your exports aside, run `git update-index --no-skip-worktree src/strategies/custom/index.ts` and `git checkout -- src/strategies/custom/index.ts`, pull again, write your exports into the new placeholder, then run `bun install`, which marks it again.
 
 ---
 
@@ -773,7 +773,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 
 Without a `schema`, the whole block, `name` included, reaches the strategy unchecked, and Gekko says so as it starts, in an `info` line.
 
-Your strategy imports `zod` itself, and like any package it is looked up from the strategy file's folder: unless the file sits inside a Gekko 2 checkout, whose `node_modules` has it, install it next to the strategy (`bun add zod` or `npm install zod` in its folder). Otherwise Gekko stops with `[TRADING ADVISOR] Cannot import the strategy file …/emaCrossover.strategy.ts: ResolveMessage: Cannot find package 'zod' from '…/emaCrossover.strategy.ts'`. The same goes for any other package (see [Where Your Strategy Lives](#where-your-strategy-lives) for the packages the compiled executable cannot find).
+Your strategy imports `zod` itself, and like any package it is looked up from the strategy file's folder: unless the file sits inside a Gekko checkout, whose `node_modules` has it, install it next to the strategy (`bun add zod` or `npm install zod` in its folder). Otherwise Gekko stops with `[TRADING ADVISOR] Cannot import the strategy file …/emaCrossover.strategy.ts: ResolveMessage: Cannot find package 'zod' from '…/emaCrossover.strategy.ts'`. The same goes for any other package (see [Where Your Strategy Lives](#where-your-strategy-lives) for the packages the compiled executable cannot find).
 
 ---
 
@@ -785,16 +785,16 @@ Your strategy imports `zod` itself, and like any package it is looked up from th
 bun run build:exec
 ```
 
-This creates a standalone binary at `dist/gekko2` that can run **without Bun installed**. A strategy loaded through `strategyPath` is not compiled into it: the binary loads its file each time it starts, so a change to the strategy needs no new build (one in `src/strategies/custom/` does).
+This creates a standalone binary at `dist/gekko` that can run **without Bun installed**. A strategy loaded through `strategyPath` is not compiled into it: the binary loads its file each time it starts, so a change to the strategy needs no new build (one in `src/strategies/custom/` does).
 
 ### Run Your Strategy
 
 ```bash
 # From the directory a relative strategyPath (and storage.database) is resolved against
-GEKKO_CONFIG_FILE_PATH=./config.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config.yml ./dist/gekko
 
 # From any directory, when strategyPath and storage.database are absolute (recommended for deployment)
-GEKKO_CONFIG_FILE_PATH=/path/to/config.yml /path/to/gekko2/dist/gekko2
+GEKKO_CONFIG_FILE_PATH=/path/to/config.yml /path/to/gekko/dist/gekko
 ```
 
 > [!TIP]
@@ -955,7 +955,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 }
 ```
 
-`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko 2's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)). So it trades the first watched pair alone, warning of the others: a strategy that trades every pair lives in `src/strategies/custom/`, where it can trade through the [PositionBook](#tracking-your-position).
+`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)). So it trades the first watched pair alone, warning of the others: a strategy that trades every pair lives in `src/strategies/custom/`, where it can trade through the [PositionBook](#tracking-your-position).
 
 ### Configuration File: `ema-crossover-config.yaml`
 
@@ -1032,7 +1032,7 @@ The backtest reads the candles of its range from `./db/binance-BTC_USDT.sql`, th
 bun run build:exec
 
 # Run backtest
-GEKKO_CONFIG_FILE_PATH=ema-crossover-config.yaml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=ema-crossover-config.yaml ./dist/gekko
 ```
 
 ---
@@ -1138,7 +1138,7 @@ Gekko loads the strategy as it starts: it imports the file at `strategyPath` (a 
 - `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: ResolveMessage: Cannot find module '/home/user/strategies/myStrategy.strategy.ts' from '…'`: there is no file at that path (`strategyPath` once resolved).
   - Verify `strategyPath` points to the correct file
   - For a relative `strategyPath`, check the directory Gekko is started from, or use an absolute path
-- `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@helpers/strategy/positionTracker/positionTracker' from '…/myStrategy.strategy.ts'`: the file imports a Gekko 2 module, which a file loaded through `strategyPath` cannot: import only types from Gekko 2, or move the strategy to `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
+- `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find module '@helpers/strategy/positionTracker/positionTracker' from '…/myStrategy.strategy.ts'`: the file imports a Gekko module, which a file loaded through `strategyPath` cannot: import only types from Gekko, or move the strategy to `src/strategies/custom/` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
 - `[TRADING ADVISOR] Cannot import the strategy file …/myStrategy.strategy.ts: ResolveMessage: Cannot find package 'zod' from '…/myStrategy.strategy.ts'`: install the package next to the strategy. The compiled executable never finds a package without an `index.js` at its root, such as `lodash-es` (see [Where Your Strategy Lives](#where-your-strategy-lives)).
 - `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: BuildMessage: Expected ")" but found ";" at /home/user/strategies/myStrategy.strategy.ts:12:21`: a syntax error at that line and column of the file named, the strategy file or a file it imports. Two or more are listed one after the other, after Bun's count, and one mistake can make several: `[TRADING ADVISOR] Cannot import the strategy file /home/user/strategies/myStrategy.strategy.ts: 2 errors building "/home/user/strategies/myStrategy.strategy.ts": BuildMessage: Expected ")" but found ";" at …:12:21; BuildMessage: Expected "]" but found ";" at …:13:20`.
 - `[TRADING ADVISOR] Cannot find external MyStrategy strategy in /home/user/strategies/myStrategy.strategy.ts`: the file was loaded, but exports nothing under the name `strategyName`.

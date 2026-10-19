@@ -1,6 +1,6 @@
 # 📊 Technical Indicators
 
-Gekko 2 provides **31 built-in technical indicators** organized into six categories. A strategy registers the ones it needs in `init`, by name, with `addIndicator(name, symbol, params)`: Gekko then feeds each one the timeframe candles of its pair and hands its result to the strategy's hooks (see [Using Indicators in Strategies](#-using-indicators-in-strategies)).
+Gekko provides **31 built-in technical indicators** organized into six categories. A strategy registers the ones it needs in `init`, by name, with `addIndicator(name, symbol, params)`: Gekko then feeds each one the timeframe candles of its pair and hands its result to the strategy's hooks (see [Using Indicators in Strategies](#-using-indicators-in-strategies)).
 
 Where TA-Lib has the indicator, Gekko follows its definition and its first candle, and the section says where Gekko departs from it. Each section gives:
 

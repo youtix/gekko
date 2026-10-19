@@ -1,6 +1,6 @@
-# Contributing to Gekko 2
+# Contributing to Gekko
 
-Thank you for considering contributing to Gekko 2! This guide explains how to get the project running locally and how to submit your contributions.
+Thank you for considering contributing to Gekko! This guide explains how to get the project running locally and how to submit your contributions.
 
 ## Getting Started
 
@@ -9,16 +9,16 @@ Thank you for considering contributing to Gekko 2! This guide explains how to ge
 Work lands on the `development` branch; `main` only moves for releases. Fork the repository on GitHub, clone your fork and switch to the upstream `development` branch:
 
 ```bash
-git clone https://github.com/<your-username>/gekko2.git
-cd gekko2
-git remote add upstream https://github.com/youtix/gekko2.git
+git clone https://github.com/<your-username>/gekko.git
+cd gekko
+git remote add upstream https://github.com/youtix/gekko.git
 git fetch upstream
 git switch -c development upstream/development
 ```
 
 ### Install Bun and Node.js
 
-Gekko 2 runs on [Bun](https://bun.sh/) 1.3 or later. Follow the [installation instructions](https://bun.sh/docs/install) if you don't already have it.
+Gekko runs on [Bun](https://bun.sh/) 1.3 or later. Follow the [installation instructions](https://bun.sh/docs/install) if you don't already have it.
 
 The unit tests also need [Node.js](https://nodejs.org/) 22.13 or later (not 23), with `node` on your `PATH`: vitest runs them under Node. Without one, `bun run` runs vitest on Bun, where part of the suite fails and coverage is not supported, so the pre-push hook cannot pass.
 
@@ -60,7 +60,7 @@ Before opening a pull request, ensure the codebase is clean:
 bun run format:check
 bun run lint:check
 bun run type:check
-bun run build:exec  # compiles the executable to dist/gekko2
+bun run build:exec  # compiles the executable to dist/gekko
 ```
 
 `format:check` and `lint:check` read the whole repository, the tests, the scripts and the configuration files included, not only `src/`; `bun run format` and `bun run lint` fix what they can. Prettier leaves `documentation/`, whose tables are aligned by hand, and `CHANGELOG.md` alone. A few rules you may meet:

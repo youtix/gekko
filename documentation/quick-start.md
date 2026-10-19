@@ -1,6 +1,6 @@
 # 🚀 Quick Start Guide
 
-Get Gekko 2 up and running in minutes. This guide walks you through from installation to live trading.
+Get Gekko up and running in minutes. This guide walks you through from installation to live trading.
 
 ---
 
@@ -10,19 +10,19 @@ Get Gekko 2 up and running in minutes. This guide walks you through from install
 
 ```bash
 # Clone the repository
-git clone https://github.com/youtix/gekko2.git
+git clone https://github.com/youtix/gekko.git
 
 # Change directory
-cd gekko2
+cd gekko
 
 # Install dependencies
 bun install
 
 # Compile Gekko into a standalone executable
-bun run build:exec # This creates `dist/gekko2` — a single binary you can run anywhere without Bun installed.
+bun run build:exec # This creates `dist/gekko` — a single binary you can run anywhere without Bun installed.
 ```
 
-Run every command of this guide from the root of the checkout, the `gekko2` directory: the executable reads `.env` and `.env.local` from the directory it runs in, and the paths that `GEKKO_CONFIG_FILE_PATH` and the configurations name (`./config/…`, `./db/…`) are relative to it.
+Run every command of this guide from the root of the checkout, the `gekko` directory: the executable reads `.env` and `.env.local` from the directory it runs in, and the paths that `GEKKO_CONFIG_FILE_PATH` and the configurations name (`./config/…`, `./db/…`) are relative to it.
 
 ### Configure with `.env.local`
 
@@ -44,10 +44,10 @@ At the default `error` level, Gekko prints its logo, its errors and the tables o
 
 ```bash
 # Runs the configuration that .env.local names
-./dist/gekko2
+./dist/gekko
 
 # Or name it on the command line, which wins over .env and .env.local
-GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml ./dist/gekko
 ```
 
 The executable loads `.env`, then `.env.local`, by itself: there is nothing to `source`. A variable set on the command line, or exported in your shell, wins over both files.
@@ -89,7 +89,7 @@ plugins:
 **Run the importer:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/importer.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/importer.local.yml ./dist/gekko
 ```
 
 This downloads the 1-minute candles of BTC/USDT from Binance, from 2024-01-01 00:00 to 2024-12-01 00:00 UTC, both minutes included, and stores them in `./db/binance-BTC_USDT.sql`, creating the `db/` directory, which git ignores. An import reads public market data only: it needs no API key. It takes about 8 minutes: Binance answers 1000 minutes per request, and `watch.tickrate` spaces the requests at least 1000 ms apart by default. At the `info` level, Gekko logs its progress at every percent; at `error`, it prints its logo and nothing more.
@@ -170,7 +170,7 @@ Write assets, the currency and symbols in upper case, as the exchange lists them
 **Run the backtest:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml ./dist/gekko
 ```
 
 The backtest replays the candles of step 2: the same database, over the same range, 2024-01-01 00:00 to 2024-12-01 00:00 UTC. It refuses to start when a minute of its `daterange` is missing from the database (`Missing candles in database: …`, followed by the ranges the database holds), so a range of your own must lie within the minutes you imported; without the import, it stops at once (`Cannot open the database …`). The first 365 candles of 1 hour go to the warmup (`warmup.candleCount` counts timeframe candles), and the strategy only trades after them.
@@ -228,7 +228,7 @@ plugins:
 **Run the screener:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/screener.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/screener.local.yml ./dist/gekko
 ```
 
 **Subscribe from your chat.** Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: the EventSubscriber sends nothing until its chat subscribes, and keeps its subscriptions in memory only. The bot answers `Subscribed to all events` (`/sub_strat_create` subscribes to the signals alone, and `/start` lists every command). Without `chatId`, the bot binds itself to the first chat that sends it a command after start-up, and drops the commands sent before; Gekko logs that chat's id at the `info` level, for you to set as `chatId`. With `chatId` set, a command your chat sent while Gekko was not running is handled as it starts.
@@ -283,7 +283,7 @@ Gekko reads the keys from this file only, exactly as written: it expands no envi
 **Run sandbox trading:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/sandbox.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/sandbox.local.yml ./dist/gekko
 ```
 
 Real orders are placed on the testnet with fake funds. Perfect for validating your strategy behavior. At the `info` level, Gekko logs the warmup download (365 hours of minutes, about 20 seconds), then each order, and each round trip as it closes.
@@ -343,7 +343,7 @@ The last line, at the top level of the file, outside every section, is the discl
 **Run live trading:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/live.local.yml ./dist/gekko2
+GEKKO_CONFIG_FILE_PATH=./config/live.local.yml ./dist/gekko
 ```
 
 Gekko executes real trades with real money. Monitor closely and use stop-losses. Once Gekko runs, send the bot `/subscribe_all`, and again after every restart, as in step 4. Stopped with Ctrl-C, it prints no final report, and however it stops, it cancels no open order (see step 5): check your open orders on the exchange.

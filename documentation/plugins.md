@@ -1,6 +1,6 @@
 # 🔌 Plugins
 
-Plugins are the modular components that extend Gekko 2's functionality. Each plugin handles a specific aspect of the trading workflow — from running strategies to executing orders, analyzing performance, and sending notifications. This guide provides detailed documentation for all available plugins.
+Plugins are the modular components that extend Gekko's functionality. Each plugin handles a specific aspect of the trading workflow — from running strategies to executing orders, analyzing performance, and sending notifications. This guide provides detailed documentation for all available plugins.
 
 ---
 
@@ -837,7 +837,7 @@ plugins:
 
 ## Creating Custom Plugins
 
-Gekko 2's plugin architecture is extensible. Custom plugins can:
+Gekko's plugin architecture is extensible. Custom plugins can:
 
 - Listen to any emitted event
 - Emit custom events for other plugins

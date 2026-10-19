@@ -1,6 +1,6 @@
 # Built-in Strategies
 
-Gekko 2 comes with a variety of pre-built trading strategies that you can use right out of the box. Each strategy is designed with different market conditions and trading styles in mind.
+Gekko comes with a variety of pre-built trading strategies that you can use right out of the box. Each strategy is designed with different market conditions and trading styles in mind.
 
 You pick a strategy with the TradingAdvisor's `strategyName` and give its parameters directly under the top-level `strategy:` block, whose `name` must equal `strategyName` (see the [TradingAdvisor](./plugins.md#-tradingadvisor)). The seven signal strategies wait for each of their orders to end before they advise again on its pair, and GridBot re-arms a level only once that level's order has ended: run them with a [Trader](./plugins.md#-trader), for alerts only too. On `paper-binance` (realtime) and `dummy-cex` (backtest), the Trader only simulates the orders.
 
@@ -256,7 +256,7 @@ The DEMA strategy uses the difference between a **Double Exponential Moving Aver
 5. An order canceled or refused, or a BUY skipped for the market's minimum cost (on several pairs, see [Pairs and Capital](#pairs-and-capital)), counts as its trend's advice: the next order on that pair waits for the next trend, once `diff` has crossed the other threshold
 
 > [!NOTE]
-> The DEMA follows the price closely while the SMA lags behind it, so a positive `diff` means the price has just fallen below its average, and a negative one that it has just risen above it. The strategy buys after a fall and sells after a rise: it trades against the recent move, as Gekko 1's DEMA did, although its logs call these an uptrend and a downtrend.
+> The DEMA follows the price closely while the SMA lags behind it, so a positive `diff` means the price has just fallen below its average, and a negative one that it has just risen above it. The strategy buys after a fall and sells after a rise: it trades against the recent move, as the DEMA of the [original Gekko](https://github.com/askmike/gekko) did, although its logs call these an uptrend and a downtrend.
 
 #### Parameters
 
