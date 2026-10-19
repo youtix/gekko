@@ -44,6 +44,19 @@ export type AdviceOrder = {
   price?: number;
 };
 
+/**
+ * A cancellation the strategy asked for (STRATEGY_CANCEL_ORDER_EVENT, Tools.cancelOrder): the id of the order, and its pair when the
+ * StrategyManager knows the order, one it created in this run whose outcome it has not heard of yet. Left out otherwise: the Trader,
+ * which has forgotten such an order or never had it, then warns of an unknown order, and the EventSubscriber's strat_cancel
+ * notification says so.
+ */
+export type AdviceCancelOrder = {
+  /** Gekko order id, as createOrder returned it */
+  id: UUID;
+  /** The pair of the order, when known */
+  symbol?: TradingPair;
+};
+
 export type StrategyOrder = Omit<AdviceOrder, 'id' | 'orderCreationDate'> & {
   /**
    * BUY orders only, holding no key but percentage and trigger (createOrder refuses anything else): a stop armed once the BUY completes,

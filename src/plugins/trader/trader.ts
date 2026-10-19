@@ -14,7 +14,7 @@ import { getFirstCandleFromBucket } from '@helpers/candle/candle.helper';
 import { getMarketOrderLimits, toBound } from '@helpers/market/market.helper';
 import { roundToStep } from '@helpers/market/precision.helper';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
-import { AdviceOrder } from '@models/advice.types';
+import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
@@ -25,7 +25,7 @@ import { debug, error, info, warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
-import { filter, isNil, noop, pick, uniq } from 'lodash-es';
+import { filter, isNil, noop, pick, uniqBy } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { FEE_BUFFER_PERCENT, ORDER_FACTORY, SIZING_KEYS } from './trader.const';
 import {
@@ -767,10 +767,11 @@ export class Trader extends Plugin {
     }
   }
 
-  public async onStrategyCancelOrder(payloads: UUID[]) {
-    // Parallel strategy: process all payloads concurrently. An id asked twice in the same batch is canceled once.
+  public async onStrategyCancelOrder(payloads: AdviceCancelOrder[]) {
+    // Parallel strategy: process all payloads concurrently. An id asked twice in the same batch is canceled once: the payloads are
+    // compared by their ids, each being a copy of its own (see copyPayload), which uniq, comparing references, would let through twice.
     await Promise.all(
-      uniq(payloads).map(async id => {
+      uniqBy(payloads, 'id').map(async ({ id }) => {
         const orderMetadata = this.orders.get(id);
         if (!orderMetadata) return warning('trader', `[${id}] Impossible to cancel order: Unknown Order`);
         const { orderInstance, side, amount, type, orderCreationDate, price, requestedPrice, symbol } = orderMetadata;

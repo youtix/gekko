@@ -10,6 +10,7 @@ vi.mock('@services/logger', () => ({ info: vi.fn() }));
 // A round trip on ETH/BTC: its P&L is a fraction of a BTC.
 const roundTrip: RoundTrip = {
   id: 1,
+  symbol: 'ETH/BTC',
   entryAt: 1748563200000,
   entryPrice: 0.05,
   entryEquity: 0.1,

@@ -9,7 +9,14 @@ import { ApplicationStopError } from '@errors/applicationStop.error';
 import { GekkoError } from '@errors/gekko.error';
 import { AdviceOrder, StrategyOrder, TrailingConfig } from '@models/advice.types';
 import { Candle } from '@models/candle.types';
-import { CandleBucket, ExchangeEvent, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent } from '@models/event.types';
+import {
+  CandleBucket,
+  ExchangeEvent,
+  OrderCanceledEvent,
+  OrderCompletedEvent,
+  OrderErroredEvent,
+  OrderInitiatedEvent,
+} from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
 import { OrderSide } from '@models/order.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
@@ -933,6 +940,13 @@ describe('StrategyManager', () => {
           it('drops the trailing stop of that order before it stops', () => {
             expect(target['pendingTrailingStops'].has(buyId)).toBe(false);
           });
+
+          it('forgets the pair of that order before it stops: its cancellation names none', () => {
+            const listener = vi.fn();
+            target.on(STRATEGY_CANCEL_ORDER_EVENT, listener);
+            target['cancelOrder'](buyId);
+            expect(listener.mock.calls).toStrictEqual([[{ id: buyId }]]);
+          });
         });
 
         // The orderly stop prevails, as when two plugins fail on one bucket: a restart-on-failure supervisor leaves the bot stopped. The
@@ -963,6 +977,13 @@ describe('StrategyManager', () => {
 
           it('drops the trailing stop of that order all the same', () => {
             expect(target['pendingTrailingStops'].has(buyId)).toBe(false);
+          });
+
+          it('forgets the pair of that order all the same: its cancellation names none', () => {
+            const listener = vi.fn();
+            target.on(STRATEGY_CANCEL_ORDER_EVENT, listener);
+            target['cancelOrder'](buyId);
+            expect(listener.mock.calls).toStrictEqual([[{ id: buyId }]]);
           });
         });
 
@@ -1029,6 +1050,14 @@ describe('StrategyManager', () => {
 
         it('gives onTrailingStopTriggered the id of that SELL, then the state of the stop, then the tools', () => {
           expect(strategy.onTrailingStopTriggered).toHaveBeenCalledExactlyOnceWith(SELL_ID, state, manager['tools']);
+        });
+
+        // An order of the strategy's own from then on, which it may adopt and cancel (see Strategy.onTrailingStopTriggered)
+        it('relays a cancellation of that SELL with its pair, BTC/USDT', () => {
+          const cancelations = vi.fn();
+          manager.on(STRATEGY_CANCEL_ORDER_EVENT, cancelations);
+          manager['tools'].cancelOrder(SELL_ID);
+          expect(cancelations.mock.calls).toStrictEqual([[{ id: SELL_ID, symbol: 'BTC/USDT' }]]);
         });
       });
 
@@ -3322,6 +3351,11 @@ describe('StrategyManager', () => {
           it('keeps no SELL of the strategy', () => {
             expect(manager['strategySellIds'].size).toBe(0);
           });
+
+          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
+          it('keeps the pair of no order', () => {
+            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          });
         });
 
         // Each key StrategyOrder declares, given or left undefined (a strategy passing its own optional parameter). An order is sized one
@@ -3548,6 +3582,11 @@ describe('StrategyManager', () => {
           it('keeps no SELL of the strategy', () => {
             expect(manager['strategySellIds'].size).toBe(0);
           });
+
+          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
+          it('keeps the pair of no order', () => {
+            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          });
         });
 
         // Left out, undefined or null (an untyped strategy) as the Trader reads them, the amount, the cost and the allocation make an
@@ -3677,6 +3716,11 @@ describe('StrategyManager', () => {
           it('keeps no trailing stop', () => {
             expect(manager['pendingTrailingStops'].size).toBe(0);
           });
+
+          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
+          it('keeps the pair of no order', () => {
+            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          });
         });
 
         // A trigger left out, undefined (a strategy passing its own optional parameter) or null (an untyped one), asks for a stop active as
@@ -3797,6 +3841,10 @@ describe('StrategyManager', () => {
           it('relays no order', () => {
             expect(listener).not.toHaveBeenCalled();
           });
+
+          it('keeps the pair of no order', () => {
+            expect(target['pendingOrderSymbols'].size).toBe(0);
+          });
         },
       );
 
@@ -3842,14 +3890,114 @@ describe('StrategyManager', () => {
       });
     });
 
+    // A cancellation names the pair of an order the manager created until it hears of its outcome: relayed as a bare id, it named no
+    // pair, nor did the strat_cancel notification, and a chat fed by several instances, one per pair, could not tell which it was
+    // about. A LIMIT BUY on BTC/USDT and a SELL on ETH/USDT are pending, created on the minute ending at 61000. Compared strictly: the
+    // pair of an order the manager does not know is left out, not undefined.
     describe('cancelOrder', () => {
-      it('cancelOrder emits the cancel event', () => {
-        const listener = vi.fn();
+      const BUY: OrderInitiatedEvent['order'] = {
+        id: '0c0c0c0c-0000-4000-8000-0000000000c1',
+        symbol: 'BTC/USDT',
+        side: 'BUY',
+        type: 'LIMIT',
+        amount: 1,
+        price: 90,
+        orderCreationDate: 61000,
+      };
+      const SELL: OrderInitiatedEvent['order'] = {
+        id: '0c0c0c0c-0000-4000-8000-0000000000c2',
+        symbol: 'ETH/USDT',
+        side: 'SELL',
+        type: 'MARKET',
+        amount: 2,
+        orderCreationDate: 61000,
+      };
+      /** An id the manager never drew */
+      const UNKNOWN_ID: UUID = '0c0c0c0c-0000-4000-8000-0000000000c3';
+      const exchange: ExchangeEvent = { price: 100, portfolio: new Map() };
+      /** The end of `order` on the next minute, as the Trader relays each kind of end */
+      const END_ORDER = {
+        completed: (order: OrderInitiatedEvent['order']) =>
+          manager.onOrderCompleted({ order: { ...order, orderExecutionDate: 121000, effectivePrice: 100, fee: 0 }, exchange }),
+        canceled: (order: OrderInitiatedEvent['order']) =>
+          manager.onOrderCanceled({ order: { ...order, orderCancelationDate: 121000 }, exchange }),
+        errored: (order: OrderInitiatedEvent['order']) =>
+          manager.onOrderErrored({ order: { ...order, reason: 'refused', orderErrorDate: 121000, filled: 0, mayBeLive: false }, exchange }),
+      };
+      let listener: Mock;
+
+      beforeEach(() => {
+        manager.setMarketData(twoPairsMarketData);
+        completeWarmup(); // Orders wait for it
+        listener = vi.fn();
         manager.on(STRATEGY_CANCEL_ORDER_EVENT, listener);
+        vi.mocked(randomUUID).mockReturnValueOnce(BUY.id).mockReturnValueOnce(SELL.id);
+        manager['createOrder']({ symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 1, price: 90 });
+        manager['createOrder']({ symbol: 'ETH/USDT', side: 'SELL', type: 'MARKET', amount: 2 });
+      });
 
-        manager['cancelOrder']('db2254e3-c749-448c-b7b6-aa28831bbae7');
+      it.each`
+        order   | symbol
+        ${BUY}  | ${'BTC/USDT'}
+        ${SELL} | ${'ETH/USDT'}
+      `('relays the cancellation of the $order.side it created, still pending, with its pair: $symbol', ({ order, symbol }) => {
+        manager['tools'].cancelOrder(order.id);
+        expect(listener.mock.calls).toStrictEqual([[{ id: order.id, symbol }]]);
+      });
 
-        expect(listener).toHaveBeenCalledWith('db2254e3-c749-448c-b7b6-aa28831bbae7');
+      // Asked again before its outcome comes, the order is still pending
+      it('relays a second cancellation of a pending order with its pair again', () => {
+        manager['tools'].cancelOrder(BUY.id);
+        manager['tools'].cancelOrder(BUY.id);
+        expect(listener.mock.calls).toStrictEqual([[{ id: BUY.id, symbol: 'BTC/USDT' }], [{ id: BUY.id, symbol: 'BTC/USDT' }]]);
+      });
+
+      it('relays the cancellation of an id it did not create with that id alone', () => {
+        manager['tools'].cancelOrder(UNKNOWN_ID);
+        expect(listener.mock.calls).toStrictEqual([[{ id: UNKNOWN_ID }]]);
+      });
+
+      // Ended, the order is no longer the Trader's either: it warns of an unknown order
+      describe.each`
+        end
+        ${'completed'}
+        ${'canceled'}
+        ${'errored'}
+      `('once the BUY it created has $end', ({ end }: { end: keyof typeof END_ORDER }) => {
+        beforeEach(() => END_ORDER[end](BUY));
+
+        it('relays its cancellation with its id alone', () => {
+          manager['tools'].cancelOrder(BUY.id);
+          expect(listener.mock.calls).toStrictEqual([[{ id: BUY.id }]]);
+        });
+
+        it('still relays that of the SELL pending on ETH/USDT with its pair', () => {
+          manager['tools'].cancelOrder(SELL.id);
+          expect(listener.mock.calls).toStrictEqual([[{ id: SELL.id, symbol: 'ETH/USDT' }]]);
+        });
+      });
+
+      // Forgotten before the hook of its end runs, which may throw: by then the order has ended
+      it.each`
+        end            | hook
+        ${'completed'} | ${'onOrderCompleted'}
+        ${'canceled'}  | ${'onOrderCanceled'}
+        ${'errored'}   | ${'onOrderErrored'}
+      `(
+        'relays with its id alone the cancellation $hook asks for, of the order it hears of',
+        ({ end, hook }: { end: keyof typeof END_ORDER; hook: string }) => {
+          const cancelHeardOrder = ({ order, tools }: { order: { id: UUID }; tools: Tools<object> }) => tools.cancelOrder(order.id);
+          manager['strategy'] = { [hook]: cancelHeardOrder } as any;
+          END_ORDER[end](BUY);
+          expect(listener.mock.calls).toStrictEqual([[{ id: BUY.id }]]);
+        },
+      );
+
+      // Kept until each order ends, the pairs never outnumber the orders pending
+      it('keeps the pair of no order once every order it created has ended', () => {
+        END_ORDER.completed(BUY);
+        END_ORDER.errored(SELL);
+        expect(manager['pendingOrderSymbols'].size).toBe(0);
       });
     });
 

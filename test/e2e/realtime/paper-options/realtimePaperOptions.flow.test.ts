@@ -158,6 +158,7 @@ describe('E2E: Realtime paper trading options', () => {
     // in %, to 15 significant digits. The low of the candle held, 110, is above the entry price: no adverse excursion.
     expect(findLoggedObject(isRoundTrip)).toEqual({
       id: 0,
+      symbol: 'BTC/USDT',
       entryAt: minute(12, 1),
       entryPrice: 100,
       entryEquity: 310000,

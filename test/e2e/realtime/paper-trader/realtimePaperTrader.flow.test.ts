@@ -191,6 +191,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       roundTrips: [
         {
           id: 0,
+          symbol: 'BTC/USDT',
           entryAt: at(1),
           entryPrice: 100,
           // The pair equity after the BUY, 101 × 100 + 299,899.9 = 309,999.9, its fee given back: the 100 BTC × 100 + 300,000 USDT held

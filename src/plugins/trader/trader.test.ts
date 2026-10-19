@@ -10,7 +10,7 @@ import {
 } from '@constants/event.const';
 import { EMPTY_ORDER_SUMMARY } from '@constants/order.const';
 import { GekkoError } from '@errors/gekko.error';
-import { AdviceOrder } from '@models/advice.types';
+import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
 import { Watch } from '@models/configuration.types';
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
@@ -239,11 +239,14 @@ describe('Trader', () => {
     symbol: overrides?.symbol ?? 'BTC/USDT',
   });
 
+  /** The cancellation of `advice` as the StrategyManager relays it for an order it created, still pending: with the pair of the order */
+  const cancelationOf = ({ id, symbol }: AdviceOrder): AdviceCancelOrder => ({ id, symbol });
+
   // An order created by the trader, listened to by its creation flow, or by its cancelation flow once canceled
   const prepareOrder = async (flow: 'creation' | 'cancelation', advice = buildAdvice()) => {
     await trader.onStrategyCreateOrder([advice]);
     const order = getOrderInstance(advice.id)!;
-    if (flow === 'cancelation') await trader.onStrategyCancelOrder([advice.id]);
+    if (flow === 'cancelation') await trader.onStrategyCancelOrder([cancelationOf(advice)]);
     return order;
   };
 
@@ -1084,7 +1087,7 @@ describe('Trader', () => {
         ${'what the SELL it does not cancel leaves'}         | ${[sell(1, 0.5, 'LIMIT'), sell(2, 0.2, 'LIMIT')]} | ${0.5992}
       `('places an all-in SELL for $description', async ({ placed, amount }) => {
         await trader.onStrategyCreateOrder(placed);
-        await trader.onStrategyCancelOrder([placed[0].id]);
+        await trader.onStrategyCancelOrder([cancelationOf(placed[0])]);
         await trader.onStrategyCreateOrder([allInSell]);
         expect(getPlacedAmount(allInSell)).toBe(amount);
       });
@@ -1267,7 +1270,7 @@ describe('Trader', () => {
         ${'what the BUY it does not cancel leaves'}               | ${[buy(4, 2, 'LIMIT'), buy(8, 2, 'LIMIT')]} | ${7.6}
       `('places an all-in BUY for $description', async ({ placed, amount }) => {
         await trader.onStrategyCreateOrder(placed);
-        await trader.onStrategyCancelOrder([placed[0].id]);
+        await trader.onStrategyCancelOrder([cancelationOf(placed[0])]);
         await trader.onStrategyCreateOrder([secondAllIn]);
         expect(getPlacedAmount(secondAllIn)).toBe(amount);
       });
@@ -2168,7 +2171,7 @@ describe('Trader', () => {
       });
 
       it('warns when the strategy cancels the order afterwards', async () => {
-        await trader.onStrategyCancelOrder([advice.id]);
+        await trader.onStrategyCancelOrder([cancelationOf(advice)]);
         expect(logger.warning).toHaveBeenCalledWith('trader', `[${advice.id}] Impossible to cancel order: Unknown Order`);
       });
 
@@ -2234,17 +2237,24 @@ describe('Trader', () => {
   });
 
   describe('onStrategyCancelOrder', () => {
-    it('warns when order is unknown', async () => {
-      await trader.onStrategyCancelOrder(['missing-id' as any]);
-      expect(logger.warning).toHaveBeenCalledWith('trader', '[missing-id] Impossible to cancel order: Unknown Order');
+    // The StrategyManager relays the id alone of an order it did not create in this run, or whose end it has heard of, and with its pair
+    // one it created that the Trader does not hold (refused before it was placed, its end not yet heard of): the Trader reads the id
+    it.each`
+      kind                                    | cancelation
+      ${'its id alone'}                       | ${{ id: 'missing-id' }}
+      ${'its pair, which the Trader ignores'} | ${{ id: 'missing-id', symbol: 'BTC/USDT' }}
+    `('warns "[missing-id] Impossible to cancel order: Unknown Order" for an unknown order asked with $kind', async ({ cancelation }) => {
+      await trader.onStrategyCancelOrder([cancelation]);
+      expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', '[missing-id] Impossible to cancel order: Unknown Order');
     });
 
+    // Two copies of one cancellation, as the deferred delivery hands its payloads: compared by reference, both would reach the exchange
     it('cancels an order once when its id comes twice in the same batch', async () => {
       const advice = buildAdvice();
       trader['prices'].set('BTC/USDT', 100);
       await trader.onStrategyCreateOrder([advice]);
 
-      await trader.onStrategyCancelOrder([advice.id, advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice), cancelationOf(advice)]);
 
       expect(orderActions.cancel).toHaveBeenCalledOnce();
     });
@@ -2257,7 +2267,7 @@ describe('Trader', () => {
       await trader.onStrategyCreateOrder([advice]);
       const order = getOrderInstance(advice.id)!;
 
-      await trader.onStrategyCancelOrder([advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice)]);
 
       expect(order.removeAllListeners).toHaveBeenCalled();
       expect(order.cancel).toHaveBeenCalled();
@@ -2290,7 +2300,7 @@ describe('Trader', () => {
       await trader.onStrategyCreateOrder([advice]);
       const order = getOrderInstance(advice.id)!;
 
-      await trader.onStrategyCancelOrder([advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice)]);
 
       order.emit(ORDER_ERRORED_EVENT, { reason: 'exchange timeout', mayBeLive: false });
       await tick();
@@ -2313,7 +2323,7 @@ describe('Trader', () => {
       await trader.onStrategyCreateOrder([advice]);
       const order = getOrderInstance(advice.id)!;
 
-      await trader.onStrategyCancelOrder([advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice)]);
 
       // Simulate completed instead of canceled
       await order.emitAndSettle(ORDER_COMPLETED_EVENT);
@@ -2333,7 +2343,7 @@ describe('Trader', () => {
 
       await trader.onStrategyCreateOrder([advice]);
       const order = getOrderInstance(advice.id)!;
-      await trader.onStrategyCancelOrder([advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice)]);
       order.emit(ORDER_COMPLETED_EVENT);
       await tick(10); // createSummary, then synchronize (fetchBalance, fetchTickers)
 
@@ -2360,7 +2370,7 @@ describe('Trader', () => {
       await trader.onStrategyCreateOrder([advice]);
       orderActions.cancel.mockRejectedValueOnce(new Error('cancel exploded'));
 
-      await trader.onStrategyCancelOrder([advice.id]);
+      await trader.onStrategyCancelOrder([cancelationOf(advice)]);
       await tick();
 
       expect(logger.error).toHaveBeenCalledWith(
@@ -3109,7 +3119,7 @@ describe('Trader', () => {
         };
         (action === 'launch' ? orderActions.launch : orderActions.cancel).mockImplementationOnce(answer);
         await trader.onStrategyCreateOrder([advice]);
-        if (action === 'cancel') await trader.onStrategyCancelOrder([advice.id]);
+        if (action === 'cancel') await trader.onStrategyCancelOrder([cancelationOf(advice)]);
         await flush();
         expect(listener).toHaveBeenCalledWith([isAbout(advice.id)]);
       });
@@ -3125,7 +3135,7 @@ describe('Trader', () => {
           await tick(10);
           this.emit(ORDER_CANCELED_EVENT, cancelation);
         });
-        await trader.onStrategyCancelOrder([advice.id]);
+        await trader.onStrategyCancelOrder([cancelationOf(advice)]);
         await flush();
         expect(listener).toHaveBeenCalledWith([isAbout(advice.id)]);
       });

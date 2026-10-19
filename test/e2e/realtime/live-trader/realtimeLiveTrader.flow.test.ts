@@ -275,6 +275,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
         ],
         roundTrip: {
           id: 0,
+          symbol: 'BTC/USDT',
           entryAt: at(buyFilledAt),
           entryPrice: 100,
           // After the BUY the account holds 0.999 BTC and 9,900 USDT, 99.9 + 9,900 at 100, and the fee of 0.1 is given back: 10,000,

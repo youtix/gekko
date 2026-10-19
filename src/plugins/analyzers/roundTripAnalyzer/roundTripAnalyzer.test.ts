@@ -1231,6 +1231,7 @@ describe('RoundTripAnalyzer', () => {
     it.each`
       field                    | expected
       ${'id'}                  | ${0}
+      ${'symbol'}              | ${'BTC/USDT'}
       ${'entryAt'}             | ${1000}
       ${'entryPrice'}          | ${100}
       ${'entryEquity'}         | ${1000}
@@ -1741,6 +1742,11 @@ describe('RoundTripAnalyzer', () => {
 
       it('should measure the P&L of the round trip from the pair equity before the BUY to the pair equity after the SELL', () => {
         expect(emittedRoundTrips()[0].pnl).toBeCloseTo(2_009.923, 6);
+      });
+
+      // A chat fed by several instances, one per pair, could not tell which pair a roundtrip_complete notification was about
+      it('should emit the round trip with the pair it traded, BTC/USDT', () => {
+        expect(emittedRoundTrips()[0].symbol).toBe('BTC/USDT');
       });
     });
 

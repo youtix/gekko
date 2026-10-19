@@ -216,6 +216,7 @@ describe('E2E: Backtest Flow', () => {
         // lows it reads, of the candles closing after its BUY, 00:02 and 00:03, never fall below 9000.
         {
           id: 0,
+          symbol: 'BTC/USDT',
           entryAt: minute(2),
           entryPrice: 9000,
           entryEquity: 300000,
@@ -231,6 +232,7 @@ describe('E2E: Backtest Flow', () => {
         // (11000 - 8900) / 11000 × 100.
         {
           id: 1,
+          symbol: 'BTC/USDT',
           entryAt: minute(6),
           entryPrice: 11000,
           entryEquity: 301980,
@@ -468,6 +470,7 @@ describe('E2E: Backtest Flow', () => {
       roundTrips: [
         {
           id: 0,
+          symbol: 'BTC/USDT',
           entryAt: minute(25),
           entryPrice: 10240,
           entryEquity: 300000,

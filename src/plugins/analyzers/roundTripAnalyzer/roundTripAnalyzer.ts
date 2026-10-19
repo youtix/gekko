@@ -371,6 +371,7 @@ export class RoundTripAnalyzer extends Plugin {
     const { entryAt, entryPrice, entryEquity, exitPrice, pendingEntry } = roundTrip;
     const roundtrip: RoundTrip = {
       id: this.nextRoundTripId++,
+      symbol: this.symbol,
 
       entryAt,
       entryPrice,

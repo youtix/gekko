@@ -16,7 +16,7 @@ import { isSellable } from '@helpers/strategy/positionTracker/positionTracker.he
 import * as indicators from '@indicators/index';
 import { Indicator } from '@indicators/indicator';
 import { IndicatorNames, IndicatorParameters } from '@indicators/indicator.types';
-import { AdviceOrder, StrategyOrder, TrailingConfig } from '@models/advice.types';
+import { AdviceCancelOrder, AdviceOrder, StrategyOrder, TrailingConfig } from '@models/advice.types';
 import {
   CandleBucket,
   ExchangeEvent,
@@ -82,6 +82,11 @@ export class StrategyManager extends EventEmitter {
   private indicatorsResults: IndicatorResults[] = [];
   private currentTimestamp: EpochTimeStamp = 0;
   private pendingTrailingStops = new Map<UUID, TrailingConfig>();
+  /**
+   * The pair of every order created, the SELLs of the trailing stops included, until the manager hears of its outcome: a cancellation
+   * the strategy asks for names it (see cancelOrder)
+   */
+  private readonly pendingOrderSymbols = new Map<UUID, TradingPair>();
   /** The SELLs the trailing stops sent, until their outcome: told apart from the SELLs the strategy created (see onOrderCompleted) */
   private readonly trailingStopSellIds = new Set<UUID>();
   /** The SELLs the strategy created, with their pair, until their outcome: the stops of that pair hold their trigger (see isTriggerHeld) */
@@ -195,6 +200,8 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onOrderCompleted({ order, exchange }: OrderCompletedEvent) {
+    // Forgotten before anything that may throw, the hook included: from now on, a cancellation of the order names no pair
+    this.pendingOrderSymbols.delete(order.id);
     this.consecutiveErrors = 0;
     // The hook gets its own copy of the event (see copyOrderEvent): what follows reads the event itself
     this.strategy?.onOrderCompleted?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
@@ -210,6 +217,8 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onOrderCanceled({ order, exchange }: OrderCanceledEvent) {
+    // As on a completion (see onOrderCompleted)
+    this.pendingOrderSymbols.delete(order.id);
     this.consecutiveErrors = 0;
     this.strategy?.onOrderCanceled?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
     // A BUY canceled drops the stop it asked for, even after a partial fill
@@ -225,6 +234,8 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onOrderErrored({ order, exchange }: OrderErroredEvent) {
+    // As on a completion (see onOrderCompleted), the error that trips the circuit breaker included
+    this.pendingOrderSymbols.delete(order.id);
     this.consecutiveErrors++;
     const isConsecutiveErrorsReached = this.maxConsecutiveErrors !== -1 && this.consecutiveErrors >= this.maxConsecutiveErrors;
     // Thrown before the hook and the trailing clean-up, the breaker kept the error that trips it from the strategy, which ended holding
@@ -291,7 +302,8 @@ export class StrategyManager extends EventEmitter {
 
   private onTrailingStopTriggered(state: TrailingStopState) {
     const orderId = this.createOrder({ symbol: state.symbol, side: 'SELL', type: 'MARKET', amount: state.amount });
-    // createOrder kept it as a SELL of the strategy: the SELL of a stop holds no other stop of the pair, each selling its own BUY's fill
+    // createOrder kept it as a SELL of the strategy: the SELL of a stop holds no other stop of the pair, each selling its own BUY's fill.
+    // It keeps its pair (see pendingOrderSymbols): the strategy may adopt that SELL, and cancel it.
     this.strategySellIds.delete(orderId);
     this.trailingStopSellIds.add(orderId);
     // The stop sells until that SELL ends (see onOrderCompleted and resumeTrailingStop): the hook gets it with the id of its SELL
@@ -343,8 +355,15 @@ export class StrategyManager extends EventEmitter {
     this.indicators.push({ indicator, symbol });
   }
 
+  /**
+   * Relays the cancellation of `orderId`, with the pair of the order while the manager has not heard of its outcome (see
+   * pendingOrderSymbols). Relayed as a bare id, it named no pair, nor did the strat_cancel notification: a chat fed by several
+   * instances, one per pair, could not tell which one it was about. An id the manager did not create in this run, or of an order whose
+   * end it has heard of, goes alone, and the Trader, which knows no such order, warns of it.
+   */
   private cancelOrder(orderId: UUID): void {
-    this.emit<UUID>(STRATEGY_CANCEL_ORDER_EVENT, orderId);
+    const symbol = this.pendingOrderSymbols.get(orderId);
+    this.emit<AdviceCancelOrder>(STRATEGY_CANCEL_ORDER_EVENT, symbol ? { id: orderId, symbol } : { id: orderId });
   }
 
   private cancelTrailingOrder(orderId: UUID): void {
@@ -373,6 +392,8 @@ export class StrategyManager extends EventEmitter {
     // The stop of a BUY (checkOrder refuses one on a SELL) is armed once the BUY completes. Kept by reference until then, it was the
     // strategy's object: a change made in between armed another stop than the one checked here, or none (a percentage of 0).
     if (order.trailing) this.pendingTrailingStops.set(id, { ...order.trailing });
+    // Until its outcome, a cancellation of the order names its pair (see cancelOrder)
+    this.pendingOrderSymbols.set(id, order.symbol);
     // Until its outcome, a SELL holds back the triggers of the stops of its pair (see isTriggerHeld)
     if (order.side === 'SELL') this.strategySellIds.set(id, order.symbol);
 

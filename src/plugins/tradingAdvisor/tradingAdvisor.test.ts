@@ -543,6 +543,7 @@ describe('TradingAdvisor', () => {
         createdOrderId = undefined;
         strategy.onTimeframeCandleAfterWarmup.mockImplementation(({ tools }) => {
           createdOrderId = tools.createOrder(BUY_ORDER);
+          tools.cancelOrder(createdOrderId);
           tools.cancelOrder(ORDER_TO_CANCEL);
           tools.log('info', INFO_MESSAGE);
         });
@@ -563,9 +564,16 @@ describe('TradingAdvisor', () => {
         ]);
       });
 
+      // As the strategy manager relays them: compared strictly, the pair is left out, not undefined
+      it('queues the cancellations the strategy asked for: of the order it created with its pair, BTC/USDT, of an id it did not create alone', () => {
+        expect(delivered.get(STRATEGY_CANCEL_ORDER_EVENT)).toStrictEqual([
+          { id: createdOrderId, symbol: 'BTC/USDT' },
+          { id: ORDER_TO_CANCEL },
+        ]);
+      });
+
       it.each`
         event                              | expected
-        ${STRATEGY_CANCEL_ORDER_EVENT}     | ${[ORDER_TO_CANCEL]}
         ${STRATEGY_INFO_EVENT}             | ${[{ timestamp: START + 3 * ONE_MINUTE, level: 'info', tag: 'strategy', message: INFO_MESSAGE }]}
         ${STRATEGY_WARMUP_COMPLETED_EVENT} | ${[FIRST_3M_BUCKET]}
         ${TIMEFRAME_CANDLE_EVENT}          | ${[FIRST_3M_BUCKET]}

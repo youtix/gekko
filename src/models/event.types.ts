@@ -131,6 +131,8 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
 export type RoundTrip = {
   /** Its number, counted from 0 in the order the round trips of the run close */
   id: number;
+  /** Its pair: the one the RoundTripAnalyzer trades on, the only pair of its run (it refuses a run that watches several) */
+  symbol: TradingPair;
   /** When the BUY that opened it filled: its execution date, or its cancelation date for a BUY canceled after a partial fill */
   entryAt: number;
   /** The mean price of its BUYs, weighted by their amounts, in currency */

@@ -137,6 +137,13 @@ export type Tools<T> = {
    * loses its stop, even after a partial fill.
    */
   createOrder: (order: StrategyOrder) => UUID;
+  /**
+   * Asks the Trader to cancel the order `orderId`: an id createOrder returned, or that of the SELL of a trailing stop (see
+   * Strategy.onTrailingStopTriggered). Its outcome arrives through the order hooks: canceled, completed if the order filled first, or
+   * errored if the cancelation failed. The request names the pair of the order until that outcome arrives, as the strat_cancel
+   * notification of the EventSubscriber shows; an id the strategy did not get in this run, or that of an order whose outcome has
+   * arrived, goes alone, and the Trader warns that it knows no such order.
+   */
   cancelOrder: (orderId: UUID) => void;
   /**
    * Cancels the trailing stop of the BUY `orderId` (TrailingStopState.id), before or after the BUY completes, and while the stop

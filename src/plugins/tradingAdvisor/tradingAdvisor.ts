@@ -7,7 +7,7 @@ import {
 } from '@constants/event.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
 import { describeError } from '@errors/error.helper';
-import { AdviceOrder } from '@models/advice.types';
+import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
 import { StrategyInfo } from '@models/strategyInfo.types';
@@ -19,7 +19,6 @@ import { error, info } from '@services/logger';
 import { StrategyManager } from '@strategies/strategyManager';
 import { isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { bindAll, filter } from 'lodash-es';
-import { UUID } from 'node:crypto';
 import { tradingAdvisorSchema } from './tradingAdvisor.schema';
 import { TradingAdvisorConfiguration } from './tradingAdvisor.types';
 
@@ -76,8 +75,8 @@ export class TradingAdvisor extends Plugin {
     this.addDeferredEmit<CandleBucket>(STRATEGY_WARMUP_COMPLETED_EVENT, event);
   }
 
-  private relayCancelOrder(orderId: UUID) {
-    this.addDeferredEmit<UUID>(STRATEGY_CANCEL_ORDER_EVENT, orderId);
+  private relayCancelOrder(advice: AdviceCancelOrder) {
+    this.addDeferredEmit<AdviceCancelOrder>(STRATEGY_CANCEL_ORDER_EVENT, advice);
   }
 
   private relayCreateOrder(advice: AdviceOrder) {
