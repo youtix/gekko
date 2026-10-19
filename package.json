@@ -1,5 +1,5 @@
 {
-  "name": "gekko2",
+  "name": "gekko",
   "version": "2.0.0",
   "description": "A modular crypto trading bot framework supporting backtesting, real-time trading, and custom strategies.",
   "keywords": [
@@ -16,7 +16,6 @@
     "automated-trading",
     "technical-analysis",
     "gekko",
-    "gekko2",
     "exchange",
     "finance",
     "market-data",
@@ -33,9 +32,9 @@
     "bun": ">=1.3.0"
   },
   "scripts": {
-    "build:exec": "bun build src/gekko2.ts --compile --outfile dist/gekko2",
+    "build:exec": "bun build src/gekko.ts --compile --outfile dist/gekko",
     "commit:check": "commitlint",
-    "dev": "bun ./src/gekko2.ts",
+    "dev": "bun ./src/gekko.ts",
     "format": "bun prettier . --write",
     "format:check": "prettier --check .",
     "lint": "bun eslint . --fix",
@@ -49,7 +48,7 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "test:e2e": "bun test --isolate test/e2e",
-    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/gekko2.tsbuildinfo"
+    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile node_modules/.cache/tsc/gekko.tsbuildinfo"
   },
   "devDependencies": {
     "@commitlint/cli": "^20.4.2",

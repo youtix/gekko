@@ -6,7 +6,7 @@ import { prepare, verifyConditions, type Exec, type VersionPluginContext } from 
 
 // The plugin runs in a temporary directory, on a copy of the real package.json. Its build is a stub that writes the executable
 // with the version package.json carries when the build runs, so a test can tell whether the version was written first.
-const EXECUTABLE = 'dist/gekko2';
+const EXECUTABLE = 'dist/gekko';
 const VERSION = '9.8.7';
 const PACKAGE_JSON = readFileSync(new URL('../../package.json', import.meta.url), 'utf8');
 
@@ -75,17 +75,17 @@ describe('version plugin', () => {
 
     it('should log the version written, then the executable rebuilt', () => {
       prepare({ executable: EXECUTABLE }, context, buildExecutable);
-      expect(log.mock.calls).toEqual([['Wrote version 9.8.7 into package.json'], ['Rebuilt dist/gekko2 with version 9.8.7']]);
+      expect(log.mock.calls).toEqual([['Wrote version 9.8.7 into package.json'], ['Rebuilt dist/gekko with version 9.8.7']]);
     });
 
     it('should refuse a build that writes no executable', () => {
-      expect(() => prepare({ executable: EXECUTABLE }, context, vi.fn())).toThrow('bun run build:exec wrote no dist/gekko2');
+      expect(() => prepare({ executable: EXECUTABLE }, context, vi.fn())).toThrow('bun run build:exec wrote no dist/gekko');
     });
 
     it('should refuse a build that writes no executable, even when an earlier build left one', () => {
       mkdirSync(path.join(dir, 'dist'));
       writeFileSync(path.join(dir, EXECUTABLE), 'an earlier build');
-      expect(() => prepare({ executable: EXECUTABLE }, context, vi.fn())).toThrow('bun run build:exec wrote no dist/gekko2');
+      expect(() => prepare({ executable: EXECUTABLE }, context, vi.fn())).toThrow('bun run build:exec wrote no dist/gekko');
     });
 
     it('should run the build:exec script of package.json with bun when no runner is given', () => {

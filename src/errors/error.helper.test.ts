@@ -44,7 +44,7 @@ class BuildMessage {
 
 const file = '/strategies/my.strategy.ts';
 const positionIn = (line: number, column: number) => ({ file, namespace: 'file', line, column, length: 1 });
-const missingFile = new ResolveMessage(`Cannot find module '${file}' from '/gekko2/src/strategies/strategyManager.ts'`);
+const missingFile = new ResolveMessage(`Cannot find module '${file}' from '/gekko/src/strategies/strategyManager.ts'`);
 const missingPackage = new ResolveMessage(`Cannot find package 'zod' from '${file}'`);
 const syntaxError = new BuildMessage('Expected ")" but found ";"', positionIn(3, 21));
 const otherSyntaxError = new BuildMessage('Expected "]" but found ";"', positionIn(4, 20));
@@ -127,7 +127,7 @@ describe('describeError', () => {
   // error stopped Gekko without the file, or what was wrong with it
   it.each`
     kind                                       | value                  | said
-    ${'a ResolveMessage of a missing file'}    | ${missingFile}         | ${`ResolveMessage: Cannot find module '${file}' from '/gekko2/src/strategies/strategyManager.ts'`}
+    ${'a ResolveMessage of a missing file'}    | ${missingFile}         | ${`ResolveMessage: Cannot find module '${file}' from '/gekko/src/strategies/strategyManager.ts'`}
     ${'a ResolveMessage of a missing package'} | ${missingPackage}      | ${`ResolveMessage: Cannot find package 'zod' from '${file}'`}
     ${'a BuildMessage, at its position'}       | ${syntaxError}         | ${`BuildMessage: Expected ")" but found ";" at ${file}:3:21`}
     ${'a BuildMessage placed on no line'}      | ${unplacedSyntaxError} | ${'BuildMessage: Expected ")" but found ";"'}
@@ -181,7 +181,7 @@ describe('toError', () => {
     ${'undefined'}                     | ${undefined}           | ${'undefined'}
     ${'an object'}                     | ${{ error_code: 403 }} | ${'{ error_code: 403 }'}
     ${'an object without a prototype'} | ${withoutPrototype}    | ${'[Object: null prototype] { status: 503 }'}
-    ${'a ResolveMessage'}              | ${missingFile}         | ${`ResolveMessage: Cannot find module '${file}' from '/gekko2/src/strategies/strategyManager.ts'`}
+    ${'a ResolveMessage'}              | ${missingFile}         | ${`ResolveMessage: Cannot find module '${file}' from '/gekko/src/strategies/strategyManager.ts'`}
   `('wraps $kind in an Error with the message $message', ({ value, message }) => {
     expect(toError(value)).toEqual(new Error(message));
   });

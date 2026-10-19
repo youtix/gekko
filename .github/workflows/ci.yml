@@ -120,7 +120,7 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko2 with the version it releases
+      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko with the version it releases
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -9,21 +9,21 @@ vi.mock('@services/core/pipeline/pipeline', () => ({ gekkoPipeline: vi.fn() }));
 vi.mock('@services/injecter/injecter', () => ({ inject: { storage: vi.fn(), closeStorage: vi.fn() } }));
 vi.mock('@services/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 
-/** The listener gekko2.ts registered for a process event, which the process.on spy captured instead of registering */
+/** The listener gekko.ts registered for a process event, which the process.on spy captured instead of registering */
 const handlerOf = (event: string) => {
   const registration = vi.mocked(process.on).mock.calls.find(([name]) => name === event);
-  if (!registration) throw new Error(`gekko2.ts registered no '${event}' handler`);
+  if (!registration) throw new Error(`gekko.ts registered no '${event}' handler`);
   return registration[1];
 };
 
-/** Imports gekko2.ts with a pipeline that never ends, as in realtime mode, and resolves once the pipeline has started */
+/** Imports gekko.ts with a pipeline that never ends, as in realtime mode, and resolves once the pipeline has started */
 const startRealtimeRun = () =>
   new Promise<void>(started => {
     vi.mocked(gekkoPipeline).mockImplementation(() => {
       started();
       return new Promise<never>(() => {});
     });
-    void import('./gekko2'); // never settles, like `await main()` in a realtime run
+    void import('./gekko'); // never settles, like `await main()` in a realtime run
   });
 
 /** SQLite's error behind the failure below: another connection held the write lock past the busy timeout */
@@ -31,7 +31,7 @@ const lockError = new Error('database is locked');
 
 /**
  * What SQLiteStorage.close() throws when its last insert fails. Built from the GekkoError class imported after vi.resetModules(), the
- * one the copy of gekko2.ts under test checks against.
+ * one the copy of gekko.ts under test checks against.
  */
 const unwrittenMinutesError = async () => {
   const { GekkoError } = await import('@errors/gekko.error');
@@ -46,10 +46,10 @@ describe('main', () => {
   let initialExitCode: typeof process.exitCode;
 
   beforeEach(() => {
-    // gekko2.ts runs `await main()` when it is imported: every test imports a fresh copy of it
+    // gekko.ts runs `await main()` when it is imported: every test imports a fresh copy of it
     vi.resetModules();
     vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-    // gekko2.ts registers process-level handlers: capture them, so that none is left on the vitest process
+    // gekko.ts registers process-level handlers: capture them, so that none is left on the vitest process
     vi.spyOn(process, 'on').mockImplementation(() => process);
     initialExitCode = process.exitCode;
   });
@@ -62,7 +62,7 @@ describe('main', () => {
   describe('when the pipeline ends normally', () => {
     beforeEach(async () => {
       vi.mocked(gekkoPipeline).mockResolvedValue([]);
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('does not call process.exit', () => {
@@ -86,11 +86,11 @@ describe('main', () => {
     });
 
     it('ends the run without an error', async () => {
-      await expect(import('./gekko2')).resolves.toBeDefined();
+      await expect(import('./gekko')).resolves.toBeDefined();
     });
 
     it('logs the failure with its cause, once, at error level', async () => {
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(vi.mocked(error).mock.calls).toEqual([
         ['gekko', `Could not close the storage: ${closeFailure.message}\nCaused by: ${lockError.stack}`],
@@ -98,13 +98,13 @@ describe('main', () => {
     });
 
     it('sets the exit code to 1', async () => {
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(process.exitCode).toBe(1);
     });
 
     it('does not call process.exit', async () => {
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(process.exit).not.toHaveBeenCalled();
     });
@@ -120,11 +120,11 @@ describe('main', () => {
     });
 
     it('ends the run without an error', async () => {
-      await expect(import('./gekko2')).resolves.toBeDefined();
+      await expect(import('./gekko')).resolves.toBeDefined();
     });
 
     it('does not create a storage to close it', async () => {
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(inject.storage).not.toHaveBeenCalled();
     });
@@ -135,7 +135,7 @@ describe('main', () => {
       // The real module, which builds `config` when it is evaluated: without a file to read, its evaluation throws a GekkoError
       vi.doUnmock('@services/configuration/configuration');
       vi.stubEnv('GEKKO_CONFIG_FILE_PATH', undefined);
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     afterEach(() => {
@@ -165,10 +165,10 @@ describe('main', () => {
 
   describe('when the pipeline stops with an ApplicationStopError', () => {
     beforeEach(async () => {
-      // Imported after vi.resetModules(), so that it is the class gekko2.ts checks against
+      // Imported after vi.resetModules(), so that it is the class gekko.ts checks against
       const { ApplicationStopError } = await import('@errors/applicationStop.error');
       vi.mocked(gekkoPipeline).mockRejectedValue(new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)'));
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs the stop reason at error level', () => {
@@ -198,7 +198,7 @@ describe('main', () => {
         handlerOf('unhandledRejection')(new Error('binance fetchOrder failed: 503 Service Unavailable'));
         throw new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)');
       });
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('still exits with code 0', () => {
@@ -216,7 +216,7 @@ describe('main', () => {
       vi.mocked(inject.closeStorage).mockImplementation(() => {
         throw checkpointError;
       });
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs the stop reason, then the failure to close the storage, at error level', () => {
@@ -235,11 +235,11 @@ describe('main', () => {
     let failure: Error;
 
     beforeEach(async () => {
-      // A subclass, imported after vi.resetModules() so that it extends the GekkoError gekko2.ts checks against
+      // A subclass, imported after vi.resetModules() so that it extends the GekkoError gekko.ts checks against
       const { MissingCandlesError } = await import('@services/core/stream/backtest/backtest.error');
       failure = new MissingCandlesError('BTC/USDT', { start: Date.UTC(2024, 0, 1), end: Date.UTC(2024, 0, 2) });
       vi.mocked(gekkoPipeline).mockRejectedValue(failure);
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs its one-line message at error level', () => {
@@ -267,7 +267,7 @@ describe('main', () => {
       vi.mocked(inject.closeStorage).mockImplementation(() => {
         throw checkpointError;
       });
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs the failure of the run, then the failure to close the storage, at error level', () => {
@@ -288,7 +288,7 @@ describe('main', () => {
     beforeEach(async () => {
       const { GekkoError } = await import('@errors/gekko.error');
       vi.mocked(gekkoPipeline).mockRejectedValue(new GekkoError('exchange', 'Could not load the markets', { cause }));
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs its message, then its cause in full, at error level', () => {
@@ -303,7 +303,7 @@ describe('main', () => {
 
     beforeEach(async () => {
       vi.mocked(gekkoPipeline).mockRejectedValue(hookError);
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs its name and message at error level', () => {
@@ -314,7 +314,7 @@ describe('main', () => {
     });
 
     it('logs its stack frames at error level', () => {
-      expect(error).toHaveBeenCalledWith('gekko', expect.stringMatching(/\n\s+at .*gekko2\.test\.ts:\d+:\d+/));
+      expect(error).toHaveBeenCalledWith('gekko', expect.stringMatching(/\n\s+at .*gekko\.test\.ts:\d+:\d+/));
     });
 
     it('exits with code 1', () => {
@@ -331,7 +331,7 @@ describe('main', () => {
   describe('when the pipeline rejects with a value that is not an Error', () => {
     beforeEach(async () => {
       vi.mocked(gekkoPipeline).mockRejectedValue('raw failure');
-      await import('./gekko2');
+      await import('./gekko');
     });
 
     it('logs the value as is at error level', () => {
@@ -376,7 +376,7 @@ describe('main', () => {
       ${'each cause of a loop once'}         | ${loopStart}                       | ${causedBy(loopStart, loopEnd)}
     `('logs $kind at error level', async ({ failure, logged }) => {
       vi.mocked(gekkoPipeline).mockRejectedValue(failure);
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(error).toHaveBeenCalledWith('gekko', logged);
     });
@@ -391,7 +391,7 @@ describe('main', () => {
       const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
       vi.mocked(config.showLogo).mockReturnValue(showLogo);
 
-      await import('./gekko2');
+      await import('./gekko');
 
       expect(consoleLog).toHaveBeenCalledTimes(printCount);
     });
@@ -406,7 +406,7 @@ describe('main', () => {
       ${'SIGTERM'}
     `('registers a $event handler before the pipeline starts', async ({ event }) => {
       vi.mocked(gekkoPipeline).mockResolvedValue([]);
-      await import('./gekko2');
+      await import('./gekko');
 
       const { calls, invocationCallOrder } = vi.mocked(process.on).mock;
       const registrationCallOrder = invocationCallOrder[calls.findIndex(([name]) => name === event)];
