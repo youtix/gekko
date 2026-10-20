@@ -18,10 +18,12 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The e2e suite runs on Bun's own test runner and fake timers, which a new Bun could change under every pull request: pin the
+      # version, as Node's is, and bump it in both jobs in a commit of its own (package.json's engines.bun stays >=1.3.0)
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       # vitest runs the unit tests under Node, not Bun: pin the version package.json requires instead of the runner's
       - name: Setup Node
@@ -75,6 +77,11 @@ jobs:
       - name: Test with coverage
         run: bun run test:coverage
 
+      # The whole pipeline of each mode on Bun's test runner, the realtime flows playing real minutes under fake timers (about 15 s).
+      # No git hook runs it. A step of this job rather than a job of its own: the release needs this job, so a failure holds it back
+      - name: Test end to end
+        run: bun run test:e2e
+
       - name: Build
         run: bun run build:exec
 
@@ -98,10 +105,11 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The Bun the checks passed on: the release compiles its executable with it, and the executable embeds it
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.3.14
 
       # semantic-release runs under Node
       - name: Setup Node

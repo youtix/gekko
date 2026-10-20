@@ -50,7 +50,7 @@ bun run test:e2e                                      # the end-to-end tests
 
 The unit tests are the `*.test.ts` files next to the code they test in `src/` and `scripts/`, and vitest runs them. `test:coverage` fails when the lines, functions, branches or statements covered fall below 95%.
 
-The end-to-end tests in `test/e2e` run the whole pipeline of each mode on Bun's own test runner: `bun test --isolate test/e2e/<path_to_file>` runs one file. Neither CI nor the hooks run them, so run them before you open a pull request. The realtime flows run on real minutes under Bun's fake timers: a run of minutes lasts milliseconds and meets the same minutes every time.
+The end-to-end tests in `test/e2e` run the whole pipeline of each mode on Bun's own test runner: `bun test --isolate test/e2e/<path_to_file>` runs one file. CI runs them, on the Bun version that `.github/workflows/ci.yml` pins, but the hooks do not, so run them before you open a pull request. The realtime flows run on real minutes under Bun's fake timers: a run of minutes lasts milliseconds and meets the same minutes every time.
 
 ### Check Formatting, Linting, Types and the Build
 
@@ -70,7 +70,7 @@ bun run build:exec  # compiles the executable to dist/gekko
 - Only the test files (`*.test.ts` and everything under `test/e2e`) may use an explicit `any`: the source and the benchmarks may not.
 - `type:check` also covers `vitest.config.ts` and `scripts/release/version.cjs`: a misspelt vitest option fails it.
 
-CI runs these four commands and `bun run test:coverage` on every push and pull request to `development` and `main`, in a job whose token can only read the repository.
+CI runs these four commands, `bun run test:coverage` and `bun run test:e2e` on every push and pull request to `development` and `main`, in a job whose token can only read the repository.
 
 ## Commit Message Guidelines
 
