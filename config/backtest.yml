@@ -1,7 +1,10 @@
+# Backtests BTC and ETH on the database config/importer.yml writes, both pairs from 2017-10-01: run that import first
+
 showLogo: false
 watch:
   assets:
     - BTC
+    - ETH
   currency: USDT
   timeframe: 1h
   mode: backtest
@@ -31,8 +34,27 @@ exchange:
         fee:
           maker: 0.0004
           taker: 0.0007
+    - symbol: ETH/USDT
+      marketData:
+        price:
+          min: 0.01
+          max: 1000000
+        amount:
+          min: 0.0001
+          max: 9000
+        cost:
+          min: 5
+          max: 9000000
+        precision:
+          price: 8
+          amount: 8
+        fee:
+          maker: 0.0004
+          taker: 0.0007
   simulationBalance:
     - assetName: BTC
+      balance: 0
+    - assetName: ETH
       balance: 0
     - assetName: USDT
       balance: 1000
@@ -41,6 +63,7 @@ storage:
   type: sqlite
   database: ./db/binance-BTC_ETH_USDT.sql
 
+# Like every signal strategy, RSI trades every watched pair: each BUY takes an equal share of the free USDT among the pairs not invested
 strategy:
   name: RSI
   src: ohlc4
@@ -59,5 +82,6 @@ plugins:
       threshold: 1 # in percentage
       dust: 10 # in currency
 
-  - name: RoundTripAnalyzer
+  # Not the RoundTripAnalyzer, which runs on one pair only: to use it, watch one asset and remove the other's marketData and balance
+  - name: PortfolioAnalyzer
     enableConsoleTable: true
