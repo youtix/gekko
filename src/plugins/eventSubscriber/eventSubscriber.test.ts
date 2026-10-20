@@ -1287,8 +1287,9 @@ help - Show help information`);
         );
       });
 
-      // Not through the notifications, which wait for a subscription: the bot sends the answer itself
+      // Not through the notifications, even once the chat is subscribed to everything: the bot sends the answer itself
       it('sends nothing through the notifications', async () => {
+        plugin['handleCommand']('/subscribe_all');
         plugin['handleCommand']('/portfolio');
         await settle();
         expect(fakeBot.sendMessage).not.toHaveBeenCalled();
