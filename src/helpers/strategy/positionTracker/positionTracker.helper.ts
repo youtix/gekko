@@ -3,9 +3,8 @@ import { OrderType } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import { Tools } from '@strategies/strategy.types';
-import { getMarketOrderLimits } from '@helpers/market/market.helper';
-import { roundToStep } from '@helpers/market/precision.helper';
-import { isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
+import { getMarketOrderLimits, getSentCost } from '@helpers/market/market.helper';
+import { isFiniteNumber } from '@utils/math/math.utils';
 import { Fill, PendingOrder, UnfinishedOrderParams } from './positionTracker.types';
 
 /** Whether a value above 0 is below a market minimum: one left undefined, 0 or below sets no bound, as toBound reads it (market.helper) */
@@ -14,17 +13,17 @@ const isBelowMinimum = (value: number, minimum?: number) => minimum !== undefine
 /**
  * Whether an all-in SELL of `amount` passes the minimums of the market as the exchange checks them: the amount, truncated to the step
  * of the market as CCXTExchange sends it, against the minimum amount (that of a market order for a MARKET one, which the exchange
- * checks against both lot sizes), then its cost at `price`, unchecked while the price is unknown (0). Less is dust, which no order
- * can sell. Checked before the truncation, a remainder worth less than a step above the minimum cost would read as enough to sell,
- * every SELL of it refused: 0.0000549 BTC at 95000 USDT is 5.22 USDT, sent as 0.00005 BTC, 4.75 USDT. The cost is worked out in
- * decimal, as the exchange checks it: the binary product of a holding worth the minimum exactly can fall an ulp under it, and the
- * holding read as dust, 0.00007 BTC at 100000 USDT coming out at 6.999999999999999 USDT against a minimum of 7.
+ * checks against both lot sizes), then its cost at `price` (see getSentCost), unchecked while the price is unknown (0). Less is dust,
+ * which no order can sell. Checked before the truncation, a remainder worth less than a step above the minimum cost would read as
+ * enough to sell, every SELL of it refused: 0.0000549 BTC at 95000 USDT is 5.22 USDT, sent as 0.00005 BTC, 4.75 USDT. The cost is
+ * worked out in decimal, as the exchange checks it: the binary product of a holding worth the minimum exactly can fall an ulp under it,
+ * and the holding read as dust, 0.00007 BTC at 100000 USDT coming out at 6.999999999999999 USDT against a minimum of 7.
  */
 export const isSellable = (amount: number, price: number, type: OrderType, marketData: MarketData = {}) => {
   const limits = type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData;
-  const sent = roundToStep(amount, limits.precision?.amount, 'down');
+  const { sent, cost } = getSentCost(amount, price, limits);
   if (!(sent > 0) || isBelowMinimum(sent, limits.amount?.min)) return false;
-  return !(price > 0) || !isBelowMinimum(multiplyPrecise(sent, price), limits.cost?.min);
+  return !(price > 0) || !isBelowMinimum(cost, limits.cost?.min);
 };
 
 /**
