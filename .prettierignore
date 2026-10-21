@@ -1,9 +1,11 @@
-# Prettier reads .gitignore too. What the tools write: the executable, the importer's candles, the coverage reports, Bun's lockfile
+# Prettier reads .gitignore too. A slash starts each pattern, which names a path from the root: without it a name matches at any
+# depth, and `documentation` also left scripts/documentation/ unformatted
+# What the tools write: the executable, the importer's candles, the coverage reports, Bun's lockfile
 /dist
 /db
 /coverage
-bun.lock
-# Its tables are aligned by hand
-documentation
+/bun.lock
+# The guides, whose tables are aligned by hand
+/documentation
 # semantic-release writes it: its notes stay as the generator wrote them, as on the GitHub release
-CHANGELOG.md
+/CHANGELOG.md

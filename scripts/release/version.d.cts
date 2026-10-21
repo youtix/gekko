@@ -1,4 +1,6 @@
-// The types of version.cjs, for its test: tsc reads no JavaScript file.
+// The types of version.cjs for its test, which also imports Exec and VersionPluginContext, types the JavaScript file does not
+// export: tsc resolves the test's import of './version.cjs' to this file, and checks version.cjs on its own, against its JSDoc
+// (allowJs and its @ts-check). Neither is checked against the other: a change to the plugin's parameters is made in both.
 
 /** The version plugin's options in release.config.cjs. */
 export interface VersionPluginConfig {

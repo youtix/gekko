@@ -12,6 +12,9 @@ jobs:
     # The checks run the code under review, its install scripts and tests included: their token can read, not push
     permissions:
       contents: read
+    # Without a bound, a step that hangs holds the runner, and on main the release behind it, for GitHub's default of six hours. The
+    # job takes a few minutes
+    timeout-minutes: 30
     steps:
       # The whole history, so that the commit messages are read from the first commit of the pull request or of the push
       - uses: actions/checkout@v4
@@ -78,8 +81,11 @@ jobs:
         run: bun run test:coverage
 
       # The whole pipeline of each mode on Bun's test runner, the realtime flows playing real minutes under fake timers (about 15 s).
-      # No git hook runs it. A step of this job rather than a job of its own: the release needs this job, so a failure holds it back
+      # No git hook runs it. A step of this job rather than a job of its own: the release needs this job, so a failure holds it back.
+      # Under fake timers Bun checks a test's timeout only while the clock advances: a flow that awaits a promise that never settles
+      # hangs past every timeout of its own, and fails here after ten minutes rather than at the job's bound
       - name: Test end to end
+        timeout-minutes: 10
         run: bun run test:e2e
 
       - name: Build

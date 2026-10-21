@@ -1,3 +1,4 @@
+import { describeError } from '@errors/error.helper';
 import { analyzerSchema } from '@plugins/analyzers/analyzer.schema';
 import { candleWriterSchema } from '@plugins/candleWriter/candleWriter.schema';
 import { eventSubscriberSchema } from '@plugins/eventSubscriber/eventSubscriber.schema';
@@ -6,6 +7,7 @@ import { performanceReporterSchema } from '@plugins/performanceReporter/performa
 import { supervisionSchema } from '@plugins/supervision/supervision.schema';
 import { traderSchema } from '@plugins/trader/trader.schema';
 import { tradingAdvisorSchema } from '@plugins/tradingAdvisor/tradingAdvisor.schema';
+import { parseConfigurationFile } from '@services/configuration/configuration.helper';
 import { configurationSchema } from '@services/configuration/configuration.schema';
 import * as strategies from '@strategies/index';
 import type { StrategyConstructor } from '@strategies/strategy.types';
@@ -165,7 +167,9 @@ const yamlChecksOf = (documents: Document[], externalStrategies: Set<unknown>): 
   const checks: YamlChecks = { configurations: [], entries: [], strategyBlocks: [], sections: [], unchecked: [] };
   for (const { where, content, isFile } of documents) {
     if (!isFile && (Array.isArray(content) || nameOf(content) !== undefined)) {
-      entriesOf(content).forEach((entry, index) => checks.entries.push(pluginCheck(where, entry, Array.isArray(content) ? index : undefined)));
+      entriesOf(content).forEach((entry, index) =>
+        checks.entries.push(pluginCheck(where, entry, Array.isArray(content) ? index : undefined)),
+      );
       continue;
     }
     const block = isPlainObject(content) ? (content as Record<string, unknown>) : {};
@@ -203,9 +207,8 @@ const documentsOf = (blocks: Block[]) => {
   return { documents, unreadable };
 };
 
-const configurationFile = (file: string): Document => {
-  const source = `config/${file}`;
-  const content = load(read(source), { schema: CORE_SCHEMA, filename: source });
+/** A file of config/, filled in as a reader would before a run (see CREDENTIAL_STAND_INS), its `where` saying what was filled in */
+const configurationFile = (source: string, content: unknown): Document => {
   const changes = new Set<string>();
   const options = isPlainObject(content) ? (content as Record<string, unknown>) : {};
   for (const section of [options.exchange, ...entriesOf(content)].filter(isPlainObject) as Record<string, unknown>[]) {
@@ -222,12 +225,47 @@ const configurationFile = (file: string): Document => {
   return { where: `${source}${changes.size ? ` (${[...changes].join(', ')})` : ''}`, source, content, isFile: true };
 };
 
+/**
+ * Reads the files of config/ with the loader's parser, which refuses a file that does not parse in one line quoting none of it. Read
+ * with js-yaml's load, such a file failed the whole suite with js-yaml's message, which quotes the lines around the fault: in a
+ * reader's copy of a configuration, the reader's keys.
+ */
+const configurationFilesOf = (files: { source: string; text: string }[]) => {
+  const documents: Document[] = [];
+  const unreadable: string[] = [];
+  for (const { source, text } of files) {
+    let content: unknown;
+    try {
+      content = parseConfigurationFile(source, text, 'YAML');
+    } catch (error) {
+      unreadable.push(describeError(error));
+      continue;
+    }
+    documents.push(configurationFile(source, content));
+  }
+  return { documents, unreadable };
+};
+
+/** A reader's copy of a configuration, which holds the reader's keys: git ignores it (config/*.local.* in .gitignore) */
+const isLocalCopy = (source: string) => /\.local\./.test(path.basename(source));
+
+/**
+ * The copy each configuration of config/ that leaves a credential to fill in must name: [the file, its copy]. Not a copy itself,
+ * which is that place: one that still left a credential empty was asked to name config/<name>.local.local.yml, and failed.
+ */
+const copiesToName = (files: Document[]) =>
+  files
+    .filter(({ where, source }) => where.includes('credentials filled in') && !isLocalCopy(source))
+    .map(({ source }) => [source, source.replace(/\.ya?ml$/, '.local.yml')] as const);
+
 const guideDocuments = documentsOf(guideBlocks);
-const configurationFiles = readdirSync(path.join(ROOT, 'config'))
-  .filter(file => /\.ya?ml$/.test(file))
-  .sort()
-  .map(configurationFile);
-const yamlDocuments = [...guideDocuments.documents, ...configurationFiles];
+const configurationFiles = configurationFilesOf(
+  readdirSync(path.join(ROOT, 'config'))
+    .filter(file => /\.ya?ml$/.test(file))
+    .sort()
+    .map(file => ({ source: `config/${file}`, text: read(`config/${file}`) })),
+);
+const yamlDocuments = [...guideDocuments.documents, ...configurationFiles.documents];
 const externalStrategies = new Set(
   yamlDocuments
     .flatMap(({ content }) => entriesOf(content))
@@ -266,6 +304,17 @@ describe('yaml blocks of the guides and configurations of config/', () => {
     expect([...guideDocuments.unreadable, ...yaml.unchecked]).toEqual([]);
   });
 
+  it('should read every file of config/ as the loader reads it', () => {
+    expect(configurationFiles.unreadable).toEqual([]);
+  });
+
+  it('should refuse a file of config/ that does not parse in one line that quotes none of it', () => {
+    const file = { source: 'config/sample.local.yml', text: 'exchange:\n  apiKey: sample-key\n bad: indentation\n' };
+    expect(configurationFilesOf([file]).unreadable).toEqual([
+      'Invalid YAML in configuration file config/sample.local.yml: bad indentation of a mapping entry at line 3, column 2',
+    ]);
+  });
+
   it('should find yaml blocks in the guides', () => {
     expect(guideDocuments.documents.length).toBeGreaterThan(0);
   });
@@ -282,24 +331,37 @@ describe('yaml blocks of the guides and configurations of config/', () => {
 
   it('should check a file of config/ as a whole configuration, whatever it holds', () => {
     const file = { where: 'config/sample.yml', source: 'config/sample.yml', content: { exchange: { name: 'binance' } }, isFile: true };
-    expect(yamlChecksOf([file], new Set()).configurations.flatMap(check => check.issues())).toContainEqual(expect.stringMatching(/^plugins: /));
+    expect(yamlChecksOf([file], new Set()).configurations.flatMap(check => check.issues())).toContainEqual(
+      expect.stringMatching(/^plugins: /),
+    );
   });
 
   // A configuration of config/ that leaves a credential for the reader to fill in says where to write it: in a copy git ignores
-  // (config/*.local.*), not in the tracked file, which a later `git commit -a` committed with the keys
-  it.each(
-    configurationFiles
-      .filter(({ where }) => where.includes('credentials filled in'))
-      .map(({ source }) => [source, source.replace(/\.ya?ml$/, '.local.yml')]),
-  )('%s should send the reader to %s, a copy git ignores, for its credentials', (source, copy) => {
-    expect(read(source)).toContain(copy);
+  // (config/*.local.*), not in the tracked file, which a later `git commit -a` committed with the keys. A boolean: toContain printed
+  // the file whole when it failed, the keys of a copy included.
+  it.each(copiesToName(configurationFiles.documents))(
+    '%s should send the reader to %s, a copy git ignores, for its credentials',
+    (source, copy) => {
+      expect(read(source).includes(copy)).toBe(true);
+    },
+  );
+
+  it.each`
+    source                       | copy                         | copies
+    ${'config/sample.yml'}       | ${'config/sample.local.yml'} | ${[['config/sample.yml', 'config/sample.local.yml']]}
+    ${'config/sample.local.yml'} | ${'no copy of its own'}      | ${[]}
+  `('should ask $source, which leaves a credential empty, to name $copy', ({ source, copies }) => {
+    const { documents } = configurationFilesOf([{ source, text: 'exchange:\n  name: binance\n  apiKey:\n' }]);
+    expect(copiesToName(documents)).toEqual(copies);
   });
 
   it.each([
     ['read', 'yaml', 1],
     ['leave out', 'yaml fragment', 0],
   ])('should %s a block opened with ```%s', (_outcome, info, documentCount) => {
-    expect(documentsOf(blocksOf('sample.md', fenced(info, 'watch:', '  warmup:', '    candleCount: 40'))).documents).toHaveLength(documentCount);
+    expect(documentsOf(blocksOf('sample.md', fenced(info, 'watch:', '  warmup:', '    candleCount: 40'))).documents).toHaveLength(
+      documentCount,
+    );
   });
 });
 
@@ -407,7 +469,9 @@ const relativeImportsOf = ({ statements }: ts.SourceFile) =>
   );
 
 const exportedClassesOf = ({ statements }: ts.SourceFile) =>
-  statements.filter(ts.isClassDeclaration).flatMap(declaration => (isExported(declaration) && declaration.name ? [declaration.name.text] : []));
+  statements
+    .filter(ts.isClassDeclaration)
+    .flatMap(declaration => (isExported(declaration) && declaration.name ? [declaration.name.text] : []));
 
 /**
  * Writes each typescript block as `<guide>-<line>.ts`, but for a module another block imports by a relative path
@@ -428,8 +492,10 @@ const snippetsOf = (blocks: Block[]): Snippet[] => {
       const before = `${STATEMENTS_FRAME.before}${indent(frame?.before ?? '')}`;
       snippet.content = `${before}${indent(block.text)}${indent(frame?.after ?? '')}${STATEMENTS_FRAME.after}`;
       snippet.firstLine = before.split('\n').length;
-    } else if (kind === 'class members') snippet.problems.push(`${block.where}: no block of statements before it declares the class of these members`);
-    else snippet.problems.push(...syntaxErrorsOf(block.text).map(({ line, message }) => `${block.source}:${block.line + line}: ${message}`));
+    } else if (kind === 'class members')
+      snippet.problems.push(`${block.where}: no block of statements before it declares the class of these members`);
+    else
+      snippet.problems.push(...syntaxErrorsOf(block.text).map(({ line, message }) => `${block.source}:${block.line + line}: ${message}`));
     if (kind === 'statements' && sourceFileOf(block.text).statements.some(ts.isClassDeclaration)) skeleton = block;
     snippets.push(snippet);
   }
@@ -440,7 +506,9 @@ const snippetsOf = (blocks: Block[]): Snippet[] => {
       const className = path.posix.basename(specifier).split('.')[0].toLowerCase();
       const exporter = snippets.find(
         ({ source, kind, text }) =>
-          source === importer.source && kind === 'module' && exportedClassesOf(sourceFileOf(text)).some(name => name.toLowerCase() === className),
+          source === importer.source &&
+          kind === 'module' &&
+          exportedClassesOf(sourceFileOf(text)).some(name => name.toLowerCase() === className),
       );
       if (exporter) exporter.file = file;
     }
@@ -469,7 +537,12 @@ const TYPESCRIPT_SAMPLES = [
   {
     sample: 'a module',
     source: 'module.sample.md',
-    markdown: fenced('typescript', 'import { Strategy } from "@strategies/strategy";', '', 'export class Empty implements Strategy<object> {}'),
+    markdown: fenced(
+      'typescript',
+      'import { Strategy } from "@strategies/strategy";',
+      '',
+      'export class Empty implements Strategy<object> {}',
+    ),
     error: /^module\.sample\.md:2: TS2307 Cannot find module '@strategies\/strategy' or its corresponding type declarations\.$/,
   },
 ].map(sample => ({ ...sample, written: snippetsOf(blocksOf(sample.source, sample.markdown)) }));
@@ -507,7 +580,8 @@ describe('typescript blocks of the guides', () => {
     writeFileSync(path.join(directory, 'context.ts'), CONTEXT);
     // The program sees the global declarations of src, as the type check of the codebase does (IndicatorRegistry, EpochTimeStamp): a
     // module only imported by the snippets would leave out the declaration files and the indicators' registry entries
-    const isGlobal = (file: string) => file.endsWith('.d.ts') || (!/\.(test|bench)\.ts$/.test(file) && read(`src/${file}`).includes('declare global'));
+    const isGlobal = (file: string) =>
+      file.endsWith('.d.ts') || (!/\.(test|bench)\.ts$/.test(file) && read(`src/${file}`).includes('declare global'));
     const globals = readdirSync(path.join(ROOT, 'src'), { recursive: true, encoding: 'utf8' })
       .filter(file => file.endsWith('.ts') && isGlobal(file))
       .map(file => path.join(ROOT, 'src', file));
@@ -519,7 +593,11 @@ describe('typescript blocks of the guides', () => {
     writeFileSync(path.join(directory, 'tsconfig.json'), JSON.stringify(tsconfig, null, 2));
     let output = '';
     try {
-      execFileSync(process.execPath, [TSC, '--project', directory, '--pretty', 'false'], { cwd: directory, encoding: 'utf8', stdio: 'pipe' });
+      execFileSync(process.execPath, [TSC, '--project', directory, '--pretty', 'false'], {
+        cwd: directory,
+        encoding: 'utf8',
+        stdio: 'pipe',
+      });
     } catch (error) {
       const { stdout } = error as { stdout?: string };
       if (stdout === undefined) throw error;
