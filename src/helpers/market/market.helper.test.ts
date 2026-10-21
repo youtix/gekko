@@ -2,7 +2,7 @@ import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { MarketData } from '@services/exchange/exchange.types';
 import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
-import { assertOrderWithinLimits, checkOrderPrice, getMarketOrderLimits, toBound } from './market.helper';
+import { assertOrderWithinLimits, checkOrderPrice, getMarketOrderLimits, getSentCost, toBound } from './market.helper';
 
 describe('market.helper', () => {
   const marketData: MarketData = {
@@ -32,6 +32,26 @@ describe('market.helper', () => {
       ${undefined} | ${undefined}
     `('reads a limit of $limit as the bound $expected', ({ limit, expected }) => {
       expect(toBound(limit)).toBe(expected);
+    });
+  });
+
+  // The amount truncated to the amount step, as the exchanges send it, then its cost at the price in decimal, as they check it: in
+  // binary, 0.00007 at 100000 came out at 6.999999999999999 and 100 at 0.000001 at 0.00009999999999999999, under minimums of 7 and
+  // 0.0001. A step that is not a finite number above 0 is none, and the amount is valued as it is.
+  describe('getSentCost', () => {
+    it.each`
+      amount                   | price       | precision              | sent       | cost      | description
+      ${0.001}                 | ${60000}    | ${{ amount: 0.00001 }} | ${0.001}   | ${60}     | ${'an amount on the step'}
+      ${0.0000870833333333333} | ${60000}    | ${{ amount: 0.00001 }} | ${0.00008} | ${4.8}    | ${'an amount the step cuts'}
+      ${0.0000099}             | ${60000}    | ${{ amount: 0.00001 }} | ${0}       | ${0}      | ${'an amount the step cuts to 0'}
+      ${1.4}                   | ${10}       | ${{ amount: 0.5 }}     | ${1}       | ${10}     | ${'a step that is not a unit of its last decimal'}
+      ${100}                   | ${0.000001} | ${{ amount: 1 }}       | ${100}     | ${0.0001} | ${'a cost of the minimum of the pairs quoted in BTC'}
+      ${0.00007}               | ${100000}   | ${undefined}           | ${0.00007} | ${7}      | ${'no precision'}
+      ${0.00007}               | ${100000}   | ${{ price: 0.01 }}     | ${0.00007} | ${7}      | ${'no amount step'}
+      ${0.00007}               | ${100000}   | ${{ amount: 0 }}       | ${0.00007} | ${7}      | ${'an amount step of 0, which sets none'}
+      ${NaN}                   | ${100}      | ${{ amount: 0.001 }}   | ${NaN}     | ${NaN}    | ${'an amount that is not a number'}
+    `('is $sent at a cost of $cost for $description', ({ amount, price, precision, sent, cost }) => {
+      expect(getSentCost(amount, price, { ...binanceMarketData, precision })).toEqual({ sent, cost });
     });
   });
 

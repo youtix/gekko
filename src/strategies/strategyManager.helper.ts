@@ -5,6 +5,7 @@ import { CandleBucket, ExchangeEvent, OrderInitiatedEvent } from '@models/event.
 import { TradingPair } from '@models/utility.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import { isFinitePositive } from '@utils/math/math.utils';
+import { listInWords } from '@utils/string/string.utils';
 import { isNil, isPlainObject } from 'lodash-es';
 import { inspect } from 'node:util';
 import { ORDER_KEYS, SIZING_KEYS, TRAILING_KEYS } from './strategyManager.const';
@@ -53,9 +54,6 @@ export const getKeysProblem = (order: StrategyOrder): string | undefined => {
   if (unknownKeys.length) return `order keys must be one of ${showValues(ORDER_KEYS)}, got ${showValues(unknownKeys)}`;
 };
 
-/** Names as a sentence lists them: amount and cost; amount, cost and allocation */
-const listNames = (names: readonly string[]) => `${names.slice(0, -1).join(', ')} and ${names.at(-1)}`;
-
 /**
  * What is wrong with the side, the type, the size or the price of an order, or undefined when nothing is: a side of ORDER_SIDES and a
  * type of ORDER_TYPES as they are spelt there; an amount, a cost and a price above 0, and an allocation above 0 and at most 100, each
@@ -80,7 +78,8 @@ export const getOrderProblem = (order: StrategyOrder): string | undefined => {
   if (!isNil(allocation) && !(isFinitePositive(allocation) && allocation <= 100))
     return `allocation must be a number above 0 and at most 100 (25 for 25 %), or left out, got ${inspect(allocation)}`;
   const sizingKeys = SIZING_KEYS.filter(key => !isNil(order[key]));
-  if (sizingKeys.length > 1) return `amount, cost and allocation size an order three ways: give at most one, got ${listNames(sizingKeys)}`;
+  if (sizingKeys.length > 1)
+    return `amount, cost and allocation size an order three ways: give at most one, got ${listInWords(sizingKeys)}`;
   if (!isNil(price) && !isFinitePositive(price))
     return `price must be a number above 0, or left out for the last price of the pair, got ${inspect(price)}`;
 };

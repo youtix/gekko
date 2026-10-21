@@ -1,4 +1,16 @@
-export const DEFAULT_FEE_BUFFER = 0.05; // 5%
+import { addPrecise } from '@utils/math/math.utils';
+import { shiftDecimalPoint } from '@utils/math/round.utils';
+
+/** The share of its budget a BUY keeps back for its fee, and for a price above the one it was sized at (see getBuyBudget) */
+export const DEFAULT_FEE_BUFFER = 0.05;
+/** DEFAULT_FEE_BUFFER in %, as the lines of the Trader and of the PositionBook write it: "once 5 % is kept back for the fee" */
+export const FEE_BUFFER_PERCENT = shiftDecimalPoint(DEFAULT_FEE_BUFFER, 2);
+/**
+ * The share of its budget a BUY spends on its cost, the rest kept back (DEFAULT_FEE_BUFFER), worked out in decimal: an all-in BUY, or
+ * one by its cost or its allocation, buys that share of its budget at its price, before the amount step of the market (see
+ * getAllInBuyAmount, and getBuyBudget, its inverse), and the PositionBook estimates the cost of a BUY at that share before it skips one
+ */
+export const BUY_COST_SHARE = addPrecise(1, -DEFAULT_FEE_BUFFER);
 /** The sides of an order, the one list of them: OrderSide derives from it, and the StrategyManager refuses an order of any other side */
 export const ORDER_SIDES = ['BUY', 'SELL'] as const;
 /**

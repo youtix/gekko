@@ -48,6 +48,11 @@ export type ExchangeEvent = {
   portfolio: Portfolio;
   /** The last price of the pair of the order, in currency: 0 when the Trader knows none, a price being above 0 */
   price: number;
+  /**
+   * When the Trader read these balances, in epoch milliseconds: undefined for the empty portfolio it starts with, before any read. The
+   * EventSubscriber dates the balances of /portfolio with it.
+   */
+  portfolioReadAt?: EpochTimeStamp;
 };
 
 export type OrderInitiatedEvent = {
@@ -70,6 +75,12 @@ export type OrderCanceledEvent = OrderInitiatedEvent & {
     filled?: number;
     /** What was left of its amount: the amount less `filled`, never below 0. Undefined with `filled` */
     remaining?: number;
+    /**
+     * The mean price of the fills the exchange reported for the order, in currency, undefined when it reported none (see
+     * Trader.reportCanceled). Not `price`, the one the order asked for: a MARKET or a STICKY order fills at the market, a LIMIT order at
+     * its price or better.
+     */
+    fillPrice?: number;
   };
 };
 
@@ -154,7 +165,7 @@ export type RoundTrip = {
   /**
    * The deepest fall of a one-minute low below the entry price, in % of that price (5 for 5 %), 0 when no low fell below it: over the
    * candles that closed after the BUY that opened it filled, up to the one that closed when or before the SELL that closed it filled
-   * (see countCandle, roundTripAnalyzer.ts). Measured after the warmup only.
+   * (see countCandle, roundTripAnalyzer.helper.ts). Measured after the warmup only.
    */
   maxAdverseExcursion: number;
   /**

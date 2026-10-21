@@ -5,6 +5,7 @@ import {
   formatPercent,
   formatRatio,
   formatSignedPercent,
+  listInWords,
   pluralize,
   toCamelCase,
   toPlainNumber,
@@ -48,6 +49,20 @@ describe('pluralize', () => {
     ${'the singular, a plural given'}   | ${'octopus'}     | ${1}   | ${'octopi'}  | ${'octopus'}
   `('should give $expected for $count $word: $description', ({ word, count, pluralForm, expected }) => {
     expect(pluralize(word, count, pluralForm)).toBe(expected);
+  });
+});
+
+// The last two joined by 'and', the others by commas, as a line names the pairs, the keys or the options it is about
+describe('listInWords', () => {
+  it.each`
+    description      | items                                               | expected
+    ${'no item'}     | ${[]}                                               | ${''}
+    ${'one item'}    | ${['BTC/USDT']}                                     | ${'BTC/USDT'}
+    ${'two items'}   | ${['amount', 'cost']}                               | ${'amount and cost'}
+    ${'three items'} | ${['amount', 'cost', 'allocation']}                 | ${'amount, cost and allocation'}
+    ${'four items'}  | ${['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'XRP/USDT']} | ${'BTC/USDT, ETH/USDT, SOL/USDT and XRP/USDT'}
+  `('should give $expected for $description', ({ items, expected }) => {
+    expect(listInWords(items)).toBe(expected);
   });
 });
 

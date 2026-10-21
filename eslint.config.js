@@ -20,6 +20,20 @@ export default [
     rules: {
       'no-console': 'error',
       'import/no-cycle': 'error',
+      // A helper of src/helpers is shared by several modules, the plugins among them: one that imported a plugin's own module made the
+      // plugin a dependency of every module that uses the helper
+      'import/no-restricted-paths': [
+        'error',
+        {
+          zones: [
+            {
+              target: './src/helpers',
+              from: './src/plugins',
+              message: 'src/helpers cannot import a plugin: move what it needs to src/helpers',
+            },
+          ],
+        },
+      ],
       'import/no-unresolved': 'error',
       // import/no-unused-modules is left out: without options it checks nothing, and its unusedExports option crashes under ESLint 10,
       // which eslint-plugin-import 2.32 does not support. A dead export is found with TypeScript's find-references instead.

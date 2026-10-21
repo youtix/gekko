@@ -3,6 +3,7 @@ import { Tag } from '@models/tag.types';
 import { MarketData, MarketValidationResult } from '@services/exchange/exchange.types';
 import { isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { isNil, max, min } from 'lodash-es';
+import { roundToStep } from './precision.helper';
 
 /** What an order is checked on: its price, its amount, then its cost, the two multiplied */
 type OrderValue = 'price' | 'amount' | 'cost';
@@ -17,6 +18,17 @@ type Refusal = { isValid: false; reason: OrderValue; value: number; min?: number
  * only as a finite number above 0: a precision of 0 states none.
  */
 export const toBound = (limit?: number) => (isFinitePositive(limit) ? limit : undefined);
+
+/**
+ * An amount as the exchanges send it, truncated to the amount step of the market (see roundToStep; left as it is without a step), and
+ * its cost at `price` worked out in decimal (see multiplyPrecise): the cost they check against the minimum cost of the market. Valued
+ * before the truncation, an amount less than a step above the minimum reads as enough: 0.0000870833333333333 BTC at 60000 is 5.225
+ * USDT, above a minimum of 5, and is sent as 0.00008 BTC, 4.8 USDT.
+ */
+export const getSentCost = (amount: number, price: number, marketData: MarketData): { sent: number; cost: number } => {
+  const sent = roundToStep(amount, marketData.precision?.amount, 'down');
+  return { sent, cost: multiplyPrecise(sent, price) };
+};
 
 /** Checks that a value is a finite number above 0, within the range of the market for it */
 const checkWithinRange = (

@@ -1,3 +1,4 @@
+import { listInWords } from '@utils/string/string.utils';
 import { compact } from 'lodash-es';
 import { z } from 'zod';
 
@@ -42,10 +43,9 @@ export const debugBacktestStrategySchema = z
   .superRefine(({ allIn, cost, allocation }, ctx) => {
     const given = compact([allIn && 'allIn', cost !== undefined && 'cost', allocation !== undefined && 'allocation']);
     if (given.length < 2) return;
-    const named = `${given.slice(0, -1).join(', ')} and ${given.at(-1)}`;
     ctx.addIssue({
       code: 'custom',
       path: [given[1]],
-      message: `allIn, cost and allocation size the orders three ways: give at most one, got ${named}`,
+      message: `allIn, cost and allocation size the orders three ways: give at most one, got ${listInWords(given)}`,
     });
   });

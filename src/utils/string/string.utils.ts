@@ -34,6 +34,13 @@ export function pluralize(word: string, count: number, pluralForm?: string): str
   return `${word}s`;
 }
 
+/**
+ * Items as a sentence lists them: one as it is, 'a and b', 'a, b and c', and '' for none. For a line that names the pairs, the keys or
+ * the options it is about.
+ */
+export const listInWords = (items: readonly string[]): string =>
+  items.length > 1 ? `${items.slice(0, -1).join(', ')} and ${items.at(-1)}` : (items[0] ?? '');
+
 const ratioFormatter = new Intl.NumberFormat('en-US', {
   minimumFractionDigits: 2,
   maximumFractionDigits: 2,

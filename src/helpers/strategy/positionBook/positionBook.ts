@@ -1,15 +1,15 @@
+import { BUY_COST_SHARE, FEE_BUFFER_PERCENT } from '@constants/order.const';
 import { GekkoError } from '@errors/gekko.error';
+import { toBound } from '@helpers/market/market.helper';
+import { getAllocatedShare } from '@helpers/order/sizing.helper';
 import { PositionTracker } from '@helpers/strategy/positionTracker/positionTracker';
 import { TradingPair } from '@models/utility.types';
-import { getAllocatedShare } from '@plugins/trader/trader.helper';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams } from '@strategies/strategy.types';
-import { toBound } from '@helpers/market/market.helper';
 import { multiplyPrecise } from '@utils/math/math.utils';
 import { round } from '@utils/math/round.utils';
-import { formatEveryDecimal } from '@utils/string/string.utils';
+import { formatEveryDecimal, listInWords } from '@utils/string/string.utils';
 import { UUID } from 'node:crypto';
-import { BUY_COST_SHARE, FEE_BUFFER_PERCENT, SHARE_DECIMALS } from './positionBook.const';
-import { listPairs } from './positionBook.helper';
+import { SHARE_DECIMALS } from './positionBook.const';
 import { BuyOrder, OrderParams, SellOrder, TrackParams } from './positionBook.types';
 
 /**
@@ -49,7 +49,7 @@ export class PositionBook {
     for (const pair of this.trackedPairs) this.trackers.set(pair, new PositionTracker());
     if (this.trackedPairs.length < 2) return;
     const rule = 'each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset';
-    tools.log('info', `Trading ${listPairs(this.trackedPairs)}: ${rule}`);
+    tools.log('info', `Trading ${listInWords(this.trackedPairs)}: ${rule}`);
   }
 
   /**
@@ -149,7 +149,7 @@ export class PositionBook {
   private getTracker(symbol: TradingPair, action: string): PositionTracker {
     const tracker = this.trackers.get(symbol);
     if (tracker) return tracker;
-    const tracked = this.pairs.length > 0 ? listPairs(this.pairs) : 'no pair until init calls track';
+    const tracked = this.pairs.length > 0 ? listInWords(this.pairs) : 'no pair until init calls track';
     throw new GekkoError('strategy', `Impossible to ${action} on ${symbol}: the position book does not track it (it tracks ${tracked})`);
   }
 
