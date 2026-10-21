@@ -33,7 +33,7 @@ type MockMarket = {
 /**
  * ccxt's error classes, with ccxt's own inheritance (BaseError at the root, NetworkError extends OperationFailed, OrderNotFound extends
  * InvalidOrder, BadSymbol extends BadRequest) and names ('NetworkError'), so that retry, translateCcxtError
- * (src/services/exchange/exchange.utils.ts) and the creations of CCXTExchange run their instanceof checks against the mocked module,
+ * (src/services/exchange/exchange.helper.ts) and the creations of CCXTExchange run their instanceof checks against the mocked module,
  * and a failure reads as ccxt's.
  */
 export class MockBaseError extends Error {

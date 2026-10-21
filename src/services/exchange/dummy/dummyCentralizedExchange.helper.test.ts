@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { roundToMarketPrecision } from './dummyCentralizedExchange.helper';
 
-// The steps themselves are those of roundToStep and getPriceTick (precision.utils), as ccxt 4.5.39 puts a value on them
+// The steps themselves are those of roundToStep and getPriceTick (precision.helper), as ccxt 4.5.39 puts a value on them
 describe('roundToMarketPrecision', () => {
   it.each`
     marketData                                                                    | expected                                              | scenario

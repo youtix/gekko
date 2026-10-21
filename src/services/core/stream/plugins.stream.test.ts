@@ -95,7 +95,7 @@ const createHeldWork = () => {
   return { run, started: started.promise, release: () => released.resolve(), finished };
 };
 
-/** Runs the plugins through the public API, as pipeline.utils does, and returns what the pipeline rejected with, if anything. */
+/** Runs the plugins through the public API, as pipeline.helper does, and returns what the pipeline rejected with, if anything. */
 const runPipeline = (source: Iterable<CandleBucket> | AsyncIterable<CandleBucket>, plugins: Plugin[]) =>
   pipeline(Readable.from(source), new PluginsStream(plugins)).then(
     () => undefined,
@@ -886,7 +886,7 @@ describe('PluginsStream', () => {
         expect(plugin.processCloseStream).toHaveBeenCalledWith(stopError);
       });
 
-      // pipeline() rejects with the error upstream, which came first: pipeline.utils prefers the stream's failure, main() sees the stop
+      // pipeline() rejects with the error upstream, which came first: pipeline.helper prefers the stream's failure, main() sees the stop
       it('reports the failure of the bucket, not the error it was destroyed with', async () => {
         finalization.release();
         expect(await streamError).toBe(stopError);

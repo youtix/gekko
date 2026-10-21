@@ -41,7 +41,7 @@ const significantDigitsSchema = (field: string) => {
 
 /**
  * The lowest and highest order price, amount or cost of a pair. A max left out, or set to 0 as Binance reports a disabled
- * filter, sets no maximum (market.utils counts a bound of 0 as absent), so min is only compared with a max above 0.
+ * filter, sets no maximum (market.helper counts a bound of 0 as absent), so min is only compared with a max above 0.
  * Zod still runs the refinement after a failed bound: a negative max, already reported, is not compared either.
  */
 const limitRangeSchema = (field: string) =>

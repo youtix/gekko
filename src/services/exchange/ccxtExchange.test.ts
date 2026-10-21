@@ -1065,7 +1065,7 @@ describe('CCXTExchange', () => {
 
   // Hyperliquid takes 5 significant digits in a price, whole units from 10000 on. ccxt sets precision.price once, when the markets load,
   // to the tick at the price of that moment: 0.1 on a market loaded at 9990, finer than the tick from 10000 on, where ccxt sends 10000.3
-  // and 10000.4 at 10000. The roundings mocked are those of ccxt 4.5.39 (see the hyperliquid order prices of exchange.utils.test.ts).
+  // and 10000.4 at 10000. The roundings mocked are those of ccxt 4.5.39 (see the hyperliquid order prices of exchange.helper.test.ts).
   describe('createLimitOrder, a price rounded beyond the tick of the market data', () => {
     const limits = { amount: { min: 0.01 }, cost: { min: 10 } };
     let exchange: CCXTExchange;

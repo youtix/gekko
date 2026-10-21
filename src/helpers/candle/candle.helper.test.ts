@@ -19,7 +19,7 @@ import {
   ohlc4,
 } from './candle.helper';
 
-describe('candle utils', () => {
+describe('candle.helper', () => {
   const defaultCandle: Candle = {
     close: 100,
     high: 150,

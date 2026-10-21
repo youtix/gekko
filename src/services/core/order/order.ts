@@ -262,7 +262,7 @@ export abstract class Order extends EventEmitter {
   /**
    * Applies a state the exchange reported for the order, once recorded (see recordOrderUpdate): executed in full ('closed'), the order
    * is filled; canceled, see handleTransactionCanceled; open, the order is open, which is reported once per transaction. Those are the
-   * only statuses a state carries (see processStatus in exchange.utils).
+   * only statuses a state carries (see processStatus in exchange.helper).
    */
   protected applyOrderUpdate(order: OrderState): void | Promise<void> {
     const previousStatus = this.transactions.get(order.id)?.status;

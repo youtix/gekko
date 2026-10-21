@@ -88,7 +88,7 @@ describe('roundToStep', () => {
     expect(roundToStep(value, 0.01, option)).toBe(value);
   });
 
-  // A step that is not a finite number above 0 is none, as market.utils reads a limit: the value is left as it is, as CCXTExchange leaves
+  // A step that is not a finite number above 0 is none, as market.helper reads a limit: the value is left as it is, as CCXTExchange leaves
   // a value the market has no precision for
   it.each`
     step

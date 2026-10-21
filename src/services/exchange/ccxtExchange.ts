@@ -30,7 +30,7 @@ import {
 import { CCXTExchangeConfig, Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from './exchange.types';
 
 /**
- * A real exchange reached through ccxt. Every call goes through one of two wrappers of exchange.utils, which both translate the
+ * A real exchange reached through ccxt. Every call goes through one of two wrappers of exchange.helper, which both translate the
  * ccxt errors into Gekko's:
  * - The reads (fetchTicker(s), fetchOHLCV, fetchMyTrades, fetchOrder, fetchOpenOrders, fetchBalance) go through retry, which sends
  *   them again after a ccxt NetworkError: they are idempotent.
@@ -112,7 +112,7 @@ export class CCXTExchange implements Exchange {
    *   with that mapping, and the private client reads it to resolve a symbol written with a token name (UBTC/USDC for BTC/USDC)
    *   and to key its spot balance (fetchBalance): it is copied.
    * - Hyperliquid's private fetchCurrencies also ran ccxt's initializeClient at start-up, which sets ccxt's referrer and would approve
-   *   ccxt's builder fee but for the builderFee: false that createExchange sets (exchange.utils.ts): createOrder and cancelOrder run
+   *   ccxt's builder fee but for the builderFee: false that createExchange sets (exchange.helper.ts): createOrder and cancelOrder run
    *   it before their first request anyway.
    */
   public async loadMarkets() {

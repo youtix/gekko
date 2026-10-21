@@ -4,7 +4,7 @@ import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { assertOrderWithinLimits, checkOrderPrice, getMarketOrderLimits, toBound } from './market.helper';
 
-describe('Market Utils', () => {
+describe('market.helper', () => {
   const marketData: MarketData = {
     price: { min: 10, max: 100 },
     amount: { min: 1, max: 10 },

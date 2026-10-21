@@ -75,7 +75,7 @@ const EVERY_MODE_WATCH = {
   tickrate: 500,
 };
 
-describe('Pipeline Utils', () => {
+describe('pipeline.helper', () => {
   describe('mergeSequentialStreams', () => {
     it.each`
       values1   | values2 | expected
@@ -323,7 +323,7 @@ describe('Pipeline Utils', () => {
       });
 
       // From the start of the candle `candleCount` candles before the one in progress to the last closed minute. The window
-      // itself is swept over many dates in candle.utils.test.ts (getCandleStart).
+      // itself is swept over many dates in candle.helper.test.ts (getCandleStart).
       it.each`
         timeframe | candleCount | clock                         | start                     | end
         ${'1m'}   | ${3}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-15T10:17:00Z'} | ${'2024-03-15T10:19:00Z'}

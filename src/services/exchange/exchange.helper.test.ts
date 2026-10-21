@@ -20,7 +20,7 @@ vi.mock('@utils/process/process.utils', () => ({
   wait: vi.fn().mockResolvedValue(undefined),
 }));
 
-describe('Exchange Utils', () => {
+describe('exchange.helper', () => {
   describe('retry', () => {
     const timeout = new ccxt.RequestTimeout('binance GET https://api.binance.com/api/v3/order request timed out (10000 ms)');
     const keyRefused = new ccxt.AuthenticationError('binance {"code":-2015,"msg":"Invalid API-key, IP, or permissions for action."}');
