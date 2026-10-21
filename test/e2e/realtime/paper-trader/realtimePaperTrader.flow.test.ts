@@ -154,9 +154,11 @@ describe('E2E: Realtime Paper Trader Flow', () => {
   });
 
   // The round trip reads the one-minute candles that close after its BUY filled, at 12:01:00, and by the time its SELL filled, at
-  // 12:02:00: the candle of 12:01 alone. The candle of 12:00 closes as the BUY fills. That of 12:02 closes after the SELL filled: it is
-  // processed before the SELL is heard, with its bucket, and taken back then. Read as each bucket arrived, the round trip skipped the
-  // candle of 12:01, which it held, and read that of 12:02, after it: 0 and 5 in the first and the last rows.
+  // 12:02:00: the candle of 12:01 alone. The candle of 12:00 closes as the BUY fills. Each order is reported once the bucket it was sent
+  // with is flushed, and heard before the next bucket is processed: the BUY before the candle of 12:01, the SELL before that of 12:02,
+  // which closes after the SELL filled. Read as each bucket arrived, when the end of an order was heard after the hooks of the next
+  // bucket, the round trip skipped the candle of 12:01, which it held, and read that of 12:02, after it: 0 and 5 in the first and the
+  // last rows.
   it.each([
     { candle: 'of 12:01, which the position holds', index: 1, mae: 5 },
     { candle: 'of 12:00, which closes as the BUY fills', index: 0, mae: 0 },
@@ -170,7 +172,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       [100, 110, 120].map((close, n) => (n === index ? { close, low: 95 } : { close })),
     );
 
-    // The round trip is heard with the candle of 12:02, at 12:03:02: the Trader reports the end of an order with the next bucket
+    // The round trip is heard at 12:03:02, as the bucket of 12:02 arrives: the SELL, reported once the bucket of 12:01 was flushed, is
+    // delivered before the plugins process the next one
     await runRealtimeUntil(() => loggedRoundTrips().length > 0, { maxMinutes: 5 });
     await endRealtimeRun();
 
@@ -270,14 +273,15 @@ describe('E2E: Realtime Paper Trader Flow', () => {
     MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
       // 12:00: the BUY of 1 BTC, sent with this candle with its stop, fills at its close
       { close: 9500 },
-      // 12:01: the BUY's completion is heard after it, and arms the stop, dormant until a high reaches its trigger, 9930
+      // 12:01: the BUY's completion, reported once the bucket of 12:00 was flushed, is heard before this candle, and arms the stop, dormant
+      // until a high reaches its trigger, 9930
       { close: 9500 },
       // 12:02: opens at its close, 10000, above the trigger: the stop is active from the open, its peak 10000 and its stop price 0.1 %
       // below, 9990, which the low of 9995 stays above
       { close: 10000, low: 9995 },
       // 12:03: opens at its close, 9800, below the stop price: the stop triggers, and its MARKET SELL of 1 BTC fills at 9800
       { close: 9800 },
-      // 12:04: the SELL's completion is heard after it, for all the stop sells: the stop is over
+      // 12:04: the SELL's completion is heard before this candle, for all the stop sells: the stop is over
       { close: 9800 },
     ]);
 
@@ -389,11 +393,12 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         annualizedReturnPct: 58.7369,
         marketReturnPct: 0,
         alpha: 0.160483333333333,
-        // The curve has a point at the close of each candle, marked before the fills its bucket delivers are heard: the BUY's with the
-        // bucket of 12:03, the SELL's with that of 12:05. The spans that end on a point holding BTC, 12:04 to 12:06: 2 of the 6 minutes.
+        // The curve has a point at the close of each candle, marked once the fills reported before its bucket arrived are heard: the BUY's,
+        // read at 12:03:22, before the point of 12:04, the SELL's, reported once the point of 12:05 was marked, before that of 12:06. The
+        // spans that end on a point holding BTC, 12:03 to 12:05: 2 of the 6 minutes.
         exposurePct: 33.3333333333333,
-        // The curve holds 300000 to 12:04, the reservation counted in the total, then 300491.45 at 12:05 and 12:06, BTC at 10000, and
-        // 300481.45 at 12:07, after the SELL. Its 6 returns are four of 0, 0.16381666666667055 (491.45 / 300000 × 100) and
+        // The curve holds 300000 to 12:03, the reservation counted in the total, then 300491.45 at 12:04 and 12:05, BTC at 10000, and
+        // 300481.45 at 12:06 and 12:07, after the SELL. Its 6 returns are four of 0, 0.16381666666667055 (491.45 / 300000 × 100) and
         // -0.003327881708447944 (-10 / 300491.45 × 100): their population standard deviation, and the root mean square of the loss over
         // them
         volatility: 0.06131095614191739,
@@ -403,13 +408,13 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         sortinoRatio: 844.0422483784159,
         startPrice: 10000,
         endPrice: 10000,
-        // The fee of the SELL from the peak of 12:06: 10 / 300491.45 × 100, the last minute
+        // The fee of the SELL from the peak of 12:05: 10 / 300491.45 × 100, the last two minutes
         maxDrawdownPct: 0.00332788170844794,
-        longestDrawdownMs: ONE_MINUTE,
+        longestDrawdownMs: 2 * ONE_MINUTE,
         startEquity: 300000,
         endEquity: 300481.45,
-        // Counted once per delivery: the reads of the start and of the end of the warmup together, with the candle of 12:00, then each of
-        // those of 12:02:30, 12:03:22, 12:04:30, 12:05:02 and 12:06:30 with the candle after it
+        // Counted once per delivery: the reads of the start and of the end of the warmup together, after the hooks of the candle of 12:00,
+        // then each of those of 12:02:30, 12:03:22, 12:04:30, 12:05:02 and 12:06:30 as the next bucket arrives, before its hooks
         portfolioChangeCount: 6,
         benchmarkAsset: 'BTC',
         interruption: 'The operation was aborted.',

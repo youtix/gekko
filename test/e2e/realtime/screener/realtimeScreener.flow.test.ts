@@ -207,10 +207,10 @@ describe('E2E: Realtime Screener Flow', () => {
         { at: Date.UTC(2024, 0, 1, 12, 2, 12), text: '/portfolio' },
         { at: Date.UTC(2024, 0, 1, 12, 5, 12), text: '/portfolio' },
       ];
-      // The candles of 12:00 to 12:04, one a minute from 12:01:02: until the strategy's lines on the completion of the BUYs advised on
-      // the second candle have gone out, with the fifth, at 12:05:02. Checked at the end of each minute of the run, the condition holds
+      // The candles of 12:00 to 12:04, one a minute from 12:01:02: until the strategy's lines on the completion of the SELLs advised on
+      // the third candle have gone out, with the fifth, at 12:05:02. Checked at the end of each minute of the run, the condition holds
       // at 12:05:30, where the clock stops.
-      await runRealtimeUntil(() => relays('Order Completed: ').length === 4, { maxMinutes: 6 });
+      await runRealtimeUntil(() => relays('Order Completed: ').length === 6, { maxMinutes: 6 });
     });
 
     afterAll(() => endRealtimeRun());
@@ -218,7 +218,8 @@ describe('E2E: Realtime Screener Flow', () => {
     it('Scenario A: 1 BTC advised to SELL at 100 then BUY at 110, filled by the next candle: completed at 99.8001 and 110.2101', () => {
       // The Trader places the STICKY SELL advised on the candle of 12:00 one price.min (0.1) under the ticker, at 99.9, which the high of
       // the next candle reaches, and the BUY advised on that one at 110.1, which the low of 12:02 reaches. A poll of the order sees it
-      // filled, and the Trader reports it with the next candle, as the strategy hears of it: the strategy's line goes out with the next.
+      // filled, and the Trader reports it: it is delivered as the next candle arrives, before the plugins process it, and the strategy's
+      // line, dated with the close of the candle the strategy last processed, goes out with that candle's notifications.
       // The simulator takes Binance's 0.1 % fee out of the SELL's proceeds, 99.9 - 0.0999, and adds it to the BUY's cost, 110.1 + 0.1101.
       // The currency is shared with ETH, whose orders fill on the same candles: 300,000 + 99.8001 + 1,997.99001 after the SELLs, then
       // 110.2101 and 2,202.21001 less after the BUYs. The BUY, created before the Trader saw the SELL filled, shows the balances before it.
@@ -265,7 +266,7 @@ describe('E2E: Realtime Screener Flow', () => {
           'Current portfolio: 99 BTC / 302,097.79011 USDT',
           '------',
         ),
-        strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <BTC SELL 1>'),
+        strategyLog('2024-01-01T12:02:00.000Z', 'Order Completed: <BTC SELL 1>'),
         message(
           'BUY STICKY order completed (<BTC BUY 2>) for BTC/USDT',
           'Amount: 1 BTC',
@@ -276,7 +277,7 @@ describe('E2E: Realtime Screener Flow', () => {
           'Current portfolio: 100 BTC / 299,785.37 USDT',
           '------',
         ),
-        strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <BTC BUY 2>'),
+        strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <BTC BUY 2>'),
       ]);
     });
 
@@ -326,7 +327,7 @@ describe('E2E: Realtime Screener Flow', () => {
           'Current portfolio: 99 ETH / 302,097.79011 USDT',
           '------',
         ),
-        strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <ETH SELL 1>'),
+        strategyLog('2024-01-01T12:02:00.000Z', 'Order Completed: <ETH SELL 1>'),
         message(
           'BUY STICKY order completed (<ETH BUY 2>) for ETH/USDT',
           'Amount: 1 ETH',
@@ -337,14 +338,14 @@ describe('E2E: Realtime Screener Flow', () => {
           'Current portfolio: 100 ETH / 299,785.37 USDT',
           '------',
         ),
-        strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <ETH BUY 2>'),
+        strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <ETH BUY 2>'),
       ]);
     });
 
     it('Scenario C: the 10 orders advised created under the ids of their advices, the 6 filled completed under them, in order', () => {
       // Advised on each of the 5 candles, BTC's order then ETH's, each filled by the next candle and reported with the one after: those of
-      // the last two candles are not reported yet. The strategy hears of a completion as it is reported, and its line goes out with the
-      // next candle.
+      // the last two candles are not reported yet. The strategy hears of a completion as it is reported, before the plugins process that
+      // candle, and its line goes out with the same candle's notifications.
       expect({
         created: relays(' order created ('),
         completed: relays(' order completed ('),
@@ -375,28 +376,33 @@ describe('E2E: Realtime Screener Flow', () => {
           'Order Completed: <ETH SELL 1>',
           'Order Completed: <BTC BUY 2>',
           'Order Completed: <ETH BUY 2>',
+          'Order Completed: <BTC SELL 3>',
+          'Order Completed: <ETH SELL 3>',
         ],
       });
     });
 
-    it('Scenario D: the 14 info lines the strategy logged relayed, its 10 debug lines logged and never relayed', () => {
-      // A line logged on a candle goes out with that candle's notifications; one logged on an order event, delivered after them, with the
-      // next candle's. Each is dated with the close of the candle being processed. The debug lines, one per pair and candle, reach the
-      // logs at GEKKO_LOG_LEVEL=debug, never the chat.
+    it('Scenario D: the 16 info lines the strategy logged relayed, its 10 debug lines logged and never relayed', () => {
+      // A line logged on a candle goes out with that candle's notifications. One logged on an order event goes out with them too, ahead
+      // of the candle's own: the event is delivered as the candle arrives, before the plugins process it, and the line is dated with the
+      // close of the candle the strategy last processed, the one before. The debug lines, one per pair and candle, reach the logs at
+      // GEKKO_LOG_LEVEL=debug, never the chat.
       expect({ relayed: postsWith('] (strategy)\n'), debug: linesOf('STRATEGY', 'debug') }).toEqual({
         relayed: [
           strategyLog('2024-01-01T12:01:00.000Z', 'Trigger SHORT for BTC/USDT'),
           strategyLog('2024-01-01T12:01:00.000Z', 'Trigger SHORT for ETH/USDT'),
           strategyLog('2024-01-01T12:02:00.000Z', 'Trigger LONG for BTC/USDT'),
           strategyLog('2024-01-01T12:02:00.000Z', 'Trigger LONG for ETH/USDT'),
+          strategyLog('2024-01-01T12:02:00.000Z', 'Order Completed: <BTC SELL 1>'),
+          strategyLog('2024-01-01T12:02:00.000Z', 'Order Completed: <ETH SELL 1>'),
           strategyLog('2024-01-01T12:03:00.000Z', 'Trigger SHORT for BTC/USDT'),
           strategyLog('2024-01-01T12:03:00.000Z', 'Trigger SHORT for ETH/USDT'),
-          strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <BTC SELL 1>'),
-          strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <ETH SELL 1>'),
+          strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <BTC BUY 2>'),
+          strategyLog('2024-01-01T12:03:00.000Z', 'Order Completed: <ETH BUY 2>'),
           strategyLog('2024-01-01T12:04:00.000Z', 'Trigger LONG for BTC/USDT'),
           strategyLog('2024-01-01T12:04:00.000Z', 'Trigger LONG for ETH/USDT'),
-          strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <BTC BUY 2>'),
-          strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <ETH BUY 2>'),
+          strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <BTC SELL 3>'),
+          strategyLog('2024-01-01T12:04:00.000Z', 'Order Completed: <ETH SELL 3>'),
           strategyLog('2024-01-01T12:05:00.000Z', 'Trigger SHORT for BTC/USDT'),
           strategyLog('2024-01-01T12:05:00.000Z', 'Trigger SHORT for ETH/USDT'),
         ],
@@ -475,8 +481,9 @@ describe('E2E: Realtime Screener Flow', () => {
     it('Scenario E: resting orders canceled unfilled by the strategy a candle after their advice: 6 canceled, none completed', async () => {
       // Both pairs close at 100 on the candles DebugAdvice sells on and 90 on those it buys on: the next candle never reaches an order,
       // which rests until the strategy cancels it, a candle after its advice (cancelAfter: 1). The paper exchange cancels it at once, and
-      // the Trader reports it with the same candle, when the strategy hears of it: its line goes out with the next candle. The scenario's
-      // cancellations used to come from the synthetic ticker running ahead of the candles: on a flat market it canceled nothing.
+      // the Trader reports it with the same candle, when the strategy hears of it: its line goes out as the next candle arrives, before the
+      // plugins process it. The scenario's cancellations used to come from the synthetic ticker running ahead of the candles: on a flat
+      // market it canceled nothing.
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', zigzag(100, 90));
       MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag(100, 90));
       mockStrategyConfig = { ...DEFAULT_MOCK_STRATEGY_CONFIG, cancelAfter: 1 };
@@ -566,7 +573,8 @@ describe('E2E: Realtime Screener Flow', () => {
       MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag(2000, 2200));
       // The creations fail as an exchange answers, within the minute: those asked with a candle when the next one reaches the simulated
       // exchange, before the plugins process it. Nothing on that path waits for a timer, so one turn of the event loop lets the creations
-      // of the candle before arrive, and another their failures reach the Trader: each candle's failures are delivered with the next one.
+      // of the candle before arrive, and another their failures reach the Trader: each candle's failures are delivered with the next one,
+      // before the plugins process it.
       // BTC's are lost on the network, which leaves their outcome unknown; ETH's fail on an error that placed nothing.
       const { DummyCentralizedExchange } = await import('@services/exchange/dummy/dummyCentralizedExchange');
       const { processOneMinuteBucket } = DummyCentralizedExchange.prototype;
@@ -589,10 +597,11 @@ describe('E2E: Realtime Screener Flow', () => {
       // The breaker ends the run, waited for rather than raced against a timer
       const failure = await runRealtimeUntilEnd({ maxMinutes: 10 });
 
-      // The orders of each candle error with the next one, and the strategy's lines go out a candle later: 12:00's orders error with the
-      // candle of 12:01, 12:01's with 12:02's. The 5th error, that of <BTC SELL 3>, delivered with the candle of 12:03, trips the breaker
-      // (maxConsecutiveErrors, 5 by default) once the strategy has heard of it: what that candle queued is dropped as the run stops, the
-      // strategy's line for the 5th error and the 6th error among them.
+      // The orders of each candle error with the next one, the strategy's lines going out with it: 12:00's orders error with the candle
+      // of 12:01, 12:01's with 12:02's. Each notification quotes the last close the subscriber has processed, that of the candle its order
+      // was advised on. The 5th error, that of <BTC SELL 3>, delivered as the candle of 12:03 arrives, trips the breaker
+      // (maxConsecutiveErrors, 5 by default) once the strategy has heard of it, before the plugins process that candle, which advises
+      // nothing: what was queued since is dropped as the run stops, the strategy's line for the 5th error and the 6th error among them.
       expect({
         failure,
         errored: postsWith(' order errored ('),
@@ -608,7 +617,7 @@ describe('E2E: Realtime Screener Flow', () => {
             'It may still be live on the exchange, where Gekko follows it no more: check it there',
             'At time: 2024-01-01T12:01:00.000Z',
             'Requested amount: 1',
-            'Current price: 110 USDT',
+            'Current price: 100 USDT',
             '------',
           ),
           message(
@@ -616,7 +625,7 @@ describe('E2E: Realtime Screener Flow', () => {
             'Due to Simulated Exchange Error',
             'At time: 2024-01-01T12:01:00.000Z',
             'Requested amount: 1',
-            'Current price: 2,200 USDT',
+            'Current price: 2,000 USDT',
             '------',
           ),
           message(
@@ -625,7 +634,7 @@ describe('E2E: Realtime Screener Flow', () => {
             'It may still be live on the exchange, where Gekko follows it no more: check it there',
             'At time: 2024-01-01T12:02:00.000Z',
             'Requested amount: 1',
-            'Current price: 100 USDT',
+            'Current price: 110 USDT',
             '------',
           ),
           message(
@@ -633,7 +642,7 @@ describe('E2E: Realtime Screener Flow', () => {
             'Due to Simulated Exchange Error',
             'At time: 2024-01-01T12:02:00.000Z',
             'Requested amount: 1',
-            'Current price: 2,000 USDT',
+            'Current price: 2,200 USDT',
             '------',
           ),
         ],
@@ -642,7 +651,7 @@ describe('E2E: Realtime Screener Flow', () => {
           'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)',
           [
             'Deferred events dropped as the application closes, the final reports may miss them:',
-            'TradingAdvisor (strategyInfo: 1), Trader (portfolioChange: 1, orderErrored: 1, orderInitiated: 2)',
+            'TradingAdvisor (strategyInfo: 1), Trader (portfolioChange: 1, orderErrored: 1)',
           ].join(' '),
         ],
       });

@@ -150,7 +150,7 @@ describe('E2E: Realtime paper trading options', () => {
   ])('Scenario B: feeOverride %s', async (_title, feeOverride, { exitEquity, pnl, profit }) => {
     paperRun = { balance: { BTC: 100, USDT: 300000 }, feeOverride, analyzer: 'RoundTripAnalyzer' };
 
-    // The round trip exits on the second candle, and is reported with the third
+    // The round trip exits on the second candle, and is heard as the third arrives, before the plugins process it
     const isRoundTrip = (message: Record<string, any>) => message.id === 0 && 'exitAt' in message;
     await runRealtimeUntil(() => findLoggedObject(isRoundTrip) !== undefined, { maxMinutes: 5 });
 

@@ -1,7 +1,9 @@
 import { ApplicationStopError } from '@errors/applicationStop.error';
 import { GekkoError } from '@errors/gekko.error';
+import { Watch } from '@models/configuration.types';
 import { CandleBucket } from '@models/event.types';
 import { Plugin } from '@plugins/plugin';
+import { config } from '@services/configuration/configuration';
 import { error, info, warning } from '@services/logger';
 import { SequentialEventEmitter } from '@helpers/event/sequentialEventEmitter';
 import { noop } from 'lodash-es';
@@ -21,6 +23,8 @@ const { injectMock } = vi.hoisted(() => ({
 }));
 
 vi.mock('@services/injecter/injecter', () => ({ inject: injectMock }));
+// The mode the stream reads as it is built: a backtest, unless a test sets another (see inMode)
+vi.mock('@services/configuration/configuration', () => ({ config: { getWatch: vi.fn(() => ({ mode: 'backtest' })) } }));
 vi.mock('@services/logger', () => ({
   info: vi.fn(),
   debug: vi.fn(),
@@ -118,6 +122,9 @@ const failToLogFinalizationFailure = (thrown: unknown) =>
 /** Writes a bucket to the stream on its own, outside any pipeline, and resolves once the stream has processed it */
 const writeBucket = (stream: PluginsStream) =>
   new Promise<void>((resolve, reject) => stream.write(BUCKET, failure => (failure ? reject(failure) : resolve())));
+
+/** The streams built from now on run in `mode`, which they read from the configuration as they are built */
+const inMode = (mode: Watch['mode']) => vi.mocked(config.getWatch).mockReturnValue({ mode } as Watch);
 
 /* -------------------------------------------------------------------------- */
 /*                                   TESTS                                    */
@@ -277,6 +284,153 @@ describe('PluginsStream', () => {
         await runPipeline([BUCKET], [createPluginStub()]);
 
         expect(info).toHaveBeenCalledWith('stream', 'Gekko is closing the application !');
+      });
+    });
+
+    // In realtime a report of the Trader floats: it queues the end of its order between two buckets. Delivered after the hooks of the next
+    // bucket, that end reached the strategy a bucket late, which decided on it as if the order were still pending.
+    describe('with events queued between two buckets', () => {
+      let calls: string[];
+      let advisor: Plugin;
+      let trader: Plugin;
+
+      /**
+       * Writes a bucket, then `queue` queues events as a report that floats queues the end of its order, then a second bucket: resolves
+       * once the stream has processed it
+       */
+      const writeTwoBuckets = async (stream: PluginsStream, queue: () => void) => {
+        await writeBucket(stream);
+        queue();
+        await writeBucket(stream);
+      };
+
+      beforeEach(() => {
+        calls = [];
+        advisor = createEmittingPluginStub('TradingAdvisor');
+        trader = createEmittingPluginStub('Trader');
+        vi.mocked(advisor.processInputStream).mockImplementation(async () => {
+          calls.push('TradingAdvisor processes the bucket');
+        });
+        vi.mocked(trader.processInputStream).mockImplementation(async () => {
+          calls.push('Trader processes the bucket');
+        });
+        // The order an order hook places, which the TradingAdvisor queues as it hears of the end of an order: the Trader initiates it
+        advisor.on('strategyCreateOrder', () => {
+          calls.push('strategyCreateOrder');
+          trader.addDeferredEmit('orderInitiated', { id: 3 });
+        });
+        trader.on('orderInitiated', () => {
+          calls.push('orderInitiated');
+        });
+        trader.on('orderCompleted', () => {
+          calls.push('orderCompleted');
+        });
+        trader.on('portfolioChange', () => {
+          calls.push('portfolioChange');
+        });
+      });
+
+      const BEFORE_THE_HOOKS = ['orderCompleted', 'TradingAdvisor processes the bucket', 'Trader processes the bucket'];
+      const AFTER_THE_HOOKS = ['TradingAdvisor processes the bucket', 'Trader processes the bucket', 'orderCompleted'];
+
+      // A backtest's Trader awaits its reports before its flush: the end of an order comes with the bucket it filled in, before which
+      // the simulated exchange settles the fills of a bucket, and a delivery before the hooks would bring them before its candle
+      it.each`
+        mode          | delivered                                         | expected
+        ${'realtime'} | ${'before the plugins process the second bucket'} | ${BEFORE_THE_HOOKS}
+        ${'backtest'} | ${'after the plugins process the second bucket'}  | ${AFTER_THE_HOOKS}
+        ${'importer'} | ${'after the plugins process the second bucket'}  | ${AFTER_THE_HOOKS}
+      `('delivers in $mode mode an event queued between two buckets $delivered', async ({ mode, expected }) => {
+        inMode(mode);
+        const stream = new PluginsStream([advisor, trader]);
+
+        await writeTwoBuckets(stream, () => trader.addDeferredEmit('orderCompleted', { id: 1 }));
+
+        expect(calls.slice(2)).toEqual(expected);
+      });
+
+      // An order hook ran on a fill the Trader delivered after the turn of the TradingAdvisor: its order is sent before the hooks too
+      it('delivers in realtime what the plugins queued since the previous flush in config order, before the hooks', async () => {
+        inMode('realtime');
+        const stream = new PluginsStream([advisor, trader]);
+
+        await writeTwoBuckets(stream, () => {
+          trader.addDeferredEmit('orderCompleted', { id: 1 });
+          advisor.addDeferredEmit('strategyCreateOrder', { id: 2 });
+        });
+
+        expect(calls.slice(2)).toEqual([
+          'strategyCreateOrder',
+          'orderCompleted',
+          'orderInitiated',
+          'TradingAdvisor processes the bucket',
+          'Trader processes the bucket',
+        ]);
+      });
+
+      // The paper exchange consumes the bucket first: an order sent as the events queued are delivered trades at its close, as a live one
+      // at the market of the moment
+      it('lets the simulated exchange consume a bucket in realtime before what was queued since the previous flush', async () => {
+        inMode('realtime');
+        const dummyExchange = { processOneMinuteBucket: vi.fn(() => calls.push('exchange')), getExchangeName: () => 'paper-binance' };
+        injectMock.exchange.mockReturnValue(dummyExchange);
+        const stream = new PluginsStream([advisor, trader]);
+
+        await writeTwoBuckets(stream, () => trader.addDeferredEmit('orderCompleted', { id: 1 }));
+
+        expect(calls.slice(3)).toEqual([
+          'exchange',
+          'orderCompleted',
+          'TradingAdvisor processes the bucket',
+          'Trader processes the bucket',
+        ]);
+      });
+
+      // The analyzers value a portfolio at the prices of the bucket they processed: delivered first, the first read would find none
+      it('delivers in realtime what the plugins queued at start-up after they process the first bucket', async () => {
+        inMode('realtime');
+        vi.mocked(trader.processInitStream).mockImplementation(async () => trader.addDeferredEmit('portfolioChange', { id: 1 }));
+
+        await writeBucket(new PluginsStream([advisor, trader]));
+
+        expect(calls).toEqual(['TradingAdvisor processes the bucket', 'Trader processes the bucket', 'portfolioChange']);
+      });
+
+      it('does not broadcast in realtime for a plugin with nothing queued', async () => {
+        inMode('realtime');
+        const plugin = createPluginStub({ hasDeferredEvents: vi.fn(() => false) });
+
+        await runPipeline([BUCKET, BUCKET], [plugin]);
+
+        expect(plugin.broadcastDeferredEmit).not.toHaveBeenCalled();
+      });
+
+      // The circuit breaker, as the end of the fifth order in error reaches the strategy
+      describe('when a handler throws in realtime on an event queued between two buckets', () => {
+        const stopError = new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)');
+        let stream: PluginsStream;
+        let streamError: Error;
+
+        beforeEach(async () => {
+          inMode('realtime');
+          trader.on('orderErrored', () => {
+            throw stopError;
+          });
+          stream = new PluginsStream([advisor, trader]);
+          await writeBucket(stream);
+          trader.addDeferredEmit('orderErrored', { id: 1 });
+          const errored = waitForError(stream);
+          stream.write(BUCKET);
+          streamError = await errored;
+        });
+
+        it('fails the bucket with what it threw', () => {
+          expect(streamError).toBe(stopError);
+        });
+
+        it('does not let the plugins process the bucket', () => {
+          expect(advisor.processInputStream).toHaveBeenCalledOnce();
+        });
       });
     });
 

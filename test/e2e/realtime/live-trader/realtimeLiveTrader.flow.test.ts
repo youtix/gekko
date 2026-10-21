@@ -219,7 +219,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
       MockCCXTExchange.matchesOrdersAtCreation = matchesOrdersAtCreation;
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }, { close: 110 }, { close: 120 }, { close: 125 }]);
 
-      // The SELL is reported with the bucket after its fill, candle 2's at 12:03:02, and the round trip with it
+      // The SELL is reported between the buckets of candles 1 and 2, and heard as candle 2's arrives, at 12:03:02, with the round trip
       await runRealtimeUntil(() => loggedRoundTrip() !== undefined, { maxMinutes: 5 });
 
       expect({
@@ -261,11 +261,11 @@ describe('E2E: Realtime Live Trader Flow', () => {
           // 0.10989 USDT on the 109.89 of 0.999 × 110: 0.1 %, and 110 less its 0.1 % is 109.89
           summaryLine('[#2] SELL MARKET', sellFilledAt, 'Order amount: 0.999, Effective price: 109.89, Fee: 0.10989, Fee percent: 0.1,'),
         ],
-        // The BUY is reported with the bucket after its fill, candle 1's, after the SELL that candle created
+        // The BUY is reported between the buckets of candles 0 and 1, and heard as candle 1's arrives, before that candle creates the SELL
         strategy: [
           'Order 0 created on candle 0: BUY MARKET of 1.0000004 on BTC/USDT',
-          'Order 1 created on candle 1: SELL MARKET of 1 on BTC/USDT',
           `Order 0 completed: 1 at 100, fee 0.1 (0.1 %), effective price 100.1, executed at 2024-01-01T${buyFilledAt}.000Z`,
+          'Order 1 created on candle 1: SELL MARKET of 1 on BTC/USDT',
           `Order 1 completed: 0.999 at 110, fee 0.10989 (0.1 %), effective price 109.89, executed at 2024-01-01T${sellFilledAt}.000Z`,
         ],
         warnings: [
@@ -309,7 +309,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
       { close: 96 },
     ]);
 
-    // Canceled at 12:03:02, the order is reported to the strategy with the next bucket, candle 3's at 12:04:02
+    // Canceled at 12:03:02, the order is reported between two buckets, and heard as the next one arrives, candle 3's at 12:04:02
     await runRealtimeUntil(() => findTextLine('Order 0 canceled:') !== undefined, { maxMinutes: 5 });
 
     expect({
@@ -367,7 +367,8 @@ describe('E2E: Realtime Live Trader Flow', () => {
       { close: 103 },
     ]);
 
-    // The SELL of candle 2 is sent at 12:03:02 and fills as it is created, reported with the next bucket, at 12:04:02
+    // The SELL of candle 2 is sent at 12:03:02 and fills as it is created, reported between two buckets, heard as the next one arrives,
+    // at 12:04:02
     await runRealtimeUntil(() => findTextLine('Order 1 completed') !== undefined || findTextLine('Order 1 errored') !== undefined, {
       maxMinutes: 6,
     });
@@ -405,7 +406,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
         // 0.063 USDT on the 63 of 0.6 × 105: 0.1 %, and 105 less its 0.1 % is 104.895
         summaryLine('[#2] SELL MARKET', '12:03:02', 'Order amount: 0.6, Effective price: 104.895, Fee: 0.063, Fee percent: 0.1,'),
       ],
-      // Both ends are reported with the bucket of 12:04:02, after the creation of the SELL
+      // Both ends are heard as the bucket of 12:04:02 arrives, after the SELL was created on candle 2
       strategy: [
         'Order 0 created on candle 0: SELL LIMIT of 1 on BTC/USDT at 110',
         'Order 0 canceled by the strategy on candle 2',
@@ -496,7 +497,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
     if (fault) MockCCXTExchange.creationFaults = [fault];
     MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }, { close: 110 }, { close: 120 }]);
 
-    // The creation fails at 12:01:02, and the error reaches the strategy with the next bucket, at 12:02:02
+    // The creation fails at 12:01:02, and the error reaches the strategy as the next bucket arrives, at 12:02:02
     await runRealtimeUntil(() => findTextLine('Order 0 errored') !== undefined, { maxMinutes: 4 });
 
     expect({

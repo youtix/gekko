@@ -4,6 +4,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Nullable } from '@models/utility.types';
 import { Plugin } from '@plugins/plugin';
+import { config } from '@services/configuration/configuration';
 import { isDummyExchange } from '@services/exchange/exchange.helper';
 import { DummyExchange } from '@services/exchange/exchange.types';
 import { inject } from '@services/injecter/injecter';
@@ -29,10 +30,34 @@ export class PluginsStream extends Writable {
   private caughtError?: Error;
   /** The plugins that failed on that bucket besides the one whose failure is the error: logged after it */
   private otherFailures: PluginFailure[] = [];
+  /**
+   * Whether what the plugins queued since the previous flush is delivered before they process a bucket too: in realtime, where the
+   * reports of the Trader float (see Trader.relayTerminalEvents) and queue the end of their order between two buckets. Delivered after
+   * the hooks of the next bucket only, that end reached the strategy a bucket late, which decided on that bucket as if the order were
+   * still pending: its position book counted a pair whose BUY had filled as not long, or one whose SELL had filled as long, and shared
+   * the currency otherwise than a backtest of the same candles (a BUY of 50 % live where the backtest went all-in, an all-in BUY where
+   * it sent 50 %), and the analyzers marked that candle without the fill. The order hooks run before the candle hooks, and the orders
+   * they place go out with those of the bucket. It comes once the simulated exchange of paper trading has consumed the bucket: an order
+   * sent then trades at that close, as a live one at the market of the moment. A report still waiting for the exchange as the bucket
+   * arrives (the trades of its summary, the balance or the tickers of its synchronization) is delivered after the hooks, or with the
+   * next bucket: the strategy decides once more without it, though the Trader may size from the balance it read.
+   * Not in a backtest, whose Trader awaits its reports before its flush: the end of an order comes with the bucket it filled in.
+   * Delivered before the hooks there, the fills the simulated exchange settles as it consumes a bucket would reach the strategy and the
+   * analyzers before its candle (the Trader counts its reports in flight as queued); before the simulated exchange consumes it, the
+   * orders an order hook placed after the turn of the TradingAdvisor (GridBot's grid) would trade on it, a bucket early.
+   */
+  private readonly deliversQueuedFirst: boolean;
+  /**
+   * Whether a bucket has been flushed: before the first, what the plugins queued at start-up (the balance the Trader reads first) waits
+   * for the flush after its hooks, so that the analyzers value it at the prices of that bucket. Delivered before, it would reach them
+   * without a price, which the PortfolioAnalyzer leaves uncounted.
+   */
+  private hasFlushed = false;
 
   constructor(plugins: Plugin[]) {
     super({ objectMode: true });
     this.plugins = plugins;
+    this.deliversQueuedFirst = config.getWatch().mode === 'realtime';
     const exchange = inject.exchange();
     if (isDummyExchange(exchange)) this.dummyExchange = exchange;
   }
@@ -118,6 +143,9 @@ export class PluginsStream extends Writable {
     // Forward bucket to dummy exchange (if set by user) before all plugins
     await this.dummyExchange?.processOneMinuteBucket(bucket);
 
+    // In realtime, first what the plugins queued since the previous flush: the ends of orders reported meanwhile (see deliversQueuedFirst)
+    if (this.deliversQueuedFirst && this.hasFlushed) await this.deliverDeferredEvents();
+
     // Forward bucket to all plugins concurrently, and let them all finish before the plugins can be finalised
     const results = await Promise.allSettled(this.plugins.map(plugin => plugin.processInputStream(bucket)));
     // Ranked once a plugin failed: the ranking allocated its arrays on every bucket, though none fails in a run that goes on
@@ -127,12 +155,21 @@ export class PluginsStream extends Writable {
       throw failure.reason;
     }
 
-    // Broadcast the deferred events plugin by plugin, in config order. Each call delivers the oldest group of the plugin's queue,
-    // the payloads queued in a row under one event name, so that the events arrive in the order they were queued. It resolves to
-    // false once the queue is empty. Not called while a plugin has nothing queued (see hasDeferredEvents): an awaited call per plugin
-    // and bucket, most of them with nothing to deliver. Asked as each plugin's turn comes, not once before the loop: a handler of a
-    // plugin flushed earlier queues events on a later one, delivered with this bucket (in a backtest, the order a TradingAdvisor's
-    // advice places ends on the Trader at once, and the strategy and the analyzers hear of it in the bucket it filled in).
+    await this.deliverDeferredEvents();
+    this.hasFlushed = true;
+  }
+
+  /**
+   * Broadcasts the deferred events plugin by plugin, in config order. Each call delivers the oldest group of the plugin's queue, the
+   * payloads queued in a row under one event name, so that the events arrive in the order they were queued. It resolves to false once
+   * the queue is empty. Not called while a plugin has nothing queued (see hasDeferredEvents): an awaited call per plugin and bucket,
+   * most of them with nothing to deliver. Asked as each plugin's turn comes, not once before the loop: a handler of a plugin flushed
+   * earlier queues events on a later one, delivered in this pass (in a backtest, the order a TradingAdvisor's advice places ends on the
+   * Trader at once, and the strategy and the analyzers hear of it in the bucket it filled in). What a handler queues on a plugin whose
+   * turn is over waits for the next pass (see deliversQueuedFirst), as the order an order hook places does: the TradingAdvisor queues it
+   * as the Trader delivers the end of an order.
+   */
+  private async deliverDeferredEvents() {
     for (const plugin of this.plugins) {
       while (plugin.hasDeferredEvents() && (await plugin.broadcastDeferredEmit()));
     }
