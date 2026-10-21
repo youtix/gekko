@@ -33,9 +33,14 @@ const pairsOf = (count: number) => ['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOT'].sl
 const bucketOf = (pairs: TradingPair[]): CandleBucket => flatBucket(Object.fromEntries(pairs.map(pair => [pair, 100])));
 /** A portfolio holding `free` of `currency` */
 const holdingCurrency = (free: number, currency = 'USDT'): Portfolio => new Map([[currency, { free, used: 0, total: free }]]);
+/** A portfolio holding the amounts given free, by asset: `portfolioOf({ USDT: 8, BTC: 0.002 })` */
+const portfolioOf = (amounts: Record<string, number>): Portfolio =>
+  new Map(Object.entries(amounts).map(([asset, free]) => [asset, { free, used: 0, total: free }]));
 /** The market data of `pairs`, each with a minimum cost of `minimum`, a bound only as a number above 0 */
 const withMinimumCost = (pairs: TradingPair[], minimum?: number) =>
   new Map<TradingPair, MarketData>(pairs.map(pair => [pair, { cost: { min: minimum } }]));
+/** The market data of `pairs`, each with `market` */
+const withMarket = (pairs: TradingPair[], market: MarketData) => new Map<TradingPair, MarketData>(pairs.map(pair => [pair, market]));
 
 describe('PositionBook', () => {
   let book: PositionBook;
@@ -43,14 +48,19 @@ describe('PositionBook', () => {
   let logs: LoggedLine[];
   let portfolio: Portfolio;
   let marketData: Map<TradingPair, MarketData>;
+  /** The candle of the hooks: that of the bucket the book tracked, every close at 100, unless a test sets it */
+  let candle: CandleBucket;
 
   const log: LoggerFn = (level, message) => {
     logs.push({ level, message });
   };
-  /** The params of a candle hook, as a strategy hands them to buy and sell: the portfolio and the market data of the test */
-  const params = () => ({ portfolio, tools: { createOrder: orders.createOrder, log, marketData } });
-  /** Tracks `pairs`, as init does on a bucket of them */
-  const track = (pairs: TradingPair[]) => book.track({ candle: bucketOf(pairs), tools: { log } });
+  /** The params of a candle hook, as a strategy hands them to buy and sell: the candle, the portfolio and the market data of the test */
+  const params = () => ({ candle, portfolio, tools: { createOrder: orders.createOrder, log, marketData } });
+  /** Tracks `pairs`, as init does on a bucket of them, the candle of the hooks at their closes */
+  const track = (pairs: TradingPair[]) => {
+    candle = bucketOf(pairs);
+    book.track({ candle, tools: { log } });
+  };
   /**
    * Plays the steps (see playSteps): 'buy<ASSET>' and 'sell<ASSET>' place a STICKY order of <ASSET>/USDT through the book, 'stop<ASSET>'
    * is the SELL of a trailing stop there, which the StrategyManager creates and the book adopts, and 'usdt<free>' sets the portfolio of
@@ -75,6 +85,7 @@ describe('PositionBook', () => {
     logs = [];
     portfolio = new Map();
     marketData = new Map();
+    candle = new Map();
   });
 
   describe('track', () => {
@@ -310,9 +321,13 @@ describe('PositionBook', () => {
     const SKIP_LINE =
       '[BTC/USDT] BUY skipped: 50 % of the 20 USDT free, 9.5 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account';
 
-    /** Tracks `pairs` without a word, the portfolio holding `free` of `currency`, each pair with a minimum cost of `minimum` */
+    /**
+     * Tracks `pairs` without a word, the portfolio holding `free` of `currency`, each pair with a minimum cost of `minimum`, and the
+     * candle of the hooks at a close of 100
+     */
     const setUp = (pairs: TradingPair[], free: number, minimum?: number, currency = 'USDT') => {
-      book.track({ candle: bucketOf(pairs), tools: { log: noop } });
+      candle = bucketOf(pairs);
+      book.track({ candle, tools: { log: noop } });
       portfolio = holdingCurrency(free, currency);
       marketData = withMinimumCost(pairs, minimum);
     };
@@ -389,16 +404,16 @@ describe('PositionBook', () => {
       expect(logs).toEqual([{ level: 'warn', message }]);
     });
 
-    // 50 % of 0.000002 BTC is 0.000001 BTC, 9.5e-7 as String writes it once 5 % is kept back
-    it('writes the cost estimate and the minimum beside it with every decimal', () => {
-      setUp(['ETH/BTC', 'SOL/BTC'], 0.000002, 0.000001, 'BTC');
+    // String writes 9.5e-7, 5e-7 and 2.375e-7 with an exponent: 50 % of 0.000002 BTC is 0.000001 BTC, 0.00000095 BTC once 5 % is kept
+    // back, and 50 % of 0.0000005 BTC 0.00000025 BTC, 0.0000002375 BTC
+    it.each`
+      free         | minimum     | message
+      ${0.000002}  | ${0.000001} | ${`[ETH/BTC] BUY skipped: 50 % of the 0.000002 BTC free, 0.00000095 BTC once 5 % is kept back for the fee, is below the minimum cost of 0.000001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${0.0000005} | ${0.0001}   | ${`[ETH/BTC] BUY skipped: 50 % of the 0.0000005 BTC free, 0.0000002375 BTC once 5 % is kept back for the fee, is below the minimum cost of 0.0001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+    `('writes the currency free, the cost estimate and the minimum with every decimal: $free BTC free', ({ free, minimum, message }) => {
+      setUp(['ETH/BTC', 'SOL/BTC'], free, minimum, 'BTC');
       book.buy({ type: 'STICKY', symbol: 'ETH/BTC' }, params());
-      expect(logs).toEqual([
-        {
-          level: 'warn',
-          message: `[ETH/BTC] BUY skipped: 50 % of the 0.000002 BTC free, 0.00000095 BTC once 5 % is kept back for the fee, is below the minimum cost of 0.000001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`,
-        },
-      ]);
+      expect(logs).toEqual([{ level: 'warn', message }]);
     });
 
     it('logs the next skips of the pair at debug level, without the note on them', () => {
@@ -421,6 +436,165 @@ describe('PositionBook', () => {
       setUp([BTC, ETH], 20, 10);
       play(steps);
       expect(logs.map(({ level }) => level)).toEqual(levels);
+    });
+  });
+
+  describe('a BUY whose amount the market would refuse', () => {
+    // On 12 USDT free, 50 % is 6 USDT, 5.7 USDT once 5 % is kept back for the fee: above the minimum cost of 5. What that buys at the
+    // price of the BUY, the close unless it has one, truncated to the amount step of the market, is what the market checks.
+    const BAND = { cost: { min: 5 }, precision: { amount: 0.00001 } } satisfies MarketData;
+
+    /** Tracks BTC/USDT and ETH/USDT without a word, 12 USDT free, BTC at `close` and ETH at 2000 in the candle of the hooks */
+    const setUp = (close: number, market: MarketData) => {
+      book.track({ candle: bucketOf([BTC, ETH]), tools: { log: noop } });
+      candle = flatBucket({ [BTC]: close, [ETH]: 2000 });
+      portfolio = holdingCurrency(12);
+      marketData = withMarket([BTC, ETH], market);
+    };
+
+    it.each`
+      case                                                                                 | close       | order                                 | market                                                          | placed
+      ${'0.00005 BTC at 97654.32 once truncated, 4.882716 USDT, below the minimum cost'}   | ${97654.32} | ${{ type: 'STICKY' }}                 | ${BAND}                                                         | ${0}
+      ${'0.00006 BTC at 95000 once truncated, 5.7 USDT'}                                   | ${95000}    | ${{ type: 'STICKY' }}                 | ${BAND}                                                         | ${1}
+      ${'0.0000583691535612557 BTC at 97654.32 on a market without a step, 5.7 USDT'}      | ${97654.32} | ${{ type: 'STICKY' }}                 | ${{ cost: { min: 5 } }}                                         | ${1}
+      ${'a LIMIT BUY at 95000, the close at 97654.32: 0.00006 BTC at its price'}           | ${97654.32} | ${{ type: 'LIMIT', price: 95000 }}    | ${BAND}                                                         | ${1}
+      ${'a LIMIT BUY at 97654.32, the close at 95000: 0.00005 BTC at its price'}           | ${95000}    | ${{ type: 'LIMIT', price: 97654.32 }} | ${BAND}                                                         | ${0}
+      ${'0.00057 BTC at 10000, below a minimum amount of 0.001'}                           | ${10000}    | ${{ type: 'STICKY' }}                 | ${{ ...BAND, amount: { min: 0.001 } }}                          | ${0}
+      ${'0.00057 BTC at 10000, the minimum amount itself'}                                 | ${10000}    | ${{ type: 'STICKY' }}                 | ${{ ...BAND, amount: { min: 0.00057 } }}                        | ${1}
+      ${'0.00057 BTC at 10000, below a minimum amount of 0.001, without a minimum cost'}   | ${10000}    | ${{ type: 'STICKY' }}                 | ${{ amount: { min: 0.001 } }}                                   | ${0}
+      ${'a MARKET BUY of 0.00057 BTC, below the minimum amount of a market order, 0.001'}  | ${10000}    | ${{ type: 'MARKET' }}                 | ${{ ...BAND, amount: { min: 0.0001 }, market: { min: 0.001 } }} | ${0}
+      ${'a STICKY BUY of 0.00057 BTC, which the minimum of a market order does not bound'} | ${10000}    | ${{ type: 'STICKY' }}                 | ${{ ...BAND, amount: { min: 0.0001 }, market: { min: 0.001 } }} | ${1}
+    `('places $placed BUY of BTC for $case', ({ close, order, market, placed }) => {
+      setUp(close, market);
+      book.buy({ ...order, symbol: BTC }, params());
+      expect(orders.advices).toHaveLength(placed);
+    });
+
+    // Without a price, which the Trader refuses the BUY for, there is no amount to work out: the BUY is sent, as before
+    it('places a BUY without a price whose pair the candle of the hook lacks', () => {
+      setUp(97654.32, BAND);
+      candle = flatBucket({ [ETH]: 2000 });
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(orders.advices).toHaveLength(1);
+    });
+
+    it.each`
+      case                                             | close       | market                                 | message
+      ${'the cost of the amount sent'}                 | ${97654.32} | ${BAND}                                | ${`[BTC/USDT] BUY skipped: 50 % of the 12 USDT free, 5.7 USDT once 5 % is kept back for the fee, 0.00005 BTC at 97654.32 once truncated to the amount step 0.00001 of the market, a cost of 4.882716 USDT, is below the minimum cost of 5 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'the amount sent'}                             | ${10000}    | ${{ ...BAND, amount: { min: 0.001 } }} | ${`[BTC/USDT] BUY skipped: 50 % of the 12 USDT free, 5.7 USDT once 5 % is kept back for the fee, 0.00057 BTC at 10000 once truncated to the amount step 0.00001 of the market, is below the minimum amount of 0.001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'the amount sent, on a market without a step'} | ${10000}    | ${{ amount: { min: 0.001 } }}          | ${`[BTC/USDT] BUY skipped: 50 % of the 12 USDT free, 5.7 USDT once 5 % is kept back for the fee, 0.00057 BTC at 10000, is below the minimum amount of 0.001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+    `('warns of the first skip of a pair below a minimum, naming $case', ({ close, market, message }) => {
+      setUp(close, market);
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(logs).toEqual([{ level: 'warn', message }]);
+    });
+
+    // ETH long, BTC is the last pair not invested: all of 5.5 USDT, 5.225 USDT once 5 % is kept back, buys 0.000055 BTC at 95000, sent
+    // as 0.00005 BTC, 4.75 USDT
+    it('warns of the skip of the all-in BUY of the last pair, the step taking its amount below the minimum cost', () => {
+      setUp(95000, BAND);
+      play('buyETH completed:1');
+      portfolio = holdingCurrency(5.5);
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(logs).toEqual([
+        {
+          level: 'warn',
+          message: `[BTC/USDT] BUY skipped: all of the 5.5 USDT free, 5.225 USDT once 5 % is kept back for the fee, 0.00005 BTC at 95000 once truncated to the amount step 0.00001 of the market, a cost of 4.75 USDT, is below the minimum cost of 5 USDT of the market: fund the account${NEXT_SKIPS}`,
+        },
+      ]);
+    });
+  });
+
+  describe('a BUY skipped beside a holding', () => {
+    // On 8 USDT free, 50 % is 4 USDT, 3.8 USDT once 5 % is kept back for the fee: below the minimum cost of 5. At 60000, 0.002 BTC is
+    // 120 USDT, above it, and above the minimum amount once truncated to the amount step: enough to sell.
+    const MARKET = { cost: { min: 5 }, amount: { min: 0.00001 }, precision: { amount: 0.00001 } } satisfies MarketData;
+    const SKIPPED =
+      '[BTC/USDT] BUY skipped: 50 % of the 8 USDT free, 3.8 USDT once 5 % is kept back for the fee, is below the minimum cost of 5 USDT of the market';
+    const ADOPTED = `${SKIPPED}, but 0.002 BTC is free in the portfolio, enough to sell: the strategy is long`;
+
+    /** Tracks BTC/USDT and ETH/USDT without a word, BTC at 60000 and ETH at 3000 in the candle of the hooks, the portfolio holding `amounts` */
+    const setUp = (amounts: Record<string, number>, market: MarketData = MARKET) => {
+      book.track({ candle: bucketOf([BTC, ETH]), tools: { log: noop } });
+      candle = flatBucket({ [BTC]: 60000, [ETH]: 3000 });
+      portfolio = portfolioOf(amounts);
+      marketData = withMarket([BTC, ETH], market);
+    };
+
+    // A holding present at start-up, which the BUY of a single-pair strategy learns of once refused: skipped, the BUY takes it for the
+    // position, valued at the close whatever the price of the BUY, and the strategy sells it at its next SELL signal
+    it.each`
+      case                                                                    | amounts                      | order                             | market                                  | position
+      ${'0.002 BTC free, 120 USDT at the close: long'}                        | ${{ USDT: 8, BTC: 0.002 }}   | ${{ type: 'STICKY' }}             | ${MARKET}                               | ${'long'}
+      ${'0.002 BTC free beside a LIMIT BUY at 1000, valued at the close'}     | ${{ USDT: 8, BTC: 0.002 }}   | ${{ type: 'LIMIT', price: 1000 }} | ${MARKET}                               | ${'long'}
+      ${'0.00005 BTC free, 3 USDT at the close, too little to sell: flat'}    | ${{ USDT: 8, BTC: 0.00005 }} | ${{ type: 'STICKY' }}             | ${MARKET}                               | ${'flat'}
+      ${'0.002 BTC free beside a MARKET BUY, under 0.01, a market order min'} | ${{ USDT: 8, BTC: 0.002 }}   | ${{ type: 'MARKET' }}             | ${{ ...MARKET, market: { min: 0.01 } }} | ${'flat'}
+      ${'no BTC in the portfolio: flat'}                                      | ${{ USDT: 8 }}               | ${{ type: 'STICKY' }}             | ${MARKET}                               | ${'flat'}
+    `('reads the position of a BUY of BTC skipped with $case', ({ amounts, order, market, position }) => {
+      setUp(amounts, market);
+      book.buy({ ...order, symbol: BTC }, params());
+      expect(positionOn(BTC)).toBe(position);
+    });
+
+    it('takes no holding of a pair the candle of the hook lacks, which has no close to value it at', () => {
+      setUp({ USDT: 8, BTC: 0.002 });
+      candle = flatBucket({ [ETH]: 3000 });
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(positionOn(BTC)).toBe('flat');
+    });
+
+    // 50 % of 30 USDT, 14.25 USDT once 5 % is kept back, buys 0.00023 BTC at 60000 on the step, 13.8 USDT: placed, and pending
+    it('takes no holding while a BUY of the pair is pending, whose outcome tells the position', () => {
+      setUp({ USDT: 30, BTC: 0.002 });
+      play('buyBTC');
+      portfolio = portfolioOf({ USDT: 8, BTC: 0.002 });
+      play('buyBTC');
+      expect(positionOn(BTC)).toBe('flat, pending');
+    });
+
+    it.each`
+      case                                                       | amounts                      | message
+      ${'enough to sell, at info level in place of the warning'} | ${{ USDT: 8, BTC: 0.002 }}   | ${{ level: 'info', message: ADOPTED }}
+      ${'too little to sell, the warning as without it'}         | ${{ USDT: 8, BTC: 0.00005 }} | ${{ level: 'warn', message: `${SKIPPED}: watch fewer pairs or fund the account${NEXT_SKIPS}` }}
+    `('says the skip of a BUY of BTC beside a holding $case', ({ amounts, message }) => {
+      setUp(amounts);
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(logs).toEqual([message]);
+    });
+
+    // A custom strategy may call buy while long: the skip is said as any other, the position kept
+    it('warns of a BUY skipped while long, beside a holding enough to sell', () => {
+      setUp({ USDT: 30 });
+      play('buyBTC completed:1');
+      portfolio = portfolioOf({ USDT: 8, BTC: 0.002 });
+      play('buyBTC');
+      expect({ position: positionOn(BTC), logs }).toEqual({
+        position: 'long',
+        logs: [{ level: 'warn', message: `${SKIPPED}: watch fewer pairs or fund the account${NEXT_SKIPS}` }],
+      });
+    });
+
+    // The strategies sell only once canSell allows it: flat beside the holding, they ignored their SELL signals
+    it('lets the strategy sell the holding taken, nothing pending', () => {
+      setUp({ USDT: 8, BTC: 0.002 });
+      play('buyBTC');
+      expect(book.canSell(BTC)).toBe(true);
+    });
+
+    // Its SELL completed, the next BUY of BTC is skipped, no BTC left: the first warning of the pair, the holding taken said at info
+    it('warns of the first skip after a holding taken and sold, the holding taken no warning', () => {
+      setUp({ USDT: 8, BTC: 0.002 });
+      play('buyBTC sellBTC completed:1 usdt8 buyBTC');
+      expect(logs.map(({ level }) => level)).toEqual(['info', 'warn']);
+    });
+
+    it('places the all-in BUY of a book tracking one pair, though the portfolio holds enough BTC to sell', () => {
+      book.track({ candle: bucketOf([BTC]), tools: { log: noop } });
+      candle = flatBucket({ [BTC]: 60000 });
+      portfolio = portfolioOf({ USDT: 8, BTC: 0.002 });
+      marketData = withMarket([BTC], MARKET);
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
     });
   });
 });

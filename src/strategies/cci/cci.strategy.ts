@@ -24,8 +24,8 @@ export class CCI implements Strategy<CCIStrategyParams> {
   // while other pairs are not invested, which takes a share of the currency: the strategy buys a pair only when flat there and sells it
   // only when long, never while its order there is pending. Advised on every new overbought (oversold) trend, each SELL (BUY) after the
   // first was sized from what the previous one left, then refused once nothing was left, until maxConsecutiveErrors stopped the bot.
-  // The trend of an order canceled or errored stays adviced, and so does that of a BUY the book skips, its share below the minimum cost
-  // of the market: the next order waits for the next trend.
+  // The trend of an order canceled or errored stays adviced, and so does that of a BUY the book skips as too small for the market (see
+  // PositionBook.buy): the next order waits for the next trend.
   private readonly book = new PositionBook();
 
   init(params: InitParams<CCIStrategyParams>): void {

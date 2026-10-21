@@ -23,7 +23,8 @@ export class TMA implements Strategy<TMAStrategyParams> {
   // order of that pair is pending. Advised on every candle, each order after the first was sized from what the previous one left, then
   // refused once nothing was left, until maxConsecutiveErrors stopped the bot. An order canceled or errored is placed again by the next
   // candle of its signal, unless what it executed before it ended changed the position (see PositionTracker), and a BUY the book
-  // skipped, its share below the minimum cost of the market, is asked for again on the next one.
+  // skipped as too small for the market is asked for again on the next one, unless the book took the asset of the pair held for the
+  // position (see PositionBook.buy).
   private readonly book = new PositionBook();
 
   init(params: InitParams<TMAStrategyParams>): void {

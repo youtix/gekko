@@ -26,13 +26,22 @@ const PRICES = { BTC: 10000, ETH: 2000, SOL: 25, XRP: 0.5 } as const;
 type Asset = keyof typeof PRICES;
 
 /**
- * What a scenario runs: the assets watched, in the order of watch.assets, the USDT it starts from (none of the assets), the least an
- * order costs on every market, and the steps of DebugPositionBook
+ * What a scenario runs: the assets watched, in the order of watch.assets, the USDT it starts from, and the amount of each asset held
+ * (none unless `held` gives it), the least an order costs on every market, and the steps of DebugPositionBook. Every market takes
+ * amounts to the millionth from 0 on, unless `amountDecimals` and `amountMin` say otherwise.
  */
-type Book = { assets: Asset[]; usdt: number; costMin?: number; steps: DebugPositionBookParams['steps'] };
+type Book = {
+  assets: Asset[];
+  usdt: number;
+  held?: Partial<Record<Asset, number>>;
+  costMin?: number;
+  amountDecimals?: number;
+  amountMin?: number;
+  steps: DebugPositionBookParams['steps'];
+};
 
 /** A backtest of the minutes 00:00 to 00:08 on 1m candles, without a warmup: the candle of 00:00 is the first the strategy trades on */
-const backtestOf = ({ assets, usdt, costMin, steps }: Book): RawConfiguration => ({
+const backtestOf = ({ assets, usdt, held = {}, costMin, amountDecimals = 6, amountMin = 0, steps }: Book): RawConfiguration => ({
   watch: {
     mode: 'backtest',
     assets,
@@ -42,9 +51,16 @@ const backtestOf = ({ assets, usdt, costMin, steps }: Book): RawConfiguration =>
   },
   exchange: {
     name: 'dummy-cex',
-    simulationBalance: [...assets.map(assetName => ({ assetName, balance: 0 })), { assetName: 'USDT', balance: usdt }],
+    simulationBalance: [...assets.map(assetName => ({ assetName, balance: held[assetName] ?? 0 })), { assetName: 'USDT', balance: usdt }],
     // One order takes 1000 units at most by default, and SOL and XRP are bought by the thousand
-    marketData: assets.map(asset => rawMarket(`${asset}/USDT`, { amountMax: 1000000, costMin })),
+    marketData: assets.map(asset => {
+      const { symbol, marketData } = rawMarket(`${asset}/USDT`, { amountMax: 1000000, costMin });
+      const { amount, precision } = marketData;
+      return {
+        symbol,
+        marketData: { ...marketData, amount: { ...amount, min: amountMin }, precision: { ...precision, amount: amountDecimals } },
+      };
+    }),
   },
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [{ name: 'TradingAdvisor', strategyName: 'DebugPositionBook' }, { name: 'Trader' }],
@@ -308,6 +324,99 @@ describe('E2E: Backtest of a position book', () => {
         // 14.25 × 10000 × 0.999 = 142357.5 and 149489.624 × 0.999 = 149340.134376 brought in: 7718.386376 + 291697.634376
         unreservedRead(minute(4), { BTC: 0, ETH: 0, USDT: 299416.020752 }),
       ],
+    });
+  });
+
+  it('Scenario D: skips every BUY whose amount, truncated to the step, is below a minimum of the market, sending nothing', async () => {
+    const assets: Asset[] = ['BTC', 'ETH'];
+    const steps: DebugPositionBookParams['steps'] = range(5).map(candle => ({ candle, side: 'BUY', symbols: ['BTC/USDT'] }));
+    /** What a run sent, read and logged, BTC at `btcPrice` on markets taking amounts to 0.00001 from `amountMin` on, at 5 USDT at least */
+    const runAt = async (btcPrice: number, amountMin?: number) => {
+      clearLogs();
+      const backtest = backtestOf({ assets, usdt: 12, costMin: 5, amountDecimals: 5, amountMin, steps });
+      const candles = { 'BTC/USDT': flatCandles(btcPrice), 'ETH/USDT': flatCandles(PRICES.ETH) };
+      const { failure, orderCalls, balanceReads } = await runBacktest(backtest, candles);
+      return {
+        failure,
+        strategyLines: strategyLines(),
+        traderWarnings: messagesOf('TRADER', 'warn'),
+        orderCalls,
+        balanceReads: balanceReads.slice(3),
+      };
+    };
+    const belowMinimumCost = await runAt(97654.32);
+    const belowMinimumAmount = await runAt(10000, 0.001);
+
+    // Each BTC BUY takes 50 % of the 12 USDT free, ETH flat beside it: 6 USDT, 5.7 USDT once 5 % is kept back for the fee, above the
+    // minimum cost of 5. At 97654.32 that buys 0.0000583691535612557 BTC, sent as 0.00005 BTC on the step of the market, 4.882716 USDT:
+    // under the minimum cost. At 10000, 0.00057 BTC, under a minimum amount of 0.001 BTC. Sent, each BUY would be refused by the market,
+    // an error counting towards the circuit breaker, and the fifth, on the candle of 00:04, would stop the run.
+    const skipped = (sent: string) =>
+      `[BTC/USDT] BUY skipped: 50 % of the 12 USDT free, 5.7 USDT once 5 % is kept back for the fee, ${sent}: watch fewer pairs or fund the account`;
+    const nextSkips = '; the next skips of this pair are logged at debug level until a BUY of it is placed';
+    /** The lines of a run whose five BUYs are skipped, `sent` saying why: the first at warn level, the next ones at debug level */
+    const skippedFiveTimes = (sent: string) => [
+      tradingLine('BTC/USDT and ETH/USDT'),
+      WARMUP_DONE,
+      `warn | ${skipped(sent)}${nextSkips}`,
+      ...range(4).map(() => `debug | ${skipped(sent)}`),
+    ];
+    const truncated = 'once truncated to the amount step 0.00001 of the market';
+    expect({ belowMinimumCost, belowMinimumAmount }).toEqual({
+      belowMinimumCost: {
+        failure: undefined,
+        strategyLines: skippedFiveTimes(
+          `0.00005 BTC at 97654.32 ${truncated}, a cost of 4.882716 USDT, is below the minimum cost of 5 USDT of the market`,
+        ),
+        traderWarnings: [],
+        // No order sent, none errored: nothing read after the start-up
+        orderCalls: [],
+        balanceReads: [],
+      },
+      belowMinimumAmount: {
+        failure: undefined,
+        strategyLines: skippedFiveTimes(`0.00057 BTC at 10000 ${truncated}, is below the minimum amount of 0.001 BTC of the market`),
+        traderWarnings: [],
+        orderCalls: [],
+        balanceReads: [],
+      },
+    });
+  });
+
+  it('Scenario E: restarted long on both pairs with too little USDT to buy, takes each holding for the position and sells it', async () => {
+    const assets: Asset[] = ['BTC', 'ETH'];
+    const steps: DebugPositionBookParams['steps'] = [
+      { candle: 1, side: 'BUY' },
+      { candle: 3, side: 'SELL' },
+    ];
+    const backtest = backtestOf({ assets, usdt: 4, held: { BTC: 0.002, ETH: 0.05 }, costMin: 5, steps });
+    const { failure, orderCalls, balanceReads } = await runBacktest(backtest, candlesOf(assets));
+
+    // The BTC BUY takes 50 % of the 4 USDT free, 1.9 USDT once 5 % is kept back for the fee, and the ETH BUY, BTC long by then, all of
+    // it, 3.8 USDT: both below the minimum cost of 5, so neither is sent. Each pair holds enough to sell at the close, 0.002 BTC at 10000
+    // being worth 20 USDT and 0.05 ETH at 2000 100 USDT: each holding is the position, which the SELLs of 00:03 sell. A holding present
+    // at start-up was learnt only from a BUY sent and refused: skipped, the strategy stayed flat beside both, and skipped the SELL steps.
+    const adopted = (pair: TradingPair, share: string, held: string) =>
+      `info | [${pair}] BUY skipped: ${share}, is below the minimum cost of 5 USDT of the market, but ${held} is free in the portfolio, enough to sell: the strategy is long`;
+    expect({
+      failure,
+      strategyLines: strategyLines(),
+      traderWarnings: messagesOf('TRADER', 'warn'),
+      orderCalls,
+      balanceReads: balanceReads.slice(3),
+    }).toEqual({
+      failure: undefined,
+      strategyLines: [
+        tradingLine('BTC/USDT and ETH/USDT'),
+        WARMUP_DONE,
+        adopted('BTC/USDT', '50 % of the 4 USDT free, 1.9 USDT once 5 % is kept back for the fee', '0.002 BTC'),
+        adopted('ETH/USDT', 'all of the 4 USDT free, 3.8 USDT once 5 % is kept back for the fee', '0.05 ETH'),
+      ],
+      traderWarnings: [],
+      // All of each asset
+      orderCalls: [filledMarketOrder(minute(4), 'BTC/USDT', 'SELL', 0.002, 1), filledMarketOrder(minute(4), 'ETH/USDT', 'SELL', 0.05, 2)],
+      // 0.002 × 10000 × 0.999 = 19.98 and 0.05 × 2000 × 0.999 = 99.9 brought in: 4 + 119.88
+      balanceReads: [unreservedRead(minute(4), { BTC: 0, ETH: 0, USDT: 123.88 })],
     });
   });
 });

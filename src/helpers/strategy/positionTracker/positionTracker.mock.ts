@@ -1,3 +1,4 @@
+import { IndicatorNames } from '@indicators/indicator.types';
 import { AdviceOrder, StrategyOrder } from '@models/advice.types';
 import { CandleBucket } from '@models/event.types';
 import { LogLevel } from '@models/logLevel.types';
@@ -5,6 +6,7 @@ import { Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import {
+  AddIndicatorFn,
   LoggerFn,
   OnOrderCanceledEventParams,
   OnOrderCompletedEventParams,
@@ -133,15 +135,25 @@ export const ETH_IGNORED_WARNING: LoggedLine = {
     'The strategy trades BTC/USDT only, the first pair watched (watch.assets): it ignores ETH/USDT, whose candles are still required every minute',
 };
 
+/** An addIndicator call: the name of the indicator, its pair and its parameters */
+type AddedIndicator = [name: IndicatorNames, symbol: TradingPair, parameters: unknown];
+
 /**
  * Plays init as the StrategyManager does, on the first one-minute bucket: a candle of each of `pairs`, in their order (that of
- * watch.assets), with the strategy's parameters; returns the lines it logged
+ * watch.assets), with the strategy's parameters; returns the lines it logged and its addIndicator calls, each in order
  */
-export const logsAtInit = <T>(strategy: Pick<Strategy<T>, 'init'>, pairs: TradingPair[], strategyParams: T): LoggedLine[] => {
+export const playInit = <T>(strategy: Pick<Strategy<T>, 'init'>, pairs: TradingPair[], strategyParams: T) => {
   const logs: LoggedLine[] = [];
+  const indicators: AddedIndicator[] = [];
   const candle: CandleBucket = new Map(pairs.map(pair => [pair, { start: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }]));
   const log: LoggerFn = (level, message) => logs.push({ level, message });
-  const tools = { strategyParams, log } as Tools<T>;
-  strategy.init?.({ candle, portfolio: new Map(), tools, addIndicator: noop });
-  return logs;
+  const addIndicator: AddIndicatorFn = (name, symbol, parameters) => {
+    indicators.push([name, symbol, parameters]);
+  };
+  strategy.init?.({ candle, portfolio: new Map(), tools: { strategyParams, log } as Tools<T>, addIndicator });
+  return { logs, indicators };
 };
+
+/** The lines init logs, in order (see playInit) */
+export const logsAtInit = <T>(strategy: Pick<Strategy<T>, 'init'>, pairs: TradingPair[], strategyParams: T): LoggedLine[] =>
+  playInit(strategy, pairs, strategyParams).logs;

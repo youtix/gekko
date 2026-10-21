@@ -393,6 +393,34 @@ describe('PositionTracker', () => {
     });
   });
 
+  describe('adoptHolding', () => {
+    // At 100 USDT, 0.05 BTC costs the minimum, 5 USDT, and a MARKET order takes 0.2 BTC at least (see limits). Long or with an order
+    // pending, whose outcome tells the position, it takes nothing.
+    it.each`
+      case                                                    | steps                     | held       | type        | adopted  | isLong   | isPendingOrder
+      ${'flat, 0.05 BTC, the minimum cost: long'}             | ${''}                     | ${0.05}    | ${'STICKY'} | ${true}  | ${true}  | ${false}
+      ${'flat, 0.04999 BTC, under the minimum cost: flat'}    | ${''}                     | ${0.04999} | ${'STICKY'} | ${false} | ${false} | ${false}
+      ${'flat, 0.05 BTC for a MARKET order, under 0.2: flat'} | ${''}                     | ${0.05}    | ${'MARKET'} | ${false} | ${false} | ${false}
+      ${'flat, 0.2 BTC for a MARKET order: long'}             | ${''}                     | ${0.2}     | ${'MARKET'} | ${true}  | ${true}  | ${false}
+      ${'flat, a BUY pending: flat'}                          | ${'buy'}                  | ${1}       | ${'STICKY'} | ${false} | ${false} | ${true}
+      ${'long: long'}                                         | ${'buy completed:1'}      | ${1}       | ${'STICKY'} | ${false} | ${true}  | ${false}
+      ${'long, its SELL pending: long'}                       | ${'buy completed:1 sell'} | ${1}       | ${'STICKY'} | ${false} | ${true}  | ${true}
+    `('takes a holding of $held BTC when $case', ({ steps, held, type, adopted, isLong, isPendingOrder }) => {
+      play(steps);
+      const result = tracker.adoptHolding(held, PRICE, type, limits);
+      expect({ adopted: result, isLong: tracker.isLong, isPendingOrder: tracker.isPendingOrder }).toEqual({
+        adopted,
+        isLong,
+        isPendingOrder,
+      });
+    });
+
+    it('lets the strategy sell the holding taken', () => {
+      tracker.adoptHolding(1, PRICE, 'STICKY', limits);
+      expect(tracker.canSell()).toBe(true);
+    });
+  });
+
   describe('order hooks', () => {
     it.each`
       outcome        | order                         | steps                          | n            | isOwn

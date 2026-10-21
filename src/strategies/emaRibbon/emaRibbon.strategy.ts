@@ -20,8 +20,8 @@ export class EMARibbon implements Strategy<EMARibbonStrategyParams> {
   // The strategy buys a pair only when flat on it and sells it only when long, never while its order on that pair is pending. A SELL
   // is all-in, and so is a BUY on one pair; on several, a BUY takes an equal share of the free currency among the pairs not invested
   // (see PositionBook). An order canceled or errored is placed again by the next candle that signals it, unless what it executed before
-  // it ended changed the position (see PositionTracker); a BUY the book skipped, its share below the minimum cost of the market, is
-  // asked for again by that candle.
+  // it ended changed the position (see PositionTracker); a BUY the book skipped as too small for the market is asked for again by that
+  // candle, unless the book took the asset of the pair held for the position (see PositionBook.buy).
   private readonly book = new PositionBook();
   // The spreads of each pair's ribbon on the candle in progress and on the one before, recorded on every candle, the warmup included.
   // Recorded after the warmup only, the first candle after it had no spread to compare with: it bought a ribbon that was narrowing,

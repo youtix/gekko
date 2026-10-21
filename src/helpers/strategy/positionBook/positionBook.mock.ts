@@ -1,9 +1,7 @@
-import { LoggedLine } from '@helpers/strategy/positionTracker/positionTracker.mock';
-import { IndicatorNames } from '@indicators/indicator.types';
+import { LoggedLine, playInit } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
-import { AddIndicatorFn, IndicatorResults, Strategy, Tools } from '@strategies/strategy.types';
-import { noop } from 'lodash-es';
+import { IndicatorResults, Strategy } from '@strategies/strategy.types';
 
 /** What track logs, through tools.log, on a bucket of BTC/USDT then ETH/USDT: the pairs traded, and the rule of their orders */
 export const BTC_ETH_TRADED_INFO: LoggedLine = {
@@ -22,30 +20,20 @@ export const indicatorArguments = <T>(resultsByPair: Record<TradingPair, readonl
 
 /**
  * A bucket holding a flat candle of each pair at the close given (open, high, low and close alike), the pairs in the order given (that
- * of watch.assets): `flatBucket({ 'BTC/USDT': 110, 'ETH/USDT': 90 })`
+ * of watch.assets), each candle starting at `start`, a real minute, the first of 2024 (UTC) unless given: `flatBucket({ 'BTC/USDT':
+ * 110, 'ETH/USDT': 90 })`. Every candle used to start at 0, the epoch, so that a suite could not play buckets one minute after another.
  */
-export const flatBucket = (closeByPair: Record<TradingPair, number>): CandleBucket =>
+export const flatBucket = (closeByPair: Record<TradingPair, number>, start = Date.UTC(2024, 0, 1)): CandleBucket =>
   new Map(
     Object.entries(closeByPair).map(([pair, close]) => [
       pair as TradingPair,
-      { start: 0, open: close, high: close, low: close, close, volume: 1 },
+      { start, open: close, high: close, low: close, close, volume: 1 },
     ]),
   );
 
-/** An addIndicator call: the name of the indicator, its pair and its parameters */
-export type AddedIndicator = [name: IndicatorNames, symbol: TradingPair, parameters: unknown];
-
 /**
  * Plays init as the StrategyManager does, on the first one-minute bucket: a candle of each of `pairs`, in their order (that of
- * watch.assets), with the strategy's parameters (see logsAtInit); returns its addIndicator calls, in order
+ * watch.assets), with the strategy's parameters (see playInit); returns its addIndicator calls, in order
  */
-export const indicatorsAtInit = <T>(strategy: Pick<Strategy<T>, 'init'>, pairs: TradingPair[], strategyParams: T): AddedIndicator[] => {
-  const added: AddedIndicator[] = [];
-  const candle: CandleBucket = new Map(pairs.map(pair => [pair, { start: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }]));
-  const tools = { strategyParams, log: noop } as unknown as Tools<T>;
-  const addIndicator: AddIndicatorFn = (name, symbol, parameters) => {
-    added.push([name, symbol, parameters]);
-  };
-  strategy.init?.({ candle, portfolio: new Map(), tools, addIndicator });
-  return added;
-};
+export const indicatorsAtInit = <T>(strategy: Pick<Strategy<T>, 'init'>, pairs: TradingPair[], strategyParams: T) =>
+  playInit(strategy, pairs, strategyParams).indicators;

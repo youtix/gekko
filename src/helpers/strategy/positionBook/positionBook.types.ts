@@ -7,7 +7,10 @@ export type BuyOrder = Omit<StrategyOrder, 'side' | 'amount' | 'cost' | 'allocat
 export type SellOrder = Omit<StrategyOrder, 'side' | 'trailing' | 'amount' | 'cost' | 'allocation'>;
 /** What track reads of the params of init: the bucket, whose pairs it tracks, and the log */
 export type TrackParams = Pick<InitParams<unknown>, 'candle'> & { tools: Pick<Tools<unknown>, 'log'> };
-/** What buy and sell read of the params of the candle hook that calls them: the portfolio as of the candle, and the tools */
-export type OrderParams = Pick<OnCandleEventParams<unknown>, 'portfolio'> & {
+/**
+ * What buy and sell read of the params of the candle hook that calls them: the candle of every pair, whose close a BUY is priced at
+ * when the book estimates what the market makes of it (see PositionBook.buy), the portfolio as of the candle, and the tools
+ */
+export type OrderParams = Pick<OnCandleEventParams<unknown>, 'candle' | 'portfolio'> & {
   tools: Pick<Tools<unknown>, 'createOrder' | 'log' | 'marketData'>;
 };

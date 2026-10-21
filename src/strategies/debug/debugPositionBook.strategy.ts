@@ -18,9 +18,10 @@ import { DebugPositionBookParams } from './debugPositionBook.types';
  * through a PositionBook, as the signal strategies do, a position per watched pair, where the other debug strategies track none. On
  * the candles its block lists, counted from 0 for the first candle after the warmup, it plays each step, those of a candle in the
  * order of the block, on each pair the step names, every watched pair when it names none: a MARKET BUY sized by the book (an equal
- * share of the free currency among the pairs not invested, all-in for the last of them, skipped when the share is below the minimum
- * cost of the market), or an all-in MARKET SELL. A step the position of a pair does not allow, a BUY while long, a SELL while flat,
- * either while an order of the pair is pending, is skipped on that pair, said at info level.
+ * share of the free currency among the pairs not invested, all-in for the last of them, skipped when the market would refuse it as
+ * too small, the asset of the pair held then taken for the position when it is enough to sell: see PositionBook.buy), or an all-in
+ * MARKET SELL. A step the position of a pair does not allow, a BUY while long, a SELL while flat, either while an order of the pair is
+ * pending, is skipped on that pair, said at info level.
  */
 export class DebugPositionBook implements Strategy<DebugPositionBookParams> {
   static schema = debugPositionBookStrategySchema;

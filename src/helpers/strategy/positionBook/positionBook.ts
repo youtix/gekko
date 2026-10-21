@@ -1,15 +1,14 @@
-import { BUY_COST_SHARE, FEE_BUFFER_PERCENT } from '@constants/order.const';
 import { GekkoError } from '@errors/gekko.error';
-import { toBound } from '@helpers/market/market.helper';
 import { getAllocatedShare } from '@helpers/order/sizing.helper';
 import { PositionTracker } from '@helpers/strategy/positionTracker/positionTracker';
 import { TradingPair } from '@models/utility.types';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams } from '@strategies/strategy.types';
-import { multiplyPrecise } from '@utils/math/math.utils';
+import { isFinitePositive } from '@utils/math/math.utils';
 import { round } from '@utils/math/round.utils';
 import { formatEveryDecimal, listInWords } from '@utils/string/string.utils';
 import { UUID } from 'node:crypto';
 import { SHARE_DECIMALS } from './positionBook.const';
+import { getBuyRefusal } from './positionBook.helper';
 import { BuyOrder, OrderParams, SellOrder, TrackParams } from './positionBook.types';
 
 /**
@@ -45,7 +44,9 @@ export class PositionBook {
    */
   track({ candle, tools }: TrackParams): void {
     if (this.trackedPairs) throw new GekkoError('strategy', 'The position book tracks its pairs already: track is called once, from init');
-    this.trackedPairs = Object.freeze([...candle.keys()]);
+    // A plain copy, readonly by its type alone: Bun walks a frozen array some ten times slower, and frozen, the pairs the hooks loop over
+    // on every candle cost a backtest on 1m candles up to 9 % of its time
+    this.trackedPairs = [...candle.keys()];
     for (const pair of this.trackedPairs) this.trackers.set(pair, new PositionTracker());
     if (this.trackedPairs.length < 2) return;
     const rule = 'each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset';
@@ -77,18 +78,22 @@ export class PositionBook {
 
   /**
    * Places a BUY of `order.symbol` through the tracker of that pair, which keeps it pending until its outcome; returns its id, or
-   * undefined when the BUY is skipped, which a book of several pairs alone does (see isSkipped): nothing sent, nothing pending. `params`
-   * are those of the candle hook it is called from, whole. A pair not tracked throws a GekkoError: the bot stops.
+   * undefined when the BUY is skipped, which a book of several pairs alone does (see isSkipped): nothing sent, nothing pending, the pair
+   * long if the portfolio holds enough of its asset to sell. `params` are those of the candle hook it is called from, whole. A pair not
+   * tracked throws a GekkoError: the bot stops.
    *
    * It takes an equal share of the free currency among the n pairs not invested, sent as its allocation, 100 / n %, rounded down to
-   * SHARE_DECIMALS decimals, which the Trader sizes from the currency free at its last synchronization:
+   * SHARE_DECIMALS decimals, of the currency the Trader sizes an allocation from: the currency free at its last synchronization, plus
+   * what its own BUYs still open at that read held of it, the part they had filled included (see the allocation of Tools.createOrder):
    * - n counts every pair that is not long, flat with nothing pending or flat with a BUY pending, the pair asking among them (it buys
    *   once canBuy allows it, and counts even when long): n is 1 at least. A pair whose BUY is pending counts: two signals on one candle
    *   are both sized by the Trader from the same balance read, the second placed before any synchronization. Left out, the second would
    *   ask more than an equal share of that balance (all of it, on two pairs), which the Trader caps at what the first leaves, with a
-   *   warning. Counted, the shares of one candle are exact. When a synchronization reads the balance after a pending BUY took its share
-   *   (a STICKY order resting past a periodic read), the shares after it are smaller than equal, and the difference stays in the
-   *   currency, for the last pair to buy. A pair whose SELL is pending is long: what that SELL brings in is the currency's once it fills.
+   *   warning. Counted, the shares of one candle are equal. So are those of BUYs a synchronization falls between, while the first rests
+   *   (a STICKY order resting past a periodic read): that read shows the currency less what the resting BUY holds of it, which the
+   *   Trader adds back, so that the BUY counted among the n is counted in the currency shared too. Shared from the free currency alone,
+   *   the share after such a read was smaller than equal, and on two pairs the rest stayed idle once both were long, no pair left to buy
+   *   with it. A pair whose SELL is pending is long: what that SELL brings in is the currency's once it fills.
    * - Rounded down: 100 / 3 is 33.333333333333336 as a double, and three BUYs of it on one candle asked for more than 100 % of the
    *   balance read, the third capped by the Trader at what the first two left, with a warning. Rounded down, n shares sum to 100 % less
    *   under n millionths of a percent, a rest below the dust of any order.
@@ -99,7 +104,7 @@ export class PositionBook {
   buy(order: BuyOrder, params: OrderParams): UUID | undefined {
     const tracker = this.getTracker(order.symbol, `place the BUY ${order.type} order`);
     const allocation = this.getAllocation(order.symbol);
-    if (this.isSkipped(order.symbol, allocation, params)) return;
+    if (this.isSkipped(tracker, order, allocation, params)) return;
     this.warnedSkips.delete(order.symbol);
     return tracker.buy(params.tools.createOrder, allocation === undefined ? order : { ...order, allocation });
   }
@@ -153,50 +158,61 @@ export class PositionBook {
     throw new GekkoError('strategy', `Impossible to ${action} on ${symbol}: the position book does not track it (it tracks ${tracked})`);
   }
 
-  /** The allocation of a BUY of `symbol`, in % (see buy): 100 / n rounded down, n the pairs not invested, undefined when n is 1 */
+  /**
+   * The allocation of a BUY of `symbol`, in % (see buy): 100 / n rounded down to SHARE_DECIMALS decimals, n the pairs not long, those
+   * whose BUY is pending among them, and `symbol` itself; undefined when n is 1, the BUY all-in
+   */
   private getAllocation(symbol: TradingPair): number | undefined {
     const notInvested = [...this.trackers].filter(([pair, tracker]) => pair === symbol || !tracker.isLong).length;
     return notInvested > 1 ? round(100 / notInvested, SHARE_DECIMALS, 'down') : undefined;
   }
 
   /**
-   * Whether the BUY of `symbol`, allocated `allocation` % of the free currency (all of it when undefined), is skipped, in a book that
-   * tracks several pairs: when its cost, estimated from the portfolio the candle hook got, is below the minimum cost of the market (see
-   * toBound). Sent, the exchange refuses it, each refusal counting towards the circuit breaker: a share of too little currency is
-   * refused at every signal of its pair, and the refusals stop the bot once maxConsecutiveErrors of them follow one another, though the
-   * currency would fund the BUYs of fewer pairs. Every BUY is checked then, that of the last pair not invested, all-in, included. The
-   * estimate is the currency free in the portfolio, the share allocated of it (see getAllocatedShare), less the share DEFAULT_FEE_BUFFER
-   * keeps back for the fee, all in decimal: the cost of a BUY sized from that budget before the amount step of the market, which can
-   * take it lower (the Trader warns of a share so cut before it sends it, not of an all-in BUY, which the exchange refuses then).
-   * Without the currency in the portfolio (no balance read yet), or without a minimum cost on the market, nothing is skipped: the
-   * Trader and the exchange say what they make of the BUY.
+   * Whether the BUY `order`, allocated `allocation` % of the free currency (all of it when undefined), is skipped, in a book that tracks
+   * several pairs: when the market would refuse it for its cost or its amount (see getBuyRefusal), as estimated from the currency free
+   * in the portfolio, the share allocated of it (see getAllocatedShare), and the close of its pair in the candle of the hook. Sent, the
+   * exchange refuses it, each refusal counting towards the circuit breaker: a share of too little currency is refused at every signal of
+   * its pair, and the refusals stop the bot once maxConsecutiveErrors of them follow one another, though the currency would fund the
+   * BUYs of fewer pairs. Every BUY is checked then, that of the last pair not invested, all-in, included. Without the currency in the
+   * portfolio (no balance read yet), or without a minimum cost or amount on the market, nothing is skipped: the Trader and the exchange
+   * say what they make of the BUY.
    *
    * A book that tracks one pair never skips: its all-in BUY is sent as a single-pair strategy always sent it, and refused when the
    * currency is too little. That refusal is how its tracker learns of a holding present at start-up, read from the portfolio after it
    * and sold at the next SELL signal (see PositionTracker), and how an account that can neither buy nor sell trips maxConsecutiveErrors,
-   * which stops the bot. Skipped, the strategy would stay flat beside that holding, never selling it, and the bot would run on with
-   * nothing to trade, every skip after the first logged at debug level. On several pairs, a pair whose BUYs are skipped learns of a
-   * holding of its asset only once a BUY of it is sent.
+   * which stops the bot: skipped, the bot would run on with nothing to trade, every skip after the first logged at debug level.
    *
-   * A skip is said through the strategy's log: at warn level for the first skip of a pair, then at debug level for its next skips,
-   * until a BUY of that pair is placed. A strategy whose signal holds over many candles (TMA, EMARibbon) asks for its BUY again on each,
-   * and the same warning would come on every candle until the currency or the pairs watched changed.
+   * On several pairs a skip teaches the tracker what that refusal would have: the asset free in the portfolio of the hook, when it is
+   * enough to sell at the close, is the position (see PositionTracker.adoptHolding), said at info level, and the strategy sells it at its
+   * next SELL signal. Skipped without a word of it, a holding present at start-up was never sold: after a restart long on every pair
+   * with little currency left, every BUY was skipped, the strategy stayed flat beside the holdings, ignoring its SELL signals, and the
+   * warning advised to fund the account.
+   *
+   * Any other skip is said through the strategy's log: at warn level for the first skip of a pair, then at debug level for its next
+   * skips, until a BUY of that pair is placed. A strategy whose signal holds over many candles (TMA, EMARibbon) asks for its BUY again on
+   * each, and the same warning would come on every candle until the currency or the pairs watched changed.
    */
-  private isSkipped(symbol: TradingPair, allocation: number | undefined, { portfolio, tools }: OrderParams): boolean {
+  private isSkipped(tracker: PositionTracker, order: BuyOrder, allocation: number | undefined, params: OrderParams): boolean {
     if (this.pairs.length < 2) return false;
-    const [, currency] = symbol.split('/');
+    const { candle, portfolio, tools } = params;
+    const { symbol, type } = order;
+    const [asset, currency] = symbol.split('/');
     const free = portfolio.get(currency)?.free;
     if (free === undefined) return false;
-    const minimum = toBound(tools.marketData.get(symbol)?.cost?.min);
-    if (minimum === undefined) return false;
-    const cost = multiplyPrecise(allocation === undefined ? free : getAllocatedShare(free, allocation), BUY_COST_SHARE);
-    if (!(cost < minimum)) return false;
+    const marketData = tools.marketData.get(symbol);
+    const close = candle.get(symbol)?.close;
+    const refusal = getBuyRefusal(order, allocation === undefined ? free : getAllocatedShare(free, allocation), close, marketData);
+    if (refusal === undefined) return false;
 
-    const share = allocation === undefined ? `all of the ${free} ${currency} free` : `${allocation} % of the ${free} ${currency} free`;
+    const share = `${allocation === undefined ? 'all' : `${allocation} %`} of the ${formatEveryDecimal(free)} ${currency} free`;
+    const held = portfolio.get(asset)?.free;
+    if (held !== undefined && isFinitePositive(close) && tracker.adoptHolding(held, close, type, marketData)) {
+      const holding = `${formatEveryDecimal(held)} ${asset} is free in the portfolio, enough to sell`;
+      tools.log('info', `[${symbol}] BUY skipped: ${share}, ${refusal}, but ${holding}: the strategy is long`);
+      return true;
+    }
     const remedy = allocation === undefined ? 'fund the account' : 'watch fewer pairs or fund the account';
-    const estimate = `${formatEveryDecimal(cost)} ${currency} once ${FEE_BUFFER_PERCENT} % is kept back for the fee`;
-    const below = `is below the minimum cost of ${formatEveryDecimal(minimum)} ${currency} of the market`;
-    const line = `[${symbol}] BUY skipped: ${share}, ${estimate}, ${below}: ${remedy}`;
+    const line = `[${symbol}] BUY skipped: ${share}, ${refusal}: ${remedy}`;
     if (this.warnedSkips.has(symbol)) {
       tools.log('debug', line);
       return true;

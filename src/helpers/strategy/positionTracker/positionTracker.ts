@@ -1,4 +1,6 @@
 import { StrategyOrder } from '@models/advice.types';
+import { OrderType } from '@models/order.types';
+import { MarketData } from '@services/exchange/exchange.types';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams, Tools } from '@strategies/strategy.types';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { UUID } from 'node:crypto';
@@ -13,7 +15,8 @@ import { Fill, PendingOrder, UnfinishedOrderParams } from './positionTracker.typ
  * several keeps one per pair in a PositionBook, which also shares the currency among their BUYs.
  *
  * - It starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that
- *   ended without completing while the account held it (see settleUnfinished).
+ *   ended without completing while the account held it (see settleUnfinished), or, in a PositionBook of several pairs, a BUY the book
+ *   skipped while the portfolio showed the holding (see adoptHolding).
  * - A completed BUY makes it long, a completed SELL flat, unless it sold less than it asked for, all of the asset free for an all-in
  *   SELL: the position is then read from the portfolio after it (see settleCompletedSell).
  * - A canceled or errored order may have executed all the same, in part or in full: the position is read from what its event
@@ -75,6 +78,22 @@ export class PositionTracker {
    */
   adoptSell(orderId: UUID): void {
     this.pendingOrders.set(orderId, { side: 'SELL' });
+  }
+
+  /**
+   * Takes a holding of its asset that no order of its own brought for the position: long when it is flat with nothing pending and
+   * `held` is enough to sell at `price` (see isSellable); returns whether it went long. Long already, or with an order pending, whose
+   * outcome tells the position, it takes nothing. A PositionBook of several pairs calls it for a BUY it skips, never sent, the market
+   * refusing its share as too small (see PositionBook.buy): sent, that BUY was refused, and its outcome read the position from the
+   * portfolio after it (see settleUnfinished), which is how a strategy learnt of a holding present at start-up. Skipped, it taught
+   * nothing: after a restart long on every pair with little currency left, every BUY was skipped, the strategy stayed flat beside the
+   * holdings and ignored its SELL signals, and nothing was ever sold. The caller says it, through the strategy's log, with the BUY it
+   * skipped.
+   */
+  adoptHolding(held: number, price: number, type: OrderType, marketData?: MarketData): boolean {
+    if (!this.canBuy() || !isSellable(held, price, type, marketData)) return false;
+    this.long = true;
+    return true;
   }
 
   /**
