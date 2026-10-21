@@ -2,9 +2,22 @@ import { BUY_COST_SHARE, FEE_BUFFER_PERCENT } from '@constants/order.const';
 import { getMarketOrderLimits, getSentCost, toBound } from '@helpers/market/market.helper';
 import { getAllInBuyAmount } from '@helpers/order/sizing.helper';
 import { MarketData } from '@services/exchange/exchange.types';
-import { isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
+import { addPrecise, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
 import { BuyOrder } from './positionBook.types';
+
+/**
+ * The currency a BUY of the book is estimated from, as the line of its skip names it (see PositionBook.buy): all of the currency free for
+ * an all-in BUY, `allocation` % of it for a share, or, for a share while BUYs of the book's own hold some of the currency (`held`, what
+ * the exchange holds for the orders open at the read), `allocation` % of the two added up, each named in the words of the Trader's
+ * sizing lines. Without a part held, the line reads as it always did.
+ */
+export const describeShare = (allocation: number | undefined, free: number, held: number, currency: string): string => {
+  if (allocation === undefined) return `all of the ${formatEveryDecimal(free)} ${currency} free`;
+  if (!(held > 0)) return `${allocation} % of the ${formatEveryDecimal(free)} ${currency} free`;
+  const parts = `${formatEveryDecimal(free)} ${currency} free at the last synchronization, plus ${formatEveryDecimal(held)} ${currency} held by the BUYs open then`;
+  return `${allocation} % of ${formatEveryDecimal(addPrecise(free, held))} ${currency}: ${parts}`;
+};
 
 /**
  * Why the market would refuse the BUY `order`, sized from `budget` of the currency, as the line of its skip says it (see

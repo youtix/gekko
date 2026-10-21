@@ -1,6 +1,6 @@
 import { MarketData } from '@services/exchange/exchange.types';
 import { describe, expect, it } from 'vitest';
-import { getBuyRefusal } from './positionBook.helper';
+import { describeShare, getBuyRefusal } from './positionBook.helper';
 
 const STEP = { precision: { amount: 0.00001 } } satisfies MarketData;
 
@@ -35,6 +35,22 @@ describe('positionBook.helper', () => {
       ${Infinity}
     `('works out no amount without a price above 0: a close of $close', ({ close }) => {
       expect(getBuyRefusal({ type: 'STICKY', symbol: 'BTC/USDT' }, 6, close, { ...STEP, cost: { min: 5 } })).toBeUndefined();
+    });
+  });
+
+  describe('describeShare', () => {
+    // A part held is named only for a share: an all-in BUY is sized from what is left of the currency free
+    it.each`
+      case                                     | allocation   | free         | held         | expected
+      ${'all-in'}                              | ${undefined} | ${9}         | ${0}         | ${'all of the 9 USDT free'}
+      ${'all-in, beside a part held'}          | ${undefined} | ${15.75}     | ${14.25}     | ${'all of the 15.75 USDT free'}
+      ${'a share, nothing held'}               | ${50}        | ${20}        | ${0}         | ${'50 % of the 20 USDT free'}
+      ${'a share, a part held'}                | ${50}        | ${15.75}     | ${14.25}     | ${'50 % of 30 USDT: 15.75 USDT free at the last synchronization, plus 14.25 USDT held by the BUYs open then'}
+      ${'a share of 0.3 + 0.1, in decimal'}    | ${25}        | ${0.3}       | ${0.1}       | ${'25 % of 0.4 USDT: 0.3 USDT free at the last synchronization, plus 0.1 USDT held by the BUYs open then'}
+      ${'a share, every decimal'}              | ${50}        | ${0.0000005} | ${0.0000002} | ${'50 % of 0.0000007 USDT: 0.0000005 USDT free at the last synchronization, plus 0.0000002 USDT held by the BUYs open then'}
+      ${'a share, a part held that is no sum'} | ${50}        | ${20}        | ${NaN}       | ${'50 % of the 20 USDT free'}
+    `('names the currency of $case: $expected', ({ allocation, free, held, expected }) => {
+      expect(describeShare(allocation, free, held, 'USDT')).toBe(expected);
     });
   });
 });

@@ -597,4 +597,85 @@ describe('PositionBook', () => {
       expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
     });
   });
+
+  describe('a share while a BUY of another pair rests', () => {
+    // On 30 USDT, the BUY of BTC takes 50 %, 15 USDT, 14.25 USDT once 5 % is kept back: 0.1425 BTC at 100, above the minimum cost of
+    // 10 of BTC/USDT, so it is placed and pends. Resting unfilled at its price on an exchange that holds its notional (Binance), it holds
+    // 14.25 USDT, and the next read shows 15.75 USDT free: the Trader adds back what its BUY holds, amount × price, 14.25, a base of 30.
+    // Half filled, the exchange still holds 7.125 USDT for it, while the Trader counts the part filled too: its base is still 30.
+    const UNFILLED = { free: 15.75, used: 14.25 };
+    const HALF_FILLED = { free: 15.75, used: 7.125 };
+    // The simulator holds the maker fee of 0.1 % with the notional, 14.26425 USDT, 15.73575 free: the Trader adds back 14.25, a base of
+    // 29.98575, 0.01425 under the 30 the book reads
+    const SIMULATED = { free: 15.73575, used: 14.26425 };
+
+    /** A portfolio holding `free` USDT free, and `used` USDT held by the orders open at the read */
+    const readOf = ({ free, used }: { free: number; used: number }): Portfolio => new Map([['USDT', { free, used, total: free + used }]]);
+    /**
+     * Tracks BTC/USDT and ETH/USDT without a word, a minimum cost of 10 on BTC/USDT and of `ethMinimum` on ETH/USDT, plays `steps`
+     * on 30 USDT free (the BUY of BTC placed, 'buyBTC'), then reads `read`
+     */
+    const setUp = (ethMinimum: number, steps: string, read: { free: number; used: number }) => {
+      candle = bucketOf([BTC, ETH]);
+      book.track({ candle, tools: { log: noop } });
+      marketData = new Map<TradingPair, MarketData>([
+        [BTC, { cost: { min: 10 } }],
+        [ETH, { cost: { min: ethMinimum } }],
+      ]);
+      portfolio = holdingCurrency(30);
+      play(steps);
+      portfolio = readOf(read);
+    };
+
+    // The share is of the currency free plus what the exchange holds, as the Trader's base is: never above it on Binance, equal for a
+    // BUY resting unfilled, under it once part of it filled
+    it.each`
+      case                                                                            | ethMinimum | read           | placed
+      ${'resting unfilled: 50 % of 30 USDT, the Trader base, 14.25 USDT, above 10'}   | ${10}      | ${UNFILLED}    | ${1}
+      ${'resting unfilled: 50 % of 30 USDT, 14.25 USDT, below 15'}                    | ${15}      | ${UNFILLED}    | ${0}
+      ${'half filled: 50 % of 22.875 USDT, under the Trader 30, 10.865625, above 10'} | ${10}      | ${HALF_FILLED} | ${1}
+      ${'half filled: 10.865625 USDT, below 12, where the Trader sizes 14.25'}        | ${12}      | ${HALF_FILLED} | ${0}
+    `('places $placed BUY of ETH beside the BUY of BTC $case', ({ ethMinimum, read, placed }) => {
+      setUp(ethMinimum, 'buyBTC', read);
+      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      expect(orders.advices.filter(({ symbol }) => symbol === ETH)).toHaveLength(placed);
+    });
+
+    it.each`
+      case                                                    | ethMinimum | steps                   | read                     | message
+      ${'resting unfilled, the base and its parts'}           | ${15}      | ${'buyBTC'}             | ${UNFILLED}              | ${`[ETH/USDT] BUY skipped: 50 % of 30 USDT: 15.75 USDT free at the last synchronization, plus 14.25 USDT held by the BUYs open then, 14.25 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'half filled, the part still held'}                   | ${12}      | ${'buyBTC'}             | ${HALF_FILLED}           | ${`[ETH/USDT] BUY skipped: 50 % of 22.875 USDT: 15.75 USDT free at the last synchronization, plus 7.125 USDT held by the BUYs open then, 10.865625 USDT once 5 % is kept back for the fee, is below the minimum cost of 12 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'in the simulator, its maker fee held too'}           | ${15}      | ${'buyBTC'}             | ${SIMULATED}             | ${`[ETH/USDT] BUY skipped: 50 % of 30 USDT: 15.73575 USDT free at the last synchronization, plus 14.26425 USDT held by the BUYs open then, 14.25 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'nothing held, the BUY of BTC placed since the read'} | ${15}      | ${'buyBTC'}             | ${{ free: 30, used: 0 }} | ${`[ETH/USDT] BUY skipped: 50 % of the 30 USDT free, 14.25 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'held by an order the book did not place, BTC flat'}  | ${10}      | ${''}                   | ${UNFILLED}              | ${`[ETH/USDT] BUY skipped: 50 % of the 15.75 USDT free, 7.48125 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
+      ${'an all-in BUY, BTC long, sized from what is left'}   | ${15}      | ${'buyBTC completed:1'} | ${UNFILLED}              | ${`[ETH/USDT] BUY skipped: all of the 15.75 USDT free, 14.9625 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market: fund the account${NEXT_SKIPS}`}
+    `('names the currency of a skipped BUY of ETH, $case', ({ ethMinimum, steps, read, message }) => {
+      setUp(ethMinimum, steps, read);
+      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      expect(logs).toEqual([{ level: 'warn', message }]);
+    });
+
+    // The share of ETH, 14.25 USDT, is below the minimum cost of 15, and 0.2 ETH at 100, 20 USDT, above it: enough to sell
+    it('names the base of the share in the line of a holding taken', () => {
+      setUp(15, 'buyBTC', UNFILLED);
+      portfolio = new Map([...readOf(UNFILLED), ['ETH', { free: 0.2, used: 0, total: 0.2 }]]);
+      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      expect(logs).toEqual([
+        {
+          level: 'info',
+          message:
+            '[ETH/USDT] BUY skipped: 50 % of 30 USDT: 15.75 USDT free at the last synchronization, plus 14.25 USDT held by the BUYs open then, 14.25 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market, but 0.2 ETH is free in the portfolio, enough to sell: the strategy is long',
+        },
+      ]);
+    });
+
+    it('sends the all-in BUY of a book tracking one pair, whatever the exchange holds', () => {
+      book.track({ candle: bucketOf([BTC]), tools: { log: noop } });
+      candle = bucketOf([BTC]);
+      portfolio = readOf({ free: 9, used: 14.25 });
+      marketData = withMinimumCost([BTC], 10);
+      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
+    });
+  });
 });

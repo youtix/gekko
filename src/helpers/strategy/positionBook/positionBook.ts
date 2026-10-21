@@ -3,12 +3,12 @@ import { getAllocatedShare } from '@helpers/order/sizing.helper';
 import { PositionTracker } from '@helpers/strategy/positionTracker/positionTracker';
 import { TradingPair } from '@models/utility.types';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams } from '@strategies/strategy.types';
-import { isFinitePositive } from '@utils/math/math.utils';
+import { addPrecise, isFinitePositive } from '@utils/math/math.utils';
 import { round } from '@utils/math/round.utils';
 import { formatEveryDecimal, listInWords } from '@utils/string/string.utils';
 import { UUID } from 'node:crypto';
 import { SHARE_DECIMALS } from './positionBook.const';
-import { getBuyRefusal } from './positionBook.helper';
+import { describeShare, getBuyRefusal } from './positionBook.helper';
 import { BuyOrder, OrderParams, SellOrder, TrackParams } from './positionBook.types';
 
 /**
@@ -159,6 +159,15 @@ export class PositionBook {
   }
 
   /**
+   * Whether a pair other than `symbol` is flat with an order of its own pending: a BUY, a SELL being placed only while long. The
+   * currency the exchange holds then may be that BUY's, which the Trader adds back to the base of a share (see isSkipped); the
+   * orders of another strategy, or placed by hand, hold some of it too, which it does not
+   */
+  private isBuyPendingBeside(symbol: TradingPair): boolean {
+    return [...this.trackers].some(([pair, tracker]) => pair !== symbol && !tracker.isLong && tracker.isPendingOrder);
+  }
+
+  /**
    * The allocation of a BUY of `symbol`, in % (see buy): 100 / n rounded down to SHARE_DECIMALS decimals, n the pairs not long, those
    * whose BUY is pending among them, and `symbol` itself; undefined when n is 1, the BUY all-in
    */
@@ -168,14 +177,24 @@ export class PositionBook {
   }
 
   /**
-   * Whether the BUY `order`, allocated `allocation` % of the free currency (all of it when undefined), is skipped, in a book that tracks
-   * several pairs: when the market would refuse it for its cost or its amount (see getBuyRefusal), as estimated from the currency free
-   * in the portfolio, the share allocated of it (see getAllocatedShare), and the close of its pair in the candle of the hook. Sent, the
+   * Whether the BUY `order`, allocated `allocation` % of the currency (all of the currency free when undefined), is skipped, in a book
+   * that tracks several pairs: when the market would refuse it for its cost or its amount (see getBuyRefusal), as estimated from the
+   * portfolio of the hook, the share allocated (see getAllocatedShare), and the close of its pair in the candle of the hook. Sent, the
    * exchange refuses it, each refusal counting towards the circuit breaker: a share of too little currency is refused at every signal of
    * its pair, and the refusals stop the bot once maxConsecutiveErrors of them follow one another, though the currency would fund the
    * BUYs of fewer pairs. Every BUY is checked then, that of the last pair not invested, all-in, included. Without the currency in the
    * portfolio (no balance read yet), or without a minimum cost or amount on the market, nothing is skipped: the Trader and the exchange
    * say what they make of the BUY.
+   *
+   * A share is estimated from the currency free, plus, while a BUY of the book's own is pending on another pair, what the exchange holds
+   * for the orders open at the read (`used`): the Trader adds back to the base of a share what its own BUYs open at its read held (see
+   * buy), the currency read showing less what a resting BUY holds. Estimated from the currency free alone, a share depended on whether a
+   * synchronization fell between the two BUYs, and was skipped though the Trader sized it above the minimum: on 30 USDT, BTC's BUY of
+   * 50 % resting across a read of 15.75 USDT free and 14.25 USDT held, ETH's came out at 7.48125 USDT, under a minimum cost of 10, where
+   * the Trader sized it at 14.25. What the exchange holds equals what the Trader adds back for a BUY resting unfilled at its price on an
+   * exchange that holds its notional (Binance); it is less once the BUY has partly filled, the Trader counting what it filled too, and
+   * more by the maker fee the simulator holds with it, by the move of a STICKY BUY above the price it was created at, or by an order
+   * Gekko did not place. An all-in BUY is estimated from the currency free alone, as the Trader sizes it from what is left of it.
    *
    * A book that tracks one pair never skips: its all-in BUY is sent as a single-pair strategy always sent it, and refused when the
    * currency is too little. That refusal is how its tracker learns of a holding present at start-up, read from the portfolio after it
@@ -197,14 +216,17 @@ export class PositionBook {
     const { candle, portfolio, tools } = params;
     const { symbol, type } = order;
     const [asset, currency] = symbol.split('/');
-    const free = portfolio.get(currency)?.free;
-    if (free === undefined) return false;
+    const balance = portfolio.get(currency);
+    if (!balance) return false;
+    const { free, used } = balance;
+    const heldByBuys = allocation !== undefined && this.isBuyPendingBeside(symbol) && isFinitePositive(used) ? used : 0;
+    const budget = allocation === undefined ? free : getAllocatedShare(heldByBuys > 0 ? addPrecise(free, heldByBuys) : free, allocation);
     const marketData = tools.marketData.get(symbol);
     const close = candle.get(symbol)?.close;
-    const refusal = getBuyRefusal(order, allocation === undefined ? free : getAllocatedShare(free, allocation), close, marketData);
+    const refusal = getBuyRefusal(order, budget, close, marketData);
     if (refusal === undefined) return false;
 
-    const share = `${allocation === undefined ? 'all' : `${allocation} %`} of the ${formatEveryDecimal(free)} ${currency} free`;
+    const share = describeShare(allocation, free, heldByBuys, currency);
     const held = portfolio.get(asset)?.free;
     if (held !== undefined && isFinitePositive(close) && tracker.adoptHolding(held, close, type, marketData)) {
       const holding = `${formatEveryDecimal(held)} ${asset} is free in the portfolio, enough to sell`;
