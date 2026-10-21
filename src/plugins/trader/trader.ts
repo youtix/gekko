@@ -34,9 +34,9 @@ import { debug, error, info, warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
 import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { formatEveryDecimal } from '@utils/string/string.utils';
-import { filter, isNil, noop, pick, uniqBy } from 'lodash-es';
+import { filter, isNil, noop, uniqBy } from 'lodash-es';
 import { UUID } from 'node:crypto';
-import { ORDER_FACTORY, SIZING_KEYS } from './trader.const';
+import { ORDER_FACTORY } from './trader.const';
 import {
   computeOrderPricing,
   describeAllocationBase,
@@ -201,10 +201,12 @@ export class Trader extends Plugin {
     const held = new Map<string, number>();
     // A synchronization started after a count was noted reads a balance that shows what happened then
     const isRead = (count?: number) => !isNil(count) && count < synchronizationNumber;
-    for (const order of this.orders.values()) {
-      if (order.side !== 'BUY' || !isRead(order.synchronizationCount) || isRead(order.endSynchronizationCount)) continue;
-      const holding = isRead(order.cancelSynchronizationCount) ? order.orderInstance.getFilledAmount() : order.amount;
-      const cost = multiplyPrecise(holding, order.price);
+    for (const metadata of this.orders.values()) {
+      // The price it was created with, not that of the order, the one the strategy asked for, if any
+      const { order, price, orderInstance } = metadata;
+      if (order.side !== 'BUY' || !isRead(metadata.synchronizationCount) || isRead(metadata.endSynchronizationCount)) continue;
+      const holding = isRead(metadata.cancelSynchronizationCount) ? orderInstance.getFilledAmount() : order.amount;
+      const cost = multiplyPrecise(holding, price);
       if (!isFinitePositive(cost)) continue;
       const [, currencyName] = order.symbol.split('/');
       held.set(currencyName, addPrecise(held.get(currencyName) ?? 0, cost));
@@ -239,11 +241,11 @@ export class Trader extends Plugin {
    */
   private async checkStickyOrders() {
     const checks = [...this.orders]
-      .filter(([, { type }]) => type === 'STICKY')
-      .map(([id, { orderInstance, side, type }]) =>
+      .filter(([, { order }]) => order.type === 'STICKY')
+      .map(([id, { orderInstance, order }]) =>
         orderInstance
           .checkOrder()
-          .catch(err => error('trader', `[${id}] Impossible to check the ${side} ${type} order: ${describeError(err)}`)),
+          .catch(err => error('trader', `[${id}] Impossible to check the ${order.side} ${order.type} order: ${describeError(err)}`)),
       );
     await Promise.all(checks);
   }
@@ -776,8 +778,9 @@ export class Trader extends Plugin {
   }
 
   /**
-   * The fill, with its summary, estimated when the exchange cannot give it (see summarizeCompletedOrder), the portfolio after it, and
-   * the cost or the allocation the strategy sized the order by, as the other events of the order relay them
+   * The fill, with its summary, estimated when the exchange cannot give it (see summarizeCompletedOrder), and the portfolio after it,
+   * over the order as relayed: its amount and its price those the order executed at, and the cost or the allocation the strategy sized
+   * the order by kept, as the other events of the order relay them
    */
   private async reportCompleted(orderInstance: OrderInstance, order: RelayedOrder, creationPrice: number) {
     const { id, symbol, side, type, orderCreationDate } = order;
@@ -795,7 +798,7 @@ export class Trader extends Plugin {
         error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
       const { order: completed, exchange } = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
-      this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, { order: { ...completed, ...pick(order, SIZING_KEYS) }, exchange });
+      this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, { order: { ...order, ...completed }, exchange });
       this.orders.delete(id);
     } catch (err) {
       error('trader', `[${id}] Impossible to report the completion of the ${side} ${type} order: ${describeError(err)}`);
@@ -909,7 +912,8 @@ export class Trader extends Plugin {
       uniqBy(payloads, 'id').map(async ({ id }) => {
         const orderMetadata = this.orders.get(id);
         if (!orderMetadata) return warning('trader', `[${id}] Impossible to cancel order: Unknown Order`);
-        const { orderInstance, side, amount, type, orderCreationDate, price, requestedPrice, symbol } = orderMetadata;
+        const { orderInstance, order, price } = orderMetadata;
+        const { side, type } = order;
         // The exchange gets the cancelation before any order sent after it, and releases what the order reserved: kept whole, an order
         // placed since the balance was read went on taking from it, and an all-in order sent after the cancelation, to trade at the
         // market instead, left that out. Not what it filled before, spent (a BUY's currency) or sold (a SELL's asset), which that read
@@ -924,13 +928,12 @@ export class Trader extends Plugin {
         // A BUY holds no more than that fill of the currency at a read started from now on (see readHeldByOpenBuys)
         orderMetadata.cancelSynchronizationCount = this.synchronizationCount;
 
-        // From now on its updates are no longer logged, and its end is relayed as the creation flow relays it: with the price the
-        // strategy asked for, if any, and the cost or the allocation it sized the order by. Not the price the order was created with
-        // (see TraderOrderMetadata), the market price for an order without one, which the strategy and the EventSubscriber would read
-        // as a requested limit price: that one only goes to the report, for the estimate of a fill.
+        // From now on its updates are no longer logged, and its end is relayed as the creation flow relays it: the order as initiated,
+        // with the price the strategy asked for, if any, and the cost or the allocation it sized the order by. Not the price the order was
+        // created with (see TraderOrderMetadata), the market price for an order without one, which the strategy and the EventSubscriber
+        // would read as a requested limit price: that one only goes to the report, for the estimate of a fill.
         orderInstance.removeAllListeners();
-        const relayed = { id, orderCreationDate, amount, side, type, price: requestedPrice, symbol, ...pick(orderMetadata, SIZING_KEYS) };
-        this.relayTerminalEvents(orderInstance, relayed, price);
+        this.relayTerminalEvents(orderInstance, order, price);
 
         // Cancel, without waiting: the outcome arrives through the terminal events. A failure is reported as ORDER_ERRORED_EVENT,
         // so a rejection is not expected, but it must not become an unhandled one. Tracked as a report: the simulated exchange
@@ -948,7 +951,7 @@ export class Trader extends Plugin {
     // Parallel strategy: process all payloads concurrently
     await Promise.all(
       payloads.map(async advice => {
-        const { id, side, orderCreationDate, type, symbol } = advice;
+        const { id, side, type, symbol } = advice;
         const price = advice.price ?? this.prices.get(symbol);
         // Unknown (a pair not watched), 0, negative or NaN: the order can be neither sized nor placed. The strategy already holds its
         // id and waits for a terminal event of it: it hears of it as an error, like an order the exchange refused. Nothing was
@@ -991,19 +994,8 @@ export class Trader extends Plugin {
 
         // Create order
         const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price);
-        // With the cost or the allocation the strategy sized it by, if any, which the events of its cancelation flow relay as asked
-        this.orders.set(id, {
-          amount,
-          side,
-          orderCreationDate,
-          type,
-          price,
-          requestedPrice: advice.price,
-          orderInstance,
-          symbol,
-          synchronizationCount: this.synchronizationCount,
-          ...pick(advice, SIZING_KEYS),
-        });
+        // The order as initiated, which the events of its cancelation flow relay as the creation flow does (see onStrategyCancelOrder)
+        this.orders.set(id, { orderInstance, order: orderInitiated, price, synchronizationCount: this.synchronizationCount });
         // Until the balance is read again, the orders after it can only take what it leaves (see unreadOrders): a SELL its amount of the
         // asset, a BUY what it may spend of the currency, an all-in BUY all it was sized from and a BUY sized by its cost or by its
         // allocation its budget, unless capped at the maximum of the market. Not an order that cannot be placed, which the exchange

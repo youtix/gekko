@@ -7,9 +7,3 @@ export const ORDER_FACTORY = {
   STICKY: StickyOrder,
   LIMIT: LimitOrder,
 } as const;
-
-/**
- * The keys with which a strategy sizes an order otherwise than by its amount: every event of the order relays them as the strategy gave
- * them, left out when it gave none (see OrderEvent)
- */
-export const SIZING_KEYS = ['cost', 'allocation'] as const;

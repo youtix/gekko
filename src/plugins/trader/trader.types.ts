@@ -1,5 +1,5 @@
 import { OrderCanceledEvent, OrderInitiatedEvent } from '@models/event.types';
-import { OrderSide, OrderType } from '@models/order.types';
+import { OrderType } from '@models/order.types';
 import { TradingPair } from '@models/utility.types';
 import { Order as AbstractOrder } from '@services/core/order/order';
 import { OrderSummary } from '@services/core/order/order.types';
@@ -12,31 +12,19 @@ export type Trader = z.infer<typeof traderSchema>;
 export type TraderOrderMetadata = {
   /** Order instance */
   orderInstance: AbstractOrder;
-  /** Order creation date */
-  orderCreationDate: EpochTimeStamp;
-  /** Order amount */
-  amount: number;
-  /** Order side (SELL | BUY)*/
-  side: OrderSide;
-  /** Order type ('MARKET' | 'STICKY' | 'LIMIT')*/
-  type: OrderType;
+  /**
+   * The order as initiated, the one its ORDER_INITIATED_EVENT carried: the order the strategy asked for, with the amount the Trader
+   * placed it for, the price the strategy asked for, if any, and the cost or the allocation it sized the order by, as it gave them. The
+   * events of its end relay it, in both flows (see Trader.onStrategyCancelOrder), each with what it adds. Kept whole: the cancelation
+   * flow rebuilt it from copies of its fields, one by one, and a copy that lost one, the amount, passed every test of the Trader.
+   */
+  order: RelayedOrder;
   /**
    * The price the order was created with, in currency: the price the strategy asked for, else the market price at its creation. A
    * LIMIT order is placed at it. A MARKET order ignores it, executed at the market, and so does a STICKY order, placed from the
-   * ticker: at bid + price.min for a BUY, ask - price.min for a SELL.
+   * ticker: at bid + price.min for a BUY, ask - price.min for a SELL. Not the price of `order`, the one the strategy asked for, if any.
    */
   price: number;
-  /** The price the strategy asked for, if any: the price its terminal events relay, in both flows (see Trader.onStrategyCancelOrder) */
-  requestedPrice?: number;
-  /**
-   * The cost the strategy sized the order by, in currency, as it gave it, and left out for an order it sized otherwise: its terminal
-   * events relay it in both flows (see Trader.onStrategyCancelOrder)
-   */
-  cost?: number;
-  /** The allocation the strategy sized the order by, in percent, as it gave it, and left out for an order it sized otherwise (see cost) */
-  allocation?: number;
-  /** Trading Pair */
-  symbol: TradingPair;
   /**
    * The count of synchronizations started when the order was placed: one started after it reads a balance that shows it, reserved or
    * filled (see Trader.unreadOrders and Trader.readHeldByOpenBuys)

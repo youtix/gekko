@@ -16,7 +16,7 @@ import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { config } from '@services/configuration/configuration';
 import { OrderSummary } from '@services/core/order/order.types';
 import * as logger from '@services/logger';
-import { noop, pick } from 'lodash-es';
+import { noop, omit, pick } from 'lodash-es';
 import type { Mock } from 'vitest';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Trader } from './trader';
@@ -882,7 +882,20 @@ describe('Trader', () => {
       expect(initiated?.amount).toBeCloseTo(1.2345, 5);
 
       const metadata = getOrderMetadata(advice.id);
-      expect(metadata?.amount).toBeCloseTo(1.2345, 5);
+      expect(metadata?.order.amount).toBeCloseTo(1.2345, 5);
+    });
+
+    // The order as initiated, whole, which the cancelation flow relays as it is (see onStrategyCancelOrder), beside the price it was
+    // created with and the count of synchronizations started: a LIMIT BUY of 95 USDT at 95, placed for 0.95 BTC before any of them
+    it('keeps the order it initiated whole, its amount of 0.95 BTC included, beside the price it was created with', async () => {
+      const advice = buildAdvice({ type: 'LIMIT', price: 95, cost: 95 });
+      await trader.onStrategyCreateOrder([advice]);
+      expect(getOrderMetadata(advice.id)).toEqual({
+        orderInstance: expect.any(Object),
+        order: { ...advice, amount: 0.95 },
+        price: 95,
+        synchronizationCount: 0,
+      });
     });
 
     // A BUY of 0.5 BTC whose fee (0.1 %) the exchange took from the BTC bought, as Binance does unless the fees are paid in BNB: the
@@ -1728,6 +1741,17 @@ describe('Trader', () => {
             'trader',
             `[${advice.id}] BUY MARKET order of 500 USDT (50 % of 1000 USDT: 430 USDT free at the last synchronization, plus 570 USDT held by the BUYs open then) sized to 40.85 ETH at 10`,
           );
+        });
+
+        // A STICKY BUY is sized, and created, at the market price, the strategy asking for none: it holds its 4.75 BTC at that price, 100,
+        // the one it was created with, not at the price of the order its events relay, which it does not have
+        it('places a BUY of 50 % of the 525 USDT read and the 475 a resting STICKY BUY holds at its creation price, for 47.5 ETH', async () => {
+          await trader.onStrategyCreateOrder([buy(4, { allocation: 50 }, 'STICKY')]);
+          fakeExchange.fetchBalance.mockResolvedValue(read(525, 475));
+          await trader['synchronize']();
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(47.5);
         });
 
         // What it filled counts too, spent on its behalf: 190 USDT on 2 of its 5 BTC, 285 reserved for the 3 left. Left out, the share of
@@ -2761,6 +2785,28 @@ describe('Trader', () => {
     `('warns "[missing-id] Impossible to cancel order: Unknown Order" for an unknown order asked with $kind', async ({ cancelation }) => {
       await trader.onStrategyCancelOrder([cancelation]);
       expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', '[missing-id] Impossible to cancel order: Unknown Order');
+    });
+
+    // Relayed whole, as the creation flow initiated it: the cancelation flow rebuilt it from copies of its fields, one by one, and a copy
+    // that lost the amount passed every row. A LIMIT BUY of 95 USDT at 95, placed for 0.95 BTC from the 1000 USDT read.
+    describe('the order the terminal events of the cancelation flow relay', () => {
+      const advice = buildAdvice({ type: 'LIMIT', price: 95, cost: 95 });
+
+      beforeEach(async () => {
+        vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+        trader['portfolio'] = new Map<string, BalanceDetail>([['USDT', { free: 1000, used: 0, total: 1000 }]]);
+        await prepareOrder('cancelation', advice);
+      });
+
+      it.each`
+        event                   | payload                                                         | getRelayed          | added
+        ${ORDER_CANCELED_EVENT} | ${{ timestamp: 1_700_000_100_000, filled: 0, remaining: 0.95 }} | ${getCanceledEvent} | ${['orderCancelationDate', 'filled', 'remaining']}
+        ${ORDER_ERRORED_EVENT}  | ${{ reason: 'exchange timeout', mayBeLive: false }}             | ${getErroredEvent}  | ${['reason', 'orderErrorDate', 'filled', 'mayBeLive']}
+        ${ORDER_INVALID_EVENT}  | ${{ reason: 'too small', status: 'rejected', filled: false }}   | ${getErroredEvent}  | ${['reason', 'orderErrorDate', 'filled', 'mayBeLive']}
+      `('relays in its $event the order initiated, its amount of 0.95 BTC included', async ({ event, payload, getRelayed, added }) => {
+        await getOrderInstance(advice.id).emitAndSettle(event, payload);
+        expect(omit(getRelayed().order, added)).toEqual({ ...advice, amount: 0.95 });
+      });
     });
 
     // Two copies of one cancellation, as the deferred delivery hands its payloads: compared by reference, both would reach the exchange
