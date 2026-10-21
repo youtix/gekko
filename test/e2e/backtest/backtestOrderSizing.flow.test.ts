@@ -5,13 +5,12 @@ import { beforeEach, describe, expect, it } from 'bun:test';
 import { range } from 'lodash-es';
 import { fileURLToPath } from 'node:url';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs } from '../mocks/winston.mock';
+import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
 import {
   filledMarketOrder,
   flatCandles,
   minute,
   mockBacktestModules,
-  numberedTextLines,
   openLimitOrder,
   rawMarket,
   refusedMarketOrder,

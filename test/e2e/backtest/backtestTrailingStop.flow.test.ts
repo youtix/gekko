@@ -1,16 +1,8 @@
 import type { Candle } from '@models/candle.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs } from '../mocks/winston.mock';
-import {
-  filledMarketOrder,
-  minute,
-  mockBacktestModules,
-  numberedTextLines,
-  rawMarket,
-  runBacktest,
-  unreservedRead,
-} from './backtestRun.helper';
+import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
+import { filledMarketOrder, minute, mockBacktestModules, rawMarket, runBacktest, unreservedRead } from './backtestRun.helper';
 
 mockBacktestModules();
 // DebugTrailingStop logs the life of its stop at debug level: the logger hands a debug line to winston only when GEKKO_LOG_LEVEL lets it

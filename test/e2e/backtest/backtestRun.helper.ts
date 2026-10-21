@@ -11,7 +11,7 @@ import { mapValues, range } from 'lodash-es';
 import { mockConfiguration, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
-import { isTextLine, logStore, MockWinston, type TextLine } from '../mocks/winston.mock';
+import { MockWinston } from '../mocks/winston.mock';
 
 /** The first minute the backtests of this directory can read, 2024-01-01 at midnight UTC */
 const START = Date.parse('2024-01-01T00:00:00Z');
@@ -215,28 +215,6 @@ export const runBacktest = async (backtest: RawConfiguration, candles: Record<Tr
     (error: Error) => error,
   );
   return run;
-};
-
-const ORDER_ID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-
-/**
- * The messages with each order id, a UUID drawn at random, replaced by `order <n>`, numbered from 1 in the order the ids first appear:
- * the lines of one order keep one name, from run to run
- */
-export const withOrderNumbers = (messages: string[]) => {
-  const numbers = new Map<string, number>();
-  const numberOf = (id: string) => numbers.get(id) ?? numbers.set(id, numbers.size + 1).size;
-  return messages.map(message => message.replace(ORDER_ID, id => `order ${numberOf(id)}`));
-};
-
-/**
- * The lines logged as text, oldest first, each order named by its rank among the orders of the log (see withOrderNumbers): the order
- * a line names is the one the run placed n-th, whatever lines a test keeps of them
- */
-export const numberedTextLines = (): TextLine[] => {
-  const lines = logStore.filter(isTextLine);
-  const messages = withOrderNumbers(lines.map(({ message }) => message));
-  return lines.map((line, index) => ({ ...line, message: messages[index] }));
 };
 
 type Fee = { maker: number; taker: number };

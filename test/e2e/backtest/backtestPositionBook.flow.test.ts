@@ -5,13 +5,12 @@ import type { DebugPositionBookParams } from '@strategies/debug/debugPositionBoo
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { range } from 'lodash-es';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs } from '../mocks/winston.mock';
+import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
 import {
   filledMarketOrder,
   flatCandles,
   minute,
   mockBacktestModules,
-  numberedTextLines,
   rawMarket,
   refusedMarketOrder,
   runBacktest,

@@ -3,12 +3,11 @@ import type { DebugAdviceParams } from '@strategies/debug/debugAdvice.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { range } from 'lodash-es';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs } from '../mocks/winston.mock';
+import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
 import {
   canceledLimitOrder,
   minute,
   mockBacktestModules,
-  numberedTextLines,
   openLimitOrder,
   rawMarket,
   runBacktest,
