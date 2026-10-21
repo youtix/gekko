@@ -5,6 +5,40 @@ import { advanceClock, minuteOf, REALTIME_START, startFakeClock } from './clock.
 describe('clock.helper', () => {
   afterEach(() => jest.useRealTimers());
 
+  // First in the file, so that in the order the tests are defined its first test starts outside Bun's event loop (the runner enters it
+  // once a test of the file has waited on it), where an advance runs a timer's process.nextTick callbacks at the timer's instant
+  describe('advanceClock', () => {
+    // advanceClock advances every second from inside the event loop, where the callback runs once that second is over, 1 s in: the
+    // timer it arms is due 1.5 s in and fires in the next second. A first second advanced from outside ran it at 0.5 s, the timer at 1 s
+    it('should run what a timer started through process.nextTick once the second it fired in is over, whatever ran before', async () => {
+      startFakeClock();
+      let firedAt: number | undefined;
+      setTimeout(() => process.nextTick(() => setTimeout(() => (firedAt = Date.now()), 500)), 500);
+      await advanceClock(2 * ONE_SECOND);
+      expect(firedAt! - REALTIME_START).toBe(1_500);
+    });
+
+    it('should move the fake clock by the time asked, the last step shorter', async () => {
+      startFakeClock();
+      await advanceClock(90_500);
+      expect(Date.now() - REALTIME_START).toBe(90_500);
+    });
+
+    it('should stop at the end of the second in which `until` came to hold', async () => {
+      startFakeClock();
+      await advanceClock(10 * ONE_SECOND, { until: () => Date.now() >= REALTIME_START + 2_500 });
+      expect(Date.now() - REALTIME_START).toBe(3 * ONE_SECOND);
+    });
+
+    it('should refuse to move the real clock', async () => {
+      const failure = await advanceClock(ONE_SECOND).then(
+        () => undefined,
+        (error: Error) => error.message,
+      );
+      expect(failure).toBe('advanceClock moves the fake clock: call startFakeClock() first');
+    });
+  });
+
   describe('minuteOf', () => {
     const minute = Date.parse('2024-01-01T00:01:00Z');
 
@@ -32,38 +66,6 @@ describe('clock.helper', () => {
       setTimeout(() => (fired = true), ONE_SECOND);
       jest.advanceTimersByTime(ONE_SECOND);
       expect(fired).toBe(true);
-    });
-  });
-
-  describe('advanceClock', () => {
-    it('should move the fake clock by the time asked, the last step shorter', async () => {
-      startFakeClock();
-      await advanceClock(90_500);
-      expect(Date.now() - REALTIME_START).toBe(90_500);
-    });
-
-    // A single advance of Bun's fake timers runs no process.nextTick callback: the timer it arms, due 1.5 s in, would wait for the
-    // next advance
-    it('should run within the advance what a timer started through process.nextTick, a second later at most', async () => {
-      startFakeClock();
-      let firedAt: number | undefined;
-      setTimeout(() => process.nextTick(() => setTimeout(() => (firedAt = Date.now()), 500)), 500);
-      await advanceClock(2 * ONE_SECOND);
-      expect(firedAt! - REALTIME_START).toBe(1_500);
-    });
-
-    it('should stop at the end of the second in which `until` came to hold', async () => {
-      startFakeClock();
-      await advanceClock(10 * ONE_SECOND, { until: () => Date.now() >= REALTIME_START + 2_500 });
-      expect(Date.now() - REALTIME_START).toBe(3 * ONE_SECOND);
-    });
-
-    it('should refuse to move the real clock', async () => {
-      const failure = await advanceClock(ONE_SECOND).then(
-        () => undefined,
-        (error: Error) => error.message,
-      );
-      expect(failure).toBe('advanceClock moves the fake clock: call startFakeClock() first');
     });
   });
 });

@@ -34,8 +34,8 @@ export const startFakeClock = (now = REALTIME_START) => {
 };
 
 /**
- * Lets the event loop run `turns` times without moving the fake clock: what a timer started, the callbacks of process.nextTick
- * included, which Bun does not run while it advances its fake timers.
+ * Lets the event loop run `turns` times without moving the fake clock: what a timer started runs then, the process.nextTick and promise
+ * callbacks it queued included, which Bun runs only once an advance of its fake timers made from inside its event loop is over.
  */
 export const yieldToEventLoop = async (turns = TURNS_PER_STEP) => {
   for (let turn = 0; turn < turns; turn++) await new Promise(resolve => setImmediate(resolve));
@@ -43,15 +43,24 @@ export const yieldToEventLoop = async (turns = TURNS_PER_STEP) => {
 
 /**
  * Advances the fake clock by `ms`, a second at a time, letting the event loop run after each second. Bun has no
- * advanceTimersByTimeAsync and runs no process.nextTick callback during an advance: a minute advanced at once would fire the Heart and
- * leave the candle it fetched halfway down the streams until the advance is over, read by the plugins on the clock of its end. Stops at
- * the end of the second in which `until` comes to hold, if given.
+ * advanceTimersByTimeAsync, and an advance made from inside its event loop runs none of the process.nextTick and promise callbacks of the
+ * timers it fires before it is over: a minute advanced at once would fire the Heart and leave the candle it fetched halfway down the
+ * streams until the advance is over, read by the plugins on the clock of its end. Stops at the end of the second in which `until` comes to
+ * hold, if given.
+ *
+ * Made outside the event loop, an advance runs those callbacks after each timer instead, at its instant. The test runner calls a test
+ * outside it until a test or a hook of its file has waited on it (awaited a setImmediate, a timer), and a test stays outside it until it
+ * waits on it itself: a first second advanced before then ran them at their instant when the test ran alone or first, at the end of the
+ * second after a test that had waited on the event loop. So the event loop runs once before the first second, which advanceClock then
+ * advances from inside it, as every other.
  *
  * Every timer fires on its way, so that a run never meets the Heart's late tick (a machine that slept): heart.test.ts plays it, and
  * realtime.stream.test.ts the end of a live stream on it.
  */
 export const advanceClock = async (ms: number, { until }: { until?: () => boolean } = {}) => {
   if (!jest.isFakeTimers()) throw new Error('advanceClock moves the fake clock: call startFakeClock() first');
+  // Inside the event loop from the first second on, whatever the test awaited before
+  await yieldToEventLoop(1);
   for (let elapsed = 0; elapsed < ms && !until?.(); elapsed += CLOCK_STEP) {
     jest.advanceTimersByTime(Math.min(CLOCK_STEP, ms - elapsed));
     await yieldToEventLoop();

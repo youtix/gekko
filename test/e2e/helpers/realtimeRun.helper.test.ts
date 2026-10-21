@@ -209,9 +209,14 @@ describe('realtimeRun.helper', () => {
         expect(pipeline.signal?.aborted).toBe(true);
       });
 
-      it('should move the fake clock until the aborted run has ended', async () => {
+      it('should move the fake clock until the aborted run has ended, and no further', async () => {
+        // Date reads the real clock once endRealtimeRun is over: a fake timer reads the fake one as it fires each second, its last
+        // reading where the clock stopped
+        let clockAtLastSecond = 0;
+        setInterval(() => (clockAtLastSecond = Date.now()), ONE_SECOND);
         await endRealtimeRun();
-        expect(pipeline.endedAt! - (REALTIME_START + ONE_MINUTE)).toBe(15 * ONE_SECOND);
+        // The pipeline ends 15 s after its abort, made at the end of the beforeEach's minute
+        expect(clockAtLastSecond - (REALTIME_START + ONE_MINUTE)).toBe(15 * ONE_SECOND);
       });
 
       it('should put the real timers back', async () => {
@@ -219,13 +224,18 @@ describe('realtimeRun.helper', () => {
         expect(jest.isFakeTimers()).toBe(false);
       });
 
-      it('should drop the fake timers left, as the polls of the orders still open', async () => {
+      it('should drop the fake timers left, as the polls of the orders still open: none for a fake clock or on the real one', async () => {
+        // Every 5 ms, so that the interval, were it kept on the real clock, would fire within the 30 ms waited below
         let polls = 0;
-        setInterval(() => polls++, ONE_SECOND);
+        setInterval(() => polls++, 5);
         await endRealtimeRun();
         const pollsAtEnd = polls;
+        // A fake clock started again, as the next scenario starts it, would fire what it holds
+        startFakeClock();
+        const fakeTimersLeft = jest.getTimerCount();
+        jest.useRealTimers();
         await new Promise(resolve => setTimeout(resolve, 30));
-        expect(polls).toBe(pollsAtEnd);
+        expect({ fakeTimersLeft, pollsAfterTheEnd: polls - pollsAtEnd }).toEqual({ fakeTimersLeft: 0, pollsAfterTheEnd: 0 });
       });
 
       it.each<[string, Partial<typeof pipeline>, string]>([

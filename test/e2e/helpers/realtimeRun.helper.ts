@@ -117,8 +117,8 @@ const runMinutes = async (minutes: number, condition?: () => boolean) => {
 export const runRealtimeUntil = (condition: () => boolean, { maxMinutes }: { maxMinutes: number }) => runMinutes(maxMinutes, condition);
 
 /**
- * Runs the realtime pipeline for `minutes` minutes, for a test that asserts what does not happen: starts it unless a run is in progress,
- * then advances the fake clock. Throws what ended the run if it ends meanwhile.
+ * Runs the realtime pipeline for `minutes` minutes, for a test that asserts what a fixed span produces, or does not: starts it unless a
+ * run is in progress, then advances the fake clock. Throws what ended the run if it ends meanwhile.
  */
 export const runRealtimeFor = ({ minutes }: { minutes: number }) => runMinutes(minutes);
 
