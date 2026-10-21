@@ -6,37 +6,27 @@ import { LoggerFn } from '@strategies/strategy.types';
 import { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { PositionTracker } from './positionTracker';
-import { isSellable, pickTradedPair } from './positionTracker.helper';
-import {
-  ETH_IGNORED_WARNING,
-  holding,
-  LoggedLine,
-  OrderOutcome,
-  OrderRecorder,
-  OutcomeFacts,
-  playSteps,
-  relayOrderOutcome,
-  UNKNOWN_ORDER_ID,
-} from './positionTracker.mock';
+import { holding, OrderOutcome, OrderRecorder, OutcomeFacts, playSteps, relayOrderOutcome, UNKNOWN_ORDER_ID } from './positionTracker.mock';
 
 const symbol = 'BTC/USDT';
 const ORDER_ID: UUID = '00000000-0000-0000-0000-000000000042';
-const THREE_PAIRS_WARNING =
-  'The strategy trades ETH/USDT only, the first pair watched (watch.assets): it ignores BTC/USDT, SOL/USDT, whose candles are still required every minute';
 
 describe('PositionTracker', () => {
   let tracker: PositionTracker;
   let orders: OrderRecorder;
 
   /**
-   * Plays the steps (see playSteps): 'buy' and 'sell' place an order through the tracker, 'sell2' a SELL of 2 BTC, 'stop' is the SELL
-   * of a trailing stop, which the StrategyManager creates and the tracker adopts, 'unadopted' such a SELL left unadopted
+   * Plays the steps (see playSteps): 'buy' and 'sell' place an order through the tracker, 'sell2' a SELL of 2 BTC, 'sellHalf' a SELL
+   * of 50 % of the BTC, 'sellCost' a SELL of 50 USDT of BTC, 'stop' is the SELL of a trailing stop, which the StrategyManager creates
+   * and the tracker adopts, 'unadopted' such a SELL left unadopted
    */
   const play = (steps: string) =>
     playSteps(steps, tracker, orders, step => {
       if (step === 'buy') tracker.buy(orders.createOrder, { type: 'STICKY', symbol });
       else if (step === 'sell') tracker.sell(orders.createOrder, { type: 'STICKY', symbol });
       else if (step === 'sell2') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, amount: 2 });
+      else if (step === 'sellHalf') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, allocation: 50 });
+      else if (step === 'sellCost') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, cost: 50 });
       else if (step === 'stop') tracker.adoptSell(orders.createOrder({ type: 'MARKET', side: 'SELL', symbol }));
       else if (step === 'unadopted') orders.createOrder({ type: 'MARKET', side: 'SELL', symbol });
       else throw new Error(`Unknown step: ${step}`);
@@ -98,6 +88,7 @@ describe('PositionTracker', () => {
     const quarterStep = new Map<TradingPair, MarketData>([[symbol, { ...limits, precision: { amount: 0.25 } }]]);
 
     describe('the fill a cancelation reports', () => {
+      // Without a portfolio that lists BTC, what a SELL left unsold is all that is known to be held (see 'a SELL canceled after a fill')
       it.each`
         case                                                               | steps    | filled    | remaining | isLong
         ${'a BUY that filled 0.9 of 1: long'}                              | ${'buy'} | ${0.9}    | ${0.1}    | ${true}
@@ -115,17 +106,87 @@ describe('PositionTracker', () => {
         expect(tracker.isLong).toBe(isLong);
       });
 
-      // 0 filled and 0 remaining used to stand for no fill reported, which the order now leaves out: reported, it is a fact
+      // What a BUY filled is the position it opened, whatever else the portfolio shows: a holding present at start-up, or the portfolio
+      // known before the order when the read after it failed
       it.each`
-        case                                                            | steps    | filled    | remaining | free | isLong
-        ${'a BUY that filled nothing, the portfolio holding 1: flat'}   | ${'buy'} | ${0}      | ${1}      | ${1} | ${false}
-        ${'a SELL that left 0.0001, the portfolio holding 1: flat'}     | ${LONG}  | ${0.9999} | ${0.0001} | ${1} | ${false}
-        ${'a BUY that filled 0.9, the portfolio holding nothing: long'} | ${'buy'} | ${0.9}    | ${0.1}    | ${0} | ${true}
-        ${'a SELL that left 0 of 0, the portfolio holding 1: flat'}     | ${LONG}  | ${0}      | ${0}      | ${1} | ${false}
-      `('reads the fill before the portfolio: $case', ({ steps, filled, remaining, free, isLong }) => {
-        play(steps);
+        case                                                            | filled | remaining | free | isLong
+        ${'a BUY that filled nothing, the portfolio holding 1: flat'}   | ${0}   | ${1}      | ${1} | ${false}
+        ${'a BUY that filled 0.9, the portfolio holding nothing: long'} | ${0.9} | ${0.1}    | ${0} | ${true}
+      `('reads the fill of a BUY before the portfolio: $case', ({ filled, remaining, free, isLong }) => {
+        play('buy');
         relayLast('canceled', { filled, remaining, portfolio: holding(symbol, free) });
         expect(tracker.isLong).toBe(isLong);
+      });
+    });
+
+    // What a SELL left unsold is what is left of the order, and the holding only when the order was for all of it: an amount the
+    // strategy chose, sent as asked, which the tracker takes for the position. Read so, a SELL of a share of the asset, one capped at the
+    // most the market takes in one order, all-in or not, or an adopted one, canceled once it had sold all but dust, left the strategy
+    // flat beside the rest of the asset, while the same SELL completed read it long. Those are read from the portfolio after them, as when
+    // they complete, never below what they left unsold, which the cancelation released: a portfolio that shows less was read before.
+    describe('a SELL canceled after a fill', () => {
+      const HALF = 'buy completed:1 sellHalf';
+      const COST = 'buy completed:1 sellCost';
+      const SELL2 = 'buy completed:1 sell2';
+      let log: Mock<LoggerFn>;
+
+      /**
+       * Relays the cancelation of the last order placed, sent for `sent`, after it filled `filled` and left `remaining` unsold, the
+       * portfolio after it holding `free` BTC, or not listing BTC when it is left out, at 100 USDT
+       */
+      const cancelLast = ({ sent, filled, remaining, free }: { sent: number; filled: number; remaining: number; free?: number }) =>
+        relayOrderOutcome(
+          tracker,
+          'canceled',
+          { ...orders.created(orders.ids.length)!, amount: sent },
+          { price: PRICE, marketData, log, filled, remaining, portfolio: free === undefined ? undefined : holding(symbol, free) },
+        );
+
+      beforeEach(() => {
+        log = vi.fn();
+      });
+
+      // A SELL of 50 % and one of 50 USDT at 100 USDT are each sent for 0.5 BTC, an all-in SELL capped at a maximum of 0.6 BTC for 0.6,
+      // a SELL of 2 BTC capped at a maximum of 1 BTC for 1, a stop's SELL for the 0.5 BTC its BUY filled: each leaves the rest of the
+      // asset held. A SELL of 2 sent as asked is the position, whatever else is held. A portfolio known from before the order, its read
+      // after it having failed, still shows what the order sold: an all-in SELL is then read long, as when it completes, the position
+      // settled by the next SELL, refused for lack of anything to sell. 0 filled and 0 remaining used to stand for no fill reported,
+      // which the order now leaves out: reported, it is a fact, nothing left unsold.
+      it.each`
+        case                                                                                      | steps    | sent   | filled    | remaining | free         | isLong
+        ${'a SELL of 50 %, 0.0001 left unsold, 0.5001 BTC free: long'}                            | ${HALF}  | ${0.5} | ${0.4999} | ${0.0001} | ${0.5001}    | ${true}
+        ${'a SELL of 50 USDT, 0.0001 left unsold, 0.5001 BTC free: long'}                         | ${COST}  | ${0.5} | ${0.4999} | ${0.0001} | ${0.5001}    | ${true}
+        ${'an all-in SELL capped at 0.6, 0.0001 left unsold, 0.4001 BTC free: long'}              | ${LONG}  | ${0.6} | ${0.5999} | ${0.0001} | ${0.4001}    | ${true}
+        ${'a SELL of 2 capped at 1, 0.0001 left unsold, 1.0001 BTC free: long'}                   | ${SELL2} | ${1}   | ${0.9999} | ${0.0001} | ${1.0001}    | ${true}
+        ${'an adopted stop SELL of 0.5, 0.0001 left unsold, 0.5001 BTC free: long'}               | ${STOP}  | ${0.5} | ${0.4999} | ${0.0001} | ${0.5001}    | ${true}
+        ${'an all-in SELL, 0.0001 left unsold, the portfolio holding 1: long'}                    | ${LONG}  | ${1}   | ${0.9999} | ${0.0001} | ${1}         | ${true}
+        ${'an all-in SELL that left 0 of 0, the portfolio holding 1: long'}                       | ${LONG}  | ${0}   | ${0}      | ${0}      | ${1}         | ${true}
+        ${'an all-in SELL of 1, 0.0001 left unsold, as much free: flat'}                          | ${LONG}  | ${1}   | ${0.9999} | ${0.0001} | ${0.0001}    | ${false}
+        ${'an all-in SELL of 1, 0.5 left unsold, 0 BTC free in a portfolio read before it: long'} | ${LONG}  | ${1}   | ${0.5}    | ${0.5}    | ${0}         | ${true}
+        ${'a SELL of 50 %, 0.0001 left unsold, the portfolio without BTC: flat'}                  | ${HALF}  | ${0.5} | ${0.4999} | ${0.0001} | ${undefined} | ${false}
+        ${'an all-in SELL that left 0 of 0, the portfolio without BTC: flat'}                     | ${LONG}  | ${0}   | ${0}      | ${0}      | ${undefined} | ${false}
+        ${'a SELL of 2 sent as asked, 0.0001 left unsold, 1.0001 BTC free: flat'}                 | ${SELL2} | ${2}   | ${1.9999} | ${0.0001} | ${1.0001}    | ${false}
+        ${'a SELL of 2 sent as asked, 0.5 left unsold, no BTC free: long'}                        | ${SELL2} | ${2}   | ${1.5}    | ${0.5}    | ${0}         | ${true}
+      `('reads $case', ({ steps, sent, filled, remaining, free, isLong }) => {
+        play(steps);
+        cancelLast({ sent, filled, remaining, free });
+        expect(tracker.isLong).toBe(isLong);
+      });
+
+      it.each`
+        case                                       | steps   | sent   | filled    | remaining | free      | message
+        ${'a SELL of 50 %, 0.0002 BTC free'}       | ${HALF} | ${0.5} | ${0.4999} | ${0.0001} | ${0.0002} | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0002 BTC free in the portfolio after it, too little to sell: the strategy is flat'}
+        ${'an all-in SELL of 1, as much BTC free'} | ${LONG} | ${1}   | ${0.9999} | ${0.0001} | ${0.0001} | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat'}
+      `('logs the position read after $case, which changes it', ({ steps, sent, filled, remaining, free, message }) => {
+        play(steps);
+        cancelLast({ sent, filled, remaining, free });
+        expect(log.mock.calls).toEqual([['info', message]]);
+      });
+
+      it('logs nothing after a SELL of 50 % with 0.5001 BTC free, which keeps the position', () => {
+        play(HALF);
+        cancelLast({ sent: 0.5, filled: 0.4999, remaining: 0.0001, free: 0.5001 });
+        expect(log).not.toHaveBeenCalled();
       });
     });
 
@@ -378,60 +439,5 @@ describe('PositionTracker', () => {
     `('$action returns the id of the order created', ({ action }) => {
       expect(tracker[action as 'buy' | 'sell'](createOrder, { type: 'MARKET', symbol })).toBe(ORDER_ID);
     });
-  });
-});
-
-// The rule the tracker reads a position with, exported for whoever checks an all-in SELL the same way (a trailing stop's)
-describe('isSellable', () => {
-  const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
-  // A minimum whose binary product with an amount worth it exactly falls an ulp under it: 0.00007 × 100000 is 6.999999999999999
-  const minimumOfSeven: MarketData = { cost: { min: 7 }, precision: { amount: 0.00001 } };
-  // A step that is not one unit of a decimal, which CCXTExchange truncates to as to any other: 1.4 is sent as 1. Only a power of ten was
-  // truncated to, and 1.4 read as sellable over a minimum of 1.1
-  const halfStep: MarketData = { amount: { min: 1.1 }, precision: { amount: 0.5 } };
-  it.each`
-    amount     | price     | type        | data              | description                                                        | expected
-    ${0.1}     | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.1 at 100, 10 USDT'}                                           | ${true}
-    ${0.1}     | ${100}    | ${'MARKET'} | ${limits}         | ${'0.1 in a MARKET order, under its minimum of 0.2'}               | ${false}
-    ${0.04999} | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.04999 at 100, 4.999 USDT, under the minimum cost'}            | ${false}
-    ${0.05009} | ${100}    | ${'LIMIT'}  | ${limits}         | ${'0.05009, sent as 0.05: 5 USDT, the minimum cost itself'}        | ${true}
-    ${0.0005}  | ${0}      | ${'LIMIT'}  | ${limits}         | ${'0.0005 at an unknown price, under the minimum amount'}          | ${false}
-    ${0.01}    | ${0}      | ${'LIMIT'}  | ${limits}         | ${'0.01 at an unknown price, the cost unchecked'}                  | ${true}
-    ${0}       | ${100}    | ${'LIMIT'}  | ${{}}             | ${'nothing, on a market without limits'}                           | ${false}
-    ${0.00007} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00007 at 100000, 7 USDT in decimal, the minimum cost itself'} | ${true}
-    ${0.00006} | ${100000} | ${'LIMIT'}  | ${minimumOfSeven} | ${'0.00006 at 100000, 6 USDT, under the minimum cost'}             | ${false}
-    ${1.4}     | ${10}     | ${'LIMIT'}  | ${halfStep}       | ${'1.4 on a step of 0.5, sent as 1, under the minimum of 1.1'}     | ${false}
-    ${1.6}     | ${10}     | ${'LIMIT'}  | ${halfStep}       | ${'1.6 on a step of 0.5, sent as 1.5, over the minimum of 1.1'}    | ${true}
-  `('is $expected for $description', ({ amount, price, type, data, expected }) => {
-    expect(isSellable(amount, price, type, data)).toBe(expected);
-  });
-});
-
-describe('pickTradedPair', () => {
-  /** Picks the pair of a bucket holding a candle of each of `pairs`, in that order; returns it with the lines it logged */
-  const pickPair = (pairs: TradingPair[]) => {
-    const logs: LoggedLine[] = [];
-    const candle = new Map(pairs.map(pair => [pair, { start: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }]));
-    const pair = pickTradedPair(candle, { log: (level, message) => logs.push({ level, message }) });
-    return { pair, logs };
-  };
-
-  // The bucket holds a candle of every watched pair, in the order of watch.assets
-  it.each`
-    case             | pairs                                   | expected
-    ${'one pair'}    | ${['BTC/USDT']}                         | ${'BTC/USDT'}
-    ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${'BTC/USDT'}
-    ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${'ETH/USDT'}
-  `('trades the first pair of the bucket: $case', ({ pairs, expected }) => {
-    expect(pickPair(pairs).pair).toBe(expected);
-  });
-
-  it.each`
-    case             | pairs                                   | expected
-    ${'one pair'}    | ${['BTC/USDT']}                         | ${[]}
-    ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${[ETH_IGNORED_WARNING]}
-    ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${[{ level: 'warn', message: THREE_PAIRS_WARNING }]}
-  `('warns once that it ignores the other pairs: $case', ({ pairs, expected }) => {
-    expect(pickPair(pairs).logs).toEqual(expected);
   });
 });

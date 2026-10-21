@@ -2,7 +2,7 @@ import { StrategyOrder } from '@models/advice.types';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams, Tools } from '@strategies/strategy.types';
 import { isFiniteNumber } from '@utils/math/math.utils';
 import { UUID } from 'node:crypto';
-import { getHolding, isSellable } from './positionTracker.helper';
+import { coversAmountAsked, getHolding, isSellable } from './positionTracker.helper';
 import { Fill, PendingOrder, UnfinishedOrderParams } from './positionTracker.types';
 
 /**
@@ -17,7 +17,8 @@ import { Fill, PendingOrder, UnfinishedOrderParams } from './positionTracker.typ
  * - A completed BUY makes it long, a completed SELL flat, unless it sold less than it asked for, all of the asset free for an all-in
  *   SELL: the position is then read from the portfolio after it (see settleCompletedSell).
  * - A canceled or errored order may have executed all the same, in part or in full: the position is read from what its event
- *   reports, long when what the order leaves held is enough to sell (see settleUnfinished). Nothing reported, it stays as it was.
+ *   reports, long when what the order leaves held is enough to sell (see settleUnfinished and getHolding). Nothing reported, it stays
+ *   as it was.
  * - The outcome of an order that is not its own changes nothing, and an order counts once: its first outcome settles it.
  *
  * The strategy places its orders through buy and sell once canBuy or canSell allows it, and hands the params of its three order
@@ -57,7 +58,7 @@ export class PositionTracker {
 
   /**
    * Creates the order as a SELL through createOrder and keeps it pending until its outcome, with the amount it asks for, left out
-   * for an all-in SELL and for one sized by a cost or an allocation (see settleCompletedSell); returns its id
+   * for an all-in SELL and for one sized by a cost or an allocation (see coversAmountAsked); returns its id
    */
   sell(createOrder: Tools<unknown>['createOrder'], order: Omit<StrategyOrder, 'side' | 'trailing'>): UUID {
     const id = createOrder({ ...order, side: 'SELL' });
@@ -69,8 +70,8 @@ export class PositionTracker {
    * Keeps pending, as sell does, a SELL the strategy did not create itself: the one a trailing stop sends when it triggers. A
    * strategy whose BUYs carry a stop adopts it from `onTrailingStopTriggered(orderId, …)`; left out, the stop's SELL is not its own
    * and its outcome changes nothing: once the stop has sold everything, the strategy stays long until the SELL it advises next is
-   * refused, nothing left to sell. The amount it asks for is not known here: completed, it is read as an all-in SELL is (see
-   * settleCompletedSell).
+   * refused, nothing left to sell. The amount it asks for is not known here: completed, or canceled after a fill, it is read as an
+   * all-in SELL is (see coversAmountAsked).
    */
   adoptSell(orderId: UUID): void {
     this.pendingOrders.set(orderId, { side: 'SELL' });
@@ -121,7 +122,7 @@ export class PositionTracker {
     this.pendingOrders.delete(order.id);
 
     const { side } = pending;
-    const holding = getHolding(side, params, fill);
+    const holding = getHolding(pending, params, fill);
     if (!holding) return true;
 
     const isLong = isSellable(holding.held, exchange.price, order.type, tools.marketData.get(order.symbol));
@@ -138,17 +139,17 @@ export class PositionTracker {
    * Settles its own SELL that completed: flat once it sold all it asked for. The Trader caps a SELL to the free balance and to the
    * most the market takes in one order (its maximum amount, that of a market order for a MARKET one): a position above that maximum,
    * bought by a STICKY or a LIMIT BUY, read flat once its first SELL had completed, the rest held while the strategy ignored its SELL
-   * signals and followed its BUY signals. A SELL that sold less than it asked for is read from the portfolio after it, as one that
-   * did not complete: long when the asset free there is enough to sell (see isSellable), flat when it is not, or when the portfolio
-   * does not list the asset. So is an all-in SELL, which asks for all of the asset free, one sized by a cost or an allocation, whose
-   * amount the Trader works out, and an adopted one, whose amount is not known here: what is free after them is what they left. When
-   * the Trader could not read the portfolio again after the fill, it is the one known before, which may still show the asset free:
-   * read long, the position is settled by the next SELL, refused for lack of anything to sell. Read long, the position is logged at
-   * info level, through the strategy's log.
+   * signals and followed its BUY signals. A SELL that sold less than it asked for is read from the portfolio after it, as one that was
+   * canceled after a fill (see coversAmountAsked and getHolding): long when the asset free there is enough to sell (see isSellable),
+   * flat when it is not, or when the portfolio does not list the asset. So is an all-in SELL, which asks for all of the asset free, one
+   * sized by a cost or an allocation, whose amount the Trader works out, and an adopted one, whose amount is not known here: what is
+   * free after them is what they left. When the Trader could not read the portfolio again after the fill, it is the one known before,
+   * which may still show the asset free: read long, the position is settled by the next SELL, refused for lack of anything to sell.
+   * Read long, the position is logged at info level, through the strategy's log.
    */
   private settleCompletedSell({ order, exchange, tools }: OnOrderCompletedEventParams<unknown>, asked?: number) {
     this.long = false;
-    if (isFiniteNumber(asked) && !(order.amount < asked)) return;
+    if (coversAmountAsked(asked, order.amount)) return;
     const [asset] = order.symbol.split('/');
     const free = exchange.portfolio.get(asset)?.free;
     if (free === undefined || !isSellable(free, exchange.price, order.type, tools.marketData.get(order.symbol))) return;
