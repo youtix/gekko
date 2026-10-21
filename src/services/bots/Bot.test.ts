@@ -32,10 +32,15 @@ describe('Bot', () => {
       expect(bot.checkUpdates).toHaveBeenCalledTimes(3);
     });
 
-    it('checks for updates every second by default', async () => {
+    // Three checks counted in 2 s passed for any default from 667 to 1000 ms: the times of the checks pin it
+    it('checks for updates every second by default, at 0, 1000 and 2000 ms', async () => {
+      const checkTimes: number[] = [];
+      bot.checkUpdates.mockImplementation(async () => {
+        checkTimes.push(Date.now());
+      });
       bot.listen();
       await vi.advanceTimersByTimeAsync(2000);
-      expect(bot.checkUpdates).toHaveBeenCalledTimes(3);
+      expect(checkTimes.map(time => time - checkTimes[0])).toEqual([0, 1000, 2000]);
     });
 
     it('stops checking for updates once closed', async () => {

@@ -32,20 +32,24 @@ describe('checkInteger', () => {
     expect(() => checkInteger('EMA', 'period', value, minimum)).not.toThrow();
   });
 
-  // A string, null or NaN read from a configuration block used to reach the indicator as its period
+  // A string, null or NaN read from a configuration block used to reach the indicator as its period. The refusal wrote it with
+  // String(): a `period: [14]` of an untyped strategy's block read as 14, and an object without a prototype threw a TypeError
   it.each`
-    value        | minimum | shown
-    ${0}         | ${1}    | ${'0'}
-    ${-3}        | ${1}    | ${'-3'}
-    ${2.5}       | ${1}    | ${'2.5'}
-    ${NaN}       | ${1}    | ${'NaN'}
-    ${Infinity}  | ${1}    | ${'Infinity'}
-    ${'5'}       | ${1}    | ${'"5"'}
-    ${null}      | ${1}    | ${'null'}
-    ${undefined} | ${1}    | ${'undefined'}
-    ${true}      | ${1}    | ${'true'}
-    ${1}         | ${2}    | ${'1'}
-  `('should refuse $value when the minimum is $minimum, naming the indicator and the key', ({ value, minimum, shown }) => {
+    value                  | minimum | shown
+    ${0}                   | ${1}    | ${'0'}
+    ${-3}                  | ${1}    | ${'-3'}
+    ${2.5}                 | ${1}    | ${'2.5'}
+    ${NaN}                 | ${1}    | ${'NaN'}
+    ${Infinity}            | ${1}    | ${'Infinity'}
+    ${'5'}                 | ${1}    | ${'"5"'}
+    ${null}                | ${1}    | ${'null'}
+    ${undefined}           | ${1}    | ${'undefined'}
+    ${true}                | ${1}    | ${'true'}
+    ${1}                   | ${2}    | ${'1'}
+    ${[14]}                | ${2}    | ${'[ 14 ]'}
+    ${{ period: 14 }}      | ${2}    | ${'{ period: 14 }'}
+    ${Object.create(null)} | ${2}    | ${'[Object: null prototype] {}'}
+  `('should refuse $shown when the minimum is $minimum, naming the indicator and the key', ({ value, minimum, shown }) => {
     expect(() => checkInteger('EMA', 'period', value, minimum)).toThrow(
       new GekkoError('strategy', `Indicator EMA: period must be a whole number, at least ${minimum}, got ${shown}`),
     );

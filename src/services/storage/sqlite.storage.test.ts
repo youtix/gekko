@@ -193,6 +193,40 @@ describe('SQLiteStorage', () => {
         new GekkoError('storage', `${resolve(database)} holds no candles of ETH/USDT, SOL/USDT: import them first.`),
       );
     });
+
+    // Once the database is open, a failure of the rest of its setup left the connection open: the storage never reached the
+    // injecter, whose closeStorage() closes the one it created
+    describe('when its setup fails once the database is open', () => {
+      const locked = Object.assign(new Error('database is locked'), { name: 'SQLiteError', code: 'SQLITE_BUSY' });
+      /** Every statement holding `statement` throws `locked`, the others run */
+      const failOn = (statement: string) =>
+        mockDb.run.mockImplementation((sql: string) => {
+          if (sql.includes(statement)) throw locked;
+        });
+
+      it.each`
+        mode          | failure                      | fail
+        ${'backtest'} | ${'a pair without a table'}  | ${() => tablesQuery.get.mockReturnValue(null)}
+        ${'importer'} | ${'the switch to WAL'}       | ${() => failOn('PRAGMA journal_mode = WAL;')}
+        ${'realtime'} | ${'the creation of a table'} | ${() => failOn('CREATE TABLE')}
+      `('closes the connection it opened in $mode mode, on $failure', ({ mode, fail }) => {
+        mockConfig.getWatch.mockReturnValue({ mode });
+        fail();
+        attempt(() => new SQLiteStorage(['BTC/USDT']));
+        expect(mockDb.close).toHaveBeenCalledOnce();
+      });
+
+      it('rethrows the failure as it was thrown', () => {
+        failOn('PRAGMA journal_mode = WAL;');
+        let thrown: unknown;
+        try {
+          new SQLiteStorage(['BTC/USDT']);
+        } catch (error) {
+          thrown = error;
+        }
+        expect(thrown).toBe(locked);
+      });
+    });
   });
 
   /** A statement is only prepared for a candle to write */

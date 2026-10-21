@@ -286,6 +286,26 @@ describe('SQLiteStorage', () => {
       );
     });
 
+    // The refused storage never reached the injecter, which closes the one it created: its connection held the database until the
+    // garbage collector closed it. SQLite lets a connection take the database out of WAL mode only while no other one holds it, and
+    // refuses with "database is locked" otherwise.
+    it('closes the connection of a backtest it refuses for a pair without a table, leaving the database to the next connection', () => {
+      writeCandles(database);
+      storageConfig = { type: 'sqlite', database };
+      mode = 'backtest';
+      try {
+        new SQLiteStorage([symbol, 'ETH/USDT']);
+      } catch {
+        // Expected
+      }
+      const next = new Database(database);
+      try {
+        expect(next.query('PRAGMA journal_mode = DELETE;').get()).toEqual({ journal_mode: 'delete' });
+      } finally {
+        next.close();
+      }
+    });
+
     it.each([
       ['backtest', 'a text file', writeText, 'file is not a database', BACKTEST_HINT],
       ['importer', 'a text file', writeText, 'file is not a database', ''],

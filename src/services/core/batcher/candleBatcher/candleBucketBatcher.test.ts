@@ -3,6 +3,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
+import { warning } from '@services/logger';
 import { toISOString, toTimestamp } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
@@ -68,6 +69,27 @@ describe('CandleBucketBatcher', () => {
 
     it('should return the first whole timeframe candle after skipping the minutes before the first boundary', () => {
       expect(feed(range(3, 10))[6]?.get(BTC)?.start).toBe(at(5));
+    });
+
+    // Each pair's batcher warned of the minutes it skipped, without naming its pair: two pairs gave two identical lines
+    it.each`
+      from | skipped
+      ${4} | ${'1 one-minute candle'}
+      ${3} | ${'2 one-minute candles'}
+    `(
+      'should warn once for the bucket, whatever its pairs, about the minutes skipped before the first boundary: $skipped',
+      ({ from, skipped }) => {
+        feed(range(from, 10));
+        expect(warning).toHaveBeenCalledExactlyOnceWith(
+          'core',
+          `Skipped ${skipped} from ${toISOString(at(from))}: the first 5-minute candle starts on the first boundary, ${toISOString(at(5))}`,
+        );
+      },
+    );
+
+    it('should not warn when the first bucket starts on a boundary', () => {
+      feed(range(0, 10));
+      expect(warning).not.toHaveBeenCalled();
     });
   });
 

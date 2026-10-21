@@ -11,14 +11,15 @@ import { info, warning } from '@services/logger';
 import { formatDurationUTC, startOfMinuteUTC, toISOString } from '@utils/date/date.utils';
 import { pluralize } from '@utils/string/string.utils';
 import { isAfter } from 'date-fns';
-import { last } from 'lodash-es';
+import { last, minBy } from 'lodash-es';
 import { Readable } from 'stream';
 import { HistoricalCandleStreamParams } from './historicalCandle.types';
 
 /**
  * Reads the 1-minute candles of one pair from the exchange, page by page, from `daterange.start` to `daterange.end` (both
  * inclusive). The stream is pulled: the next page is requested only once the consumer has taken the current one. It fails on a gap
- * in the history longer than the gap filler fills (MAX_GAP_FILL_MINUTES), and warns when the history ends before the range does.
+ * in the history longer than the gap filler fills (MAX_GAP_FILL_MINUTES), and warns when the history starts after the range does or
+ * ends before it does.
  */
 export class HistoricalCandleStream extends Readable {
   private readonly symbol: TradingPair;
@@ -144,9 +145,10 @@ export class HistoricalCandleStream extends Readable {
    * at once: downstream, the gap of one pair among several shows only minute after minute, and the filler would make up a week of
    * flat candles, which an import stores, before refusing it. On the last page, the minutes between the last candle of the range
    * and its end, which the exchange skipped although it has later candles, used to be dropped without a word: they are warned
-   * about. Returns false once the stream is destroyed.
+   * about, as the minutes before the first candle are on the first page (see checkStart). Returns false once the stream is destroyed.
    */
   private checkGaps(candles: Candle[]): boolean {
+    if (this.lastCandleStart === undefined) this.checkStart(minBy(candles, 'start')!.start);
     let previousStart = this.lastCandleStart;
     let nextStart: EpochTimeStamp | undefined;
     for (const { start } of candles) {
@@ -171,8 +173,9 @@ export class HistoricalCandleStream extends Readable {
     }
     this.lastCandleStart = previousStart;
 
-    if (this.isLastPage && nextStart !== undefined && (previousStart === undefined || previousStart < this.endDate)) {
-      const from = previousStart === undefined ? this.initialStartDate : previousStart + ONE_MINUTE;
+    // No candle of the range at all: the first one came after it, which checkStart has warned about
+    if (this.isLastPage && nextStart !== undefined && previousStart !== undefined && previousStart < this.endDate) {
+      const from = previousStart + ONE_MINUTE;
       warning(
         'stream',
         [
@@ -182,6 +185,31 @@ export class HistoricalCandleStream extends Readable {
       );
     }
     return true;
+  }
+
+  /**
+   * Warns when the first candle the exchange has from the start of the range on, `first`, comes after it: a pair listed during the
+   * range, or after it. Nothing compared that candle with the start of the range: an import of such a pair ended without its first
+   * minutes and without a word, and a backtest of the range was then refused for want of them. They stay missing: the gap filler
+   * fills a pair from its last candle, which it has none of before this one. A first candle after the whole range was warned about
+   * as the end of a history it never started.
+   */
+  private checkStart(first: EpochTimeStamp): void {
+    if (first <= this.initialStartDate) return;
+    const isAfterRange = first > this.endDate;
+    const lastMissing = isAfterRange ? this.endDate : first - ONE_MINUTE;
+    const minutes = (lastMissing - this.initialStartDate) / ONE_MINUTE + 1;
+    const missing = `${minutes} ${pluralize('minute', minutes)}`;
+    warning(
+      'stream',
+      [
+        `[${this.symbol}] The exchange has no candle from ${toISOString(this.initialStartDate)}, the start of the range,`,
+        `to ${toISOString(lastMissing)}${isAfterRange ? ', the end of the range' : ''}, its first one being at ${toISOString(first)}:`,
+        isAfterRange
+          ? `starting the history of this pair after the range, without any of its ${missing}.`
+          : `starting the history of this pair late, without its first ${missing}.`,
+      ].join(' '),
+    );
   }
 
   private onEmptyPage(): void {

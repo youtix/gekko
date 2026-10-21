@@ -2,20 +2,27 @@ import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { TradingPair } from '@models/utility.types';
-import { getBucketTimestamp } from '@helpers/candle/candle.helper';
+import { getBucketTimestamp, getCandleTimeOffset } from '@helpers/candle/candle.helper';
+import { warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
+import { pluralize } from '@utils/string/string.utils';
 import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
 import { FastCandleBatcher } from './fastCandleBatcher';
 
 /**
  * Batches 1-minute CandleBuckets into higher timeframe CandleBuckets.
- * Every bucket must hold a candle of every pair, all starting on the same minute, one minute after the previous bucket.
+ * Every bucket must hold a candle of every pair, all starting on the same minute, one minute after the previous bucket. The buckets
+ * before the first timeframe boundary are skipped, with one warning.
  */
 export class CandleBucketBatcher {
   private readonly batchers: Map<TradingPair, FastCandleBatcher>;
   private readonly candleSize: CandleSize;
   private lastTimestamp?: EpochTimeStamp;
+  /** Whether a bucket starting on a timeframe boundary has been added yet: the ones before it are skipped */
+  private hasStarted = false;
+  private skippedMinutes = 0;
+  private firstSkippedStart?: EpochTimeStamp;
 
   constructor(pairs: TradingPair[], candleSize: CandleSize) {
     if (!pairs.length) throw new GekkoError('core', 'CandleBucketBatcher needs at least one pair');
@@ -31,18 +38,16 @@ export class CandleBucketBatcher {
    */
   addBucket(bucket: CandleBucket): CandleBucket | undefined {
     const timestamp = this.checkBucket(bucket);
+    if (!this.hasStarted && !this.startsOnBoundary(timestamp)) return undefined;
     for (const [pair, batcher] of this.batchers) batcher.accumulate(bucket.get(pair)!);
 
     // Every candle of the bucket starts on the same minute, so they all close a timeframe candle or none does
     if (!isTimeframeCandleClose(this.candleSize, timestamp)) return undefined;
 
+    // From the first boundary on, every batcher has a candle in progress: each was given every candle of its pair since then
     const completedBucket: CandleBucket = new Map();
-    for (const [pair, batcher] of this.batchers) {
-      const candle = batcher.flush();
-      if (candle) completedBucket.set(pair, candle);
-    }
-    // Empty when the timeframe candle closing now started before the first boundary, so was skipped
-    return completedBucket.size === this.batchers.size ? completedBucket : undefined;
+    for (const [pair, batcher] of this.batchers) completedBucket.set(pair, batcher.flush()!);
+    return completedBucket;
   }
 
   /**
@@ -83,5 +88,30 @@ export class CandleBucketBatcher {
     }
     this.lastTimestamp = timestamp;
     return timestamp!;
+  }
+
+  /**
+   * Until a bucket starts on a timeframe boundary, counts the buckets before it, which would only make up a shorter and misdated first
+   * timeframe candle, then warns once about them. Each pair's batcher skipped and warned on its own, without naming its pair: a run on
+   * two pairs logged the same line twice.
+   */
+  private startsOnBoundary(timestamp: EpochTimeStamp) {
+    if (getCandleTimeOffset(this.candleSize, timestamp) !== 0) {
+      this.firstSkippedStart ??= timestamp;
+      this.skippedMinutes++;
+      return false;
+    }
+
+    this.hasStarted = true;
+    if (this.skippedMinutes > 0) {
+      warning(
+        'core',
+        [
+          `Skipped ${this.skippedMinutes} one-minute ${pluralize('candle', this.skippedMinutes)} from ${toISOString(this.firstSkippedStart)}:`,
+          `the first ${this.candleSize}-minute candle starts on the first boundary, ${toISOString(timestamp)}`,
+        ].join(' '),
+      );
+    }
+    return true;
   }
 }

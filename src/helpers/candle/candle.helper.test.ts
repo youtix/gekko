@@ -97,7 +97,7 @@ describe('candle.helper', () => {
     });
 
     it('should throw on an empty bucket', () => {
-      expect(() => getFirstCandleFromBucket(new Map())).toThrow('Impossible to get first candle from bucket: Empty candle bucket');
+      expect(() => getFirstCandleFromBucket(new Map())).toThrow('[CORE] Impossible to get first candle from bucket: Empty candle bucket');
     });
   });
 
@@ -150,7 +150,7 @@ describe('candle.helper', () => {
     });
 
     it('should throw on a candle size that is not a timeframe', () => {
-      expect(() => getCandleTimeOffset(45 as CandleSize, defaultCandle.start)).toThrow('[UTILS] Unsupported candle size: 45 minutes');
+      expect(() => getCandleTimeOffset(45 as CandleSize, defaultCandle.start)).toThrow('[CORE] Unsupported candle size: 45 minutes');
     });
   });
 

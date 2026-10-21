@@ -1,6 +1,7 @@
 import { GekkoError } from '@errors/gekko.error';
 import { Candle } from '@models/candle.types';
 import { InputSources } from '@models/inputSources.types';
+import { showValue } from '@utils/object/object.utils';
 import { INPUT_SOURCES } from './indicator.const';
 import type { IndicatorNames } from './indicator.types';
 
@@ -20,8 +21,6 @@ export const getInputSource = (src: InputSources = 'close'): ((candle: Candle) =
 
 const INPUT_SOURCE_NAMES = Object.keys(INPUT_SOURCES);
 
-const show = (value: unknown) => (typeof value === 'string' ? JSON.stringify(value) : String(value));
-
 const refuse = (indicator: IndicatorNames, problem: string, why?: string): never => {
   throw new GekkoError('strategy', `Indicator ${indicator}: ${problem}${why ? ` (${why})` : ''}`);
 };
@@ -29,7 +28,7 @@ const refuse = (indicator: IndicatorNames, problem: string, why?: string): never
 /** A number of candles, or of averages in a ribbon: a whole number, at least `minimum`, 1 unless the indicator needs more values */
 export const checkInteger = (indicator: IndicatorNames, key: string, value: unknown, minimum = 1, why?: string) => {
   if (!Number.isInteger(value) || (value as number) < minimum)
-    refuse(indicator, `${key} must be a whole number, at least ${minimum}, got ${show(value)}`, why);
+    refuse(indicator, `${key} must be a whole number, at least ${minimum}, got ${showValue(value)}`, why);
 };
 
 /** A finite number, at least or above a bound */
@@ -37,12 +36,16 @@ export const checkNumber = (indicator: IndicatorNames, key: string, value: unkno
   const isAbove = 'above' in bound;
   const isWithin = typeof value === 'number' && (isAbove ? value > bound.above : value >= bound.atLeast);
   if (!isWithin || !Number.isFinite(value))
-    refuse(indicator, `${key} must be a number, ${isAbove ? `above ${bound.above}` : `at least ${bound.atLeast}`}, got ${show(value)}`);
+    refuse(
+      indicator,
+      `${key} must be a number, ${isAbove ? `above ${bound.above}` : `at least ${bound.atLeast}`}, got ${showValue(value)}`,
+    );
 };
 
 /** One of the accepted names, given as they are spelt in the list */
 export const checkOneOf = (indicator: IndicatorNames, key: string, value: unknown, accepted: readonly string[]) => {
-  if (!accepted.includes(value as string)) refuse(indicator, `${key} must be one of ${accepted.map(show).join(', ')}, got ${show(value)}`);
+  if (!accepted.includes(value as string))
+    refuse(indicator, `${key} must be one of ${accepted.map(showValue).join(', ')}, got ${showValue(value)}`);
 };
 
 /** The price source named by `src`, or none, which means the close */

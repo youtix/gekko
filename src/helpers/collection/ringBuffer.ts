@@ -1,5 +1,6 @@
 import { GekkoError } from '@errors/gekko.error';
-import { addFromFirst, show } from './ringBuffer.helper';
+import { showValue } from '@utils/object/object.utils';
+import { addFromFirst } from './ringBuffer.helper';
 
 /**
  * The last `size` items pushed, read oldest first. The indicators read their window on every candle, so every read works on the items
@@ -14,7 +15,7 @@ export class RingBuffer<T> {
     // Each item takes the slot of an array index: a size of 0 or NaN wrote the items after the first to a "NaN" property, a fraction to
     // fractional ones, and the reads contradicted each other (isFull() true while empty, first set while toArray was empty)
     if (!Number.isInteger(size) || size < 1)
-      throw new GekkoError('utils', `RingBuffer size must be a whole number, at least 1, got ${show(size)}`);
+      throw new GekkoError('core', `RingBuffer size must be a whole number, at least 1, got ${showValue(size)}`);
     this.buffer = [];
     this.size = size;
   }

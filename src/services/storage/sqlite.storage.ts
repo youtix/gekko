@@ -36,12 +36,19 @@ export class SQLiteStorage extends Storage {
     this.database = database;
     this.readOnly = config.getWatch().mode === 'backtest' && database !== IN_MEMORY;
     this.db = this.open(database);
-    if (this.readOnly) {
-      this.checkTables(database, symbols);
-    } else {
-      this.db.run('PRAGMA journal_mode = WAL;');
-      this.db.run('PRAGMA synchronous = NORMAL;');
-      each(symbols, symbol => this.createTable(symbol));
+    try {
+      if (this.readOnly) {
+        this.checkTables(database, symbols);
+      } else {
+        this.db.run('PRAGMA journal_mode = WAL;');
+        this.db.run('PRAGMA synchronous = NORMAL;');
+        each(symbols, symbol => this.createTable(symbol));
+      }
+    } catch (error) {
+      // The storage never reaches the injecter, whose closeStorage() closes the one it created: a backtest refused for a pair without
+      // a table left its connection open, holding the database, until the garbage collector closed it
+      this.db.close(false);
+      throw error;
     }
   }
 

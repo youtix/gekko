@@ -10,8 +10,8 @@ import type { exchangeSchema } from './exchange.schema';
 import type { hyperliquidExchangeSchema } from './hyperliquid/hyperliquid.schema';
 
 export type ExchangeConfig = z.infer<typeof exchangeSchema>;
-export type BinanceExchangeConfig = z.infer<typeof binanceExchangeSchema>;
-export type HyperliquidExchangeConfig = z.infer<typeof hyperliquidExchangeSchema>;
+type BinanceExchangeConfig = z.infer<typeof binanceExchangeSchema>;
+type HyperliquidExchangeConfig = z.infer<typeof hyperliquidExchangeSchema>;
 export type CCXTExchangeConfig = BinanceExchangeConfig | HyperliquidExchangeConfig;
 
 export type MarketValidationResult<T> = { isValid: true; value: T } | { isValid: false; reason: string; min?: number; max?: number };

@@ -1,5 +1,6 @@
+import { range } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
-import { shallowObjectDiff } from './object.utils';
+import { shallowObjectDiff, showValue } from './object.utils';
 
 describe('shallowObjectDiff', () => {
   it.each`
@@ -42,5 +43,28 @@ describe('shallowObjectDiff', () => {
     ${null} | ${undefined}
   `('should throw a TypeError for $a and $b', ({ a, b }) => {
     expect(() => shallowObjectDiff(a, b)).toThrow(TypeError);
+  });
+});
+
+// String(value) wrote [14], 3n and a boxed 3 as the number 3, an object as [object Object], and threw for one without a prototype
+describe('showValue', () => {
+  it.each`
+    description                          | value                            | shown
+    ${'a string, quoted'}                | ${'3'}                           | ${'"3"'}
+    ${'an empty string'}                 | ${''}                            | ${'""'}
+    ${'a number'}                        | ${2.5}                           | ${'2.5'}
+    ${'NaN'}                             | ${NaN}                           | ${'NaN'}
+    ${'-0'}                              | ${-0}                            | ${'-0'}
+    ${'null'}                            | ${null}                          | ${'null'}
+    ${'undefined'}                       | ${undefined}                     | ${'undefined'}
+    ${'an array of one number'}          | ${[14]}                          | ${'[ 14 ]'}
+    ${'an array of more than six items'} | ${range(1, 10)}                  | ${'[ 1, 2, 3, 4, 5, 6, 7, 8, 9 ]'}
+    ${'a bigint'}                        | ${3n}                            | ${'3n'}
+    ${'a boxed number'}                  | ${Object(3)}                     | ${'[Number: 3]'}
+    ${'an object'}                       | ${{ period: 14, src: 'close' }}  | ${"{ period: 14, src: 'close' }"}
+    ${'an object without a prototype'}   | ${Object.create(null)}           | ${'[Object: null prototype] {}'}
+    ${'an object nested three levels'}   | ${{ a: { b: { c: { d: 1 } } } }} | ${'{ a: { b: { c: [Object] } } }'}
+  `('should write $description as $shown', ({ value, shown }) => {
+    expect(showValue(value)).toBe(shown);
   });
 });

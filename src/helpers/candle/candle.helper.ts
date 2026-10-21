@@ -62,7 +62,7 @@ export const getCandleTimeOffset = (candleSize: CandleSize, start: EpochTimeStam
     default: {
       // A size added to TIMEFRAME_TO_MINUTES without a case here, or its months in MONTHS_PER_CANDLE, fails to compile
       const unsupported: never = candleSize;
-      throw new GekkoError('utils', `Unsupported candle size: ${unsupported} minutes`);
+      throw new GekkoError('core', `Unsupported candle size: ${unsupported} minutes`);
     }
   }
 };
@@ -84,6 +84,6 @@ export const getBucketTimestamp = (bucket: CandleBucket): EpochTimeStamp | undef
 
 export const getFirstCandleFromBucket = (bucket: CandleBucket) => {
   const firstCandle = peekCandle(bucket);
-  if (!firstCandle) throw new GekkoError('utils', 'Impossible to get first candle from bucket: Empty candle bucket');
+  if (!firstCandle) throw new GekkoError('core', 'Impossible to get first candle from bucket: Empty candle bucket');
   return firstCandle;
 };

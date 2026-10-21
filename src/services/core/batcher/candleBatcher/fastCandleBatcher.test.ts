@@ -1,10 +1,9 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import { Candle } from '@models/candle.types';
 import { warning } from '@services/logger';
-import { toISOString, toTimestamp } from '@utils/date/date.utils';
+import { toTimestamp } from '@utils/date/date.utils';
 import { range } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
-import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
 import { FastCandleBatcher } from './fastCandleBatcher';
 
@@ -111,26 +110,9 @@ describe('FastCandleBatcher', () => {
       expect(feed(60, fromMinute57)[62]?.start).toBe(T0 + 60 * ONE_MINUTE);
     });
 
-    it.each`
-      from  | skipped
-      ${59} | ${'1 one-minute candle'}
-      ${57} | ${'3 one-minute candles'}
-    `('should warn once about the candles skipped: $skipped', ({ from, skipped }) => {
-      feed(
-        60,
-        range(from, 120).map(minute => candleAt(minute)),
-      );
-      expect(warning).toHaveBeenCalledExactlyOnceWith(
-        'core',
-        `Skipped ${skipped} from ${toISOString(T0 + from * ONE_MINUTE)}: the first 60-minute candle starts on the first boundary, ${toISOString(T0 + 60 * ONE_MINUTE)}`,
-      );
-    });
-
-    it('should not warn when the first candle starts on a boundary', () => {
-      feed(
-        60,
-        range(0, 120).map(minute => candleAt(minute)),
-      );
+    // It knows no pair: one warning per pair of a bucket gave as many identical lines (CandleBucketBatcher warns once for the bucket)
+    it('should skip them without a warning', () => {
+      feed(60, fromMinute57);
       expect(warning).not.toHaveBeenCalled();
     });
 
@@ -138,77 +120,5 @@ describe('FastCandleBatcher', () => {
       // Sparse on purpose: the batcher itself does not check that the minutes follow each other
       expect(feed(60, [candleAt(0), candleAt(119)])[1]?.start).toBe(T0);
     });
-  });
-});
-
-describe('isTimeframeCandleClose', () => {
-  it.each`
-    size      | minute                    | expected
-    ${1}      | ${'2024-01-01T00:00:00Z'} | ${true}
-    ${2}      | ${'2024-01-01T00:01:00Z'} | ${true}
-    ${2}      | ${'2024-01-01T00:02:00Z'} | ${false}
-    ${3}      | ${'2024-01-01T00:02:00Z'} | ${true}
-    ${3}      | ${'2024-01-01T00:03:00Z'} | ${false}
-    ${5}      | ${'2024-01-01T00:04:00Z'} | ${true}
-    ${5}      | ${'2024-01-01T00:03:00Z'} | ${false}
-    ${10}     | ${'2024-01-01T00:09:00Z'} | ${true}
-    ${10}     | ${'2024-01-01T00:08:00Z'} | ${false}
-    ${15}     | ${'2024-01-01T00:14:00Z'} | ${true}
-    ${15}     | ${'2024-01-01T00:15:00Z'} | ${false}
-    ${30}     | ${'2024-01-01T00:29:00Z'} | ${true}
-    ${30}     | ${'2024-01-01T00:30:00Z'} | ${false}
-    ${60}     | ${'2024-01-01T00:59:00Z'} | ${true}
-    ${60}     | ${'2024-01-01T00:58:00Z'} | ${false}
-    ${120}    | ${'2024-01-01T01:59:00Z'} | ${true}
-    ${120}    | ${'2024-01-01T00:59:00Z'} | ${false}
-    ${240}    | ${'2024-01-01T03:59:00Z'} | ${true}
-    ${240}    | ${'2024-01-01T01:59:00Z'} | ${false}
-    ${360}    | ${'2024-01-01T05:59:00Z'} | ${true}
-    ${360}    | ${'2024-01-01T03:59:00Z'} | ${false}
-    ${480}    | ${'2024-01-01T07:59:00Z'} | ${true}
-    ${480}    | ${'2024-01-01T05:59:00Z'} | ${false}
-    ${720}    | ${'2024-01-01T11:59:00Z'} | ${true}
-    ${720}    | ${'2024-01-01T07:59:00Z'} | ${false}
-    ${1440}   | ${'2024-01-01T23:59:00Z'} | ${true}
-    ${1440}   | ${'2024-01-01T22:59:00Z'} | ${false}
-    ${1440}   | ${'2024-02-29T23:59:00Z'} | ${true}
-    ${10080}  | ${'2024-01-07T23:59:00Z'} | ${true}
-    ${10080}  | ${'2024-01-06T23:59:00Z'} | ${false}
-    ${10080}  | ${'2024-03-31T23:59:00Z'} | ${true}
-    ${10080}  | ${'2024-02-29T23:59:00Z'} | ${false}
-    ${43200}  | ${'2024-01-31T23:59:00Z'} | ${true}
-    ${43200}  | ${'2024-01-30T23:59:00Z'} | ${false}
-    ${43200}  | ${'2023-02-28T23:59:00Z'} | ${true}
-    ${43200}  | ${'2024-02-28T23:59:00Z'} | ${false}
-    ${43200}  | ${'2024-02-29T23:58:00Z'} | ${false}
-    ${43200}  | ${'2024-02-29T23:59:00Z'} | ${true}
-    ${43200}  | ${'2024-03-01T00:00:00Z'} | ${false}
-    ${43200}  | ${'2024-04-30T23:59:00Z'} | ${true}
-    ${43200}  | ${'2024-12-31T23:59:00Z'} | ${true}
-    ${129600} | ${'2024-03-31T23:59:00Z'} | ${true}
-    ${129600} | ${'2024-03-31T23:58:00Z'} | ${false}
-    ${129600} | ${'2024-02-29T23:59:00Z'} | ${false}
-    ${129600} | ${'2024-04-30T23:59:00Z'} | ${false}
-    ${129600} | ${'2024-06-30T23:59:00Z'} | ${true}
-    ${129600} | ${'2024-09-30T23:59:00Z'} | ${true}
-    ${129600} | ${'2024-12-31T23:59:00Z'} | ${true}
-    ${259200} | ${'2024-06-30T23:59:00Z'} | ${true}
-    ${259200} | ${'2024-06-29T23:59:00Z'} | ${false}
-    ${259200} | ${'2024-12-31T23:59:00Z'} | ${true}
-    ${259200} | ${'2024-03-31T23:59:00Z'} | ${false}
-    ${259200} | ${'2024-09-30T23:59:00Z'} | ${false}
-    ${259200} | ${'2024-02-29T23:59:00Z'} | ${false}
-    ${518400} | ${'2024-12-31T23:59:00Z'} | ${true}
-    ${518400} | ${'2024-12-31T23:58:00Z'} | ${false}
-    ${518400} | ${'2024-12-30T23:59:00Z'} | ${false}
-    ${518400} | ${'2024-06-30T23:59:00Z'} | ${false}
-    ${518400} | ${'2024-02-29T23:59:00Z'} | ${false}
-    ${518400} | ${'2025-12-31T23:59:00Z'} | ${true}
-  `('should return $expected for a $size-minute candle at $minute', ({ size, minute, expected }) => {
-    expect(isTimeframeCandleClose(size, toTimestamp(minute))).toBe(expected);
-  });
-
-  it('should throw on a candle size that is not a timeframe', () => {
-    expect(() => isTimeframeCandleClose(45 as CandleSize, T0)).toThrow('[UTILS] Unsupported candle size: 45 minutes');
   });
 });

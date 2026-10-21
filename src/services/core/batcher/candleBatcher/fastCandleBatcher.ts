@@ -1,23 +1,18 @@
 import { getCandleTimeOffset } from '@helpers/candle/candle.helper';
 import { Candle } from '@models/candle.types';
-import { warning } from '@services/logger';
-import { toISOString } from '@utils/date/date.utils';
-import { pluralize } from '@utils/string/string.utils';
 import { MAX_VOLUME_FACTOR } from './candleBatcher.const';
 import { isTimeframeCandleClose } from './candleBatcher.helper';
 import { CandleSize } from './candleBatcher.types';
 
 /**
  * Optimized candle batcher: aggregates the 1-minute candles of one pair in place, in a single object per timeframe candle.
- * For internal use by CandleBucketBatcher only.
+ * CandleBucketBatcher keeps one per pair, and Supervision batches the minutes of an exchange's timeframe candle with one.
  */
 export class FastCandleBatcher {
   private accumulator: Candle | null = null;
   private readonly candleSize: CandleSize;
   /** Whether a candle starting on a timeframe boundary has been added yet: the ones before it are skipped */
   private hasStarted = false;
-  private skippedMinutes = 0;
-  private firstSkippedStart?: EpochTimeStamp;
   /**
    * The volume of the timeframe candle in progress, summed exactly (0.1 + 0.2 = 0.3) as an integer: each volume times
    * `volumeFactor`, the power of ten that leaves no decimal to any volume added so far.
@@ -84,26 +79,14 @@ export class FastCandleBatcher {
   }
 
   /**
-   * Until a candle starts on a timeframe boundary, counts the candles before it, which would only make up a shorter and
-   * misdated first timeframe candle, then warns once about them.
+   * Whether the candle starts on a timeframe boundary: until one does, the candles before it are skipped, as they would only make up a
+   * shorter and misdated first timeframe candle. Without a word: this batcher knows no pair, and it warned for each pair of a bucket,
+   * as many identical lines as pairs. CandleBucketBatcher warns once for the bucket; Supervision's window that misses its first minute
+   * has no candle to compare.
    */
   private startsOnBoundary(candle: Candle) {
-    if (getCandleTimeOffset(this.candleSize, candle.start) !== 0) {
-      this.firstSkippedStart ??= candle.start;
-      this.skippedMinutes++;
-      return false;
-    }
-
+    if (getCandleTimeOffset(this.candleSize, candle.start) !== 0) return false;
     this.hasStarted = true;
-    if (this.skippedMinutes > 0) {
-      warning(
-        'core',
-        [
-          `Skipped ${this.skippedMinutes} one-minute ${pluralize('candle', this.skippedMinutes)} from ${toISOString(this.firstSkippedStart)}:`,
-          `the first ${this.candleSize}-minute candle starts on the first boundary, ${toISOString(candle.start)}`,
-        ].join(' '),
-      );
-    }
     return true;
   }
 }

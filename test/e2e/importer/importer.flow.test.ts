@@ -260,7 +260,8 @@ describe('E2E: Importer (Synthetic)', () => {
   // jumps over a gap, and the gap filler meets the jump. It makes up the minutes a pair misses between two of its candles, flat at its
   // last close, in a partial gap (the other pairs trade) as in a total gap (every pair missing), and leaves out those before the pair's
   // first candle and after its last, which an import keeps missing, so that a backtest of them is refused. The minutes the exchange
-  // skips at the end of the range, though it has later ones, were dropped without a word: the history warns about them. A pair whose
+  // skips at the end of the range, though it has later ones, were dropped without a word, and so were those before the first candle
+  // of a pair listed during the range: the history warns about both. A pair whose
   // history ended before the range did (the last row) was filled to its end, a delisted pair for weeks, which a backtest then traded
   // on, and the import ended on a partial gap still filled "until it comes back": its last minutes stay missing, as when it is imported
   // alone. The warnings are every line logged at that level.
@@ -269,6 +270,12 @@ describe('E2E: Importer (Synthetic)', () => {
     [
       `[${pair}] The exchange has no candle from ${at(51)} to ${at(60)}, the end of the range, its next one being at ${at(61)}:`,
       'ending the history of this pair early, without its last 10 minutes.',
+    ].join(' ');
+  const FIRST_TEN = { start: START, end: minute(10) };
+  const leadingGap = (pair: TradingPair) =>
+    [
+      `[${pair}] The exchange has no candle from ${at(0)}, the start of the range, to ${at(9)}, its first one being at ${at(10)}:`,
+      'starting the history of this pair late, without its first 10 minutes.',
     ].join(' ');
   it.each<{ title: string; assets: string[]; gaps: Gap[] | Record<string, Gap[]>; candles: Record<string, Candle[]>; warnings: string[] }>([
     {
@@ -295,21 +302,21 @@ describe('E2E: Importer (Synthetic)', () => {
       warnings: [`Total gap detected: filling 10 minutes for all assets from ${at(25)}`],
     },
     {
-      title: 'a leading gap, BTC alone without the first 10 minutes of the range: not filled',
+      title: 'a leading gap, BTC alone without the first 10 minutes of the range: not filled, warned',
       assets: ['BTC'],
-      gaps: { 'BTC/USDT': [{ start: START, end: minute(10) }] },
-      candles: { BTC: expectedCandles('BTC/USDT', HOUR, { missing: { start: START, end: minute(10) } }) },
-      warnings: [],
+      gaps: { 'BTC/USDT': [FIRST_TEN] },
+      candles: { BTC: expectedCandles('BTC/USDT', HOUR, { missing: FIRST_TEN }) },
+      warnings: [leadingGap('BTC/USDT')],
     },
     {
-      title: 'a pair listed during the range, ETH without the first 10 minutes BTC trades: not filled',
+      title: 'a pair listed during the range, ETH without the first 10 minutes BTC trades: not filled, warned',
       assets: ['BTC', 'ETH'],
-      gaps: { 'ETH/USDT': [{ start: START, end: minute(10) }] },
+      gaps: { 'ETH/USDT': [FIRST_TEN] },
       candles: {
         BTC: expectedCandles('BTC/USDT'),
-        ETH: expectedCandles('ETH/USDT', HOUR, { missing: { start: START, end: minute(10) } }),
+        ETH: expectedCandles('ETH/USDT', HOUR, { missing: FIRST_TEN }),
       },
-      warnings: [],
+      warnings: [leadingGap('ETH/USDT')],
     },
     {
       title: 'a trailing gap, BTC alone without the last 10 minutes of the range: not filled, warned',

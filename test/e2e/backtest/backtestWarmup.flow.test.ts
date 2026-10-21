@@ -79,8 +79,7 @@ describe('E2E: Backtest warmup', () => {
       failure: undefined,
       warnings: [
         'STREAM | BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!',
-        // The batcher warns once a minute starts on a boundary, at 00:05, one batcher per pair, neither naming its pair
-        'CORE | Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
+        // The batcher warns once a minute starts on a boundary, at 00:05: once for the bucket, where each pair's batcher logged the line
         'CORE | Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
       ],
       strategyLines: [

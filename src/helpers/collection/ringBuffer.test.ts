@@ -26,18 +26,23 @@ const lookupsOf = (rb: RingBuffer<number>, read: (rb: RingBuffer<number>) => unk
 
 describe('RingBuffer', () => {
   describe('constructor', () => {
-    // Such a size gave reads that contradicted each other: isFull() true while empty for 0, first set while toArray was empty
+    // Such a size gave reads that contradicted each other: isFull() true while empty for 0, first set while toArray was empty. The
+    // refusal wrote the size with String(): [3] and 3n read as 3, {} as [object Object], and one without a prototype threw a TypeError
     it.each`
-      size        | shown
-      ${0}        | ${'0'}
-      ${-1}       | ${'-1'}
-      ${1.5}      | ${'1.5'}
-      ${NaN}      | ${'NaN'}
-      ${Infinity} | ${'Infinity'}
-      ${'3'}      | ${'"3"'}
-    `('should refuse a size of $size', ({ size, shown }) => {
+      size                   | shown
+      ${0}                   | ${'0'}
+      ${-1}                  | ${'-1'}
+      ${1.5}                 | ${'1.5'}
+      ${NaN}                 | ${'NaN'}
+      ${Infinity}            | ${'Infinity'}
+      ${'3'}                 | ${'"3"'}
+      ${[3]}                 | ${'[ 3 ]'}
+      ${3n}                  | ${'3n'}
+      ${{}}                  | ${'{}'}
+      ${Object.create(null)} | ${'[Object: null prototype] {}'}
+    `('should refuse a size of $shown', ({ size, shown }) => {
       expect(() => new RingBuffer(size)).toThrow(
-        new GekkoError('utils', `RingBuffer size must be a whole number, at least 1, got ${shown}`),
+        new GekkoError('core', `RingBuffer size must be a whole number, at least 1, got ${shown}`),
       );
     });
   });

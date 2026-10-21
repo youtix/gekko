@@ -178,7 +178,7 @@ describe('HistoricalCandleStream', () => {
   it.each`
     gap       | lastMinuteOfRange | from | missing
     ${[3, 7]} | ${3}              | ${3} | ${'1 minute'}
-    ${[0, 7]} | ${5}              | ${0} | ${'6 minutes'}
+    ${[4, 7]} | ${5}              | ${4} | ${'2 minutes'}
   `(
     'should warn that the history ends without its last $missing when the exchange skips the minutes $gap and the range ends at $lastMinuteOfRange',
     async ({ gap, lastMinuteOfRange, from, missing }) => {
@@ -193,6 +193,61 @@ describe('HistoricalCandleStream', () => {
       );
     },
   );
+
+  // Nothing compared the first candle with the start of the range: an import of a pair listed during the range ended without its first
+  // minutes, without a word, and a backtest of the range was then refused for want of them
+  describe.each`
+    pageSize | pages
+    ${10}    | ${'one page'}
+    ${2}     | ${'two pages'}
+  `('when the exchange has no candle for the first minutes of the range, read in $pages', ({ pageSize }) => {
+    let stream: HistoricalCandleStream;
+    let starts: number[];
+
+    beforeEach(async () => {
+      // The exchange's first candle is at minute 3, and the range ends at 5
+      fetchOHLCV.mockImplementation(serve(20, pageSize, [0, 2]));
+      stream = createStream(5);
+      starts = await readAll(stream);
+    });
+
+    it.each`
+      description                                                                       | actual                                 | expected
+      ${'push the candles of the range from the first one'}                             | ${() => starts}                        | ${[3, 4, 5].map(minute)}
+      ${'end the stream'}                                                               | ${() => stream.readableEnded}          | ${true}
+      ${'warn once with the minutes it skipped, its first candle and what is left out'} | ${() => vi.mocked(warning).mock.calls} | ${[['stream', `[BTC/USDT] The exchange has no candle from ${toISOString(minute(0))}, the start of the range, to ${toISOString(minute(2))}, its first one being at ${toISOString(minute(3))}: starting the history of this pair late, without its first 3 minutes.`]]}
+    `('should $description', ({ actual, expected }) => {
+      expect(actual()).toEqual(expected);
+    });
+  });
+
+  // A first candle after the whole range was warned about as the end of a history that never started: "ending the history of this pair
+  // early, without its last 6 minutes"
+  it.each`
+    gap       | first | to                                                   | starting
+    ${[0, 0]} | ${1}  | ${toISOString(minute(0))}                            | ${'late, without its first 1 minute'}
+    ${[0, 7]} | ${8}  | ${`${toISOString(minute(5))}, the end of the range`} | ${'after the range, without any of its 6 minutes'}
+  `(
+    'should warn that the history starts $starting when the exchange skips the minutes $gap and the range ends at 5',
+    async ({ gap, first, to, starting }) => {
+      fetchOHLCV.mockImplementation(serve(20, 10, gap));
+      await readAll(createStream(5));
+      expect(warning).toHaveBeenCalledExactlyOnceWith(
+        'stream',
+        [
+          `[BTC/USDT] The exchange has no candle from ${toISOString(minute(0))}, the start of the range, to ${to},`,
+          `its first one being at ${toISOString(minute(first))}: starting the history of this pair ${starting}.`,
+        ].join(' '),
+      );
+    },
+  );
+
+  // The earliest candle of the page, not its first: a page holding a later candle first started the history after the range
+  it('should not warn of a late start when the first page holds its earliest candle, at the start of the range, after a later one', async () => {
+    fetchOHLCV.mockResolvedValueOnce([8, 0, 1, 2, 3, 4, 5].map(n => candleAt(minute(n))));
+    await readAll(createStream(5));
+    expect(warning).not.toHaveBeenCalled();
+  });
 
   // Downstream, the gap of one pair among several shows only minute after minute: the gap filler filled it to its end however long
   // it was, and an import stored weeks of flat candles
