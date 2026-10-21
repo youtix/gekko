@@ -23,20 +23,37 @@ export const describeRequestedAmount = ({ symbol, side, amount, cost, allocation
 };
 
 /**
- * The answer to /portfolio, one line after the other. First the balances of the last portfolio received, dated with its reception and
- * its age, since Telegram shows when a message was sent, not when its figures were read: those of each watched asset, then of the
- * currency, 0 for one the portfolio lacks. Then the close of each pair's last 1-minute candle, dated with the close of their bucket, a
- * pair without one left out. Last, with both, the value of the portfolio at those closes in the currency, an asset without a close
- * adding nothing (see calculatePortfolioTotalValue).
+ * The price line of an advice, as its strat_create notification writes it, and of the order created from it, as its order_init one
+ * does. The Trader places an order of any type at the price of its advice, or without one at the market price (see
+ * Trader.onStrategyCreateOrder): a LIMIT one with a price requests it as its limit, any other is placed or sized at that price, its
+ * target, `marketPrice` without one (unknown before any close of its pair). A MARKET or a STICKY order executes at the market whatever
+ * its price, which only sizes a BUY by a cost or an allocation, or a SELL by a cost: order_init read "Requested limit price" for any
+ * order with a price, while strat_create, of the same order, read "Target price".
+ */
+export const describeTargetPrice = ({ type, price, symbol }: Pick<AdviceOrder, 'type' | 'price' | 'symbol'>, marketPrice?: number) => {
+  const [, currency] = symbol.split('/');
+  if (type === 'LIMIT' && !isNil(price)) return `Requested limit price: ${formatAmount(price)} ${currency}`;
+  const target = price ?? marketPrice;
+  return `Target price: ${isNil(target) ? 'unknown' : formatAmount(target)} ${currency}`;
+};
+
+/**
+ * The answer to /portfolio, one line after the other. First the balances of the last read of the Trader's portfolio the events
+ * brought, dated with that read and its age, since Telegram shows when a message was sent, not when its figures were read: with the
+ * time of the read, which an order event says, or with the reception of a portfolioChange, which does not (see KeptPortfolio). The
+ * balances of each watched asset, then of the currency, 0 for one the portfolio lacks. Then the close of each pair's last 1-minute
+ * candle, dated with the close of their bucket, a pair without one left out. Last, with both, the value of the portfolio at those
+ * closes in the currency, an asset without a close adding nothing (see calculatePortfolioTotalValue).
  */
 export const describePortfolioAnswer = (params: PortfolioAnswerParams) => {
-  const { portfolio, portfolioAt, prices, pricesAt, pairs, assets, currency, now } = params;
+  const { kept, prices, pricesAt, pairs, assets, currency, now } = params;
   const lines: string[] = [];
-  const isRead = !isNil(portfolio) && !isNil(portfolioAt);
-  if (isRead) {
-    // A clock set back since the reception reads as just now, rather than as a negative age
-    const age = formatDurationUTC(portfolioAt, Math.max(portfolioAt, now));
-    lines.push(`Balances read by the Trader, received at ${toISOString(portfolioAt)} (${age ? `${age} ago` : 'just now'})`);
+  if (kept) {
+    const { portfolio, at, dated } = kept;
+    // A clock set back since then reads as just now, rather than as a negative age
+    const age = formatDurationUTC(at, Math.max(at, now));
+    const when = dated === 'read' ? ` at ${toISOString(at)}` : `, received at ${toISOString(at)}`;
+    lines.push(`Balances read by the Trader${when} (${age ? `${age} ago` : 'just now'})`);
     // The currency once, were it listed among the assets
     for (const asset of uniq([...assets, currency])) {
       const { total, free, used } = getAssetBalance(portfolio, asset);
@@ -53,8 +70,8 @@ export const describePortfolioAnswer = (params: PortfolioAnswerParams) => {
       const price = prices.get(pair);
       if (!isNil(price)) lines.push(`${pair}: ${formatAmount(price)} ${currency}`);
     }
-    if (isRead) {
-      const total = calculatePortfolioTotalValue(portfolio, prices, currency, assets, pairs);
+    if (kept) {
+      const total = calculatePortfolioTotalValue(kept.portfolio, prices, currency, assets, pairs);
       lines.push(`Total value: ${formatAmount(total)} ${currency}`);
     }
   }

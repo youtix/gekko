@@ -2,16 +2,19 @@ import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { ApplicationStopError } from '@errors/applicationStop.error';
 import type { LogLevel } from '@models/logLevel.types';
 import type { Tag } from '@models/tag.types';
+import type { traderSchema } from '@plugins/trader/trader.schema';
 import type { DummyCentralizedExchange } from '@services/exchange/dummy/dummyCentralizedExchange';
 import { ExchangeNetworkError } from '@services/exchange/exchange.error';
 import type { DebugAdviceParams } from '@strategies/debug/debugAdvice.types';
+import type { debugOrderScriptStrategySchema } from '@strategies/debug/debugOrderScript.schema';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import type { z } from 'zod';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration, paperExchange } from '../../helpers/configuration.helper';
 import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, runRealtimeUntilEnd } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService, SUBSCRIBE_ALL_UPDATES } from '../../mocks/fetcher.mock';
-import { clearLogs, findTextLine, isTextLine, logStore } from '../../mocks/winston.mock';
+import { clearLogs, findTextLine, isTextLine, logStore, ORDER_ID } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -19,6 +22,9 @@ import { clearLogs, findTextLine, isTextLine, logStore } from '../../mocks/winst
 
 // DebugAdvice advises on every candle (each: 1), on every pair: a STICKY SELL of 1 unit, then a BUY, and so on
 const DEFAULT_MOCK_STRATEGY_CONFIG: { name: string } & Partial<DebugAdviceParams> = { name: 'DebugAdvice', each: 1 };
+
+/** The block of DebugOrderScript, which creates these orders on the first pair on their candles, counted from 0 */
+type OrderScript = { name: 'DebugOrderScript'; orders: z.input<typeof debugOrderScriptStrategySchema>['orders'] };
 
 const TELEGRAM_TOKEN = 'test-token';
 const TELEGRAM_USERNAME = 'test-bot';
@@ -31,9 +37,12 @@ mockRealtimeModules();
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
 // 2. Mock Configuration
-let mockStrategyConfig = DEFAULT_MOCK_STRATEGY_CONFIG;
-// Left out, the default of the schema
+let mockStrategyConfig: typeof DEFAULT_MOCK_STRATEGY_CONFIG | OrderScript = DEFAULT_MOCK_STRATEGY_CONFIG;
+// The options of the Trader: none, unless a run sets some
+let mockTraderOptions: Omit<z.input<typeof traderSchema>, 'name'> = {};
+// Left out, the defaults of the schema
 let mockOrderSynchInterval: number | undefined;
+let mockExchangeSynchInterval: number | undefined;
 mockConfiguration(() => ({
   watch: {
     mode: 'realtime',
@@ -50,10 +59,11 @@ mockConfiguration(() => ({
       { assetName: 'USDT', balance: 300000 },
     ]),
     orderSynchInterval: mockOrderSynchInterval,
+    exchangeSynchInterval: mockExchangeSynchInterval,
   },
   plugins: [
-    { name: 'TradingAdvisor', strategyName: 'DebugAdvice' },
-    { name: 'Trader' },
+    { name: 'TradingAdvisor', strategyName: mockStrategyConfig.name },
+    { name: 'Trader', ...mockTraderOptions },
     { name: 'EventSubscriber', token: TELEGRAM_TOKEN, botUsername: TELEGRAM_USERNAME },
   ],
   strategy: mockStrategyConfig,
@@ -88,10 +98,10 @@ const laterUpdates = (url: string) => {
 };
 
 /**
- * Sets up a run: the injecter, the logs, the posts and the ccxt mock as at load, the strategy and the order polls of the configuration
- * back to their defaults, no command after the subscription, and the fake clock started at REALTIME_START (see clock.helper). The chat
- * subscribes to every notification with the command the bot's first poll gets, then sends the commands a run sets; an unbound bot
- * first drops what was queued before start-up (offset=-1), here nothing.
+ * Sets up a run: the injecter, the logs, the posts and the ccxt mock as at load, the strategy, the Trader and the synchronization periods
+ * of the configuration back to their defaults, no command after the subscription, and the fake clock started at REALTIME_START (see
+ * clock.helper). The chat subscribes to every notification with the command the bot's first poll gets, then sends the commands a run
+ * sets; an unbound bot first drops what was queued before start-up (offset=-1), here nothing.
  */
 const setUpRun = async () => {
   const { inject } = await import('@services/injecter/injecter');
@@ -106,7 +116,9 @@ const setUpRun = async () => {
   });
   MockCCXTExchange.reset();
   mockStrategyConfig = DEFAULT_MOCK_STRATEGY_CONFIG;
+  mockTraderOptions = {};
   mockOrderSynchInterval = undefined;
+  mockExchangeSynchInterval = undefined;
   startFakeClock();
 };
 
@@ -119,9 +131,6 @@ const setUpRun = async () => {
  */
 const zigzag = (sellCandleClose: number, buyCandleClose: number) =>
   Array.from({ length: 20 }, (_, index) => ({ close: index % 2 ? buyCandleClose : sellCandleClose }));
-
-/** The ids the orders are given, random UUIDs, which the posts quote */
-const ORDER_ID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
 
 /** An advice relay opens with the id of its order, then says what was advised on which pair */
 const ADVICE = /^Order Id: (\S+)\nReceived \w+ (BUY|SELL) advice for ([A-Z0-9]+)\//;
@@ -410,18 +419,20 @@ describe('E2E: Realtime Screener Flow', () => {
       });
     });
 
-    it('Scenario H: /portfolio answered at once: nothing yet, then the balances last received, 70 s then 10 s old, and their value', () => {
-      // Each answer dates the balances with their reception, which comes with a bucket, and the prices with the close of the last bucket.
+    it('Scenario H: /portfolio answered at once: nothing yet, then the balances last read, 70 s then 50 s before, and their value', () => {
+      // Each answer dates the balances with the time the Trader read them, which every order event says, and the prices with the close of
+      // the last bucket.
       // 12:00:31: the Trader read the account as it started, at 12:00:30, but what it queues waits for the first bucket, at 12:01:02: the
       // subscriber has received neither a balance nor a price.
       // 12:02:12: it holds the balances the Trader read at 12:01:02 as the warmup ended, before the SELLs advised on the first candle were
-      // placed, received with the first bucket: 100 BTC, 100 ETH and 300,000 USDT, all free, 1 minute 10 seconds before the poll. The
-      // BUYs created at 12:02:02 carry that same read, and leave its date as it was; the SELLs, filled by the bucket of 12:02:02, are read
-      // at 12:02:22.
+      // placed, which the creations of those SELLs brought with the first bucket: 100 BTC, 100 ETH and 300,000 USDT, all free, read 1
+      // minute 10 seconds before the poll. The BUYs created at 12:02:02 carry that same read, with its time; the SELLs, filled by the
+      // bucket of 12:02:02, are read at 12:02:22.
       // The closes of the candle of 12:01, a candle DebugAdvice buys on: 300,000 + 100 × 110 + 100 × 2,200 = 531,000 USDT in all.
       // 12:05:12: it holds the balances the Trader read at 12:04:22, once the polls of the SELLs advised on the third candle had seen them
-      // filled, received with the bucket of 12:05:02, 10 seconds before the poll. 99 BTC and 99 ETH: of the 100 of each, 1 sold on the
-      // first candle, 1 bought on the second, 1 sold on the third. 301,883.16011 USDT: 300,000, plus the proceeds of the SELLs,
+      // filled: their ends brought them as the bucket of 12:05:02 arrived, 40 seconds after the read and 10 before the poll, and the
+      // creations of the SELLs advised on the fifth candle brought them again. 99 BTC and 99 ETH: of the 100 of each, 1 sold on the first
+      // candle, 1 bought on the second, 1 sold on the third. 301,883.16011 USDT: 300,000, plus the proceeds of the SELLs,
       // 2 × (99.8001 + 1,997.99001), less the cost of the BUYs of the second candle, 110.2101 + 2,202.21001 (see Scenarios A and B). The
       // BUYs advised on the fourth, open then, reserve their cost at the same prices, fee included, 2,312.42011, which leaves 299,570.74
       // free. The bucket of 12:05:02 filled them, and the SELLs advised on the fifth candle reserve 1 of each asset: the Trader reads that
@@ -438,7 +449,7 @@ describe('E2E: Realtime Screener Flow', () => {
         {
           at: '2024-01-01T12:02:12.000Z',
           text: message(
-            'Balances read by the Trader, received at 2024-01-01T12:01:02.000Z (1 minute 10 seconds ago)',
+            'Balances read by the Trader at 2024-01-01T12:01:02.000Z (1 minute 10 seconds ago)',
             'BTC: 100 (free 100, used 0)',
             'ETH: 100 (free 100, used 0)',
             'USDT: 300,000 (free 300,000, used 0)',
@@ -451,7 +462,7 @@ describe('E2E: Realtime Screener Flow', () => {
         {
           at: '2024-01-01T12:05:12.000Z',
           text: message(
-            'Balances read by the Trader, received at 2024-01-01T12:05:02.000Z (10 seconds ago)',
+            'Balances read by the Trader at 2024-01-01T12:04:22.000Z (50 seconds ago)',
             'BTC: 99 (free 99, used 0)',
             'ETH: 99 (free 99, used 0)',
             'USDT: 301,883.16011 (free 299,570.74, used 2,312.42011)',
@@ -687,6 +698,68 @@ describe('E2E: Realtime Screener Flow', () => {
         start: 'Strategy warmup done ! Sending first candle bucket (2024-01-01T12:02:00.000Z) to strategy',
         firstCandle: ['Iteration: 0 for BTC/USDT', 'Iteration: 0 for ETH/USDT'],
       });
+    });
+
+    it('Scenario I: /portfolio dated with the reads the order events bring, those held back from the portfolio changes too', async () => {
+      // BTC closes at 100 on the even candles and 110 on the odd ones, as in Scenarios A-D: the STICKY SELL DebugOrderScript creates on
+      // candle 0 fills on candle 1, its BUY of candle 1 on candle 2. ETH trades nothing.
+      MockCCXTExchange.setPredefinedCandles('BTC/USDT', zigzag(100, 110));
+      MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag(2000, 2200));
+      mockStrategyConfig = {
+        name: 'DebugOrderScript',
+        orders: [
+          { candle: 0, side: 'SELL', type: 'STICKY' },
+          { candle: 1, side: 'BUY', type: 'STICKY' },
+        ],
+      };
+      // The Trader emits its first read alone as a portfolio change, at 12:00:30: no later one moves a total by more than 50 %
+      mockTraderOptions = { portfolioUpdates: { threshold: 50, dust: 0 } };
+      // It reads the account every 30 s besides, from 12:01:00 on
+      mockExchangeSynchInterval = 30 * ONE_SECOND;
+      // Ten seconds after the tick that creates the BUY, then after the one that brings the end of the SELL
+      commands = [
+        { at: Date.UTC(2024, 0, 1, 12, 2, 12), text: '/portfolio' },
+        { at: Date.UTC(2024, 0, 1, 12, 3, 12), text: '/portfolio' },
+      ];
+
+      await runRealtimeUntil(() => answers().length === 2, { maxMinutes: 4 });
+
+      // 12:02:12: the creation of the BUY, at 12:02:02, carries the Trader's last read as it stands, made at 12:02:00, which shows the SELL
+      // placed at 12:01:02 holding 1 BTC: held back, no total having changed, it reaches /portfolio through that creation alone, read 12
+      // seconds before the poll. The SELL, filled by the bucket of 12:02:02, is read at 12:02:22. The closes of the candle of 12:01:
+      // 300,000 + 100 × 110 + 100 × 2,200 = 531,000 USDT in all.
+      // 12:03:12: the end of the SELL, delivered as the bucket of 12:03:02 arrives, carries the read made once it filled, at 12:02:22, 50
+      // seconds before the poll, which a change of 1 % of the BTC and of 0.03 % of the USDT kept from the portfolio changes: 99 BTC, and
+      // 300,000 + 99.9 - 0.0999 = 300,099.8001 USDT, of which the BUY placed at 110.1 holds its cost and its fee, 110.1 + 0.1101 =
+      // 110.2101. Nothing is created on candle 2. The closes of the candle of 12:02: 300,099.8001 + 99 × 100 + 100 × 2,000 = 509,999.8001.
+      expect(answers()).toEqual([
+        {
+          at: '2024-01-01T12:02:12.000Z',
+          text: message(
+            'Balances read by the Trader at 2024-01-01T12:02:00.000Z (12 seconds ago)',
+            'BTC: 100 (free 99, used 1)',
+            'ETH: 100 (free 100, used 0)',
+            'USDT: 300,000 (free 300,000, used 0)',
+            'Prices at the close of 2024-01-01T12:02:00.000Z',
+            'BTC/USDT: 110 USDT',
+            'ETH/USDT: 2,200 USDT',
+            'Total value: 531,000 USDT',
+          ),
+        },
+        {
+          at: '2024-01-01T12:03:12.000Z',
+          text: message(
+            'Balances read by the Trader at 2024-01-01T12:02:22.000Z (50 seconds ago)',
+            'BTC: 99 (free 99, used 0)',
+            'ETH: 100 (free 100, used 0)',
+            'USDT: 300,099.8001 (free 299,989.59, used 110.2101)',
+            'Prices at the close of 2024-01-01T12:03:00.000Z',
+            'BTC/USDT: 100 USDT',
+            'ETH/USDT: 2,000 USDT',
+            'Total value: 509,999.8001 USDT',
+          ),
+        },
+      ]);
     });
   });
 });

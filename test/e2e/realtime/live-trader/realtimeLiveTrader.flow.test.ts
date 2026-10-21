@@ -12,7 +12,7 @@ import {
   startRealtimeRun,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange, type AccountCall, type BalanceEntry, type CreationFault } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, findTextLine, isTextLine, logStore, type TextLine } from '../../mocks/winston.mock';
+import { clearLogs, findLoggedObject, findTextLine, numberedTextLines, type TextLine } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -55,22 +55,14 @@ const script = (orders: z.input<typeof debugOrderScriptStrategySchema>['orders']
  */
 const at = (time: string) => Date.parse(`2024-01-01T${time}.000Z`);
 
-const ORDER_ID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/g;
-
 /**
  * The lines logged as text that `keep` accepts, oldest first, each order id the StrategyManager drew, a random UUID, written #1, #2…
- * in the order the run first logged them: the first order created is #1
+ * in the order the run first logged them: the first order created is #1 (see numberedTextLines)
  */
-const linesOf = (keep: (line: TextLine) => boolean) => {
-  const textLines = logStore.filter(isTextLine);
-  const numbers = new Map<string, string>();
-  for (const { message } of textLines)
-    for (const [id] of message.matchAll(ORDER_ID)) if (!numbers.has(id)) numbers.set(id, `#${numbers.size + 1}`);
-  return textLines
-    .map(line => ({ ...line, message: line.message.replace(ORDER_ID, id => numbers.get(id)!) }))
+const linesOf = (keep: (line: TextLine) => boolean) =>
+  numberedTextLines(rank => `#${rank}`)
     .filter(keep)
     .map(({ message }) => message);
-};
 
 /** What reached the strategy: the lines DebugOrderScript logs of the orders it creates and cancels, and of what each order hook got */
 const strategyLines = () => linesOf(({ _tag, message }) => _tag === 'STRATEGY' && message.startsWith('Order '));

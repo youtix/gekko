@@ -21,12 +21,19 @@ export type EventSubscriberConfig = z.infer<typeof eventSubscriberSchema>;
 /** A message waiting for its turn, with the event it notifies of, which the logs name */
 export type PendingNotification = { event: Event; text: string };
 
+/** A read of the Trader's portfolio as the plugin keeps it for /portfolio, with the time it is dated with */
+export type KeptPortfolio = {
+  portfolio: Portfolio;
+  /** When the Trader read it, as the order event that brought it says, or when the portfolioChange that brought it arrived */
+  at: EpochTimeStamp;
+  /** What `at` is: the time of the read, or that of the reception of a portfolioChange, which does not say when the Trader read it */
+  dated: 'read' | 'received';
+};
+
 /** What the answer to /portfolio is written from (see describePortfolioAnswer) */
 export type PortfolioAnswerParams = {
-  /** The last portfolio the Trader read, as the plugin received it: undefined until one is */
-  portfolio?: Portfolio;
-  /** When that portfolio was received */
-  portfolioAt?: EpochTimeStamp;
+  /** The last read of the Trader's portfolio the events brought: undefined until one did */
+  kept?: KeptPortfolio;
   /** The close of each pair's last 1-minute candle */
   prices: Map<TradingPair, number>;
   /** The close of the last 1-minute bucket processed, which `prices` are the closes of: undefined until one is */

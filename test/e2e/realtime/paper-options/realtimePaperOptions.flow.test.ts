@@ -22,12 +22,14 @@ mockRealtimeModules();
 // environment cannot add the debug lines
 process.env.GEKKO_LOG_LEVEL = 'info';
 
-// 2. Mock Configuration: paper trading of BTC, DebugRealtime buying 1 BTC on the first candle, 12:00, and selling it on the second
+// 2. Mock Configuration: paper trading of BTC, DebugRealtime buying 1 BTC on the first candle, 12:00, and selling it on the second,
+// unless a run gives the block of another strategy
 type PaperRun = {
   balance: { BTC: number; USDT: number };
   trader?: Omit<z.input<typeof traderSchema>, 'name'>;
   feeOverride?: { maker?: number; taker?: number };
   analyzer?: 'RoundTripAnalyzer';
+  strategy?: NonNullable<RawConfiguration['strategy']>;
 };
 let paperRun: PaperRun;
 mockConfiguration(
@@ -41,11 +43,11 @@ mockConfiguration(
       feeOverride: paperRun.feeOverride,
     },
     plugins: [
-      { name: 'TradingAdvisor', strategyName: 'DebugRealtime' },
+      { name: 'TradingAdvisor', strategyName: paperRun.strategy?.name ?? 'DebugRealtime' },
       { name: 'Trader', ...paperRun.trader },
       ...(paperRun.analyzer ? [{ name: paperRun.analyzer }] : []),
     ],
-    strategy: { name: 'DebugRealtime' },
+    strategy: paperRun.strategy ?? { name: 'DebugRealtime' },
   }),
 );
 
@@ -131,6 +133,35 @@ describe('E2E: Realtime paper trading options', () => {
     // The first synchronization always emits. A later one emits when an asset crossed the dust (its total valued at the ticker, the
     // currency at 1), or when the total of an asset held changed by more than the threshold since the last portfolio emitted
     expect({ synchronizations: countSynchronizations(), emitted: emittedPortfolios }).toEqual({ synchronizations: 4, emitted });
+  });
+
+  // The rows above emit the same portfolios whether the filter compares a read with the last portfolio emitted, as it does, or with the
+  // read before it: here two BUYs of 1 BTC from 3, on the first two candles, each a change under the threshold, add up above it
+  it('Scenario A: portfolioUpdates threshold 50 %: two changes of the BTC held under it, emitted once they add up above it', async () => {
+    paperRun = {
+      balance: { BTC: 3, USDT: 300000 },
+      trader: { portfolioUpdates: { threshold: 50, dust: 1 } },
+      strategy: {
+        name: 'DebugOrderScript',
+        orders: [
+          { candle: 0, side: 'BUY', type: 'MARKET' },
+          { candle: 1, side: 'BUY', type: 'MARKET' },
+        ],
+      },
+    };
+
+    await runRealtimeUntil(() => countSynchronizations() === 4, { maxMinutes: 5 });
+
+    // The start, then the warmup end and the first BUY with the first candle (12:01:02), the second BUY with the second (12:02:02). 3 to 4
+    // BTC is 33 % since the portfolio emitted at start-up: held back. 4 to 5 is 25 % since the read before it, but 67 % since that
+    // portfolio: emitted. The BUY at 100 costs 100.1, the BUY at 110 costs 110.11: 300,000 - 100.1 - 110.11 = 299,789.79 USDT.
+    expect({ synchronizations: countSynchronizations(), emitted: emittedPortfolios }).toEqual({
+      synchronizations: 4,
+      emitted: [
+        { at: REALTIME_START, totals: { BTC: 3, USDT: 300000 } },
+        { at: minute(12, 2) + 2 * ONE_SECOND, totals: { BTC: 5, USDT: 299789.79 } },
+      ],
+    });
   });
 
   it.each([
