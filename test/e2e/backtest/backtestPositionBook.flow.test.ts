@@ -8,6 +8,7 @@ import { rawDaterange, type RawConfiguration } from '../helpers/configuration.he
 import { clearLogs } from '../mocks/winston.mock';
 import {
   filledMarketOrder,
+  flatCandles,
   minute,
   mockBacktestModules,
   numberedTextLines,
@@ -67,10 +68,6 @@ const backtestOf = ({ assets, usdt, held = {}, costMin, amountDecimals = 6, amou
   plugins: [{ name: 'TradingAdvisor', strategyName: 'DebugPositionBook' }, { name: 'Trader' }],
   strategy: { name: 'DebugPositionBook', steps },
 });
-
-/** The candles of 00:00 to 00:08 at a price that does not move, each high and low 1 ‰ off it: a MARKET order fills at the price */
-const flatCandles = (price: number): Candle[] =>
-  range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
 
 /** The candles of each of `assets` against USDT, at its price */
 const candlesOf = (assets: Asset[]): Record<TradingPair, Candle[]> =>

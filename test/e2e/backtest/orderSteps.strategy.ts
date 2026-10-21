@@ -11,18 +11,22 @@ const orderStepsSchema = z.strictObject({
       side: z.enum(['BUY', 'SELL']),
       type: z.enum(['MARKET', 'LIMIT', 'STICKY']),
       price: z.number().positive().optional(),
+      // At most one of the three, which createOrder checks: none, the order is all-in
+      amount: z.number().positive().optional(),
+      cost: z.number().positive().optional(),
       allocation: z.number().positive().max(100).optional(),
     }),
   ),
 });
 
-type OrderStepsParams = z.infer<typeof orderStepsSchema>;
+export type OrderStepsParams = z.infer<typeof orderStepsSchema>;
 
 /**
- * The strategy of the backtest flows that place orders of several pairs on candles of their own, which DebugBacktest, ordering on every
- * pair at once, cannot: on each candle after the warmup, counted from 0, it creates the orders its steps list for that candle, each on
- * the pair it names and as the step gives it. Loaded through strategyPath, as a strategy file of the user's is, it imports only types
- * from Gekko, and zod.
+ * The strategy of the backtest flows that place orders of several pairs on candles of their own, or orders sized several ways on one
+ * candle, which DebugBacktest, ordering on every pair at once and every order alike, cannot: on each candle after the warmup, counted
+ * from 0, it creates the orders its steps list for that candle, in their order, each on the pair it names and as the step gives it, of
+ * an amount, a cost or an allocation, or all-in without any. Loaded through strategyPath, as a strategy file of the user's is, it imports
+ * only types from Gekko, and zod.
  */
 export class OrderSteps implements Strategy<OrderStepsParams> {
   static schema = orderStepsSchema;

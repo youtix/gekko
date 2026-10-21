@@ -52,10 +52,16 @@ const candlesOf = (lastMinute: number, prices: Record<number, Prices>): Candle[]
     ...(prices[n] ?? { open: 10000, high: 10005, low: 9995, close: 10000 }),
   }));
 
-/** The lines of the Trader and of the strategy that say how each order ended, oldest first, each order named by its rank in the run */
+/**
+ * The lines of the Trader and of the strategy that say how each order ended, oldest first, each order named by its rank in the run. Of
+ * those two alone: at debug level, the line an order logs as its transaction is canceled matched too.
+ */
 const orderEnds = () =>
   numberedTextLines()
-    .filter(({ message }) => /order summary|order canceled|Order (Completed|Canceled)/.test(message))
+    .filter(
+      ({ _tag, message }) =>
+        ['TRADER', 'STRATEGY'].includes(_tag) && /order summary|order canceled|Order (Completed|Canceled)/.test(message),
+    )
     .map(({ _tag, message }) => `${_tag} | ${message}`);
 
 describe('E2E: Backtest STICKY orders', () => {

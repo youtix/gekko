@@ -2,7 +2,7 @@ import { ONE_MINUTE } from '@constants/time.const';
 import type { Candle } from '@models/candle.types';
 import type { TradingPair } from '@models/utility.types';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
-import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime, spyOn } from 'bun:test';
 import { last } from 'lodash-es';
 import { generateSyntheticCandle } from '../fixtures/syntheticData';
 import { mockConfiguration, rawDaterange } from '../helpers/configuration.helper';
@@ -187,13 +187,14 @@ describe('E2E: Importer (Synthetic)', () => {
   // threw it. The mock threw a plain Error, which no retry met: the scenario pinned the path of an error that is not a NetworkError, and
   // a fetchOHLCV without its retry passed it. Earlier, it also accepted a normal end without a row as well as any error, so it passed
   // when the candle streams' relay took the failure for the end of the pair's stream (an import that completes without its candles) or
-  // lost it behind another error.
-  it.each<{ fault: string; outcome: string; setFault: () => void; expected: ImportOutcome }>([
+  // lost it behind another error. The calls the exchange got are counted: the error alone passed with one retry instead of three.
+  it.each<{ fault: string; outcome: string; setFault: () => void; expected: ImportOutcome & { calls: number } }>([
     {
       fault: 'a NetworkError on the first call, then the candles',
       outcome: 'retried, every minute imported',
       setFault: () => (MockCCXTExchange.networkErrorsToThrow = 1),
-      expected: { failure: undefined, candles: expectedCandles('BTC/USDT') },
+      // The call that failed, then the one that served the 61 minutes of the range, a page
+      expected: { failure: undefined, candles: expectedCandles('BTC/USDT'), calls: 2 },
     },
     {
       fault: 'a NetworkError on every call',
@@ -206,21 +207,27 @@ describe('E2E: Importer (Synthetic)', () => {
           cause: expect.any(MockNetworkError),
         },
         candles: [],
+        // The first call, then the three retries
+        calls: 4,
       },
     },
     {
       fault: 'an ExchangeError',
       outcome: 'the ExchangeError at once, nothing imported',
       setFault: () => (MockCCXTExchange.shouldThrowExchangeError = true),
-      expected: { failure: { name: 'ExchangeError', message: 'Simulated Exchange Error', cause: undefined }, candles: [] },
+      expected: { failure: { name: 'ExchangeError', message: 'Simulated Exchange Error', cause: undefined }, candles: [], calls: 1 },
     },
   ])(
     'Scenario D: an import whose exchange fails to serve the candles ($fault): $outcome',
     async ({ setFault, expected }) => {
       const storage = await setUpImport({ assets: ['BTC'], daterange: HOUR });
       setFault();
+      // The candles are market data, which accountCalls does not record
+      const fetchOHLCV = spyOn(MockCCXTExchange.prototype, 'fetchOHLCV');
       const failure = await runImport();
-      expect({ failure: describeFailure(failure), candles: readCandles(storage, 'BTC/USDT') }).toEqual(expected);
+      const calls = fetchOHLCV.mock.calls.length;
+      fetchOHLCV.mockRestore();
+      expect({ failure: describeFailure(failure), candles: readCandles(storage, 'BTC/USDT'), calls }).toEqual(expected);
     },
     TIMEOUT,
   );

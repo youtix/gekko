@@ -7,7 +7,7 @@ import type { Asset, TradingPair } from '@models/utility.types';
 import type { DummyCentralizedExchange } from '@services/exchange/dummy/dummyCentralizedExchange';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { mock } from 'bun:test';
-import { mapValues } from 'lodash-es';
+import { mapValues, range } from 'lodash-es';
 import { mockConfiguration, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
@@ -19,6 +19,32 @@ const START = Date.parse('2024-01-01T00:00:00Z');
 /** The start of the minute `n` minutes after START */
 export const minute = (n: number) => START + n * ONE_MINUTE;
 
+/** The candle of the minute `n` minutes after START, opening at `open`, its high and its low `spread` above and below its close */
+export const candleAt = (
+  n: number,
+  { open, close, spread, volume }: { open: number; close: number; spread: number; volume: number },
+): Candle => ({
+  start: minute(n),
+  open,
+  high: close + spread,
+  low: close - spread,
+  close,
+  volume,
+});
+
+/**
+ * The candles of 00:00 to 00:08, opening every minute at `open` and closing there, but at the prices `closes` lists by minute, each high
+ * and low `spread` off its close: those of BTC at 10000, 100 either side, unless the options give others
+ */
+export const candlesClosingAt = (
+  closes: Record<number, number> = {},
+  { open = 10000, spread = 100, volume = 10 }: { open?: number; spread?: number; volume?: number } = {},
+): Candle[] => range(9).map(n => candleAt(n, { open, close: closes[n] ?? open, spread, volume }));
+
+/** The candles of 00:00 to 00:08 at a price that does not move, each high and low 1 ‰ off it: a MARKET order fills at the price */
+export const flatCandles = (price: number): Candle[] =>
+  range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
+
 /** The configuration the next getter of the mocked configuration reads: that of the run in progress (see runBacktest) */
 let configuration: RawConfiguration | undefined;
 
@@ -27,8 +53,15 @@ let configuration: RawConfiguration | undefined;
  * the flows read; ccxt, which the injecter loads with CCXTExchange though a backtest builds no exchange client (the mock spares the
  * load of the real one, which backtestMissingCandles.flow.test.ts keeps); and the configuration, parsed as the loader parses a file
  * (see mockConfiguration), the one runBacktest is given.
+ *
+ * It also sets the log level of the flows, info. The logger reads GEKKO_LOG_LEVEL once, as the pipeline loads it, and hands winston a
+ * debug line only when the level lets it through: inherited from the shell, a level of debug exported for a run of the bot added lines
+ * that the flows did not expect, and three scenarios failed for it (a set-up import's line counted among those of the backtest it
+ * prepared, a debug line of an order taken for one of its ends). A flow that reads debug lines sets debug after the call. Under
+ * `bun test --isolate`, the environment of each file is its own.
  */
 export const mockBacktestModules = () => {
+  process.env.GEKKO_LOG_LEVEL = 'info';
   mock.module('winston', () => MockWinston);
   mock.module('ccxt', () => createCcxtModuleMock());
   mockConfiguration(() => {

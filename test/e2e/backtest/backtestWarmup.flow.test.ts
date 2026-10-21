@@ -41,10 +41,13 @@ const backtestOf = (lastMinute: number, assets: ('BTC' | 'ETH')[], strategy: Str
   strategy,
 });
 
-/** The lines logged as text at `level`, oldest first, with their tag: only the warnings of the run, or only its strategy's lines */
-const linesAt = (level: 'warn' | 'info', tag?: string) =>
-  findTextLines('', level)
-    .filter(({ _tag }) => tag === undefined || _tag === tag)
+/**
+ * The warnings of the run and the info lines of its strategy, with their tag, in the order they were logged: when init ran, against the
+ * warning of the batcher, which a list of each kept apart did not tell
+ */
+const runLines = () =>
+  findTextLines('')
+    .filter(({ level, _tag }) => level === 'warn' || (level === 'info' && _tag === 'STRATEGY'))
     .map(({ _tag, message }) => `${_tag} | ${message}`);
 
 describe('E2E: Backtest warmup', () => {
@@ -69,22 +72,15 @@ describe('E2E: Backtest warmup', () => {
     // (10000 + 9900) / 2: the candle of 00:15, the first after the warmup, crosses it, 10000 above 9950, and the strategy buys BTC. The
     // candle of 00:25 crosses it back, 10000 below (10100 + 10000) / 2, and the strategy sells. ETH closes on its SMA on every candle,
     // 2000: on neither side of it, it has no initial state and never crosses, and the strategy orders nothing of it.
-    expect({
-      failure,
-      warnings: linesAt('warn'),
-      strategyLines: linesAt('info', 'STRATEGY'),
-      orderCalls,
-      balanceReads: balanceReads.slice(2),
-    }).toEqual({
+    expect({ failure, lines: runLines(), orderCalls, balanceReads: balanceReads.slice(2) }).toEqual({
       failure: undefined,
-      warnings: [
+      lines: [
         'STREAM | BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!',
+        // init, on the first minute read, 00:03, before the batcher warns of the minutes it skipped, at 00:05: the strategy trades both
+        // pairs. Run on the first timeframe candle, that of 00:05, which completes with the minute 00:09, init would log it after that warning.
+        'STRATEGY | Trading BTC/USDT and ETH/USDT: each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset',
         // The batcher warns once a minute starts on a boundary, at 00:05: once for the bucket, where each pair's batcher logged the line
         'CORE | Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
-      ],
-      strategyLines: [
-        // init, on the first minute read, 00:03: the strategy trades both pairs
-        'STRATEGY | Trading BTC/USDT and ETH/USDT: each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset',
         // On the candle of 00:10, the last of the warmup
         'STRATEGY | [BTC/USDT] Initial state: price below SMA',
         'STRATEGY | Strategy warmup done ! Sending first candle bucket (2024-01-01T00:15:00.000Z) to strategy',

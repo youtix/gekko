@@ -1,24 +1,28 @@
-import type { Candle } from '@models/candle.types';
 import type { TradingPair } from '@models/utility.types';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
-import { omit, range } from 'lodash-es';
+import { omit } from 'lodash-es';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { clearLogs, logStore } from '../mocks/winston.mock';
-import { minute, mockBacktestModules, rawMarket, runBacktest, unreservedRead, useConfiguration } from './backtestRun.helper';
+import {
+  candlesClosingAt,
+  minute,
+  mockBacktestModules,
+  rawMarket,
+  runBacktest,
+  unreservedRead,
+  useConfiguration,
+} from './backtestRun.helper';
 
 mockBacktestModules();
 
 const DATERANGE = rawDaterange({ start: minute(0), end: minute(9) - 1 });
 
 /** BTC opening every minute of 00:00 to 00:08 at 10000, closing there but at 9000 on 00:01 and 11000 on 00:03, 100 either side */
-const CANDLES: Candle[] = range(9).map(n => {
-  const close = ({ 1: 9000, 3: 11000 } as Record<number, number>)[n] ?? 10000;
-  return { start: minute(n), open: 10000, high: close + 100, low: close - 100, close, volume: 10 };
-});
+const CANDLES = candlesClosingAt({ 1: 9000, 3: 11000 });
 
 let directory: string;
 
@@ -116,6 +120,9 @@ describe('E2E: Backtest on a database file', () => {
     ],
   ] as const)('refuses %s, naming the file', async (_case, file, assets, message, files) => {
     await importCandles(join(directory, 'candles.sql'));
+    // The lines of the import that prepared the file are not the backtest's: at debug level, its count of the candles written was taken
+    // for a line of the refused backtest
+    clearLogs();
     const database = join(directory, file);
 
     const { failure, orderCalls } = await runBacktest(backtestOn(database, [...assets]));

@@ -8,6 +8,7 @@ import { rawDaterange, type RawConfiguration } from '../helpers/configuration.he
 import { clearLogs } from '../mocks/winston.mock';
 import {
   filledMarketOrder,
+  flatCandles,
   minute,
   mockBacktestModules,
   numberedTextLines,
@@ -17,34 +18,52 @@ import {
   runBacktest,
   unreservedRead,
 } from './backtestRun.helper';
+import type { OrderStepsParams } from './orderSteps.strategy';
 
 mockBacktestModules();
 
+type Asset = 'BTC' | 'ETH';
+
 /**
- * What a scenario sizes: the balances it starts from, the most BTC one order takes, the least an order costs and the least amount it
- * holds on every market, the decimals of their amounts (6 unless given), and the calendar of DebugBacktest with the sizing of its orders
+ * What a scenario sizes: the balances it starts from, the most of an asset one order takes and the fees of its market (1000 and Binance's
+ * 0.1 % unless given), the least an order costs and the least amount it holds on every market, the decimals of their amounts (6 unless
+ * given), the last minute read (00:08 unless given), and the orders: the calendar of DebugBacktest with the sizing of its orders, the
+ * same on every pair, or the steps of OrderSteps, each order of its own pair, candle and sizing
  */
 type Sizing = {
   balances: { BTC: number; ETH?: number; USDT: number };
-  btcAmountMax?: number;
+  amountMax?: Partial<Record<Asset, number>>;
+  fees?: Partial<Record<Asset, { maker: number; taker: number }>>;
   costMin?: number;
   amountMin?: number;
   amountDecimals?: number;
-  calendar: DebugBacktestParams;
-};
+  lastMinute?: number;
+} & ({ calendar: DebugBacktestParams } | { steps: OrderStepsParams['steps'] });
 
-/** A backtest of the minutes 00:00 to 00:08 on 1m candles, of BTC alone or of BTC then ETH when the scenario holds an ETH balance */
-const backtestOf = ({ balances, btcAmountMax, costMin, amountMin, amountDecimals, calendar }: Sizing): RawConfiguration => {
-  const assets = Object.keys(balances).filter(asset => asset !== 'USDT') as ('BTC' | 'ETH')[];
-  const marketOf = (asset: 'BTC' | 'ETH') =>
-    rawMarket(`${asset}/USDT`, { amountMax: asset === 'BTC' ? btcAmountMax : undefined, costMin, amountMin, amountDecimals });
+/** The strategy file of the scenarios whose orders OrderSteps places, loaded as a strategy file of the user's is */
+const ORDER_STEPS_PATH = fileURLToPath(new URL('./orderSteps.strategy.ts', import.meta.url));
+
+/** A backtest of the minutes from 00:00 on 1m candles, of BTC alone or of BTC then ETH when the scenario holds an ETH balance */
+const backtestOf = (sizing: Sizing): RawConfiguration => {
+  const { balances, amountMax = {}, fees = {}, costMin, amountMin, amountDecimals, lastMinute = 8 } = sizing;
+  const assets = Object.keys(balances).filter(asset => asset !== 'USDT') as Asset[];
+  const marketOf = (asset: Asset) =>
+    rawMarket(`${asset}/USDT`, { amountMax: amountMax[asset], fee: fees[asset], costMin, amountMin, amountDecimals });
+  // The strategy that places the orders: OrderSteps, loaded from its file, on its steps, or DebugBacktest on its calendar
+  const { advisor, strategy } =
+    'steps' in sizing
+      ? {
+          advisor: { name: 'TradingAdvisor', strategyName: 'OrderSteps', strategyPath: ORDER_STEPS_PATH },
+          strategy: { name: 'OrderSteps', steps: sizing.steps },
+        }
+      : { advisor: { name: 'TradingAdvisor', strategyName: 'DebugBacktest' }, strategy: { name: 'DebugBacktest', ...sizing.calendar } };
   return {
     watch: {
       mode: 'backtest',
       assets,
       currency: 'USDT',
       timeframe: '1m',
-      daterange: rawDaterange({ start: minute(0), end: minute(9) - 1 }),
+      daterange: rawDaterange({ start: minute(0), end: minute(lastMinute + 1) - 1 }),
     },
     exchange: {
       name: 'dummy-cex',
@@ -52,19 +71,12 @@ const backtestOf = ({ balances, btcAmountMax, costMin, amountMin, amountDecimals
       marketData: assets.map(marketOf),
     },
     storage: { type: 'sqlite', database: ':memory:' },
-    plugins: [{ name: 'TradingAdvisor', strategyName: 'DebugBacktest' }, { name: 'Trader' }],
-    strategy: { name: 'DebugBacktest', ...calendar },
+    plugins: [advisor, { name: 'Trader' }],
+    strategy,
   };
 };
 
-/** The candles of 00:00 to 00:08 at a price that does not move, each high and low 1 ‰ off it: a MARKET order fills at the price */
-const flatCandles = (price: number): Candle[] =>
-  range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
-
 const CANDLES: Record<TradingPair, Candle[]> = { 'BTC/USDT': flatCandles(10000), 'ETH/USDT': flatCandles(2000) };
-
-/** The strategy file of the scenarios whose pairs order on candles of their own, loaded as a strategy file of the user's is */
-const ORDER_STEPS_PATH = fileURLToPath(new URL('./orderSteps.strategy.ts', import.meta.url));
 
 /** The warnings the Trader logged, oldest first, each order named by its rank among the orders of the run */
 const traderWarnings = () =>
@@ -134,7 +146,7 @@ describe('E2E: Backtest order sizing', () => {
     const { failure, orderCalls, balanceReads } = await runBacktest(
       backtestOf({
         balances: { BTC: 0, ETH: 0, USDT: 300000 },
-        btcAmountMax: 20,
+        amountMax: { BTC: 20 },
         calendar: { buyCandleIndex: [1, 5], sellCandleIndex: [3, 7], allIn: true },
       }),
       CANDLES,
@@ -181,7 +193,7 @@ describe('E2E: Backtest order sizing', () => {
   it('caps a SELL at the most the market takes in one order, the rest held for the next SELL, then at the free balance', async () => {
     // An account holding a position larger than one MARKET order can sell: 1 BTC, where the market takes 0.4 at most
     const { failure, orderCalls, balanceReads } = await runBacktest(
-      backtestOf({ balances: { BTC: 1, USDT: 0 }, btcAmountMax: 0.4, calendar: { buyCandleIndex: [], sellCandleIndex: [1, 2, 3] } }),
+      backtestOf({ balances: { BTC: 1, USDT: 0 }, amountMax: { BTC: 0.4 }, calendar: { buyCandleIndex: [], sellCandleIndex: [1, 2, 3] } }),
       { 'BTC/USDT': CANDLES['BTC/USDT'] },
     );
 
@@ -301,33 +313,15 @@ describe('E2E: Backtest order sizing', () => {
     // the fee from what the BUY brings in.
     const minutes = range(15);
     const { failure, orderCalls, balanceReads } = await runBacktest(
-      {
-        watch: {
-          mode: 'backtest',
-          assets: ['BTC', 'ETH'],
-          currency: 'USDT',
-          timeframe: '1m',
-          daterange: rawDaterange({ start: minute(0), end: minute(15) - 1 }),
-        },
-        exchange: {
-          name: 'dummy-cex',
-          simulationBalance: [
-            { assetName: 'BTC', balance: 0 },
-            { assetName: 'ETH', balance: 0 },
-            { assetName: 'USDT', balance: 300000 },
-          ],
-          marketData: [rawMarket('BTC/USDT', { fee: { maker: 0, taker: 0.001 } }), rawMarket('ETH/USDT')],
-        },
-        storage: { type: 'sqlite', database: ':memory:' },
-        plugins: [{ name: 'TradingAdvisor', strategyName: 'OrderSteps', strategyPath: ORDER_STEPS_PATH }, { name: 'Trader' }],
-        strategy: {
-          name: 'OrderSteps',
-          steps: [
-            { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', price: 9500, allocation: 50 },
-            { candle: 12, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET', allocation: 50 },
-          ],
-        },
-      },
+      backtestOf({
+        balances: { BTC: 0, ETH: 0, USDT: 300000 },
+        fees: { BTC: { maker: 0, taker: 0.001 } },
+        lastMinute: 14,
+        steps: [
+          { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', price: 9500, allocation: 50 },
+          { candle: 12, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET', allocation: 50 },
+        ],
+      }),
       {
         'BTC/USDT': minutes.map(n => ({ start: minute(n), open: 10000, high: 10010, low: 9990, close: 10000, volume: 10 })),
         'ETH/USDT': minutes.map(n => ({ start: minute(n), open: 2000, high: 2002, low: 1998, close: 2000, volume: 10 })),
@@ -446,6 +440,172 @@ describe('E2E: Backtest order sizing', () => {
     expect({ allIn, allocated }).toEqual({
       allIn: { ...refused, warnings: [below('All-in BUY MARKET order sized from 5.5 USDT')] },
       allocated: { ...refused, warnings: [below('BUY MARKET order of 5.5 USDT (100 % of 5.5 USDT)')] },
+    });
+  });
+
+  it('caps a SELL at what the SELLs placed before it on its candle leave, and sends one they leave nothing of as asked, which the market refuses', async () => {
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 1, USDT: 0 },
+        steps: range(3).map(() => ({ candle: 1, symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', amount: 0.8 })),
+      }),
+      { 'BTC/USDT': CANDLES['BTC/USDT'] },
+    );
+
+    // Three SELLs of 0.8 BTC on the candle of 00:01, from the 1 BTC the account holds: each is sized from the balance read at the end of
+    // the warmup, less what the SELLs placed since take of it. Capped against the whole of the balance read, two SELLs of one asset on
+    // one minute (two trailing stops, or a stop and the strategy) each fitted, while together they sold more than was held.
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [
+        // 1 - 0.8 left
+        '[order 2] SELL MARKET order of 0.8 BTC above the free balance: 0.2 BTC sent, all that can be sold (1 BTC free at the last synchronization, less 0.8 BTC for the SELLs placed since)',
+        // Nothing left: sent as asked, the SELL goes through should one of those two fail first
+        '[order 3] SELL MARKET order of 0.8 BTC: 0.8 BTC sent as asked, which the market refuses unless some of the asset is free by then (1 BTC free at the last synchronization, less 1 BTC for the SELLs placed since)',
+      ],
+      orderCalls: [
+        filledMarketOrder(minute(2), 'BTC/USDT', 'SELL', 0.8, 1),
+        filledMarketOrder(minute(2), 'BTC/USDT', 'SELL', 0.2, 2),
+        refusedMarketOrder(
+          minute(2),
+          'BTC/USDT',
+          'SELL',
+          0.8,
+          'InvalidOrder: [EXCHANGE] Insufficient asset balance (portfolio: 0, amount: 0.8)',
+        ),
+      ],
+      // 1 BTC sold at 10000, of which 0.999 brought in
+      balanceReads: [unreservedRead(minute(2), { BTC: 0, USDT: 9990 })],
+    });
+  });
+
+  it('takes from the currency what a BUY of an amount may spend, the 5 % kept back for its fee included, for the all-in BUY after it', async () => {
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 0, ETH: 0, USDT: 300000 },
+        steps: [
+          { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 10 },
+          { candle: 1, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET' },
+        ],
+      }),
+      CANDLES,
+    );
+
+    // The BUY of 10 BTC at 10000 may spend 100000 USDT and the 5 % kept back for its fee, 100000 / 0.95: the all-in BUY of ETH on the same
+    // candle is sized from what that leaves of the 300000 USDT read at the end of the warmup
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [
+        // 300000 - 105263.15789473684, of 17 digits, which addPrecise subtracts as doubles do: 194736.84210526315, of which 95 % at 2000
+        '[order 2] All-in BUY MARKET order sized from 194736.84210526315 USDT: 92.5 ETH sent (300000 USDT free at the last synchronization, less 105263.15789473684 USDT for the BUYs placed since, the 5 % kept back for their fee included)',
+      ],
+      orderCalls: [filledMarketOrder(minute(2), 'BTC/USDT', 'BUY', 10, 1), filledMarketOrder(minute(2), 'ETH/USDT', 'BUY', 92.5, 2)],
+      // 10 × 10000 × 1.001 = 100100 and 92.5 × 2000 × 1.001 = 185185 spent: 300000 - 285285
+      balanceReads: [unreservedRead(minute(2), { BTC: 10, ETH: 92.5, USDT: 14715 })],
+    });
+  });
+
+  it('caps a BUY by cost at the currency left and at the most the market takes, in the one line of the maximum, and never a BUY of an amount', async () => {
+    // ETH's market takes 20 ETH at most in one order
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 0, ETH: 0, USDT: 300000 },
+        amountMax: { ETH: 20 },
+        steps: [
+          { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', cost: 200000 },
+          { candle: 1, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET', cost: 200000 },
+          { candle: 3, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET', amount: 30 },
+        ],
+      }),
+      CANDLES,
+    );
+
+    // The ETH BUY of 00:01 asks for 200000 USDT, of which the BTC BUY leaves 100000: sized from those, it buys 47.5 ETH, more than the
+    // market takes, and is capped at the 20 ETH it does. The BUY of 30 ETH of 00:03, which the strategy sized itself, is sent as asked,
+    // for the market to refuse, though the currency would cover it.
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [
+        // 100000 × 0.95 / 2000. Capped twice, it gets one line, the maximum's, which keeps what it was sized from and leaves out the BUYs
+        // placed since
+        '[order 2] BUY MARKET order of 200000 USDT above the free balance, sized from 100000 USDT: 47.5 ETH, above the maximum amount of a MARKET order on ETH/USDT: 20 ETH sent, the rest of the USDT left unspent',
+      ],
+      orderCalls: [
+        // 200000 × 0.95 / 10000
+        filledMarketOrder(minute(2), 'BTC/USDT', 'BUY', 19, 1),
+        filledMarketOrder(minute(2), 'ETH/USDT', 'BUY', 20, 2),
+        // A minimum amount of 0 bounds nothing
+        refusedMarketOrder(
+          minute(4),
+          'ETH/USDT',
+          'BUY',
+          30,
+          "OrderOutOfRangeError: [EXCHANGE] Order 'amount' with value 30 is too high. Maximum allowed is 20.",
+        ),
+      ],
+      balanceReads: [
+        // 19 × 10000 × 1.001 = 190190 and 20 × 2000 × 1.001 = 40040 spent: 300000 - 230230
+        unreservedRead(minute(2), { BTC: 19, ETH: 20, USDT: 69770 }),
+        // Nothing filled: the 30 ETH would have cost 60060
+        unreservedRead(minute(4), { BTC: 19, ETH: 20, USDT: 69770 }),
+      ],
+    });
+  });
+
+  it('warns of a BUY all-in, by cost and by allocation when the account holds none of the currency, each sized to 0 and refused', async () => {
+    const buy = { symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' } as const;
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 1, USDT: 0 },
+        steps: [
+          { candle: 1, ...buy },
+          { candle: 2, ...buy, cost: 100 },
+          { candle: 3, ...buy, allocation: 50 },
+        ],
+      }),
+      { 'BTC/USDT': CANDLES['BTC/USDT'] },
+    );
+
+    // An account holding BTC and no USDT: each BUY has nothing to be sized from, which its refusal for an amount of 0 does not say
+    const nothing = '0 BTC sent, which the market refuses (0 USDT free at the last synchronization)';
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [
+        `[order 1] All-in BUY MARKET order sized from 0 USDT: ${nothing}`,
+        `[order 2] BUY MARKET order of 100 USDT: ${nothing}`,
+        `[order 3] BUY MARKET order of 0 USDT (50 % of 0 USDT): ${nothing}`,
+      ],
+      orderCalls: [2, 3, 4].map(n => refusedMarketOrder(minute(n), 'BTC/USDT', 'BUY', 0, AMOUNT_OF_0)),
+      balanceReads: [2, 3, 4].map(n => unreservedRead(minute(n), { BTC: 1, USDT: 0 })),
+    });
+  });
+
+  it('warns of no order by cost whose amount the step cuts to nothing, which the market refuses naming the step', async () => {
+    // BTC at 60000 on the amount step of 0.00001 BTC, at 5 USDT at least: a BUY and a SELL of 0.5 USDT
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 0.001, USDT: 100 },
+        costMin: 5,
+        amountDecimals: 5,
+        calendar: { buyCandleIndex: 1, sellCandleIndex: 3, cost: 0.5 },
+      }),
+      { 'BTC/USDT': flatCandles(60000) },
+    );
+
+    // The BUY buys 0.5 × 0.95 / 60000 BTC and the SELL sells 0.5 / 60000 BTC, each less than a step: the Trader warns of neither, though
+    // both cost less than the minimum of 5 USDT. Truncated to 0 BTC, each is refused for its amount, the refusal naming the amount asked
+    // for and the step, where a warning of the minimum cost would have quoted the cost of nothing.
+    const roundsTo0 = (amount: string) =>
+      `OrderOutOfRangeError: [EXCHANGE] Order 'amount' with value ${amount} rounds to 0 on the amount step 0.00001 of the market. Maximum allowed is 1000.`;
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [],
+      orderCalls: [
+        refusedMarketOrder(minute(2), 'BTC/USDT', 'BUY', 0.00000791666666666667, roundsTo0('0.00000791666666666667')),
+        refusedMarketOrder(minute(4), 'BTC/USDT', 'SELL', 0.00000833333333333333, roundsTo0('0.00000833333333333333')),
+      ],
+      // Nothing filled: each synchronization after a refusal reads the balances the account started with
+      balanceReads: [unreservedRead(minute(2), { BTC: 0.001, USDT: 100 }), unreservedRead(minute(4), { BTC: 0.001, USDT: 100 })],
     });
   });
 });

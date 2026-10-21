@@ -1,33 +1,22 @@
 import { ONE_MINUTE } from '@constants/time.const';
-import type { Candle } from '@models/candle.types';
 import type { RoundTrip } from '@models/event.types';
-import type { BalanceDetail } from '@models/portfolio.types';
-import type { Asset, TradingPair } from '@models/utility.types';
-import type { DummyCentralizedExchange } from '@services/exchange/dummy/dummyCentralizedExchange';
-import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import type { DebugBacktestParams } from '@strategies/debug/debugBacktest.types';
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it } from 'bun:test';
 import { isObjectLike, range } from 'lodash-es';
-import { mockConfiguration, rawDaterange } from '../helpers/configuration.helper';
-import { seedDatabaseWithCandles } from '../helpers/database.helper';
-import { createCcxtModuleMock } from '../mocks/ccxt.mock';
-import { MockWinston, clearLogs, findLoggedObject, findTextLine, findTextLines, logStore } from '../mocks/winston.mock';
+import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
+import { clearLogs, findLoggedObject, findTextLine, findTextLines, logStore } from '../mocks/winston.mock';
+import {
+  candleAt,
+  candlesClosingAt,
+  filledMarketOrder,
+  minute,
+  mockBacktestModules,
+  openLimitOrder,
+  rawMarket,
+  runBacktest,
+} from './backtestRun.helper';
 
-// --------------------------------------------------------------------------
-// MOCKS SETUP
-// --------------------------------------------------------------------------
-
-// 1. Mock Winston
-mock.module('winston', () => MockWinston);
-
-// 2. Mock CCXT Library: a backtest builds no exchange client, but the injecter loads ccxt with CCXTExchange, and the mock spares this
-// flow the load of the real one (backtestMissingCandles.flow.test.ts loads it)
-mock.module('ccxt', () => createCcxtModuleMock());
-
-// 3. Mock Configuration
-const START = Date.parse('2024-01-01T00:00:00Z');
-/** The start of the minute `n` minutes after 00:00 */
-const minute = (n: number) => START + n * ONE_MINUTE;
+mockBacktestModules();
 
 /** The quote and the market of each asset a scenario can watch */
 const MARKETS = {
@@ -50,9 +39,8 @@ type Backtest = {
   fee?: { maker: number; taker: number };
 };
 
-let backtest: Backtest;
-
-mockConfiguration(() => ({
+/** The configuration of a scenario, as its file would hold it */
+const configurationOf = (backtest: Backtest): RawConfiguration => ({
   watch: {
     mode: 'backtest',
     assets: backtest.assets,
@@ -70,16 +58,7 @@ mockConfiguration(() => ({
       symbol: `${asset}/USDT`,
       ticker: { bid: MARKETS[asset].price, ask: MARKETS[asset].price },
     })),
-    marketData: backtest.assets.map(asset => ({
-      symbol: `${asset}/USDT`,
-      marketData: {
-        price: { min: 0, max: 1000000 },
-        amount: { min: 0, max: MARKETS[asset].amountMax },
-        cost: { min: 0, max: 1000000 },
-        precision: { price: 2, amount: 6 },
-        fee: backtest.fee ?? { maker: 0.001, taker: 0.001 },
-      },
-    })),
+    marketData: backtest.assets.map(asset => rawMarket(`${asset}/USDT`, { amountMax: MARKETS[asset].amountMax, fee: backtest.fee })),
   },
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [
@@ -88,55 +67,11 @@ mockConfiguration(() => ({
     { name: backtest.analyzer, enableConsoleTable: false },
   ],
   strategy: { name: 'DebugBacktest', ...backtest.calendar },
-}));
+});
 
 // --------------------------------------------------------------------------
 // HELPERS
 // --------------------------------------------------------------------------
-
-/** The candle of the minute `n` minutes after 00:00, its high and its low `spread` above and below its close */
-const candleAt = (n: number, { open, close, spread, volume }: { open: number; close: number; spread: number; volume: number }): Candle => ({
-  start: minute(n),
-  open,
-  high: close + spread,
-  low: close - spread,
-  close,
-  volume,
-});
-
-/** A balance read from the simulated exchange, dated by its clock: the close of the last candle it had processed */
-type BalanceRead = { at: EpochTimeStamp; balance: Record<Asset, BalanceDetail> };
-
-/**
- * Runs the backtest of `setup` on the 1-minute candles stored for each pair, to its end: the error it failed with, undefined when it
- * completed, and every balance read from the simulated exchange. Caught rather than asserted through `rejects`, which Bun waits on past
- * the test's timeout: a backtest that froze would hang the suite instead of failing its scenario. The storage is built once the
- * configuration of the scenario is set, which creates the tables of its pairs.
- */
-const runBacktest = async (setup: Backtest, candles: Record<TradingPair, Candle[]>) => {
-  backtest = setup;
-  const { inject } = await import('@services/injecter/injecter');
-  inject.reset();
-  const storage = inject.storage() as SQLiteStorage;
-  for (const [symbol, pairCandles] of Object.entries(candles)) seedDatabaseWithCandles(storage, symbol as TradingPair, pairCandles);
-
-  // The exchange the pipeline is given, the injecter keeping the one it built first: its balance reads are recorded as they are made
-  const exchange = inject.exchange() as DummyCentralizedExchange;
-  const balanceReads: BalanceRead[] = [];
-  const fetchBalance = exchange.fetchBalance.bind(exchange);
-  exchange.fetchBalance = async () => {
-    const balance = await fetchBalance();
-    balanceReads.push({ at: exchange['currentTimestamp'], balance: Object.fromEntries(balance) });
-    return balance;
-  };
-
-  const { gekkoPipeline } = await import('@services/core/pipeline/pipeline');
-  const failure = await gekkoPipeline().then(
-    () => undefined,
-    (error: Error) => error,
-  );
-  return { failure, balanceReads };
-};
 
 /** The report the analyzer logged at the end of the run: the PortfolioAnalyzer logs the length of its equity curve, not the curve */
 const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findLoggedObject(message => message.id === id);
@@ -157,24 +92,29 @@ describe('E2E: Backtest Flow', () => {
   it('Scenario A: two round trips, the last SELL on the last candle read: net -40 of fees over 4 trades, 1 of 2 won', async () => {
     // BTC opens every minute at 10000 and closes there too, but on the minutes of the orders: the BUYs at 9000 (00:01) and 11000 (00:05),
     // the SELLs at 11000 (00:03) and 9000 (00:08). Each high and low is 100 above and below the close. The 9 candles are all read.
-    const closes: Record<number, number> = { 1: 9000, 3: 11000, 5: 11000, 8: 9000 };
-    const candles = range(9).map(n => candleAt(n, { open: 10000, close: closes[n] ?? 10000, spread: 100, volume: 10 }));
+    const candles = candlesClosingAt({ 1: 9000, 3: 11000, 5: 11000, 8: 9000 });
 
-    const { failure } = await runBacktest(
-      {
+    const { failure, orderCalls } = await runBacktest(
+      configurationOf({
         assets: ['BTC'],
         minutes: { first: 0, last: 8 },
         analyzer: 'RoundTripAnalyzer',
         calendar: { buyCandleIndex: [1, 5], sellCandleIndex: [3, 8] },
-      },
+      }),
       { 'BTC/USDT': candles },
     );
 
     // Each MARKET order fills at the close of its candle, dated at its end, for a fee of 0.1 %: the BUY at 9000 costs 9009 and the one at
     // 11000 11011, the SELL at 11000 brings 10989 and the one at 9000 8991. The last fill is in the report only because it is delivered
     // with the bucket it fills in, the last one: nothing is flushed after the run.
-    expect({ failure, report: loggedReport('TRADING REPORT'), roundTrips: loggedRoundTrips() }).toEqual({
+    expect({ failure, orderCalls, report: loggedReport('TRADING REPORT'), roundTrips: loggedRoundTrips() }).toEqual({
       failure: undefined,
+      orderCalls: [
+        filledMarketOrder(minute(2), 'BTC/USDT', 'BUY', 1, 1),
+        filledMarketOrder(minute(4), 'BTC/USDT', 'SELL', 1, 2),
+        filledMarketOrder(minute(6), 'BTC/USDT', 'BUY', 1, 3),
+        filledMarketOrder(minute(9), 'BTC/USDT', 'SELL', 1, 4),
+      ],
       report: {
         id: 'TRADING REPORT',
         // From the close of the candle that completed the warmup, 00:00's, to that of the last candle read, 00:08's
@@ -251,27 +191,30 @@ describe('E2E: Backtest Flow', () => {
   it('Scenario B: a round trip on each of BTC and ETH: net 2376 after 24 of fees, exposed 25 % of the period', async () => {
     // BTC closes at 9000 on 00:01 and 11000 on 00:03, 10000 otherwise, its high and low 100 off its close; ETH at 1800 and 2200, 2000
     // otherwise, 10 off. Both open every minute at their usual price. The 9 candles of each are all read.
-    const btc: Record<number, number> = { 1: 9000, 3: 11000 };
-    const eth: Record<number, number> = { 1: 1800, 3: 2200 };
-
-    const { failure } = await runBacktest(
-      {
+    const { failure, orderCalls } = await runBacktest(
+      configurationOf({
         assets: ['BTC', 'ETH'],
         minutes: { first: 0, last: 8 },
         analyzer: 'PortfolioAnalyzer',
         calendar: { buyCandleIndex: 1, sellCandleIndex: 3 },
-      },
+      }),
       {
-        'BTC/USDT': range(9).map(n => candleAt(n, { open: 10000, close: btc[n] ?? 10000, spread: 100, volume: 10 })),
-        'ETH/USDT': range(9).map(n => candleAt(n, { open: 2000, close: eth[n] ?? 2000, spread: 10, volume: 100 })),
+        'BTC/USDT': candlesClosingAt({ 1: 9000, 3: 11000 }),
+        'ETH/USDT': candlesClosingAt({ 1: 1800, 3: 2200 }, { open: 2000, spread: 10, volume: 100 }),
       },
     );
 
     // The BUYs fill at 00:02 for 9009 and 1801.8, which leaves 289189.2 USDT; the SELLs at 00:04 bring 10989 and 2197.8, for 302376. The
     // equity curve has a point at the close of each candle, 00:01 to 00:09: 300000, 300000, then at 00:03 the positions at 10000 and
     // 2000, 301189.2, at 00:04 at 11000 and 2200, 302389.2, valued before the SELLs are heard, then 302376 to the end.
-    expect({ failure, report: loggedReport('PORTFOLIO PROFIT REPORT') }).toEqual({
+    expect({ failure, orderCalls, report: loggedReport('PORTFOLIO PROFIT REPORT') }).toEqual({
       failure: undefined,
+      orderCalls: [
+        filledMarketOrder(minute(2), 'BTC/USDT', 'BUY', 1, 1),
+        filledMarketOrder(minute(2), 'ETH/USDT', 'BUY', 1, 2),
+        filledMarketOrder(minute(4), 'BTC/USDT', 'SELL', 1, 3),
+        filledMarketOrder(minute(4), 'ETH/USDT', 'SELL', 1, 4),
+      ],
       report: {
         id: 'PORTFOLIO PROFIT REPORT',
         // From the close of the candle that completed the warmup, 00:00's, when the start prices and the start equity are taken
@@ -325,22 +268,23 @@ describe('E2E: Backtest Flow', () => {
       ...(n === 12 && { low: 9400 }),
     }));
 
-    const { failure, balanceReads } = await runBacktest(
-      {
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      configurationOf({
         assets: ['BTC'],
         minutes: { first: 0, last: 14 },
         analyzer: 'PortfolioAnalyzer',
         calendar: { buyCandleIndex: 2, sellCandleIndex: 14, buyLimitPrice: 9500 },
         // Binance's VIP 1 fees: the LIMIT BUY pays the maker fee, the MARKET SELL the taker fee
         fee: { maker: 0.0009, taker: 0.001 },
-      },
+      }),
       { 'BTC/USDT': candles },
     );
 
     // The LIMIT BUY sent with the candle of 00:02 reserves its cost, 9500 × 1.0009 = 9508.55, and rests until the low of 00:12 reaches
     // it: it fills at 00:13, at its price. The MARKET SELL sent with the last candle brings 10000 × 0.999 = 9990.
-    expect({ failure, report: loggedReport('PORTFOLIO PROFIT REPORT'), balanceReads }).toEqual({
+    expect({ failure, orderCalls, report: loggedReport('PORTFOLIO PROFIT REPORT'), balanceReads }).toEqual({
       failure: undefined,
+      orderCalls: [openLimitOrder(minute(3), 'BTC/USDT', 'BUY', 1, 9500, 1), filledMarketOrder(minute(15), 'BTC/USDT', 'SELL', 1, 2)],
       report: {
         id: 'PORTFOLIO PROFIT REPORT',
         periodStartAt: minute(1),
@@ -403,8 +347,8 @@ describe('E2E: Backtest Flow', () => {
     // 50 off: the minutes 00:03 to 00:34 are read, in batches of 10 minutes.
     const candles = range(3, 35).map(n => candleAt(n, { open: 10000 + 10 * n, close: 10000 + 10 * n, spread: 50, volume: 10 }));
 
-    const { failure } = await runBacktest(
-      {
+    const { failure, orderCalls } = await runBacktest(
+      configurationOf({
         assets: ['BTC'],
         minutes: { first: 3, last: 34 },
         analyzer: 'RoundTripAnalyzer',
@@ -412,7 +356,7 @@ describe('E2E: Backtest Flow', () => {
         timeframe: '5m',
         candleCount: 2,
         batchSize: 10,
-      },
+      }),
       { 'BTC/USDT': candles },
     );
 
@@ -422,12 +366,14 @@ describe('E2E: Backtest Flow', () => {
     // last read.
     expect({
       failure,
+      orderCalls,
       skipped: findTextLines('Skipped', 'warn').map(({ message }) => message),
       warmup: findTextLine('Strategy warmup done', 'info')?.message,
       report: loggedReport('TRADING REPORT'),
       roundTrips: loggedRoundTrips(),
     }).toEqual({
       failure: undefined,
+      orderCalls: [filledMarketOrder(minute(25), 'BTC/USDT', 'BUY', 1, 1), filledMarketOrder(minute(35), 'BTC/USDT', 'SELL', 1, 2)],
       skipped: [
         'Skipped 2 one-minute candles from 2024-01-01T00:03:00.000Z: the first 5-minute candle starts on the first boundary, 2024-01-01T00:05:00.000Z',
       ],

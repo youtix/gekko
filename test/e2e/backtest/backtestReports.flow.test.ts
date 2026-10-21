@@ -1,4 +1,3 @@
-import type { Candle } from '@models/candle.types';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { range } from 'lodash-es';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
@@ -6,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { clearLogs, findLoggedObject, findTextLines } from '../mocks/winston.mock';
-import { minute, mockBacktestModules, rawMarket, refusedMarketOrder, runBacktest } from './backtestRun.helper';
+import { candlesClosingAt, minute, mockBacktestModules, rawMarket, refusedMarketOrder, runBacktest } from './backtestRun.helper';
 
 mockBacktestModules();
 
@@ -83,13 +82,6 @@ const backtestOf = (
   strategy: { name: 'DebugBacktest', ...calendar },
 });
 
-/** BTC opening every minute at 10000 and closing there, but at the prices `closes` lists, its high and low 100 off its close */
-const candlesOf = (closes: Record<number, number> = {}): Candle[] =>
-  range(9).map(n => {
-    const close = closes[n] ?? 10000;
-    return { start: minute(n), open: 10000, high: close + 100, low: close - 100, close, volume: 10 };
-  });
-
 /** The lines of a file the PerformanceReporter wrote, its header first */
 const readRows = (file: string) => readFileSync(join(directory, file), 'utf8').split('\n');
 
@@ -109,7 +101,7 @@ describe('E2E: Backtest reports', () => {
   it('writes the report of a run that reached the end of its range under the header of the file, its status completed', async () => {
     const { failure } = await runBacktest(
       backtestOf(300000, { name: 'RoundTripAnalyzer' }, { buyCandleIndex: 1, sellCandleIndex: 3 }, 'completed.csv'),
-      { 'BTC/USDT': candlesOf({ 1: 9000, 3: 11000 }) },
+      { 'BTC/USDT': candlesClosingAt({ 1: 9000, 3: 11000 }) },
     );
 
     // A BUY of 1 at the close of 00:01, 9000, and a SELL of 1 at that of 00:03, 11000, for a fee of 0.1 % each: 10989 - 9009 = 1980 of
@@ -132,7 +124,7 @@ describe('E2E: Backtest reports', () => {
     // 1000 USDT, and a BUY of 1 BTC at 10000 on each of the candles 00:00 to 00:06: every one is refused for want of currency
     const { failure, orderCalls } = await runBacktest(
       backtestOf(1000, { name: 'PortfolioAnalyzer' }, { buyCandleIndex: range(7), sellCandleIndex: [] }, 'stopped.csv'),
-      { 'BTC/USDT': candlesOf() },
+      { 'BTC/USDT': candlesClosingAt() },
     );
 
     // The fifth refusal, that of the BUY of 00:04, reaches the strategy with the bucket of 00:04: the breaker stops the run there, its
@@ -215,7 +207,7 @@ describe('E2E: Backtest reports', () => {
           { buyCandleIndex: range(7), sellCandleIndex: [] },
           'table.csv',
         ),
-        { 'BTC/USDT': candlesOf() },
+        { 'BTC/USDT': candlesClosingAt() },
       );
 
       expect({ failure: failure?.message, printed, rows: readRows('table.csv') }).toEqual({
