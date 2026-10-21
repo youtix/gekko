@@ -62,12 +62,19 @@ let traderEvents: TraderEvent[];
 let traderEventsSpy: { mockRestore: () => void };
 
 /** An order event, as the scenarios compare it (see orderEvents) */
-type OrderEventSummary = { at: EpochTimeStamp; name: string; order: string; executedAt?: EpochTimeStamp; exchangePrice: number };
+type OrderEventSummary = {
+  at: EpochTimeStamp;
+  name: string;
+  order: string;
+  executedAt?: EpochTimeStamp;
+  exchangePrice: number;
+  readAt?: EpochTimeStamp;
+};
 
 /**
  * The order events the Trader queued, oldest first: when, which one, the order (its side, type and amount, then the price the strategy
- * asked for, none for a MARKET order, or once completed the price it executed at), when it executed, once completed, and the last price
- * of its pair, which the event carries
+ * asked for, none for a MARKET order, or once completed the price it executed at), when it executed, once completed, the last price of
+ * its pair, which the event carries, and when the Trader read the balances the event carries (see ExchangeEvent.portfolioReadAt)
  */
 const orderEvents = () =>
   traderEvents
@@ -77,7 +84,14 @@ const orderEvents = () =>
       const { side, type, amount, price } = order;
       const described = `${side} ${type} ${amount}${isNil(price) ? '' : ` at ${price}`}`;
       const execution = 'orderExecutionDate' in order && { executedAt: order.orderExecutionDate };
-      return { at: event.at, name: event.name, order: described, ...execution, exchangePrice: exchange.price };
+      return {
+        at: event.at,
+        name: event.name,
+        order: described,
+        ...execution,
+        exchangePrice: exchange.price,
+        readAt: exchange.portfolioReadAt,
+      };
     });
 
 /** The ids of the orders the Trader initiated, in the order it did */
@@ -181,12 +195,13 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       // close of each bucket, and the ticker its synchronizations read, at the end of the warmup and after each fill, quotes it too. That
       // ticker quoted a price of its own, about 10,000, which the BUY was priced at and all but the SELL's first event carried, while
       // these candles traded at 100 and 110. Each MARKET order fills as it is sent, at the clock of the simulator, the close of its
-      // candle, and is reported before the next tick.
+      // candle, and is reported before the next tick. Each event carries the balances the Trader read last, and when: the BUY is placed
+      // after the read of the end of the warmup, each end comes with the read after it, and the SELL goes out with the BUY's.
       orderEvents: [
-        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 100 },
-        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 100', executedAt: at(1), exchangePrice: 100 },
-        { at: at(2, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 110 },
-        { at: at(2, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 110', executedAt: at(2), exchangePrice: 110 },
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 100, readAt: at(1, 2) },
+        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 100', executedAt: at(1), exchangePrice: 100, readAt: at(1, 2) },
+        { at: at(2, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 110, readAt: at(1, 2) },
+        { at: at(2, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 110', executedAt: at(2), exchangePrice: 110, readAt: at(2, 2) },
       ],
       roundTrips: [
         {
@@ -284,12 +299,13 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         `Trailing stop triggered: BUY ${buyId} on BTC/USDT at stop price 9990, its MARKET SELL ${sellId} of 1 sent`,
         `Trailing stop order completed: ${sellId}`,
       ],
-      // The SELL the stop sends with the candle of 12:03 completes for the amount of the stop, the 1 BTC its BUY filled
+      // The SELL the stop sends with the candle of 12:03 completes for the amount of the stop, the 1 BTC its BUY filled. It goes out with
+      // the balances read after the BUY, three minutes before: nothing read them again since.
       orderEvents: [
-        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 9500 },
-        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 9500', executedAt: at(1), exchangePrice: 9500 },
-        { at: at(4, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 9800 },
-        { at: at(4, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 9800', executedAt: at(4), exchangePrice: 9800 },
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 9500, readAt: at(1, 2) },
+        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 9500', executedAt: at(1), exchangePrice: 9500, readAt: at(1, 2) },
+        { at: at(4, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 9800, readAt: at(1, 2) },
+        { at: at(4, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 9800', executedAt: at(4), exchangePrice: 9800, readAt: at(4, 2) },
       ],
     });
   });
@@ -328,12 +344,19 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       // The LIMIT BUY rests from 12:01:02, its cost reserved, 9500 × 1.0009 = 9508.55, until the low of 12:02 reaches it: it fills at its
       // price, at 12:03:00, the close of that candle. It is polled every 20 s from its creation: the poll of 12:03:02 reads it before the
       // candle of 12:02 is processed, that of 12:03:22 reads its fill. The MARKET SELL sent with the candle of 12:04 fills as it is sent,
-      // at 10000, and brings 10000 × 0.999 = 9990.
+      // at 10000, and brings 10000 × 0.999 = 9990. It goes out with the balances the periodic read of 12:04:30 read.
       orderEvents: [
-        { at: at(1, 2), name: 'orderInitiated', order: 'BUY LIMIT 1 at 9500', exchangePrice: 10000 },
-        { at: at(3, 22), name: 'orderCompleted', order: 'BUY LIMIT 1 at 9500', executedAt: at(3), exchangePrice: 10000 },
-        { at: at(5, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 10000 },
-        { at: at(5, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 10000', executedAt: at(5), exchangePrice: 10000 },
+        { at: at(1, 2), name: 'orderInitiated', order: 'BUY LIMIT 1 at 9500', exchangePrice: 10000, readAt: at(1, 2) },
+        { at: at(3, 22), name: 'orderCompleted', order: 'BUY LIMIT 1 at 9500', executedAt: at(3), exchangePrice: 10000, readAt: at(3, 22) },
+        { at: at(5, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 10000, readAt: at(4, 30) },
+        {
+          at: at(5, 2),
+          name: 'orderCompleted',
+          order: 'SELL MARKET 1 at 10000',
+          executedAt: at(5),
+          exchangePrice: 10000,
+          readAt: at(5, 2),
+        },
       ],
       // The Trader reads the balance at its start, at the end of the warmup, after each order and every two minutes, and queues each read
       // as a portfolio change. At 12:02:30, while the BUY rests, the read shows what it reserves.

@@ -6,6 +6,7 @@ import { Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { addPrecise, multiplyPrecise } from '@utils/math/math.utils';
 import { shiftDecimalPoint } from '@utils/math/round.utils';
+import { formatEveryDecimal } from '@utils/string/string.utils';
 import { isNil } from 'lodash-es';
 import { FreeBalanceLeft } from './trader.types';
 
@@ -69,6 +70,18 @@ export const describeBuysPlacedSince = ({ read, taken }: FreeBalanceLeft, curren
   const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
   const feeBuffer = `the ${FEE_BUFFER_PERCENT} % kept back for their fee included`;
   return `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
+};
+
+/**
+ * What an order sized by its allocation is a share of, as the lines that name its sizing write it: the balance of `unit` the last
+ * synchronization read, and, for a BUY whose currency the Trader's own BUYs open at that read held some of (`held`), the two added up,
+ * then each (see Trader.getBudget), written with every decimal, without an exponent (see formatEveryDecimal)
+ */
+export const describeAllocationBase = (read: number, held: number, unit: string) => {
+  if (!(held > 0)) return `${read} ${unit}`;
+  const free = `${formatEveryDecimal(read)} ${unit} free at the last synchronization`;
+  const open = `${formatEveryDecimal(held)} ${unit} held by the BUYs open then`;
+  return `${formatEveryDecimal(addPrecise(read, held))} ${unit}: ${free}, plus ${open}`;
 };
 
 /* -------------------------------------------------------------------------- */

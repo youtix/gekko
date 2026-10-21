@@ -37,6 +37,21 @@ export type TraderOrderMetadata = {
   allocation?: number;
   /** Trading Pair */
   symbol: TradingPair;
+  /**
+   * The count of synchronizations started when the order was placed: one started after it reads a balance that shows it, reserved or
+   * filled (see Trader.unreadOrders and Trader.readHeldByOpenBuys)
+   */
+  synchronizationCount: number;
+  /**
+   * The count of synchronizations started when the strategy canceled the order, if it did: one started after it reads a balance from
+   * which the exchange has released what the order reserved, the cancelation reaching it first (see Trader.readHeldByOpenBuys)
+   */
+  cancelSynchronizationCount?: number;
+  /**
+   * The count of synchronizations started when its completion was heard, if it was: one started after it reads a balance that shows the
+   * fill (see Trader.readHeldByOpenBuys). The order stays listed while its report reads the balance and summarizes it.
+   */
+  endSynchronizationCount?: number;
 };
 
 export type CheckOrderSummaryParams = {

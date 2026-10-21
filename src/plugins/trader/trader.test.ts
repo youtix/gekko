@@ -199,6 +199,9 @@ vi.mock('@services/core/order/limit/limitOrder', () => ({
 
 describe('Trader', () => {
   const defaultCandle = { close: 100, start: 1_700_000_000_000 } as any;
+  // When the Trader read the balances the describes below set as read, before the end of the minute processed: the events of the orders
+  // carry it beside them (see ExchangeEvent.portfolioReadAt). The empty portfolio it starts with was never read, and carries none.
+  const READ_AT = 1_699_999_995_000;
   let trader: Trader;
   let fakeExchange: {
     getExchangeName: Mock;
@@ -822,6 +825,7 @@ describe('Trader', () => {
         ['BTC', { free: 3, used: 0, total: 3 }],
         ['USDT', { free: 1000, used: 0, total: 1000 }],
       ]);
+      trader['portfolioReadAt'] = READ_AT;
     });
 
     it('creates order in internal map', async () => {
@@ -1091,6 +1095,64 @@ describe('Trader', () => {
         await trader.onStrategyCreateOrder([allInSell]);
         expect(getPlacedAmount(allInSell)).toBe(amount);
       });
+
+      // Not what it sold before the cancelation, which the balance read does not show either: forgotten, the SELL sent on the candle of the
+      // cancelation was sized from the whole of the asset read, and refused for want of funds
+      describe('when the strategy cancels a LIMIT SELL of 0.5 BTC that sold 0.2 of it', () => {
+        const limitSell = sell(1, 0.5, 'LIMIT');
+        const sellOfAll = sell(2, 0.7992);
+
+        beforeEach(async () => {
+          await trader.onStrategyCreateOrder([limitSell]);
+          getOrderInstance(limitSell.id).getFilledAmount.mockReturnValue(0.2);
+          await trader.onStrategyCancelOrder([cancelationOf(limitSell)]);
+        });
+
+        it.each`
+          description                        | advice       | amount
+          ${'an all-in SELL'}                | ${allInSell} | ${0.5992}
+          ${'a SELL of the 0.7992 BTC read'} | ${sellOfAll} | ${0.5992}
+        `('places $description for the $amount BTC its sale leaves', async ({ advice, amount }) => {
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(amount);
+        });
+
+        it('warns of a SELL of the 0.7992 BTC read with the 0.2 BTC the canceled SELL sold', async () => {
+          await trader.onStrategyCreateOrder([sellOfAll]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${sellOfAll.id}] SELL MARKET order of 0.7992 BTC above the free balance: 0.5992 BTC sent, all that can be sold (0.7992 BTC free at the last synchronization, less 0.2 BTC for the SELLs placed since)`,
+          );
+        });
+
+        // Its read shows what the SELL sold: taken from it a second time, that sale would have left the next SELL short
+        it('forgets what it sold once a synchronization started after the cancelation has read the balance', async () => {
+          fakeExchange.fetchBalance.mockResolvedValue(balance(0.5992));
+          await trader['synchronize']();
+          await trader.onStrategyCreateOrder([allInSell]);
+          expect(getPlacedAmount(allInSell)).toBe(0.5992);
+        });
+      });
+
+      // What it took when placed, at most, whatever fill it reports
+      it('places an all-in SELL for what a canceled SELL of 0.5 BTC leaves, whatever fill above it the SELL reports', async () => {
+        const limitSell = sell(1, 0.5, 'LIMIT');
+        await trader.onStrategyCreateOrder([limitSell]);
+        getOrderInstance(limitSell.id).getFilledAmount.mockReturnValue(0.6);
+        await trader.onStrategyCancelOrder([cancelationOf(limitSell)]);
+        await trader.onStrategyCreateOrder([allInSell]);
+        expect(getPlacedAmount(allInSell)).toBe(0.2992);
+      });
+
+      // Left as asked once the SELLs placed since take the asset read whole, which the exchange refuses unless one of them fails first:
+      // said with that cause, as for the all-in SELL sized from nothing, where a SELL with an amount was sent unwarned
+      it('warns of a SELL of 0.3 BTC sent as asked once a SELL took the 0.7992 BTC read, with that cause', async () => {
+        await trader.onStrategyCreateOrder([sell(5, 0.7992), secondSell]);
+        expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+          'trader',
+          `[${secondSell.id}] SELL MARKET order of 0.3 BTC: 0.3 BTC sent as asked, which the market refuses unless some of the asset is free by then (0.7992 BTC free at the last synchronization, less 0.7992 BTC for the SELLs placed since)`,
+        );
+      });
     });
 
     // Two all-in BUYs on one candle, as a strategy with two entry signals sends them, or a BUY then an all-in BUY: each was sized from
@@ -1274,6 +1336,25 @@ describe('Trader', () => {
         await trader.onStrategyCreateOrder([secondAllIn]);
         expect(getPlacedAmount(secondAllIn)).toBe(amount);
       });
+
+      // Not what it spent before the cancelation, which the balance read does not show either: what the fill may spend at the price of the
+      // order (see getBuyBudget), never more than the BUY took when placed. Forgotten, an all-in BUY sent on the candle of the cancelation,
+      // at the market instead, was sized from the whole of the currency read, and refused for want of funds.
+      it.each`
+        description                                                                      | placed                        | filled | amount
+        ${'the 100 USDT the 1 BTC a LIMIT BUY of 2 at 95 filled may spend'}              | ${buy(4, 2, 'LIMIT')}         | ${1}   | ${8.55}
+        ${'the 500 USDT the 5 BTC an all-in LIMIT BUY at 95 filled may spend'}           | ${buy(4, undefined, 'LIMIT')} | ${5}   | ${4.75}
+        ${'the 200 USDT a LIMIT BUY of 2 at 95 took, whatever fill above it it reports'} | ${buy(4, 2, 'LIMIT')}         | ${3}   | ${7.6}
+      `(
+        'places an all-in BUY on the candle the strategy cancels a BUY after a fill for $amount BTC: 1000 USDT less $description',
+        async ({ placed, filled, amount }) => {
+          await trader.onStrategyCreateOrder([placed]);
+          getOrderInstance(placed.id).getFilledAmount.mockReturnValue(filled);
+          await trader.onStrategyCancelOrder([cancelationOf(placed)]);
+          await trader.onStrategyCreateOrder([secondAllIn]);
+          expect(getPlacedAmount(secondAllIn)).toBe(amount);
+        },
+      );
     });
 
     // LIMIT and STICKY BUYs can build a position larger than one MARKET order can sell (Binance's MARKET_LOT_SIZE: tens of BTC on
@@ -1531,6 +1612,21 @@ describe('Trader', () => {
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
         });
 
+        // What a BUY the strategy cancels after a fill spent stays taken until the balance is read again: 4 BTC at 95, 400 USDT, of the 500
+        // a LIMIT BUY of 50 % at 95 took
+        it('warns of a BUY of 70 % capped at the 600 USDT a LIMIT BUY of 50 % canceled after a fill of 4 BTC leaves', async () => {
+          const limitBuy = buy(1, { allocation: 50 }, 'LIMIT');
+          await trader.onStrategyCreateOrder([limitBuy]);
+          getOrderInstance(limitBuy.id).getFilledAmount.mockReturnValue(4);
+          await trader.onStrategyCancelOrder([cancelationOf(limitBuy)]);
+          const advice = buy(2, { allocation: 70 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] BUY MARKET order of 700 USDT (70 % of 1000 USDT) above the free balance, sized from 600 USDT: 5.7 BTC sent (1000 USDT free at the last synchronization, less 400 USDT for the BUYs placed since, the 5 % kept back for their fee included)`,
+          );
+        });
+
         // It takes what it was capped at, not what it asked for: the BUYs placed since take the whole of what was read, and no more
         it('takes the 1000 USDT it was capped at, as the warning of an all-in BUY after it says', async () => {
           await trader.onStrategyCreateOrder([buy(2, { cost: 2000 }), allInBuy]);
@@ -1538,6 +1634,153 @@ describe('Trader', () => {
             'trader',
             `[${allInBuy.id}] All-in BUY MARKET order sized from 0 USDT: 0 BTC sent (1000 USDT free at the last synchronization, less 1000 USDT for the BUYs placed since, the 5 % kept back for their fee included)`,
           );
+        });
+      });
+
+      // A LIMIT BUY of 50 % at 95, 5 BTC, rests at the synchronization after it, which reads its cost reserved, as Binance reserves the
+      // amount of a resting BUY at its price: 475 of the 1000 USDT. The PositionBook counts its pair among those it shares the currency
+      // between: a share of the 525 USDT read free alone gave the next pair half of what the first left, a quarter of the capital idle.
+      describe('when a BUY of the Trader rests at the synchronization before it', () => {
+        const restingBuy = buy(1, { allocation: 50 }, 'LIMIT');
+        const ethBuy = (sizing: Sizing) => buy(2, sizing, 'MARKET', 'ETH/USDT');
+        const read = (usdtFree: number, usdtUsed: number) =>
+          new Map<string, BalanceDetail>([
+            ['BTC', { free: 3, used: 0, total: 3 }],
+            ['USDT', { free: usdtFree, used: usdtUsed, total: usdtFree + usdtUsed }],
+          ]);
+        // The same base, the 525 USDT read and the 475 the resting BUY holds, as the lines that name a share of it write it
+        const ofTheBase = (allocation: number) =>
+          `${allocation} % of 1000 USDT: 525 USDT free at the last synchronization, plus 475 USDT held by the BUYs open then`;
+
+        beforeEach(() => {
+          trader['prices'].set('ETH/USDT', 10);
+          fakeExchange.fetchTickers.mockResolvedValue({ 'BTC/USDT': { bid: 100 } });
+        });
+
+        describe('open at that synchronization', () => {
+          beforeEach(async () => {
+            await trader.onStrategyCreateOrder([restingBuy]);
+            fakeExchange.fetchBalance.mockResolvedValue(read(525, 475));
+            await trader['synchronize']();
+          });
+
+          // 50 % of 1000 USDT, 500 less the 5 % kept back for the fee, at 10: as on the candle of the resting BUY, before the read
+          it.each`
+            description                               | sizing                 | amount
+            ${'of 50 %'}                              | ${{ allocation: 50 }}  | ${47.5}
+            ${'of 70 %, capped at the 525 USDT left'} | ${{ allocation: 70 }}  | ${49.875}
+            ${'of 100 %, as an all-in BUY is'}        | ${{ allocation: 100 }} | ${49.875}
+            ${'all-in'}                               | ${{}}                  | ${49.875}
+          `('places an ETH/USDT BUY $description for $amount ETH', async ({ sizing, amount }) => {
+            const advice = ethBuy(sizing);
+            await trader.onStrategyCreateOrder([advice]);
+            expect(getPlacedAmount(advice)).toBe(amount);
+          });
+
+          it('logs at debug level the base of a BUY of 50 %, the currency read and what the resting BUY holds', async () => {
+            const advice = ethBuy({ allocation: 50 });
+            await trader.onStrategyCreateOrder([advice]);
+            expect(logger.debug).toHaveBeenCalledWith(
+              'trader',
+              `[${advice.id}] BUY MARKET order of 500 USDT (${ofTheBase(50)}) sized to 47.5 ETH at 10`,
+            );
+          });
+
+          // Its share, of what the resting BUY holds too, is above what is left: an all-in BUY spends that unwarned
+          it.each`
+            description   | sizing                 | asked
+            ${'of 70 %'}  | ${{ allocation: 70 }}  | ${700}
+            ${'of 100 %'} | ${{ allocation: 100 }} | ${1000}
+          `('warns of an ETH/USDT BUY $description capped at the 525 USDT left', async ({ sizing, asked }) => {
+            const advice = ethBuy(sizing);
+            await trader.onStrategyCreateOrder([advice]);
+            expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+              'trader',
+              `[${advice.id}] BUY MARKET order of ${asked} USDT (${ofTheBase(sizing.allocation)}) above the free balance, sized from 525 USDT: 49.875 ETH sent`,
+            );
+          });
+        });
+
+        // Two BUYs open at the read hold what they cost together: 475 USDT and 95 for a LIMIT BUY of 1 BTC at 95
+        it('logs at debug level the base of a BUY of 50 % read beside two resting BUYs, which hold 570 USDT', async () => {
+          await trader.onStrategyCreateOrder([restingBuy, buy(3, { amount: 1 }, 'LIMIT')]);
+          fakeExchange.fetchBalance.mockResolvedValue(read(430, 570));
+          await trader['synchronize']();
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.debug).toHaveBeenCalledWith(
+            'trader',
+            `[${advice.id}] BUY MARKET order of 500 USDT (50 % of 1000 USDT: 430 USDT free at the last synchronization, plus 570 USDT held by the BUYs open then) sized to 40.85 ETH at 10`,
+          );
+        });
+
+        // What it filled counts too, spent on its behalf: 190 USDT on 2 of its 5 BTC, 285 reserved for the 3 left. Left out, the share of
+        // the next BUY would shrink with every fill of the one resting, and with every poll that reports one.
+        it('places a BUY of 50 % of the 525 USDT read and the 475 a resting BUY holds, 2 of its 5 BTC filled, for 47.5 ETH', async () => {
+          await trader.onStrategyCreateOrder([restingBuy]);
+          getOrderInstance(restingBuy.id).getFilledAmount.mockReturnValue(2);
+          fakeExchange.fetchBalance.mockResolvedValue(read(525, 285));
+          await trader['synchronize']();
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(47.5);
+        });
+
+        // The read shows its fill: the report of the completion reads the balance once the fill is heard of
+        it('places a BUY of 50 % of the 525 USDT read once the completion of the resting BUY is heard, for 24.9375 ETH', async () => {
+          await trader.onStrategyCreateOrder([restingBuy]);
+          fakeExchange.fetchBalance.mockResolvedValue(read(525, 0));
+          await getOrderInstance(restingBuy.id).emitAndSettle(ORDER_COMPLETED_EVENT);
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(24.9375);
+        });
+
+        // The exchange gets the cancelation before a read started after it, and releases what the BUY reserved for the 3 BTC it had not
+        // filled: the BUY holds the 2 it had, their 190 USDT at 95, until its end is reported
+        it('places a BUY of 50 % of the 810 USDT read and the 190 USDT a resting BUY canceled after 2 BTC spent, for 47.5 ETH', async () => {
+          await trader.onStrategyCreateOrder([restingBuy]);
+          getOrderInstance(restingBuy.id).getFilledAmount.mockReturnValue(2);
+          await trader.onStrategyCancelOrder([cancelationOf(restingBuy)]);
+          fakeExchange.fetchBalance.mockResolvedValue(read(810, 0));
+          await trader['synchronize']();
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(47.5);
+        });
+
+        // A price of Infinity passes the Trader's check of the price: the BUY costs no finite number, which the exchange refuses
+        it('places a BUY of 50 % of the 1000 USDT read alone while a BUY at a price of Infinity is listed, for 47.5 ETH', async () => {
+          await trader.onStrategyCreateOrder([{ ...buy(3, { amount: 2 }, 'LIMIT'), price: Infinity }]);
+          fakeExchange.fetchBalance.mockResolvedValue(read(1000, 0));
+          await trader['synchronize']();
+          const advice = ethBuy({ allocation: 50 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(47.5);
+        });
+
+        // A SELL by its allocation stays a share of the asset read: what a SELL resting on it holds is not there to sell
+        it('places a SELL of 50 % of the 1.5 BTC read free while a SELL of 50 % rests, for 0.75 BTC', async () => {
+          const sellOf = (index: number, type: AdviceOrder['type']) => ({
+            ...buildAdvice({
+              id: `00000000-0000-4000-8000-00000000008${index}`,
+              side: 'SELL',
+              type,
+              price: type === 'LIMIT' ? 120 : undefined,
+            }),
+            allocation: 50,
+          });
+          await trader.onStrategyCreateOrder([sellOf(1, 'LIMIT')]);
+          fakeExchange.fetchBalance.mockResolvedValue(
+            new Map<string, BalanceDetail>([
+              ['BTC', { free: 1.5, used: 1.5, total: 3 }],
+              ['USDT', { free: 1000, used: 0, total: 1000 }],
+            ]),
+          );
+          await trader['synchronize']();
+          const advice = sellOf(2, 'MARKET');
+          await trader.onStrategyCreateOrder([advice]);
+          expect(getPlacedAmount(advice)).toBe(0.75);
         });
       });
 
@@ -1696,10 +1939,11 @@ describe('Trader', () => {
 
       // As a SELL with an amount: capped at the free balance left, but left as asked while none is left
       it.each`
-        description                                                 | before                      | advice                         | amount
-        ${'of 50 % after a SELL of 2 BTC'}                          | ${[sell(5, { amount: 2 })]} | ${sell(1, { allocation: 50 })} | ${1}
-        ${'of 500 USDT, 5 BTC, above the 3 BTC held'}               | ${[]}                       | ${sell(1, { cost: 500 })}      | ${3}
-        ${'of 50 %, as asked, once a SELL of 3 BTC took the asset'} | ${[sell(5, { amount: 3 })]} | ${sell(1, { allocation: 50 })} | ${1.5}
+        description                                                  | before                      | advice                          | amount
+        ${'of 50 % after a SELL of 2 BTC'}                           | ${[sell(5, { amount: 2 })]} | ${sell(1, { allocation: 50 })}  | ${1}
+        ${'of 500 USDT, 5 BTC, above the 3 BTC held'}                | ${[]}                       | ${sell(1, { cost: 500 })}       | ${3}
+        ${'of 50 %, as asked, once a SELL of 3 BTC took the asset'}  | ${[sell(5, { amount: 3 })]} | ${sell(1, { allocation: 50 })}  | ${1.5}
+        ${'of 100 %, as asked, once a SELL of 3 BTC took the asset'} | ${[sell(5, { amount: 3 })]} | ${sell(1, { allocation: 100 })} | ${3}
       `('places a SELL $description for $amount BTC', async ({ before, advice, amount }) => {
         await trader.onStrategyCreateOrder([...before, advice]);
         expect(getPlacedAmount(advice)).toBe(amount);
@@ -1713,6 +1957,24 @@ describe('Trader', () => {
         await trader.onStrategyCreateOrder([...before, advice]);
         expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
       });
+
+      // Left as asked once the SELLs placed since take the asset read whole, which the exchange refuses unless one of them fails first:
+      // said with that cause, as for the all-in SELL sized from nothing, where a SELL by its cost or its allocation was sent unwarned
+      it.each`
+        description      | advice                          | sized
+        ${'of 100 %'}    | ${sell(1, { allocation: 100 })} | ${'3 BTC (100 % of 3 BTC): 3 BTC'}
+        ${'of 50 %'}     | ${sell(1, { allocation: 50 })}  | ${'1.5 BTC (50 % of 3 BTC): 1.5 BTC'}
+        ${'of 100 USDT'} | ${sell(1, { cost: 100 })}       | ${'1 BTC (100 USDT at 100): 1 BTC'}
+      `(
+        'warns once of a SELL $description sent as asked once a SELL of 3 BTC took the asset, with that cause',
+        async ({ advice, sized }) => {
+          await trader.onStrategyCreateOrder([sell(5, { amount: 3 }), advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] SELL MARKET order of ${sized} sent as asked, which the market refuses unless some of the asset is free by then (3 BTC free at the last synchronization, less 3 BTC for the SELLs placed since)`,
+          );
+        },
+      );
 
       // LOT_SIZE (amount) up to 1 BTC, MARKET_LOT_SIZE (market) up to 0.5 BTC
       describe('when it sells more than the market takes in one order', () => {
@@ -1738,6 +2000,16 @@ describe('Trader', () => {
         `('warns once of $description, with the amount asked for and the maximum sent', async ({ advice, message }) => {
           await trader.onStrategyCreateOrder([advice]);
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // Capped at the maximum, it is not sent as asked: that line alone says what is sent. Three LIMIT SELLs of 1 BTC take the 3 read.
+        it('warns only of the maximum of a MARKET SELL of 50 % once three SELLs of 1 BTC took the asset', async () => {
+          const advice = sell(1, { allocation: 50 });
+          await trader.onStrategyCreateOrder([5, 6, 7].map(index => sell(index, { amount: 1 }, 'LIMIT', 120)).concat(advice));
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] SELL MARKET order of 1.5 BTC (50 % of 3 BTC) above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest stays held`,
+          );
         });
       });
 
@@ -2037,7 +2309,7 @@ describe('Trader', () => {
       it('emits a deferred ORDER_ERRORED_EVENT with the reason, nothing filled nor live, the portfolio and the price known', () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_ERRORED_EVENT, {
           order: { ...advice, amount: 0, reason, orderErrorDate: 1_700_000_000_000, filled: 0, mayBeLive: false },
-          exchange: { price: marketPrice ?? 0, portfolio: trader['portfolio'] },
+          exchange: { price: marketPrice ?? 0, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
         });
       });
 
@@ -2085,7 +2357,7 @@ describe('Trader', () => {
         ORDER_ERRORED_EVENT,
         expect.objectContaining({
           order: expect.objectContaining({ id: advice.id, reason: 'boom' }),
-          exchange: { price: 100, portfolio: trader['portfolio'] },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
         }),
       );
     });
@@ -2158,7 +2430,7 @@ describe('Trader', () => {
       it('emits a deferred ORDER_CANCELED_EVENT with what the order filled', () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_CANCELED_EVENT, {
           order: expect.objectContaining({ id: advice.id, orderCancelationDate: 123_456, filled: 2, remaining: 7.5 }),
-          exchange: { price: 100, portfolio: trader['portfolio'] },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
         });
       });
 
@@ -2196,6 +2468,42 @@ describe('Trader', () => {
 
       it('logs the cancelation as reporting no fill', () => {
         expect(logger.info).toHaveBeenCalledWith('trader', `[${advice.id}] BUY STICKY order canceled (no fill reported)`);
+      });
+    });
+
+    // The price the fills reported, which the RoundTripAnalyzer books a canceled fill at: not the price the strategy asked for, which a
+    // STICKY or a MARKET order is only sized by. Not for a MARKET order, whose price reported can be the bound of its slippage.
+    describe('the price of the fill of an order canceled after a fill', () => {
+      beforeEach(() => {
+        vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+      });
+
+      const cancelAfterFills = async (type: AdviceOrder['type'], price: number, averageFillPrice?: number) => {
+        const advice = { ...buildAdvice({ type, price }), cost: 100 };
+        await trader.onStrategyCreateOrder([advice]);
+        const order = getOrderInstance(advice.id)!;
+        order.getAverageFillPrice.mockReturnValue(averageFillPrice);
+        await order.emitAndSettle(ORDER_CANCELED_EVENT, { status: 'canceled', timestamp: 123_456, filled: 0.5, remaining: 0.45 });
+        return getCanceledEvent()!.order;
+      };
+
+      it.each`
+        type        | price  | averageFillPrice | fillPrice
+        ${'STICKY'} | ${100} | ${95}            | ${95}
+        ${'LIMIT'}  | ${95}  | ${94.99}         | ${94.99}
+        ${'MARKET'} | ${100} | ${110.25}        | ${undefined}
+        ${'STICKY'} | ${100} | ${undefined}     | ${undefined}
+      `(
+        'relays a fill price of $fillPrice for a $type order sized at $price whose fills were reported at $averageFillPrice',
+        async ({ type, price, averageFillPrice, fillPrice }) => {
+          const canceled = await cancelAfterFills(type, price, averageFillPrice);
+          expect(canceled.fillPrice).toBe(fillPrice);
+        },
+      );
+
+      it('leaves the fill price out of the ORDER_CANCELED_EVENT of an order whose fills no answer priced', async () => {
+        const canceled = await cancelAfterFills('STICKY', 100);
+        expect(Object.keys(canceled)).not.toContain('fillPrice');
       });
     });
 
@@ -2287,7 +2595,7 @@ describe('Trader', () => {
             filled: 2,
             remaining: 7.5,
           }),
-          exchange: { price: 100, portfolio: trader['portfolio'] },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: undefined },
         }),
       );
     });
@@ -2360,7 +2668,7 @@ describe('Trader', () => {
 
       expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_ERRORED_EVENT, {
         order: expect.objectContaining({ id: buildAdvice().id, reason: 'too small', orderErrorDate: 1_700_000_000_000 }),
-        exchange: { price: 100, portfolio: trader['portfolio'] },
+        exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: undefined },
       });
     });
 
@@ -2417,7 +2725,7 @@ describe('Trader', () => {
       it(`still emits the deferred ${relayed}, with the portfolio known`, () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(relayed, {
           order: expect.objectContaining({ id: advice.id }),
-          exchange: { price: 100, portfolio: trader['portfolio'] },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: undefined },
         });
       });
     });
@@ -2500,7 +2808,7 @@ describe('Trader', () => {
             fee: 0,
             effectivePrice: 105,
           },
-          exchange: { price: 105, portfolio: trader['portfolio'] },
+          exchange: { price: 105, portfolio: trader['portfolio'], portfolioReadAt: undefined },
         });
       });
 
@@ -2568,7 +2876,7 @@ describe('Trader', () => {
             fee: 0,
             effectivePrice: 105,
           },
-          exchange: { price: 105, portfolio: trader['portfolio'] },
+          exchange: { price: 105, portfolio: trader['portfolio'], portfolioReadAt: undefined },
         });
       });
 
@@ -2689,7 +2997,7 @@ describe('Trader', () => {
       it('still emits a deferred ORDER_COMPLETED_EVENT, with the portfolio known', () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_COMPLETED_EVENT, {
           order: expect.objectContaining({ id: buildAdvice().id }),
-          exchange: { price: 100, portfolio: trader['portfolio'] },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: undefined },
         });
       });
 
@@ -2707,7 +3015,7 @@ describe('Trader', () => {
 
       expect(trader['addDeferredEmit']).toHaveBeenCalledWith(
         ORDER_ERRORED_EVENT,
-        expect.objectContaining({ exchange: { price: 0, portfolio: trader['portfolio'] } }),
+        expect.objectContaining({ exchange: { price: 0, portfolio: trader['portfolio'], portfolioReadAt: undefined } }),
       );
     });
 
@@ -2720,7 +3028,7 @@ describe('Trader', () => {
 
       expect(trader['addDeferredEmit']).toHaveBeenCalledWith(
         ORDER_CANCELED_EVENT,
-        expect.objectContaining({ exchange: { price: 0, portfolio: trader['portfolio'] } }),
+        expect.objectContaining({ exchange: { price: 0, portfolio: trader['portfolio'], portfolioReadAt: undefined } }),
       );
     });
   });
@@ -2944,6 +3252,67 @@ describe('Trader', () => {
 
       it('emits the ORDER_COMPLETED_EVENT with the portfolio it fetched', () => {
         expect(getCompletedEvent()?.exchange.portfolio).toEqual(portfolioAfter);
+      });
+    });
+  });
+
+  // When the Trader read the balances an event of an order carries: the EventSubscriber dates them with it. An end whose read failed, or
+  // an order placed between two reads, carries the last read as it stands, which the time of its event would date anew.
+  describe('the time of the balance read the events of an order carry', () => {
+    const FIRST_READ_AT = Date.parse('2024-01-01T12:00:30Z');
+    const LATER = Date.parse('2024-01-01T12:01:10Z');
+    const advice = buildAdvice({ type: 'LIMIT', amount: 1, price: 95 });
+    const getReadAt = (event: string) =>
+      (trader['addDeferredEmit'] as unknown as Mock).mock.calls.find(([name]) => name === event)?.[1].exchange.portfolioReadAt;
+
+    beforeEach(() => {
+      trader['prices'].set('BTC/USDT', 100);
+      fakeExchange.fetchTickers.mockResolvedValue({ 'BTC/USDT': { bid: 100 } });
+    });
+
+    // The portfolio the Trader starts with was never read
+    it('is undefined in the ORDER_INITIATED_EVENT of an order placed before any read', async () => {
+      await trader.onStrategyCreateOrder([advice]);
+      expect(getReadAt(ORDER_INITIATED_EVENT)).toBeUndefined();
+    });
+
+    describe('once a synchronization read the balance at 12:00:30', () => {
+      beforeEach(async () => {
+        vi.setSystemTime(FIRST_READ_AT);
+        await trader['synchronize']();
+        vi.setSystemTime(LATER);
+      });
+
+      it('is 12:00:30 in the ORDER_INITIATED_EVENT of an order placed at 12:01:10', async () => {
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getReadAt(ORDER_INITIATED_EVENT)).toBe(FIRST_READ_AT);
+      });
+
+      // Never placed, it changed nothing on the exchange, and nothing is read again
+      it('is 12:00:30 in the ORDER_ERRORED_EVENT of an order without price', async () => {
+        trader['prices'].clear();
+        await trader.onStrategyCreateOrder([buildAdvice({ type: 'MARKET', amount: 1 })]);
+        expect(getReadAt(ORDER_ERRORED_EVENT)).toBe(FIRST_READ_AT);
+      });
+
+      // The report of every end reads the balance again (see relayError)
+      it.each`
+        end              | event                    | payload                                                       | relayed
+        ${'is filled'}   | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                  | ${ORDER_COMPLETED_EVENT}
+        ${'is canceled'} | ${ORDER_CANCELED_EVENT}  | ${{ timestamp: 1_700_000_100_000, filled: 0, remaining: 1 }}  | ${ORDER_CANCELED_EVENT}
+        ${'errors'}      | ${ORDER_ERRORED_EVENT}   | ${{ reason: 'exchange timeout', mayBeLive: false }}           | ${ORDER_ERRORED_EVENT}
+        ${'is refused'}  | ${ORDER_INVALID_EVENT}   | ${{ reason: 'too small', status: 'rejected', filled: false }} | ${ORDER_ERRORED_EVENT}
+      `('is 12:01:10, the time of the read after it, in the $relayed of an order that $end then', async ({ event, payload, relayed }) => {
+        const order = await prepareOrder('creation', advice);
+        await order.emitAndSettle(event, payload);
+        expect(getReadAt(relayed)).toBe(LATER);
+      });
+
+      it('is 12:00:30 in the ORDER_COMPLETED_EVENT of an order whose read after the fill fails', async () => {
+        const order = await prepareOrder('creation', advice);
+        fakeExchange.fetchBalance.mockRejectedValueOnce(new Error('network down'));
+        await order.emitAndSettle(ORDER_COMPLETED_EVENT);
+        expect(getReadAt(ORDER_COMPLETED_EVENT)).toBe(FIRST_READ_AT);
       });
     });
   });
@@ -3249,6 +3618,7 @@ describe('Trader', () => {
         exchange: {
           price: 100,
           portfolio: trader['portfolio'],
+          portfolioReadAt: undefined,
         },
       });
     });

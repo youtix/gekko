@@ -351,6 +351,80 @@ describe('E2E: Realtime Live Trader Flow', () => {
     });
   });
 
+  it('Scenario E: a resting LIMIT SELL filled in part and canceled by the strategy, which sells all it held at the market on that candle', async () => {
+    // A LIMIT SELL of 1 at 110 on candle 0, above the market of 100: it rests. Candle 1 reaches 111, trading 0.4 BTC up there, and on
+    // candle 2 the strategy cancels the order (cancelAfter 2), then sends a MARKET SELL of the 1 BTC it held, to sell at the market instead
+    strategy = script([
+      { candle: 0, side: 'SELL', type: 'LIMIT', price: 110, amount: 1, cancelAfter: 2 },
+      { candle: 2, side: 'SELL', type: 'MARKET', amount: 1 },
+    ]);
+    MockCCXTExchange.setBalances({ BTC: 1, USDT: 10000 });
+    MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
+      { close: 100 },
+      { open: 105, high: 111, close: 108, volume: 0.4 },
+      { close: 105 },
+      { close: 104 },
+      { close: 103 },
+    ]);
+
+    // The SELL of candle 2 is sent at 12:03:02 and fills as it is created, reported with the next bucket, at 12:04:02
+    await runRealtimeUntil(() => findTextLine('Order 1 completed') !== undefined || findTextLine('Order 1 errored') !== undefined, {
+      maxMinutes: 6,
+    });
+
+    expect({
+      calls: MockCCXTExchange.accountCalls,
+      trader: traderLines(),
+      strategy: strategyLines(),
+      warnings: warnings(),
+      book: book(),
+      balances: MockCCXTExchange.getBalances(),
+    }).toEqual({
+      calls: [
+        ...BEFORE_FIRST_ORDER_CALLS,
+        { method: 'createOrder', symbol: 'BTC/USDT', type: 'limit', side: 'SELL', amount: 1, price: 110 },
+        // Polled every 20 s from its creation at 12:01:02, the poll of 12:02:02 reading the 0.4 BTC candle 1 sold of it, to 12:03:02
+        ...Array.from({ length: 6 }, (): AccountCall => ({ method: 'fetchOrder', id: '1', symbol: 'BTC/USDT' })),
+        // Candle 2: the strategy cancels the LIMIT SELL, then sends the SELL, which the Trader sizes at once, before the report of the
+        // cancelation reads the balance (sent first, while CCXTExchange reads the ticker it prices the SELL at, candle 2's close). It caps
+        // the SELL at the 1 BTC its last synchronization read, before the LIMIT SELL was placed, less the 0.4 BTC that SELL sold: sized
+        // from the whole of it, the SELL was refused for want of funds, an error counting towards the circuit breaker, the position open.
+        { method: 'cancelOrder', id: '1', symbol: 'BTC/USDT' },
+        { method: 'fetchBalance' },
+        { method: 'createOrder', symbol: 'BTC/USDT', type: 'market', side: 'SELL', amount: 0.6, price: 105 },
+        { method: 'fetchMyTrades', symbol: 'BTC/USDT', since: at('12:03:02'), limit: 1000 },
+        { method: 'fetchBalance' },
+      ],
+      trader: [
+        '[#1] Status changed: OPEN',
+        '[#1] SELL LIMIT order fill, total filled: 0.4',
+        '[#2] SELL MARKET order of 1 BTC above the free balance: 0.6 BTC sent, all that can be sold (1 BTC free at the last synchronization, less 0.4 BTC for the SELLs placed since)',
+        '[#1] SELL LIMIT order canceled (filled: 0.4, remaining: 0.6)',
+        '[#2] SELL MARKET order fill, total filled: 0.6',
+        '[#2] Status changed: FILLED',
+        // 0.063 USDT on the 63 of 0.6 × 105: 0.1 %, and 105 less its 0.1 % is 104.895
+        summaryLine('[#2] SELL MARKET', '12:03:02', 'Order amount: 0.6, Effective price: 104.895, Fee: 0.063, Fee percent: 0.1,'),
+      ],
+      // Both ends are reported with the bucket of 12:04:02, after the creation of the SELL
+      strategy: [
+        'Order 0 created on candle 0: SELL LIMIT of 1 on BTC/USDT at 110',
+        'Order 0 canceled by the strategy on candle 2',
+        'Order 1 created on candle 2: SELL MARKET of 1 on BTC/USDT',
+        'Order 0 canceled: filled 0.4, remaining 0.6',
+        'Order 1 completed: 0.6 at 105, fee 0.063 (0.1 %), effective price 104.895, executed at 2024-01-01T12:03:02.000Z',
+      ],
+      warnings: [
+        '[#2] SELL MARKET order of 1 BTC above the free balance: 0.6 BTC sent, all that can be sold (1 BTC free at the last synchronization, less 0.4 BTC for the SELLs placed since)',
+      ],
+      book: [
+        { id: '1', type: 'limit', side: 'sell', price: 110, amount: 1, filled: 0.4, remaining: 0.6, status: 'canceled' },
+        { id: '2', type: 'market', side: 'sell', price: 105, amount: 0.6, filled: 0.6, remaining: 0, status: 'closed' },
+      ],
+      // 0.4 BTC at 110 brought 44 USDT less the maker fee of 0.1 %, 43.956, and 0.6 at 105 brought 63 less the taker fee, 62.937
+      balances: { BTC: { free: 0, used: 0, total: 0 }, USDT: { free: 10106.893, used: 0, total: 10106.893 } },
+    });
+  });
+
   // The reason the error of a creation whose outcome is unknown carries: Order.orderErroredAtCreation wraps the failure
   const outcomeUnknown = (failure: string) =>
     `Outcome unknown: the order may be live on the exchange, check it before placing it again (${failure})`;

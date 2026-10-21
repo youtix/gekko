@@ -34,10 +34,11 @@ export type AdviceOrder = {
    */
   cost?: number;
   /**
-   * A share of a balance, in place of an amount: in percent, above 0 and at most 100 (25 for 25 %), of the currency free for a BUY, of
-   * the asset free for a SELL, as the Trader's last synchronization read it. Of that balance, not of what the orders placed since leave
-   * of it: two BUYs of 50 % on one candle are both sized from the whole, and a BUY of 100 % is an all-in BUY. createOrder refuses it
-   * beside an amount or a cost (see Tools.createOrder).
+   * A share of a balance, in place of an amount: in percent, above 0 and at most 100 (25 for 25 %), of the currency free for a BUY plus
+   * what the Trader's own BUYs open at its last synchronization held of it, of the asset free for a SELL, as that synchronization read
+   * them. Of that balance, not of what the orders placed since leave of it: two BUYs of 50 % on one candle are both sized from the
+   * whole, and so are two a synchronization apart while the first rests; a BUY of 100 % buys what an all-in BUY does. createOrder
+   * refuses it beside an amount or a cost (see Tools.createOrder).
    */
   allocation?: number;
   /** Order price */

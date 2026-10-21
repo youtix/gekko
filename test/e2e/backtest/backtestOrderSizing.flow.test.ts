@@ -3,6 +3,7 @@ import type { TradingPair } from '@models/utility.types';
 import type { DebugBacktestParams } from '@strategies/debug/debugBacktest.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { range } from 'lodash-es';
+import { fileURLToPath } from 'node:url';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { clearLogs } from '../mocks/winston.mock';
 import {
@@ -10,6 +11,7 @@ import {
   minute,
   mockBacktestModules,
   numberedTextLines,
+  openLimitOrder,
   rawMarket,
   refusedMarketOrder,
   runBacktest,
@@ -56,6 +58,9 @@ const flatCandles = (price: number): Candle[] =>
   range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
 
 const CANDLES: Record<TradingPair, Candle[]> = { 'BTC/USDT': flatCandles(10000), 'ETH/USDT': flatCandles(2000) };
+
+/** The strategy file of the scenarios whose pairs order on candles of their own, loaded as a strategy file of the user's is */
+const ORDER_STEPS_PATH = fileURLToPath(new URL('./orderSteps.strategy.ts', import.meta.url));
 
 /** The warnings the Trader logged, oldest first, each order named by its rank among the orders of the run */
 const traderWarnings = () =>
@@ -278,6 +283,82 @@ describe('E2E: Backtest order sizing', () => {
         unreservedRead(minute(2), { BTC: 21, ETH: 47.5, USDT: 14715 }),
         // 200000 × 0.999 = 199800 and 95000 × 0.999 = 94905 brought in: 14715 + 294705
         unreservedRead(minute(4), { BTC: 1, ETH: 0, USDT: 309420 }),
+      ],
+    });
+  });
+
+  it('sizes a BUY allocated 50 % from the currency read and what a BUY resting at that read holds, as on the candle of that BUY', async () => {
+    // From 300000 USDT, the BTC BUY of 00:01 is a LIMIT BUY at 9500 allocated 50 %, which rests below the market of 10000 to the end; the
+    // ETH BUY of 00:12, allocated 50 % too, comes after the synchronization of 00:10. BTC's maker fee is 0, so that the simulator reserves
+    // what Binance reserves for a resting BUY, its amount at its price: it reserves a maker fee in the currency too, where Binance takes
+    // the fee from what the BUY brings in.
+    const minutes = range(15);
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      {
+        watch: {
+          mode: 'backtest',
+          assets: ['BTC', 'ETH'],
+          currency: 'USDT',
+          timeframe: '1m',
+          daterange: rawDaterange({ start: minute(0), end: minute(15) - 1 }),
+        },
+        exchange: {
+          name: 'dummy-cex',
+          simulationBalance: [
+            { assetName: 'BTC', balance: 0 },
+            { assetName: 'ETH', balance: 0 },
+            { assetName: 'USDT', balance: 300000 },
+          ],
+          marketData: [rawMarket('BTC/USDT', { fee: { maker: 0, taker: 0.001 } }), rawMarket('ETH/USDT')],
+        },
+        storage: { type: 'sqlite', database: ':memory:' },
+        plugins: [{ name: 'TradingAdvisor', strategyName: 'OrderSteps', strategyPath: ORDER_STEPS_PATH }, { name: 'Trader' }],
+        strategy: {
+          name: 'OrderSteps',
+          steps: [
+            { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', price: 9500, allocation: 50 },
+            { candle: 12, symbol: 'ETH/USDT', side: 'BUY', type: 'MARKET', allocation: 50 },
+          ],
+        },
+      },
+      {
+        'BTC/USDT': minutes.map(n => ({ start: minute(n), open: 10000, high: 10010, low: 9990, close: 10000, volume: 10 })),
+        'ETH/USDT': minutes.map(n => ({ start: minute(n), open: 2000, high: 2002, low: 1998, close: 2000, volume: 10 })),
+      },
+    );
+
+    // The read of 00:10 shows the BTC BUY's cost reserved, 142500 USDT, the 157500 left free. The PositionBook counts the BTC pair among
+    // those it shares the currency between while its BUY rests, so the ETH BUY's share is of what the read shows free and of what that BUY
+    // holds: 150000 USDT, as on the candle of the BTC BUY, before the read. A share of the 157500 read free alone bought 37.40625 ETH, and
+    // left a quarter of the capital idle.
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [],
+      orderCalls: [
+        // 50 % of 300000 USDT, 150000, less the 5 % kept back for the fee, at 9500: 142500 / 9500
+        openLimitOrder(minute(2), 'BTC/USDT', 'BUY', 15, 9500, 1),
+        // 50 % of the 157500 USDT read free and the 142500 the BTC BUY holds, 150000, of which 95 % at 2000: 142500 / 2000
+        filledMarketOrder(minute(13), 'ETH/USDT', 'BUY', 71.25, 2),
+      ],
+      balanceReads: [
+        // The synchronization of 00:10, dated by the clock of the simulator, the end of that minute
+        {
+          at: minute(11),
+          balance: {
+            BTC: { free: 0, used: 0, total: 0 },
+            ETH: { free: 0, used: 0, total: 0 },
+            USDT: { free: 157500, used: 142500, total: 300000 },
+          },
+        },
+        // After the ETH BUY: 71.25 × 2000 × 1.001 = 142642.5 spent, the BTC BUY still resting
+        {
+          at: minute(13),
+          balance: {
+            BTC: { free: 0, used: 0, total: 0 },
+            ETH: { free: 71.25, used: 0, total: 71.25 },
+            USDT: { free: 14857.5, used: 142500, total: 157357.5 },
+          },
+        },
       ],
     });
   });

@@ -17,7 +17,15 @@ import { roundToStep } from '@helpers/market/precision.helper';
 import { getAllInBuyAmount, getAllocatedShare, getBuyBudget, getSellAmountOfCost } from '@helpers/order/sizing.helper';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
-import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, OrderInitiatedEvent } from '@models/event.types';
+import {
+  CandleBucket,
+  ExchangeEvent,
+  OrderCanceledEvent,
+  OrderCompletedEvent,
+  OrderErroredEvent,
+  OrderInitiatedEvent,
+} from '@models/event.types';
+import { OrderType } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { Plugin } from '@plugins/plugin';
@@ -32,6 +40,7 @@ import { UUID } from 'node:crypto';
 import { ORDER_FACTORY, SIZING_KEYS } from './trader.const';
 import {
   computeOrderPricing,
+  describeAllocationBase,
   describeBuysPlacedSince,
   getBacktestModeIntervalSyncTime,
   PortfolioUpdatesConfig,
@@ -56,6 +65,16 @@ export class Trader extends Plugin {
   private readonly portfolioUpdatesConfig: PortfolioUpdatesConfig | null;
 
   private portfolio: Portfolio = createEmptyPortfolio();
+  /**
+   * When the Trader read the portfolio, which the events of the orders carry beside it (see ExchangeEvent.portfolioReadAt): the wall
+   * clock once the exchange answered, in a backtest too. Undefined for the empty portfolio it starts with, before any read.
+   */
+  private portfolioReadAt?: EpochTimeStamp;
+  /**
+   * What the Trader's own BUYs held of each currency at the last balance read, by currency: what that read shows taken from it, reserved
+   * or spent (see readHeldByOpenBuys). A BUY by its allocation asks for its share of the currency read and of this (see getBudget).
+   */
+  private heldByOpenBuys = new Map<string, number>();
   private prices: Map<TradingPair, number> = new Map();
   private currentTimestamp: EpochTimeStamp = 0;
   private syncInterval: NodeJS.Timeout | null = null;
@@ -74,8 +93,10 @@ export class Trader extends Plugin {
    * The orders placed since the balance was read, by id: what each one takes from a free balance that read does not show, and the
    * count of synchronizations started when it was placed. A SELL takes its amount of the asset (see sizeSell), a BUY what it may spend
    * of the currency (see sizeOrder, sizeAllInBuy and sizeBudgetBuy). A synchronization started after an order reads a balance that
-   * shows it, filled or reserved: the order is forgotten once that synchronization has read the balance. So is an order the strategy
-   * cancels: the exchange gets the cancelation before any order sent after it, and releases what the canceled order reserved.
+   * shows it, filled or reserved: the order is forgotten once that synchronization has read the balance. An order the strategy cancels
+   * takes no more than what it filled before the cancelation, as far as the exchange reported it (see onStrategyCancelOrder): the
+   * exchange gets the cancelation before any order sent after it, and releases what the order reserved for the rest, not what it spent
+   * or sold.
    */
   private readonly unreadOrders = new Map<UUID, UnreadOrder>();
 
@@ -135,10 +156,12 @@ export class Trader extends Plugin {
 
     // Update portfolio, balance and prices
     this.portfolio = await exchange.fetchBalance();
+    this.portfolioReadAt = Date.now();
     // A balance that shows the orders placed before this synchronization started: they take nothing more from it (see unreadOrders)
     for (const [id, { synchronizationCount }] of this.unreadOrders) {
       if (synchronizationCount < synchronizationNumber) this.unreadOrders.delete(id);
     }
+    this.heldByOpenBuys = this.readHeldByOpenBuys(synchronizationNumber);
     const tickers = await exchange.fetchTickers(this.pairs);
     for (const symbol of this.pairs) {
       const price = tickers[symbol].bid;
@@ -163,6 +186,30 @@ export class Trader extends Plugin {
     } else {
       this.addDeferredEmit<Portfolio>(PORTFOLIO_CHANGE_EVENT, this.portfolio);
     }
+  }
+
+  /**
+   * What the Trader's own BUYs held of each currency at the read of synchronization `synchronizationNumber`, by currency, which the read
+   * shows taken from it: those placed before that synchronization started, but those whose completion had been heard by then, the read
+   * showing them filled (see TraderOrderMetadata). Each holds its amount at the price it was created with, in decimal (see
+   * multiplyPrecise), what it had filled included: the exchange reserves what is left of a resting BUY (Binance its amount at its price),
+   * and its fills spent the rest. One the strategy had canceled before the read started holds what it had filled, as far as its fills
+   * reported then: the exchange got the cancelation first, and released the rest. A STICKY or a MARKET BUY is counted at the market price
+   * it was created at, which its moves and its fills may have left since.
+   */
+  private readHeldByOpenBuys(synchronizationNumber: number) {
+    const held = new Map<string, number>();
+    // A synchronization started after a count was noted reads a balance that shows what happened then
+    const isRead = (count?: number) => !isNil(count) && count < synchronizationNumber;
+    for (const order of this.orders.values()) {
+      if (order.side !== 'BUY' || !isRead(order.synchronizationCount) || isRead(order.endSynchronizationCount)) continue;
+      const holding = isRead(order.cancelSynchronizationCount) ? order.orderInstance.getFilledAmount() : order.amount;
+      const cost = multiplyPrecise(holding, order.price);
+      if (!isFinitePositive(cost)) continue;
+      const [, currencyName] = order.symbol.split('/');
+      held.set(currencyName, addPrecise(held.get(currencyName) ?? 0, cost));
+    }
+    return held;
   }
 
   /**
@@ -231,10 +278,19 @@ export class Trader extends Plugin {
   /**
    * What an order sized by its cost or by its allocation asks for (see Budget), undefined for an order with an amount or an all-in one:
    * createOrder lets through one of the three at most. A BUY asks for the currency it may spend, the share DEFAULT_FEE_BUFFER keeps back
-   * for the fee included: its cost, or its allocation of the currency the last synchronization read. A SELL asks for an amount of the
-   * asset: its allocation of the asset read, or its cost over the price of the order, nothing kept back, the fee coming out of what it
-   * brings in. Both worked out in decimal (see getAllocatedShare and getSellAmountOfCost). A share is of the balance read, not of what the
-   * orders placed since leave: two BUYs of 50 % on one candle are both sized from the whole of it, the second not from half of the rest.
+   * for the fee included: its cost, or its allocation of the currency the last synchronization read and of what the Trader's own BUYs
+   * open at that read held of it (see readHeldByOpenBuys). A SELL asks for an amount of the asset: its allocation of the asset read, or
+   * its cost over the price of the order, nothing kept back, the fee coming out of what it brings in. All worked out in decimal (see
+   * getAllocatedShare and getSellAmountOfCost). A share is of the balance read, not of what the orders placed since leave: two BUYs of
+   * 50 % on one candle are both sized from the whole of it, the second not from half of the rest.
+   *
+   * Nor of what the BUYs open at the read took from the currency, which the share of a BUY would otherwise depend on whether a
+   * synchronization came between it and the BUYs before it: two pairs buying a candle apart, the first a STICKY or LIMIT BUY resting
+   * across a synchronization, gave the second a share of what the first left, while the PositionBook counts the first pair, its BUY
+   * pending, among those it shares the currency between, and a quarter of the capital stayed idle on two pairs. What such a BUY had
+   * filled counts too, spent on its behalf: left out, the share of the next BUY shrank with every fill of the one resting. A SELL by its
+   * allocation stays a share of the asset read: what a SELL open on it holds is not there to sell, and no strategy shares an asset
+   * between SELLs as the PositionBook shares the currency between BUYs, its SELLs selling all of their asset.
    */
   private getBudget(advice: AdviceOrder, price: number, { read }: FreeBalanceLeft): Budget | undefined {
     const { id, side, type, symbol, cost, allocation } = advice;
@@ -242,8 +298,9 @@ export class Trader extends Plugin {
     const order = `[${id}] ${side} ${type} order of`;
     if (!isNil(allocation)) {
       const unit = side === 'BUY' ? currencyName : assetName;
-      const asked = getAllocatedShare(read, allocation);
-      return { asked, label: `${order} ${asked} ${unit} (${allocation} % of ${read} ${unit})` };
+      const held = side === 'BUY' ? (this.heldByOpenBuys.get(currencyName) ?? 0) : 0;
+      const asked = getAllocatedShare(held > 0 ? addPrecise(read, held) : read, allocation);
+      return { asked, label: `${order} ${asked} ${unit} (${allocation} % of ${describeAllocationBase(read, held, unit)})` };
     }
     if (isNil(cost)) return;
     if (side === 'BUY') return { asked: cost, label: `${order} ${cost} ${currencyName}` };
@@ -278,7 +335,10 @@ export class Trader extends Plugin {
    * (see getFreeBalanceLeft). Each SELL was capped against the whole of it: two SELLs of one asset, two trailing stops triggering on the
    * same minute or a stop's and the strategy's, each fitted while together they sold more than was held, and the second was refused,
    * its position left unprotected. Any amount is left as asked for while the balance is 0: maybe a portfolio not synchronized yet, or
-   * one the SELLs placed before take whole, and a SELL of 0 would be refused anyway.
+   * one the SELLs placed before take whole, and a SELL of 0 would be refused anyway. The second is said at warn level with that cause, as
+   * for an all-in SELL sized from nothing: the refusal names the balance, not the SELLs that took it, and an amount, a cost or an
+   * allocation was sent unwarned while an all-in SELL was warned of. Left as asked, the SELL still goes through should one of those SELLs
+   * be refused or canceled before it reaches the exchange, which a SELL of 0 never does.
    *
    * The most the market takes in one order of its type (see getMaximumAmount). LIMIT and STICKY BUYs can build a position larger than
    * one MARKET order can sell (Binance's MARKET_LOT_SIZE: tens of BTC on BTCUSDT, against 9000 for LOT_SIZE): the SELL of the whole,
@@ -314,7 +374,14 @@ export class Trader extends Plugin {
       warning('trader', `${asked} above ${capped}, the rest stays held`);
       return maximum;
     }
-    if (!isAboveBalance) return requestedAmount;
+    if (!isAboveBalance) {
+      if (isFinitePositive(requestedAmount) && read > 0 && !(free > 0)) {
+        const sent = `${formatEveryDecimal(requestedAmount)} ${assetName} sent as asked`;
+        const cause = this.getEmptyBalanceCause(balance, assetName, 'SELLs');
+        warning('trader', `${asked}: ${sent}, which the market refuses unless some of the asset is free by then (${cause})`);
+      }
+      return requestedAmount;
+    }
     const sent = `${asked} above the free balance: ${free} ${assetName} sent, all that can be sold`;
     // The amount sent is then less than the free balance read: what the SELLs placed since take is said
     const left = `${read} ${assetName} free at the last synchronization, less ${taken} ${assetName} for the SELLs placed since`;
@@ -371,7 +438,9 @@ export class Trader extends Plugin {
    *
    * Capped at the most the market takes in one order of its type (see getMaximumAmount), with a warning, as an all-in BUY is: it then
    * takes from the currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it. Otherwise it takes its
-   * budget. An allocation of 100 % is an all-in BUY: the same amount, taking as much of the currency, warned of in the same cases.
+   * budget. An allocation of 100 % is an all-in BUY: the same amount, taking as much of the currency, warned of in the same cases, but
+   * when the last synchronization read BUYs of the Trader open: its share, of what they held too, is then above what is left, and capped
+   * at it with a warning (see getBudget).
    */
   private sizeBudgetBuy(advice: AdviceOrder, price: number, currency: FreeBalanceLeft, { asked, label }: Budget) {
     const { type, symbol } = advice;
@@ -462,6 +531,14 @@ export class Trader extends Plugin {
   }
 
   /**
+   * What the events of an order of `symbol` say of the exchange (see ExchangeEvent): the last price of the pair, the portfolio the
+   * Trader read last, and when it read it, undefined before any read
+   */
+  private getExchangeEvent(symbol: TradingPair): ExchangeEvent {
+    return { price: this.getLastPrice(symbol), portfolio: this.portfolio, portfolioReadAt: this.portfolioReadAt };
+  }
+
+  /**
    * The completed event of an order from its summary, whose figures are usable numbers: the exchange's, checked, or an estimate (see
    * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing).
    */
@@ -483,8 +560,7 @@ export class Trader extends Plugin {
     );
 
     const order = { ...summary, id, orderCreationDate, type, fee, effectivePrice, symbol };
-    const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
-    return { order, exchange };
+    return { order, exchange: this.getExchangeEvent(symbol) };
   }
 
   /**
@@ -544,22 +620,29 @@ export class Trader extends Plugin {
   }
 
   /**
-   * The price a filled order executed at, estimated (see estimateOrderSummary). A LIMIT or STICKY order places limit orders, which
-   * execute at their price, or better: first, the prices the exchange reported for those that filled, weighted by their fills (see
-   * Order.getAverageFillPrice). A STICKY order was estimated at the market, which it follows, whatever its transactions filled at: one
-   * that rested at 100.01 and filled before the market fell to 99 was reported at 99. Not a MARKET order: the price reported for it can
-   * be the bound of its slippage, Hyperliquid placing it as a limit order 5 % beyond the market. Without them, a LIMIT order executed
-   * at its price. Any other one at the market: the last price known, else the price the order was created with, which comes with the
-   * report (see relayTerminalEvents) whatever the orders the Trader still lists: an estimate never has a price of NaN.
+   * The price a filled order executed at, estimated (see estimateOrderSummary): first, the price of its fills, for a LIMIT or STICKY
+   * order (see getFillPrice). A STICKY order was estimated at the market, which it follows, whatever its transactions filled at: one that
+   * rested at 100.01 and filled before the market fell to 99 was reported at 99. Without them, a LIMIT order executed at its price. Any
+   * other one at the market: the last price known, else the price the order was created with, which comes with the report (see
+   * relayTerminalEvents) whatever the orders the Trader still lists: an estimate never has a price of NaN.
    */
   private estimateExecutionPrice(orderInstance: OrderInstance, { symbol, type }: RelayedOrder, creationPrice: number) {
-    const fillPrice = type === 'MARKET' ? undefined : orderInstance.getAverageFillPrice();
+    const fillPrice = this.getFillPrice(orderInstance, type);
     if (!isNil(fillPrice)) return { price: fillPrice, priceSource: 'the prices of its fills, as the exchange reported them' };
     if (type === 'LIMIT') return { price: creationPrice, priceSource: 'its limit price' };
 
     const marketPrice = this.getLastPrice(symbol);
     if (marketPrice > 0) return { price: marketPrice, priceSource: 'the last market price' };
     return { price: creationPrice, priceSource: 'the price it was created with: no market price known' };
+  }
+
+  /**
+   * The price of what an order filled, as the exchange reported its fills, weighted by them (see Order.getAverageFillPrice), for a LIMIT
+   * or a STICKY order: both place limit orders, which execute at their price, or better. Not for a MARKET order: the price reported for
+   * it can be the bound of its slippage, Hyperliquid placing it as a limit order 5 % beyond the market. Undefined when none is known.
+   */
+  private getFillPrice(orderInstance: OrderInstance, type: OrderType) {
+    return type === 'MARKET' ? undefined : orderInstance.getAverageFillPrice();
   }
 
   /**
@@ -582,10 +665,9 @@ export class Trader extends Plugin {
     } catch (err) {
       error('trader', `[${order.id}] Impossible to synchronize: ${describeError(err)}`);
     }
-    const exchange = { price: this.getLastPrice(order.symbol), portfolio: this.portfolio };
     this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, {
       order: { ...order, reason, orderErrorDate: this.currentTimestamp, filled, mayBeLive },
-      exchange,
+      exchange: this.getExchangeEvent(order.symbol),
     });
   }
 
@@ -654,6 +736,9 @@ export class Trader extends Plugin {
     try {
       orderInstance.removeAllListeners();
       const startedAfter = this.synchronizationCount;
+      // Listed until its end is queued, it is no BUY open at the reads started from now on, which show its fill (see readHeldByOpenBuys)
+      const metadata = this.orders.get(id);
+      if (metadata) metadata.endSynchronizationCount = startedAfter;
       const summary = await this.summarizeCompletedOrder(orderInstance, order, creationPrice);
       // The portfolio after the fill, best effort (see relayError)
       try {
@@ -669,7 +754,11 @@ export class Trader extends Plugin {
     }
   }
 
-  /** The cancelation, whoever canceled the order: the strategy, or the exchange (expired, canceled from its interface) */
+  /**
+   * The cancelation, whoever canceled the order: the strategy, or the exchange (expired, canceled from its interface), with what it
+   * filled before, as far as the exchange reported it, and the price of that fill when one is known (see getFillPrice). Not `price`, the
+   * one the strategy asked for, which a MARKET or a STICKY order is only sized by: the RoundTripAnalyzer booked such a fill at it.
+   */
   private async reportCanceled(orderInstance: OrderInstance, order: RelayedOrder, cancelation: OrderCancelation) {
     const { id, symbol, side, type } = order;
     try {
@@ -686,10 +775,10 @@ export class Trader extends Plugin {
       } catch (err) {
         error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
-      const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
+      const fillPrice = this.getFillPrice(orderInstance, type);
       this.addDeferredEmit<OrderCanceledEvent>(ORDER_CANCELED_EVENT, {
-        order: { ...order, orderCancelationDate: timestamp, filled, remaining },
-        exchange,
+        order: { ...order, orderCancelationDate: timestamp, filled, remaining, ...(!isNil(fillPrice) && { fillPrice }) },
+        exchange: this.getExchangeEvent(symbol),
       });
     } catch (err) {
       error('trader', `[${id}] Impossible to report the cancelation of the ${side} ${type} order: ${describeError(err)}`);
@@ -773,9 +862,19 @@ export class Trader extends Plugin {
         const orderMetadata = this.orders.get(id);
         if (!orderMetadata) return warning('trader', `[${id}] Impossible to cancel order: Unknown Order`);
         const { orderInstance, side, amount, type, orderCreationDate, price, requestedPrice, symbol } = orderMetadata;
-        // Kept, an order placed since the balance was read went on taking from it: an all-in order sent after the cancelation, to trade at
-        // the market instead, left out what the canceled one had reserved, which the exchange releases before that order reaches it
-        this.unreadOrders.delete(id);
+        // The exchange gets the cancelation before any order sent after it, and releases what the order reserved: kept whole, an order
+        // placed since the balance was read went on taking from it, and an all-in order sent after the cancelation, to trade at the
+        // market instead, left that out. Not what it filled before, spent (a BUY's currency) or sold (a SELL's asset), which that read
+        // does not show either: forgotten, a SELL of the asset sent on the candle that canceled a LIMIT SELL which had sold 0.4 of its
+        // 1 BTC was sized from the whole of it, and refused for want of funds, an error counting towards the circuit breaker
+        const unread = this.unreadOrders.get(id);
+        const filled = orderInstance.getFilledAmount();
+        if (unread && filled > 0) {
+          const spent = side === 'SELL' ? filled : getBuyBudget(filled, price);
+          this.unreadOrders.set(id, { ...unread, amount: Math.min(unread.amount, spent) });
+        } else this.unreadOrders.delete(id);
+        // A BUY holds no more than that fill of the currency at a read started from now on (see readHeldByOpenBuys)
+        orderMetadata.cancelSynchronizationCount = this.synchronizationCount;
 
         // From now on its updates are no longer logged, and its end is relayed as the creation flow relays it: with the price the
         // strategy asked for, if any, and the cost or the allocation it sized the order by. Not the price the order was created with
@@ -821,8 +920,7 @@ export class Trader extends Plugin {
             filled: 0,
             mayBeLive: false,
           };
-          const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
-          this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, { order, exchange });
+          this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, { order, exchange: this.getExchangeEvent(symbol) });
           return;
         }
 
@@ -837,8 +935,10 @@ export class Trader extends Plugin {
 
         // Emit order initiated event
         const orderInitiated = { ...advice, amount, symbol };
-        const exchange = { price: this.getLastPrice(symbol), portfolio: this.portfolio };
-        this.addDeferredEmit<OrderInitiatedEvent>(ORDER_INITIATED_EVENT, { order: orderInitiated, exchange });
+        this.addDeferredEmit<OrderInitiatedEvent>(ORDER_INITIATED_EVENT, {
+          order: orderInitiated,
+          exchange: this.getExchangeEvent(symbol),
+        });
 
         // Create order
         const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price);
@@ -852,6 +952,7 @@ export class Trader extends Plugin {
           requestedPrice: advice.price,
           orderInstance,
           symbol,
+          synchronizationCount: this.synchronizationCount,
           ...pick(advice, SIZING_KEYS),
         });
         // Until the balance is read again, the orders after it can only take what it leaves (see unreadOrders): a SELL its amount of the

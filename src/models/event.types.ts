@@ -49,8 +49,10 @@ export type ExchangeEvent = {
   /** The last price of the pair of the order, in currency: 0 when the Trader knows none, a price being above 0 */
   price: number;
   /**
-   * When the Trader read these balances, in epoch milliseconds: undefined for the empty portfolio it starts with, before any read. The
-   * EventSubscriber dates the balances of /portfolio with it.
+   * When the Trader read these balances, in epoch milliseconds: the wall clock once the exchange answered the read, in a backtest too,
+   * whose orders are dated on the clock of the simulated exchange. Undefined for the empty portfolio it starts with, before any read; an
+   * end whose read failed carries the last read and its time. The EventSubscriber dates the balances of /portfolio with it. Only the
+   * events of the orders carry it: portfolioChange is a bare Portfolio, queued as the Trader reads it.
    */
   portfolioReadAt?: EpochTimeStamp;
 };
@@ -76,9 +78,10 @@ export type OrderCanceledEvent = OrderInitiatedEvent & {
     /** What was left of its amount: the amount less `filled`, never below 0. Undefined with `filled` */
     remaining?: number;
     /**
-     * The mean price of the fills the exchange reported for the order, in currency, undefined when it reported none (see
-     * Trader.reportCanceled). Not `price`, the one the order asked for: a MARKET or a STICKY order fills at the market, a LIMIT order at
-     * its price or better.
+     * The mean price of the fills the exchange reported for a LIMIT or a STICKY order, in currency, weighted by them (see
+     * Trader.getFillPrice): left out when it reported none with a price, and for a MARKET order, whose reported price can be the bound
+     * of its slippage (Hyperliquid places it as a limit order 5 % beyond the market). Not `price`, the one the order asked for: a STICKY
+     * order fills at the market, a LIMIT order at its price or better.
      */
     fillPrice?: number;
   };

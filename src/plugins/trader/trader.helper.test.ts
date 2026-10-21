@@ -1,7 +1,13 @@
 import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { describe, expect, it, vi } from 'vitest';
-import { computeOrderPricing, getBacktestModeIntervalSyncTime, PortfolioUpdatesConfig, shouldEmitPortfolio } from './trader.helper';
+import {
+  computeOrderPricing,
+  describeAllocationBase,
+  getBacktestModeIntervalSyncTime,
+  PortfolioUpdatesConfig,
+  shouldEmitPortfolio,
+} from './trader.helper';
 
 // Mock logger
 vi.mock('@services/logger', () => ({
@@ -64,6 +70,22 @@ describe('trader.helper', () => {
       ${'1w'}   | ${10080}
     `('is $minutes minutes at $timeframe', ({ timeframe, minutes }) => {
       expect(getBacktestModeIntervalSyncTime(timeframe)).toBe(minutes);
+    });
+  });
+
+  // The balance read alone, as it was written, until the BUYs of the Trader open at the read held some of it: then the two added up, in
+  // decimal, and each, every decimal written without an exponent
+  describe('describeAllocationBase', () => {
+    it.each`
+      description                                    | read         | held          | unit      | expected
+      ${'the currency read, nothing held'}           | ${1000}      | ${0}          | ${'USDT'} | ${'1000 USDT'}
+      ${'the asset read of a SELL'}                  | ${3}         | ${0}          | ${'BTC'}  | ${'3 BTC'}
+      ${'the currency read and what open BUYs held'} | ${525}       | ${475}        | ${'USDT'} | ${'1000 USDT: 525 USDT free at the last synchronization, plus 475 USDT held by the BUYs open then'}
+      ${'0.1 and 0.2, added up in decimal'}          | ${0.1}       | ${0.2}        | ${'USDT'} | ${'0.3 USDT: 0.1 USDT free at the last synchronization, plus 0.2 USDT held by the BUYs open then'}
+      ${'figures String writes with an exponent'}    | ${0.0000005} | ${0.00000025} | ${'BTC'}  | ${'0.00000075 BTC: 0.0000005 BTC free at the last synchronization, plus 0.00000025 BTC held by the BUYs open then'}
+      ${'nothing read and what open BUYs held'}      | ${0}         | ${950}        | ${'USDT'} | ${'950 USDT: 0 USDT free at the last synchronization, plus 950 USDT held by the BUYs open then'}
+    `('writes $description as "$expected"', ({ read, held, unit, expected }) => {
+      expect(describeAllocationBase(read, held, unit)).toBe(expected);
     });
   });
 
