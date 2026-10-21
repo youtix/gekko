@@ -42,6 +42,7 @@ import {
   describeAllocationBase,
   describeBuysPlacedSince,
   describeMaximumSent,
+  formatFigure,
   getBacktestModeIntervalSyncTime,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
@@ -600,10 +601,10 @@ export class Trader extends Plugin {
       [
         `[${id}] ${side} ${type} order summary for ${symbol}:`,
         `Completed at: ${toISOString(orderExecutionDate)}`,
-        `Order amount: ${amount},`,
-        `Effective price: ${effectivePrice},`,
-        `Fee: ${fee},`,
-        `Fee percent: ${feePercent},`,
+        `Order amount: ${formatEveryDecimal(amount)},`,
+        `Effective price: ${formatEveryDecimal(effectivePrice)},`,
+        `Fee: ${formatEveryDecimal(fee)},`,
+        `Fee percent: ${formatFigure(feePercent)},`,
       ].join(' '),
     );
 
@@ -628,7 +629,8 @@ export class Trader extends Plugin {
       const summary = await orderInstance.createSummary();
       const { amount, price, orderExecutionDate } = summary;
       if (isFinitePositive(amount) && isFinitePositive(price) && Number.isFinite(orderExecutionDate)) return summary;
-      reason = `its trades were not found, or not usable (amount ${amount}, price ${price}, executed at ${toISOString(orderExecutionDate)})`;
+      const figures = `amount ${formatEveryDecimal(amount)}, price ${formatEveryDecimal(price)}`;
+      reason = `its trades were not found, or not usable (${figures}, executed at ${toISOString(orderExecutionDate)})`;
     } catch (err) {
       reason = `its summary could not be created: ${describeError(err)}`;
     }
@@ -658,8 +660,8 @@ export class Trader extends Plugin {
       'trader',
       [
         `[${id}] ${side} ${type} order filled, but ${reason}. Its summary is estimated:`,
-        `amount ${amount} (${amountSource}),`,
-        `price ${price} (${priceSource}),`,
+        `amount ${formatEveryDecimal(amount)} (${amountSource}),`,
+        `price ${formatEveryDecimal(price)} (${priceSource}),`,
         'fee unknown,',
         `executed at ${toISOString(this.currentTimestamp)} (the end of the last minute processed)`,
       ].join(' '),
@@ -817,7 +819,7 @@ export class Trader extends Plugin {
       const startedAfter = this.synchronizationCount;
       const { timestamp, filled, remaining } = cancelation;
       // Left out by an order whose fill no answer of the exchange reported (see Order.getCancelationFill)
-      const fill = isNil(filled) ? 'no fill reported' : `filled: ${filled}, remaining: ${remaining}`;
+      const fill = isNil(filled) ? 'no fill reported' : `filled: ${formatEveryDecimal(filled)}, remaining: ${formatFigure(remaining)}`;
       info('trader', `[${id}] ${side} ${type} order canceled (${fill})`);
       this.orders.delete(id);
       // The portfolio once what the order reserved is released, best effort (see relayError)
@@ -870,7 +872,8 @@ export class Trader extends Plugin {
       const { reason, status, filled } = rejection;
       const filledAmount = orderInstance.getFilledAmount();
       if (filledAmount > 0) {
-        const fill = `after ${filledAmount} of ${amount} filled: that part is reported as a completion`;
+        const part = `${formatEveryDecimal(filledAmount)} of ${formatEveryDecimal(amount)}`;
+        const fill = `after ${part} filled: that part is reported as a completion`;
         warning('trader', `[${id}] ${side} ${type} order: ${reason} (status: ${status}), ${fill}`);
         await this.reportCompleted(orderInstance, order, creationPrice);
         return;
@@ -958,7 +961,9 @@ export class Trader extends Plugin {
         // initiated and nothing changed on the exchange: no ORDER_INITIATED_EVENT, no synchronization, the event leaves with the
         // portfolio known.
         if (!price || price <= 0) {
-          const reason = isNil(advice.price) ? `no price known for ${symbol}` : `invalid requested price ${advice.price}`;
+          const reason = isNil(advice.price)
+            ? `no price known for ${symbol}`
+            : `invalid requested price ${formatEveryDecimal(advice.price)}`;
           warning('trader', `[${id}] Impossible to create the ${side} ${type} order: ${reason}`);
           // The amount the strategy asked for, if any. Without one the order was to be sized as it is placed, all-in or from its cost or
           // its allocation (a BUY, and a SELL of a cost, from the price, missing or invalid here): never placed, it ordered nothing,
@@ -1005,8 +1010,8 @@ export class Trader extends Plugin {
         }
 
         // UPDATE EVENTS
-        orderInstance.on(ORDER_PARTIALLY_FILLED_EVENT, filled =>
-          info('trader', `[${id}] ${side} ${type} order fill, total filled: ${filled}`),
+        orderInstance.on(ORDER_PARTIALLY_FILLED_EVENT, (filled: number) =>
+          info('trader', `[${id}] ${side} ${type} order fill, total filled: ${formatEveryDecimal(filled)}`),
         );
 
         orderInstance.on(ORDER_STATUS_CHANGED_EVENT, ({ status, reason }) => {

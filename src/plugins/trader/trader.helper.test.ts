@@ -5,6 +5,7 @@ import {
   computeOrderPricing,
   describeAllocationBase,
   describeMaximumSent,
+  formatFigure,
   getBacktestModeIntervalSyncTime,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
@@ -100,6 +101,20 @@ describe('trader.helper', () => {
       ${'a maximum String writes with an exponent'} | ${{ type: 'LIMIT', symbol: 'BTC/USDT' }}  | ${0.0000005} | ${'the maximum amount of a LIMIT order on BTC/USDT: 0.0000005 BTC sent'}
     `('writes $description as "$expected"', ({ order, maximum, expected }) => {
       expect(describeMaximumSent(order, maximum)).toBe(expected);
+    });
+  });
+
+  // A figure the exchange may leave unknown, as the lines of the end of an order quote it: every decimal, and undefined as it was written,
+  // where formatEveryDecimal alone wrote 'und'
+  describe('formatFigure', () => {
+    it.each`
+      description                                  | value        | expected
+      ${'a figure as String writes it'}            | ${0.5}       | ${'0.5'}
+      ${'a figure String writes with an exponent'} | ${0.0000005} | ${'0.0000005'}
+      ${'a figure that is not a number'}           | ${NaN}       | ${'NaN'}
+      ${'an unknown figure'}                       | ${undefined} | ${'undefined'}
+    `('writes $description as "$expected"', ({ value, expected }) => {
+      expect(formatFigure(value)).toBe(expected);
     });
   });
 

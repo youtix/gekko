@@ -2518,11 +2518,12 @@ describe('Trader', () => {
 
     // The strategy already holds the id of the order (see StrategyManager.createOrder) and waits for a terminal event of it
     describe.each`
-      description                          | price        | marketPrice  | reason
-      ${'no price is known for the pair'}  | ${undefined} | ${undefined} | ${'no price known for BTC/USDT'}
-      ${'the price requested is 0'}        | ${0}         | ${100}       | ${'invalid requested price 0'}
-      ${'the price requested is negative'} | ${-5}        | ${100}       | ${'invalid requested price -5'}
-      ${'the price requested is NaN'}      | ${NaN}       | ${100}       | ${'invalid requested price NaN'}
+      description                                             | price          | marketPrice  | reason
+      ${'no price is known for the pair'}                     | ${undefined}   | ${undefined} | ${'no price known for BTC/USDT'}
+      ${'the price requested is 0'}                           | ${0}           | ${100}       | ${'invalid requested price 0'}
+      ${'the price requested is negative'}                    | ${-5}          | ${100}       | ${'invalid requested price -5'}
+      ${'the price requested is NaN'}                         | ${NaN}         | ${100}       | ${'invalid requested price NaN'}
+      ${'the price requested is negative, under a millionth'} | ${-0.00000045} | ${100}       | ${'invalid requested price -0.00000045'}
     `('when $description', ({ price, marketPrice, reason }) => {
       const advice = buildAdvice({ price });
 
@@ -2702,6 +2703,19 @@ describe('Trader', () => {
       });
     });
 
+    // Written with every decimal: String wrote a fill, or what was left, of dust with an exponent, 5e-7
+    it.each`
+      filled       | remaining    | fill
+      ${0.0000005} | ${0.9999995} | ${'filled: 0.0000005, remaining: 0.9999995'}
+      ${0.9999995} | ${0.0000005} | ${'filled: 0.9999995, remaining: 0.0000005'}
+    `('logs the cancelation of a BUY of 1 BTC as $fill', async ({ filled, remaining, fill }) => {
+      vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+      const advice = buildAdvice({ amount: 1 });
+      await trader.onStrategyCreateOrder([advice]);
+      await getOrderInstance(advice.id)!.emitAndSettle(ORDER_CANCELED_EVENT, { status: 'canceled', timestamp: 123_456, filled, remaining });
+      expect(logger.info).toHaveBeenCalledWith('trader', `[${advice.id}] BUY STICKY order canceled (${fill})`);
+    });
+
     // The price the fills reported, which the RoundTripAnalyzer books a canceled fill at: not the price the strategy asked for, which a
     // STICKY or a MARKET order is only sized by. Not for a MARKET order, whose price reported can be the bound of its slippage.
     describe('the price of the fill of an order canceled after a fill', () => {
@@ -2738,14 +2752,19 @@ describe('Trader', () => {
       });
     });
 
-    it('logs order updates (partially filled)', async () => {
+    // Written with every decimal: String wrote a fill of dust with an exponent, 5e-7
+    it.each`
+      filled       | total
+      ${5}         | ${'5'}
+      ${0.0000005} | ${'0.0000005'}
+    `('logs order updates (partially filled) with the total filled, $total', async ({ filled, total }) => {
       const advice = buildAdvice();
       await trader.onStrategyCreateOrder([advice]);
       const order = getOrderInstance(advice.id)!;
 
-      order.emit(ORDER_PARTIALLY_FILLED_EVENT, 5.0);
+      order.emit(ORDER_PARTIALLY_FILLED_EVENT, filled);
 
-      expect(logger.info).toHaveBeenCalledWith('trader', expect.stringContaining('total filled: 5'));
+      expect(logger.info).toHaveBeenCalledWith('trader', `[${advice.id}] BUY STICKY order fill, total filled: ${total}`);
     });
 
     it('logs order updates (status changed)', async () => {
@@ -3088,11 +3107,13 @@ describe('Trader', () => {
     // they armed the trailing stop of the position with an amount of NaN and the analyzers skipped or misdated the fill: the summary
     // is estimated instead, as when it cannot be created.
     describe.each`
-      shape                            | summary                                                                                 | figures
-      ${'empty (EMPTY_ORDER_SUMMARY)'} | ${EMPTY_ORDER_SUMMARY}                                                                  | ${'amount NaN, price NaN, executed at Unknown Date'}
-      ${'without amount'}              | ${{ amount: NaN, price: 100, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }} | ${'amount NaN, price 100, executed at 2023-11-14T22:15:11.000Z'}
-      ${'with a price of 0'}           | ${{ amount: 1, price: 0, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }}     | ${'amount 1, price 0, executed at 2023-11-14T22:15:11.000Z'}
-      ${'without execution date'}      | ${{ amount: 1, price: 100, feePercent: 0.25, orderExecutionDate: NaN }}                 | ${'amount 1, price 100, executed at Unknown Date'}
+      shape                                       | summary                                                                                        | figures
+      ${'empty (EMPTY_ORDER_SUMMARY)'}            | ${EMPTY_ORDER_SUMMARY}                                                                         | ${'amount NaN, price NaN, executed at Unknown Date'}
+      ${'without amount'}                         | ${{ amount: NaN, price: 100, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }}        | ${'amount NaN, price 100, executed at 2023-11-14T22:15:11.000Z'}
+      ${'with a price of 0'}                      | ${{ amount: 1, price: 0, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }}            | ${'amount 1, price 0, executed at 2023-11-14T22:15:11.000Z'}
+      ${'without execution date'}                 | ${{ amount: 1, price: 100, feePercent: 0.25, orderExecutionDate: NaN }}                        | ${'amount 1, price 100, executed at Unknown Date'}
+      ${'of 0.0000005 BTC without a price'}       | ${{ amount: 0.0000005, price: NaN, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }}  | ${'amount 0.0000005, price NaN, executed at 2023-11-14T22:15:11.000Z'}
+      ${'priced at 0.00000045 without an amount'} | ${{ amount: NaN, price: 0.00000045, feePercent: 0.25, orderExecutionDate: 1_700_000_111_000 }} | ${'amount NaN, price 0.00000045, executed at 2023-11-14T22:15:11.000Z'}
     `('when the summary of a completed order is $shape', ({ summary, figures }) => {
       const advice = buildAdvice({ type: 'MARKET', amount: 1 });
 
@@ -3154,9 +3175,10 @@ describe('Trader', () => {
       };
 
       describe.each`
-        source                  | filled  | amount  | note
-        ${'the fill reported'}  | ${0.98} | ${0.98} | ${'amount 0.98 (the fill reported)'}
-        ${'the amount ordered'} | ${0}    | ${1}    | ${'amount 1 (the amount ordered: no fill reported, and a filled order executed it in full, up to lot rounding)'}
+        source                                    | filled       | amount       | note
+        ${'the fill reported'}                    | ${0.98}      | ${0.98}      | ${'amount 0.98 (the fill reported)'}
+        ${'the amount ordered'}                   | ${0}         | ${1}         | ${'amount 1 (the amount ordered: no fill reported, and a filled order executed it in full, up to lot rounding)'}
+        ${'the fill reported, under a millionth'} | ${0.0000005} | ${0.0000005} | ${'amount 0.0000005 (the fill reported)'}
       `('when the amount comes from $source', ({ filled, amount, note }) => {
         beforeEach(async () => {
           await completeWithoutSummary('MARKET', filled, 105);
@@ -3174,14 +3196,15 @@ describe('Trader', () => {
       // A STICKY order that rested at 100.01 and filled there was reported at the market, 105 by then: its fills say where it executed.
       // Not those of a MARKET order, whose price reported can be the bound of its slippage.
       describe.each`
-        type        | marketPrice  | fillPrice    | source                                             | price     | note
-        ${'LIMIT'}  | ${105}       | ${undefined} | ${'its limit price'}                               | ${95}     | ${'price 95 (its limit price)'}
-        ${'MARKET'} | ${105}       | ${undefined} | ${'the last market price'}                         | ${105}    | ${'price 105 (the last market price)'}
-        ${'STICKY'} | ${105}       | ${undefined} | ${'the last market price'}                         | ${105}    | ${'price 105 (the last market price)'}
-        ${'MARKET'} | ${undefined} | ${undefined} | ${'the price it was created with'}                 | ${95}     | ${'price 95 (the price it was created with: no market price known)'}
-        ${'STICKY'} | ${105}       | ${100.01}    | ${'the prices of its fills'}                       | ${100.01} | ${'price 100.01 (the prices of its fills, as the exchange reported them)'}
-        ${'LIMIT'}  | ${105}       | ${94.99}     | ${'the prices of its fills'}                       | ${94.99}  | ${'price 94.99 (the prices of its fills, as the exchange reported them)'}
-        ${'MARKET'} | ${105}       | ${110.25}    | ${'the last market price, whatever its fills say'} | ${105}    | ${'price 105 (the last market price)'}
+        type        | marketPrice   | fillPrice    | source                                             | price         | note
+        ${'LIMIT'}  | ${105}        | ${undefined} | ${'its limit price'}                               | ${95}         | ${'price 95 (its limit price)'}
+        ${'MARKET'} | ${105}        | ${undefined} | ${'the last market price'}                         | ${105}        | ${'price 105 (the last market price)'}
+        ${'STICKY'} | ${105}        | ${undefined} | ${'the last market price'}                         | ${105}        | ${'price 105 (the last market price)'}
+        ${'MARKET'} | ${undefined}  | ${undefined} | ${'the price it was created with'}                 | ${95}         | ${'price 95 (the price it was created with: no market price known)'}
+        ${'STICKY'} | ${105}        | ${100.01}    | ${'the prices of its fills'}                       | ${100.01}     | ${'price 100.01 (the prices of its fills, as the exchange reported them)'}
+        ${'LIMIT'}  | ${105}        | ${94.99}     | ${'the prices of its fills'}                       | ${94.99}      | ${'price 94.99 (the prices of its fills, as the exchange reported them)'}
+        ${'MARKET'} | ${105}        | ${110.25}    | ${'the last market price, whatever its fills say'} | ${105}        | ${'price 105 (the last market price)'}
+        ${'MARKET'} | ${0.00000045} | ${undefined} | ${'the last market price, under a millionth'}      | ${0.00000045} | ${'price 0.00000045 (the last market price)'}
       `('when the price of a $type order comes from $source', ({ type, marketPrice, fillPrice, price, note }) => {
         beforeEach(async () => {
           await completeWithoutSummary(type, 0.98, marketPrice, fillPrice);
@@ -3296,8 +3319,8 @@ describe('Trader', () => {
     const summary = { amount: 2, price: 101.25, feePercent: 0.1, side: 'BUY', orderExecutionDate: 1_700_000_002_000 };
 
     // An order of the flow, refused after it filled the amount given
-    const refuse = async (flow: 'creation' | 'cancelation', filled: number) => {
-      const order = await prepareOrder(flow, advice);
+    const refuse = async (flow: 'creation' | 'cancelation', filled: number, refused = advice) => {
+      const order = await prepareOrder(flow, refused);
       order.getFilledAmount.mockReturnValue(filled);
       order.createSummary.mockResolvedValue(summary);
       await order.emitAndSettle(ORDER_INVALID_EVENT, { ...rejection, filled: filled > 0 });
@@ -3339,6 +3362,20 @@ describe('Trader', () => {
       it('forgets the order', () => {
         expect(getOrdersMap().has(advice.id)).toBe(false);
       });
+    });
+
+    // Written with every decimal: String wrote the part filled, or the amount of an order of dust, with an exponent, 5e-7
+    it.each`
+      amount       | filled       | part
+      ${5}         | ${0.0000005} | ${'0.0000005 of 5'}
+      ${0.0000009} | ${0.0000005} | ${'0.0000005 of 0.0000009'}
+    `('logs a warning naming the part filled, $part, of an order refused after it', async ({ amount, filled, part }) => {
+      const refused = buildAdvice({ type: 'STICKY', amount });
+      await refuse('creation', filled, refused);
+      expect(logger.warning).toHaveBeenCalledWith(
+        'trader',
+        `[${refused.id}] BUY STICKY order: Filter failure: NOTIONAL (status: rejected), after ${part} filled: that part is reported as a completion`,
+      );
     });
 
     // As for any fill the exchange cannot summarize: the amount is the fill the order reported (see Trader.estimateOrderSummary)
@@ -3874,6 +3911,25 @@ describe('Trader', () => {
           portfolioReadAt: undefined,
         },
       });
+    });
+
+    // Every figure written with every decimal: String wrote a fill of dust, a pair priced under a millionth or a fee rate under a
+    // millionth of a percent with an exponent, 5e-7. A fee rate none of the trades gave is written as it always was.
+    it.each`
+      description                            | amount       | price         | feePercent   | figures
+      ${'2 BTC at 100, fee 0.5 %'}           | ${2}         | ${100}        | ${0.5}       | ${'Order amount: 2, Effective price: 100.5, Fee: 1, Fee percent: 0.5,'}
+      ${'0.0000005 BTC at 100, fee 0.1 %'}   | ${0.0000005} | ${100}        | ${0.1}       | ${'Order amount: 0.0000005, Effective price: 100.1, Fee: 0.00000005, Fee percent: 0.1,'}
+      ${'1000 BTC at 0.00000045, fee 0.1 %'} | ${1000}      | ${0.00000045} | ${0.1}       | ${'Order amount: 1000, Effective price: 0.00000045045, Fee: 0.00000045, Fee percent: 0.1,'}
+      ${'2 BTC at 100, fee 0.0000005 %'}     | ${2}         | ${100}        | ${0.0000005} | ${'Order amount: 2, Effective price: 100.0000005, Fee: 0.000001, Fee percent: 0.0000005,'}
+      ${'2 BTC at 100, no fee rate'}         | ${2}         | ${100}        | ${undefined} | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined,'}
+    `('logs the summary of a BUY of $description, each figure in full', ({ amount, price, feePercent, figures }) => {
+      const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
+      const summary: OrderSummary = { amount, price, feePercent, side: 'BUY', orderExecutionDate: 1_700_000_111_000 };
+      trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
+      expect(logger.info).toHaveBeenCalledExactlyOnceWith(
+        'trader',
+        `[${id}] BUY STICKY order summary for BTC/USDT: Completed at: 2023-11-14T22:15:11.000Z ${figures}`,
+      );
     });
   });
 

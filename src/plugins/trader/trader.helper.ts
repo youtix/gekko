@@ -95,6 +95,13 @@ export const describeAllocationBase = (read: number, held: number, unit: string)
   return `${formatEveryDecimal(addPrecise(read, held))} ${unit}: ${free}, plus ${open}`;
 };
 
+/**
+ * A figure of an order the exchange may leave unknown, as the lines of its end quote it: with every decimal, without an exponent (see
+ * formatEveryDecimal), and an unknown one as it was always written, undefined (a fee rate none of its trades gave, see
+ * createOrderSummary). Not formatEveryDecimal alone, which reads the 'e' of 'undefined' as an exponent and writes 'und'.
+ */
+export const formatFigure = (value: number | undefined) => (value === undefined ? 'undefined' : formatEveryDecimal(value));
+
 /* -------------------------------------------------------------------------- */
 /*                      PORTFOLIO EMISSION FILTERING                          */
 /* -------------------------------------------------------------------------- */
