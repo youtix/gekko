@@ -3,7 +3,7 @@ import { info } from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
 import { TradingReport } from './roundTrip.types';
-import { logFinalize, logRoundtrip } from './roundTripAnalyzer.helper';
+import { logFinalize, logRoundtrip, priceCanceledFill } from './roundTripAnalyzer.helper';
 
 vi.mock('@services/logger', () => ({ info: vi.fn() }));
 
@@ -211,6 +211,27 @@ describe('roundTripAnalyzer.helper', () => {
       logFinalize(report, 'USDT');
 
       expect(consoleLog).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('priceCanceledFill', () => {
+    // The last close is 90. The price a MARKET or a STICKY order carries is the one the strategy sized it from, 100: priced at it, the
+    // part it filled at the market made the entry equity and the P&L of its round trip off by that amount times the gap.
+    const FILLS = 'the prices of its fills, as the exchange reported them';
+    it.each`
+      order                                                        | type        | price        | fillPrice    | expected
+      ${'a STICKY order sized at 100, its fills at 95'}            | ${'STICKY'} | ${100}       | ${95}        | ${{ price: 95, source: FILLS }}
+      ${'a MARKET order sized at 100, its fills at 95'}            | ${'MARKET'} | ${100}       | ${95}        | ${{ price: 95, source: FILLS }}
+      ${'a LIMIT order at 100, its fills at 99.5'}                 | ${'LIMIT'}  | ${100}       | ${99.5}      | ${{ price: 99.5, source: FILLS }}
+      ${'a STICKY order sized at 100, no fill price reported'}     | ${'STICKY'} | ${100}       | ${undefined} | ${{ price: 90, source: 'the last close' }}
+      ${'a MARKET order sized at 100, no fill price reported'}     | ${'MARKET'} | ${100}       | ${undefined} | ${{ price: 90, source: 'the last close' }}
+      ${'a STICKY order without a price, no fill price'}           | ${'STICKY'} | ${undefined} | ${undefined} | ${{ price: 90, source: 'the last close' }}
+      ${'a LIMIT order at 100, no fill price reported'}            | ${'LIMIT'}  | ${100}       | ${undefined} | ${{ price: 100, source: 'its limit price' }}
+      ${'a LIMIT order without a price, at the market'}            | ${'LIMIT'}  | ${undefined} | ${undefined} | ${{ price: 90, source: 'the last close' }}
+      ${'a LIMIT order at 100, a fill price that is not a number'} | ${'LIMIT'}  | ${100}       | ${NaN}       | ${{ price: 100, source: 'its limit price' }}
+      ${'a STICKY order sized at 100, a fill price of 0'}          | ${'STICKY'} | ${100}       | ${0}         | ${{ price: 90, source: 'the last close' }}
+    `('should price the fill of $order at $expected.price ($expected.source)', ({ type, price, fillPrice, expected }) => {
+      expect(priceCanceledFill({ type, price, fillPrice }, 90)).toEqual(expected);
     });
   });
 });

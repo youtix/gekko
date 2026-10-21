@@ -117,7 +117,7 @@ export type OrderFill = {
   date: EpochTimeStamp;
   /**
    * The price it filled at: that of a completed order, which the Trader always sets (optional in the event type only); for a canceled
-   * one, its own price, else the last close (see RoundTripAnalyzer.onOrderCanceled)
+   * one, the mean price of its fills, else an estimate (see priceCanceledFill)
    */
   price?: number;
   amount: number;

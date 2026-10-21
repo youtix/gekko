@@ -1,9 +1,9 @@
 /**
  * @fileoverview Financial and statistical utility functions for trading analysis.
  * All functions are pure and stateless. Five throw an Error on an input they cannot measure: calculateElapsedYears on a period that
- * ends before it starts, and calculateTotalReturnPct, calculateAnnualizedReturnPct, calculateMarketReturnPct and calculateExposurePct
- * on a start equity, a number of years, a start price or a period of 0 or less. The others return 0, null or an empty array for an
- * input without anything to measure, or skip such an input.
+ * ends before it starts, calculateTotalReturnPct and calculateAnnualizedReturnPct on a start equity of 0 or less, the latter on a number
+ * of years of 0 or less too, and calculateMarketReturnPct and calculateExposurePct on a start price or a period of 0 or less. The others
+ * return 0, null or an empty array for an input without anything to measure, or skip such an input.
  *
  * The percentages a report shows (the total, annualized and market returns, the alpha, the max drawdown, the exposure, the win rate)
  * are worked out in decimal (see toPercent): the reporters round them to 2 decimals, most of them down, and wrote 0 % for the 0.01 % a
@@ -107,17 +107,22 @@ export const calculateTotalReturnPct = (currentEquity: number, startEquity: numb
 };
 
 /**
- * Calculates annualized return percentage.
+ * Calculates annualized return percentage: the total return (see calculateTotalReturnPct) over the elapsed years, worked out from the
+ * equities, its change in decimal and rounded once. Worked out from the total return, already rounded to 15 significant digits, it had
+ * lost a digit that could not come back: a gain of 40 on 300,000 over a day of 2024, 0.0133333333333333 % × 366, made
+ * 4.87999999999999 % a year for 4.88 %, which the reporters, rounding down, wrote 4.87 %.
  *
- * @param totalReturnPct - Total return as percentage
+ * @param currentEquity - Current portfolio value
+ * @param startEquity - Initial portfolio value
  * @param elapsedYears - Time period in years
- * @returns Annualized return percentage
- * @throws Error if elapsedYears is zero or negative
+ * @returns Annualized return percentage (e.g., 50 for a gain of 100% over 2 years)
+ * @throws Error if startEquity or elapsedYears is zero or negative
  */
-export const calculateAnnualizedReturnPct = (totalReturnPct: number, elapsedYears: number): number => {
+export const calculateAnnualizedReturnPct = (currentEquity: number, startEquity: number, elapsedYears: number): number => {
+  if (startEquity <= 0) throw new Error('startEquity must be greater than zero');
   if (elapsedYears <= 0) throw new Error('elapsedYears must be greater than zero');
-  // 0.3 % over 3 years is 0.1 % a year, 0.09999999999999999 in binary
-  return toSignificantDigits(totalReturnPct / elapsedYears);
+  // Both divisions before the one rounding: 0.3 % over 3 years is 0.1 % a year, 0.09999999999999999 in binary
+  return toSignificantDigits(shiftDecimalPoint(addPrecise(currentEquity, -startEquity), 2) / startEquity / elapsedYears);
 };
 
 /**

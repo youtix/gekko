@@ -1,6 +1,7 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/event.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { describeError } from '@errors/error.helper';
+import { GekkoError } from '@errors/gekko.error';
 import { RingBuffer } from '@helpers/collection/ringBuffer';
 import { calculateMarketReturnPct, calculateWinRate, extractTopMAEs } from '@helpers/finance/stats.helper';
 import { calculatePairEquity, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
@@ -10,7 +11,7 @@ import { Asset, TradingPair } from '@models/utility.types';
 import { debug, error, info, warning } from '@services/logger';
 import { toISOString } from '@utils/date/date.utils';
 import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
-import { formatAmount, formatSignedPercent, pluralize } from '@utils/string/string.utils';
+import { formatAmount, formatEveryDecimal, formatSignedPercent, listInWords, pluralize } from '@utils/string/string.utils';
 import { first, isNil, sumBy } from 'lodash-es';
 import { Plugin } from '../../plugin';
 import { DUST_TOLERANCE } from '../analyzer.const';
@@ -27,6 +28,7 @@ import {
   logRoundtrip,
   measureAdverseExcursion,
   measureRoundTrip,
+  priceCanceledFill,
 } from './roundTripAnalyzer.helper';
 
 export class RoundTripAnalyzer extends Plugin {
@@ -78,7 +80,12 @@ export class RoundTripAnalyzer extends Plugin {
   constructor({ riskFreeReturn, enableConsoleTable }: AnalyzerConfig) {
     super(PLUGIN_NAME);
 
-    if (this.assets.length !== 1) throw new Error('RoundTripAnalyzer can only be used with a single pair');
+    // A GekkoError, reported in one line that says what to do: a plain Error stopped the run with its stack, and named no remedy
+    if (this.assets.length !== 1) {
+      const watched = `${this.assets.length} ${pluralize('asset', this.assets.length)} are watched (${listInWords(this.assets)})`;
+      const remedy = 'watch one asset, or report through the PortfolioAnalyzer, which values every pair';
+      throw new GekkoError('roundtrip analyzer', `RoundTripAnalyzer can only be used with a single pair: ${watched}; ${remedy}`);
+    }
 
     this.symbol = this.pairs[0];
     this.asset = this.assets[0];
@@ -162,21 +169,19 @@ export class RoundTripAnalyzer extends Plugin {
   /**
    * A BUY or a SELL canceled after a partial fill counts for the part it filled, as an order completed with that amount would: without
    * it, the position it bought would be in no round trip, and the SELL of that position would come while flat. The fill is dated at
-   * the cancelation and priced at the price of the order, a limit it reached or beat, or at the last close for an order without one
-   * (MARKET, or STICKY without a price); its fee is unknown, and counts as 0 (see Fill). A cancelation with no fill counts for nothing,
-   * but its portfolio is the latest all the same (see latestPortfolio).
+   * the cancelation and priced at the mean price of its fills, as the exchange reported them, else at the price of a LIMIT order, else
+   * at the last close (see priceCanceledFill); its fee is unknown, and counts as 0 (see Fill). A cancelation with no fill counts for
+   * nothing, but its portfolio is the latest all the same (see latestPortfolio).
    */
   public onOrderCanceled(events: OrderCanceledEvent[]): void {
     for (const { order, exchange } of events) {
-      const { id, side, price, filled, orderCancelationDate } = order;
+      const { id, side, filled, orderCancelationDate } = order;
       // No fill reported (undefined) counts for nothing, as 0 does
       if (!isNil(filled) && filled > 0) {
-        const fillPrice = price ?? this.lastPriceUpdate;
-        debug(
-          'roundtrip analyzer',
-          `${side} order ${id} canceled after a partial fill: its ${filled} filled count at ${fillPrice}, fee unknown.`,
-        );
-        this.registerTrade({ id, side, date: orderCancelationDate, price: fillPrice, amount: filled, fee: NaN }, exchange.portfolio);
+        const { price, source } = priceCanceledFill(order, this.lastPriceUpdate);
+        const counted = `its ${formatEveryDecimal(filled)} filled count at ${formatEveryDecimal(price)} (${source})`;
+        debug('roundtrip analyzer', `${side} order ${id} canceled after a partial fill: ${counted}, fee unknown.`);
+        this.registerTrade({ id, side, date: orderCancelationDate, price, amount: filled, fee: NaN }, exchange.portfolio);
       }
       this.refreshLatestPortfolio(exchange.portfolio);
     }

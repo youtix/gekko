@@ -38,7 +38,8 @@ export const calculatePerformanceStatistics = (input: PerformanceStatisticsInput
   // In decimal, as the equities are valued: in binary, a period from 1000 to 1000.3 made a net profit of 0.2999999999999545
   const netProfit = addPrecise(endEquity, -startEquity);
   const totalReturnPct = calculateTotalReturnPct(endEquity, startEquity);
-  const annualizedReturnPct = calculateAnnualizedReturnPct(totalReturnPct, horizonYears);
+  // From the equities, not from totalReturnPct: rounded to 15 significant digits, a gain of 40 on 300,000 over a day made 4.87999999999999
+  const annualizedReturnPct = calculateAnnualizedReturnPct(endEquity, startEquity, horizonYears);
   const ratioParams: RatioParams = { returns, yearlyProfit: annualizedReturnPct, riskFreeReturn, elapsedYears: horizonYears };
   // The deviation the Sharpe ratio weighs: 0 for returns all equal, where their standard deviation was the noise of their mean
   const volatility = calculateVolatility(returns);

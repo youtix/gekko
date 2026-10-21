@@ -97,17 +97,23 @@ describe('calculateTotalReturnPct', () => {
 });
 
 describe('calculateAnnualizedReturnPct', () => {
+  // Worked out from the total return, rounded to 15 significant digits, the rows over a day of 2024 came out 4.87999999999999 and
+  // 58.7368999999999: the digit the rounding dropped could not come back
   it.each`
-    description                                           | totalReturnPct | elapsedYears | expected
-    ${'1 year period'}                                    | ${50}          | ${1}         | ${50}
-    ${'2 year period'}                                    | ${100}         | ${2}         | ${50}
-    ${'half year period'}                                 | ${25}          | ${0.5}       | ${50}
-    ${'negative return'}                                  | ${-30}         | ${2}         | ${-15}
-    ${'very short period'}                                | ${10}          | ${0.1}       | ${100}
-    ${'long period'}                                      | ${100}         | ${10}        | ${10}
-    ${'0.3% over 3 years, 0.09999999999999999 in binary'} | ${0.3}         | ${3}         | ${0.1}
-  `('should return $expected for $description', ({ totalReturnPct, elapsedYears, expected }) => {
-    expect(calculateAnnualizedReturnPct(totalReturnPct, elapsedYears)).toBe(expected);
+    description                                                       | currentEquity | startEquity | elapsedYears | expected
+    ${'1 year period'}                                                | ${1500}       | ${1000}     | ${1}         | ${50}
+    ${'2 year period'}                                                | ${2000}       | ${1000}     | ${2}         | ${50}
+    ${'half year period'}                                             | ${1250}       | ${1000}     | ${0.5}       | ${50}
+    ${'negative return'}                                              | ${700}        | ${1000}     | ${2}         | ${-15}
+    ${'very short period'}                                            | ${1100}       | ${1000}     | ${0.1}       | ${100}
+    ${'long period'}                                                  | ${2000}       | ${1000}     | ${10}        | ${10}
+    ${'0.3% over 3 years, 0.09999999999999999 in binary'}             | ${1003}       | ${1000}     | ${3}         | ${0.1}
+    ${'a gain of 0.02% over a year, 0.01999999999999602 in binary'}   | ${1000.2}     | ${1000}     | ${1}         | ${0.02}
+    ${'a gain of 40 on 300000 over a day of 2024, 1/366 of the year'} | ${300040}     | ${300000}   | ${1 / 366}   | ${4.88}
+    ${'a loss of 40 on 300000 over a day of 2024'}                    | ${299960}     | ${300000}   | ${1 / 366}   | ${-4.88}
+    ${'a gain of 481.45 on 300000 over a day of 2024'}                | ${300481.45}  | ${300000}   | ${1 / 366}   | ${58.7369}
+  `('should return $expected for $description', ({ currentEquity, startEquity, elapsedYears, expected }) => {
+    expect(calculateAnnualizedReturnPct(currentEquity, startEquity, elapsedYears)).toBe(expected);
   });
 
   it.each`
@@ -115,7 +121,15 @@ describe('calculateAnnualizedReturnPct', () => {
     ${0}
     ${-1}
   `('should throw for $elapsedYears elapsed years', ({ elapsedYears }) => {
-    expect(() => calculateAnnualizedReturnPct(50, elapsedYears)).toThrow('elapsedYears must be greater than zero');
+    expect(() => calculateAnnualizedReturnPct(1500, 1000, elapsedYears)).toThrow('elapsedYears must be greater than zero');
+  });
+
+  it.each`
+    startEquity
+    ${0}
+    ${-100}
+  `('should throw for a startEquity of $startEquity', ({ startEquity }) => {
+    expect(() => calculateAnnualizedReturnPct(1000, startEquity, 1)).toThrow('startEquity must be greater than zero');
   });
 });
 

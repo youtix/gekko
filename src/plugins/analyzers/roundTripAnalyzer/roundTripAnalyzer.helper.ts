@@ -1,11 +1,11 @@
 import { BOOKED_CURRENCY_UNIT } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { calculateTotalReturnPct } from '@helpers/finance/stats.helper';
-import { RoundTrip } from '@models/event.types';
+import { OrderCanceledEvent, RoundTrip } from '@models/event.types';
 import { OrderSide } from '@models/order.types';
 import { info } from '@services/logger';
 import { formatDurationUTC, toISOString } from '@utils/date/date.utils';
-import { addPrecise, compareWithTolerance, isFiniteNumber, multiplyPrecise } from '@utils/math/math.utils';
+import { addPrecise, compareWithTolerance, isFiniteNumber, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
 import { formatAmount, formatPercent, formatRatio } from '@utils/string/string.utils';
 import { PERCENT_ROUNDING } from '../analyzer.const';
 import { ExcursionCandle, Fill, OpenRoundTrip, TradingReport } from './roundTrip.types';
@@ -14,6 +14,22 @@ import { LATE_FILL_CANDLES } from './roundTripAnalyzer.const';
 /** A mean price weighted by amounts, once one more price is added with its amount */
 export const addToMeanPrice = (meanPrice: number, amount: number, price: number, addedAmount: number) =>
   (meanPrice * amount + price * addedAmount) / (amount + addedAmount);
+
+/**
+ * The price the part a canceled order filled counts at, and where it comes from: the mean price of its fills, which the Trader relays
+ * as the exchange reported them (see OrderCanceledEvent); without it, the price of a LIMIT order, a limit it reached or beat, else the
+ * last close. Not the price of a MARKET or a STICKY order, which fills at the market: that is the price the strategy sized it from (a
+ * BUY by cost or allocation, a SELL by cost), and the round trip took it for the price of the fill, its entry equity and its P&L off by
+ * the amount filled times the gap.
+ */
+export const priceCanceledFill = (
+  { type, price, fillPrice }: Pick<OrderCanceledEvent['order'], 'type' | 'price' | 'fillPrice'>,
+  lastClose: number,
+) => {
+  if (isFinitePositive(fillPrice)) return { price: fillPrice, source: 'the prices of its fills, as the exchange reported them' };
+  if (type === 'LIMIT' && isFinitePositive(price)) return { price, source: 'its limit price' };
+  return { price: lastClose, source: 'the last close' };
+};
 
 /**
  * What a fill changes the pair equity by, valued at `price`, in currency: the asset it moves valued at that price, less the currency it

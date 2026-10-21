@@ -222,7 +222,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         annualizedNetProfit: 735583.14,
         // 2,009.79 / 310,000 × 100, to 15 significant digits
         totalReturnPct: 0.64831935483871,
-        // 0.64831935483871 × 366, to 15 significant digits
+        // 2,009.79 / 310,000 × 100 × 366, to 15 significant digits
         annualizedReturnPct: 237.284883870968,
         // From the close of 12:00, 100, to that of 12:02, 120
         marketReturnPct: 20,
@@ -362,8 +362,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         annualizedNetProfit: 176210.7,
         // 481.45 / 300000 × 100
         totalReturnPct: 0.160483333333333,
-        // 0.160483333333333 × 366, to 15 significant digits
-        annualizedReturnPct: 58.7368999999999,
+        // 481.45 / 300000 × 100 × 366
+        annualizedReturnPct: 58.7369,
         marketReturnPct: 0,
         alpha: 0.160483333333333,
         // The curve has a point at the close of each candle, marked before the fills its bucket delivers are heard: the BUY's with the
@@ -375,9 +375,9 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         // them
         volatility: 0.06131095614191739,
         downsideDeviation: 0.001358602018339833,
-        // 53.7368999999999, the annualized return less the risk-free 5, over each deviation × √(6 returns × 366 a year)
-        sharpeRatio: 18.70330483114111,
-        sortinoRatio: 844.0422483784143,
+        // 53.7369, the annualized return less the risk-free 5, over each deviation × √(6 returns × 366 a year)
+        sharpeRatio: 18.703304831141146,
+        sortinoRatio: 844.0422483784159,
         startPrice: 10000,
         endPrice: 10000,
         // The fee of the SELL from the peak of 12:06: 10 / 300491.45 × 100, the last minute

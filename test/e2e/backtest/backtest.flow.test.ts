@@ -187,8 +187,8 @@ describe('E2E: Backtest Flow', () => {
         annualizedNetProfit: -14640,
         // -40 / 300000 × 100
         totalReturnPct: -0.0133333333333333,
-        // -0.0133333333333333 × 366, to 15 significant digits
-        annualizedReturnPct: -4.87999999999999,
+        // -40 / 300000 × 100 × 366, from the equities: from the total return, rounded to 15 significant digits, -4.87999999999999
+        annualizedReturnPct: -4.88,
         // From the close of 00:00, 10000, to that of 00:08, 9000
         marketReturnPct: -10,
         // -0.0133333333333333 - (-10)
@@ -199,10 +199,10 @@ describe('E2E: Backtest Flow', () => {
         volatility: 0.664459235710974,
         // The root mean square of the losses over both profits: √(0.668918471421948² / 2)
         downsideDeviation: 0.47299678720339927,
-        // (annualizedReturnPct - 5, the risk-free return) / (the deviation × √(2 returns × 366 a year)): -9.87999999999999 over
+        // (annualizedReturnPct - 5, the risk-free return) / (the deviation × √(2 returns × 366 a year)): -9.88 over
         // 0.664459235710974 × √732, then over 0.47299678720339927 × √732
-        sharpeRatio: -0.5495827106095073,
-        sortinoRatio: -0.7720460640138027,
+        sharpeRatio: -0.5495827106095078,
+        sortinoRatio: -0.7720460640138034,
         startPrice: 10000,
         endPrice: 9000,
         startBalance: 300000,
@@ -352,8 +352,8 @@ describe('E2E: Backtest Flow', () => {
         annualizedNetProfit: 176210.7,
         // 481.45 / 300000 × 100
         totalReturnPct: 0.160483333333333,
-        // 0.160483333333333 × 366, to 15 significant digits
-        annualizedReturnPct: 58.7368999999999,
+        // 481.45 / 300000 × 100 × 366
+        annualizedReturnPct: 58.7369,
         marketReturnPct: 0,
         alpha: 0.160483333333333,
         // The spans that end on a point holding BTC, 00:13 to 00:15: 2 of the 14 minutes, the point of 00:13 being marked before the
@@ -364,9 +364,9 @@ describe('E2E: Backtest Flow', () => {
         // (-10 / 300491.45 × 100): their population standard deviation, and the root mean square of the loss over them
         volatility: 0.04226380953791824,
         downsideDeviation: 0.0008894137983374381,
-        // 53.7368999999999, the annualized return less the risk-free 5, over each deviation × √(14 returns × 366 a year)
-        sharpeRatio: 17.762308468998786,
-        sortinoRatio: 844.0422483784141,
+        // 53.7369, the annualized return less the risk-free 5, over each deviation × √(14 returns × 366 a year)
+        sharpeRatio: 17.762308468998818,
+        sortinoRatio: 844.0422483784157,
         startPrice: 10000,
         endPrice: 10000,
         // The fee of the SELL from the peak of 00:14: 10 / 300491.45 × 100, the last minute
@@ -444,8 +444,8 @@ describe('E2E: Backtest Flow', () => {
         annualizedNetProfit: 29067.72,
         // 79.42 / 300000 × 100
         totalReturnPct: 0.0264733333333333,
-        // 0.0264733333333333 × 366, to 15 significant digits
-        annualizedReturnPct: 9.68923999999999,
+        // 79.42 / 300000 × 100 × 366
+        annualizedReturnPct: 9.68924,
         // From the close of the 00:15 candle, 10190, to the last, 10340: 150 / 10190 × 100
         marketReturnPct: 1.4720314033366,
         // 0.0264733333333333 - 1.4720314033366

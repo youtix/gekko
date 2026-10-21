@@ -118,6 +118,17 @@ describe('calculatePerformanceStatistics', () => {
     expect(calculatePerformanceStatistics(input, 'portfolio analyzer')[field as 'netProfit']).toBe(expected);
   });
 
+  // Worked out from the total return, rounded to 15 significant digits, 40 on 300,000 over a day of 2024 was annualized to
+  // ±4.87999999999999 %: the reporters, rounding down, wrote the gain 4.87 %
+  it.each`
+    endEquity | change   | expected
+    ${300040} | ${'+40'} | ${4.88}
+    ${299960} | ${'-40'} | ${-4.88}
+  `('should annualize a change of $change on 300000 over a day of 2024 to $expected %', ({ endEquity, expected }) => {
+    const input = { ...INPUT, periodStartAt: Date.UTC(2024, 0, 1), periodEndAt: Date.UTC(2024, 0, 2), startEquity: 300000, endEquity };
+    expect(calculatePerformanceStatistics(input, 'portfolio analyzer').annualizedReturnPct).toBe(expected);
+  });
+
   it('should report an exposure of 0 over a period of 0 ms', () => {
     expect(statisticsOver(0).exposurePct).toBe(0);
   });

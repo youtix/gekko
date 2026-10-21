@@ -2,7 +2,9 @@ import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@constants/
 import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from '@models/event.types';
+import { OrderType } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
+import { Asset } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { debug, error, info, warning } from '@services/logger';
 import * as statsUtils from '@helpers/finance/stats.helper';
@@ -55,7 +57,7 @@ vi.mock('@services/configuration/configuration', () => {
 
 const DAY = 24 * 60 * ONE_MINUTE;
 /**
- * The portfolio the orders below carry. What it holds does not matter, portfolio.utils is mocked, but it is not empty: the Trader sends
+ * The portfolio the orders below carry. What it holds does not matter, portfolio.helper is mocked, but it is not empty: the Trader sends
  * an empty one only before it has fetched any (see isFetchedPortfolio).
  */
 const PORTFOLIO: Portfolio = new Map([['BTC', { free: 1, used: 0, total: 1 }]]);
@@ -71,10 +73,29 @@ const completed = (side: 'BUY' | 'SELL', minute: number, price: number, amount: 
   }) as any;
 const buy = (minute: number, price: number, amount: number, fee?: number) => completed('BUY', minute, price, amount, fee);
 const sell = (minute: number, price: number, amount: number) => completed('SELL', minute, price, amount);
-/** An order of 10 canceled at the given minute after filling that amount, with the price the strategy asked for, if any */
-const canceled = (side: 'BUY' | 'SELL', minute: number, filled: number, price?: number) =>
+/**
+ * An order of 10 canceled at the given minute after filling that amount, with the price the strategy asked for, if any: a LIMIT order
+ * unless the test gives another type, and the mean price of its fills when the test gives one, as the Trader relays it
+ */
+const canceled = (
+  side: 'BUY' | 'SELL',
+  minute: number,
+  filled: number,
+  price?: number,
+  { type = 'LIMIT', fillPrice }: { type?: OrderType; fillPrice?: number } = {},
+) =>
   ({
-    order: { id: `${side}-${minute}`, side, price, amount: 10, filled, remaining: 10 - filled, orderCancelationDate: minute * ONE_MINUTE },
+    order: {
+      id: `${side}-${minute}`,
+      side,
+      type,
+      price,
+      amount: 10,
+      filled,
+      remaining: 10 - filled,
+      fillPrice,
+      orderCancelationDate: minute * ONE_MINUTE,
+    },
     exchange: { portfolio: PORTFOLIO },
   }) as any;
 /** A BUY of 10 at 100 that ended in error at the given minute */
@@ -144,18 +165,36 @@ describe('RoundTripAnalyzer', () => {
       expect(new RoundTripAnalyzer({ name: PLUGIN_NAME, enableConsoleTable: false } as any)['riskFreeReturn']).toBe(5);
     });
 
-    it('should throw error if multiple pairs are configured', () => {
-      vi.spyOn(config, 'getWatch').mockReturnValueOnce({
-        pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }] as any,
-        assets: ['BTC', 'ETH'],
-        currency: 'USDT',
-        timeframe: '1m',
-        warmup: { candleCount: 100, tickrate: 1000 },
-        mode: 'realtime',
-        tickrate: 1000,
+    describe('on a run that watches several assets', () => {
+      /** The watch of a run on these assets, each against USDT */
+      const watching = (assets: Asset[]) =>
+        vi.spyOn(config, 'getWatch').mockReturnValueOnce({
+          pairs: assets.map(asset => ({ symbol: `${asset}/USDT` })) as any,
+          assets,
+          currency: 'USDT',
+          timeframe: '1m',
+          warmup: { candleCount: 100, tickrate: 1000 },
+          mode: 'realtime',
+          tickrate: 1000,
+        });
+      const REMEDY = 'watch one asset, or report through the PortfolioAnalyzer, which values every pair';
+
+      it.each`
+        assets                   | watched
+        ${['BTC', 'ETH']}        | ${'2 assets are watched (BTC and ETH)'}
+        ${['BTC', 'ETH', 'XRP']} | ${'3 assets are watched (BTC, ETH and XRP)'}
+      `('should refuse $assets, saying that $watched and how to report on them', ({ assets, watched }) => {
+        watching(assets);
+        expect(() => new RoundTripAnalyzer(mockConfig)).toThrow(
+          new GekkoError('roundtrip analyzer', `RoundTripAnalyzer can only be used with a single pair: ${watched}; ${REMEDY}`),
+        );
       });
 
-      expect(() => new RoundTripAnalyzer(mockConfig)).toThrow('RoundTripAnalyzer can only be used with a single pair');
+      // Reported in one line by main(): a plain Error stopped the run with its stack, and named no remedy
+      it('should refuse them with a GekkoError', () => {
+        watching(['BTC', 'ETH']);
+        expect(() => new RoundTripAnalyzer(mockConfig)).toThrow(GekkoError);
+      });
     });
   });
 
@@ -408,7 +447,7 @@ describe('RoundTripAnalyzer', () => {
       // A day in years: the horizon of a run of an hour
       vi.mocked(statsUtils.calculateElapsedYears).mockReturnValue(1 / 365);
       reportAfter(60);
-      const horizonYears = vi.mocked(statsUtils.calculateAnnualizedReturnPct).mock.lastCall?.[1];
+      const horizonYears = vi.mocked(statsUtils.calculateAnnualizedReturnPct).mock.lastCall?.[2];
       expect(vi.mocked(statsUtils[ratio as 'calculateSharpeRatio']).mock.lastCall?.[0].elapsedYears).toBe(horizonYears);
     });
 
@@ -757,16 +796,23 @@ describe('RoundTripAnalyzer', () => {
   });
 
   describe('onOrderCanceled', () => {
-    // The last close is 90: the price of a fill whose order had none
+    // The last close is 90: the price of a fill without the prices the exchange reported for it, unless a LIMIT order gives its own
     beforeEach(() => {
       analyzer['processOneMinuteBucket'](bucketAt(1, 90));
     });
+    const FILLS = 'the prices of its fills, as the exchange reported them';
 
+    // A MARKET or a STICKY order fills at the market: the price it carries, 100, is the one the strategy sized it from (a BUY by cost or
+    // allocation), at which the part it filled counted, its round trip entering at 100 with coins bought at 95
     describe.each`
-      order                | event                         | price
-      ${'with a price'}    | ${canceled('BUY', 2, 4, 100)} | ${100}
-      ${'without a price'} | ${canceled('BUY', 2, 4)}      | ${90}
-    `('BUY canceled after filling 4 of 10, $order', ({ event, price }) => {
+      order                                                    | event                                                            | price   | source
+      ${'a LIMIT order at 100'}                                | ${canceled('BUY', 2, 4, 100)}                                    | ${100}  | ${'its limit price'}
+      ${'a LIMIT order without a price'}                       | ${canceled('BUY', 2, 4)}                                         | ${90}   | ${'the last close'}
+      ${'a LIMIT order at 100, its fills at 99.5'}             | ${canceled('BUY', 2, 4, 100, { fillPrice: 99.5 })}               | ${99.5} | ${FILLS}
+      ${'a STICKY order sized at 100, its fills at 95'}        | ${canceled('BUY', 2, 4, 100, { type: 'STICKY', fillPrice: 95 })} | ${95}   | ${FILLS}
+      ${'a STICKY order sized at 100, no fill price reported'} | ${canceled('BUY', 2, 4, 100, { type: 'STICKY' })}                | ${90}   | ${'the last close'}
+      ${'a MARKET order sized at 100, no fill price reported'} | ${canceled('BUY', 2, 4, 100, { type: 'MARKET' })}                | ${90}   | ${'the last close'}
+    `('BUY canceled after filling 4 of 10, $order', ({ event, price, source }) => {
       beforeEach(() => {
         vi.mocked(calculatePairEquity).mockReturnValue({ total: 2500, free: 0, used: 0 });
         analyzer.onOrderCanceled([event]);
@@ -793,27 +839,33 @@ describe('RoundTripAnalyzer', () => {
         expect(analyzer['tradeCount']).toBe(1);
       });
 
-      it('should log the fill at debug', () => {
+      it(`should log the fill at debug, at ${price} (${source})`, () => {
         expect(debug).toHaveBeenCalledWith(
           'roundtrip analyzer',
-          `BUY order BUY-2 canceled after a partial fill: its 4 filled count at ${price}, fee unknown.`,
+          `BUY order BUY-2 canceled after a partial fill: its 4 filled count at ${price} (${source}), fee unknown.`,
         );
       });
     });
 
-    describe('SELL canceled after a partial fill that sells what a round trip bought', () => {
+    // A SELL by cost carries the price the strategy sized it from, 110: its round trip exited there, its P&L off for coins sold at 112
+    describe.each`
+      order                                                    | event                                                              | price
+      ${'a LIMIT order at 110'}                                | ${canceled('SELL', 3, 4, 110)}                                     | ${110}
+      ${'a STICKY order sized at 110, its fills at 112'}       | ${canceled('SELL', 3, 4, 110, { type: 'STICKY', fillPrice: 112 })} | ${112}
+      ${'a MARKET order sized at 110, no fill price reported'} | ${canceled('SELL', 3, 4, 110, { type: 'MARKET' })}                 | ${90}
+    `('SELL canceled after a partial fill that sells what a round trip bought, $order', ({ event, price }) => {
       beforeEach(() => {
         holdAfterSells(0);
         analyzer.onOrderCompleted([buy(1, 100, 4)]);
-        analyzer.onOrderCanceled([canceled('SELL', 3, 4, 110)]);
+        analyzer.onOrderCanceled([event]);
       });
 
       it('should end the round trip', () => {
         expect(analyzer['roundTrips']).toHaveLength(1);
       });
 
-      it('should exit at the price of the order', () => {
-        expect(analyzer['roundTrips'][0].exitPrice).toBe(110);
+      it(`should exit at ${price}`, () => {
+        expect(analyzer['roundTrips'][0].exitPrice).toBe(price);
       });
     });
 
@@ -1653,7 +1705,7 @@ describe('RoundTripAnalyzer', () => {
     });
   });
 
-  describe('with the real portfolio and statistics utils, in pipeline order', () => {
+  describe('with the real portfolio and statistics helpers, in pipeline order', () => {
     /**
      * A 1m timeframe: the bucket of each minute closes a timeframe candle. The events of a bucket follow it in the order PluginsStream
      * flushes them: those of the TradingAdvisor (the end of the warmup, the timeframe candle), then those of the Trader. The Trader
@@ -1682,10 +1734,29 @@ describe('RoundTripAnalyzer', () => {
         order: { id: `${side}-${minute}`, side, price, amount, fee, orderExecutionDate: minute * ONE_MINUTE },
         exchange: { portfolio, price },
       }) as OrderCompletedEvent;
-    /** An order of 10 at the given price canceled at the given minute after filling that amount, and the portfolio after it */
-    const canceledAfterFill = (side: 'BUY' | 'SELL', minute: number, price: number, filledAmount: number, portfolio: Portfolio) =>
+    /**
+     * An order of 10 at the given price canceled at the given minute after filling that amount, and the portfolio after it: a LIMIT
+     * order unless the test gives another type, and the mean price of its fills when the test gives one, as the Trader relays it
+     */
+    const canceledAfterFill = (
+      side: 'BUY' | 'SELL',
+      minute: number,
+      price: number,
+      filledAmount: number,
+      portfolio: Portfolio,
+      { type = 'LIMIT', fillPrice }: { type?: OrderType; fillPrice?: number } = {},
+    ) =>
       ({
-        order: { id: `${side}-${minute}`, side, price, amount: 10, filled: filledAmount, orderCancelationDate: minute * ONE_MINUTE },
+        order: {
+          id: `${side}-${minute}`,
+          side,
+          type,
+          price,
+          amount: 10,
+          filled: filledAmount,
+          fillPrice,
+          orderCancelationDate: minute * ONE_MINUTE,
+        },
         exchange: { portfolio, price },
       }) as OrderCanceledEvent;
     let emitSpy: MockInstance;
@@ -1923,6 +1994,32 @@ describe('RoundTripAnalyzer', () => {
         ${'netProfit'}  | ${40}    | ${'that of the round trip'}
       `('should report $field $expected: $description', ({ field, expected }) => {
         expect(report[field as keyof TradingReport]).toBe(expected);
+      });
+    });
+
+    describe('when a STICKY BUY sized at 100 is canceled after filling 4 BTC at 95', () => {
+      // The same run, the BUY a STICKY one by cost, sized at the last close, 100: it fills 4 BTC at 95, 380 USDT, before the strategy
+      // cancels it. Counted at 100, the price it carries, the part filled entered with the pair equity after it at 100, 4 × 100 + 620,
+      // 20 above what the pair held before it, and the round trip made 40 where it made 60.
+      beforeEach(() => {
+        runMinute(0, 100, { completesWarmup: true });
+        analyzer.onPortfolioChange([holding(0, 1_000)]);
+        runMinute(1, 100);
+        analyzer.onPortfolioChange([holding(4, 620)]);
+        analyzer.onOrderCanceled([canceledAfterFill('BUY', 2, 100, 4, holding(4, 620), { type: 'STICKY', fillPrice: 95 })]);
+        runMinute(2, 110);
+        analyzer.onPortfolioChange([holding(0, 1_060)]);
+        analyzer.onOrderCompleted([filled('SELL', 3, 110, 4, 0, holding(0, 1_060))]);
+        runMinute(3, 110);
+      });
+
+      it.each`
+        field            | expected | description
+        ${'entryPrice'}  | ${95}    | ${'the price of its fills, not the 100 it was sized at'}
+        ${'entryEquity'} | ${1_000} | ${'4 BTC at 95 and 620 USDT, not 1,020'}
+        ${'pnl'}         | ${60}    | ${'4 BTC bought at 95, sold at 110, not 40'}
+      `('should emit the round trip of the part filled with $field $expected: $description', ({ field, expected }) => {
+        expect(emittedRoundTrips()[0][field as keyof RoundTrip]).toBe(expected);
       });
     });
 
