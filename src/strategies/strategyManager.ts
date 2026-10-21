@@ -31,7 +31,7 @@ import { StrategyInfo } from '@models/strategyInfo.types';
 import { Asset, TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { MarketData, OpenOrder } from '@services/exchange/exchange.types';
-import { debug, error, info, isLevelEnabled, warning } from '@services/logger';
+import { debug, error, info, warning } from '@services/logger';
 import * as strategies from '@strategies/index';
 import { toISOString } from '@utils/date/date.utils';
 import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
@@ -43,7 +43,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { inspect } from 'node:util';
 import { z } from 'zod';
 import { IndicatorResults, Strategy, StrategyConstructor, Tools } from './strategy.types';
-import { MESSAGE_INSPECT_OPTIONS } from './strategyManager.const';
+import { MAX_PENDING_ORDERS, MESSAGE_INSPECT_OPTIONS } from './strategyManager.const';
 import {
   copyBucket,
   copyOrderEvent,
@@ -55,6 +55,7 @@ import {
   getParametersProblem,
   getTrailingProblem,
 } from './strategyManager.helper';
+import { OrderRecord } from './strategyManager.types';
 import { TrailingStopManager } from './trailingStopManager';
 import { TrailingStopState } from './trailingStopManager.types';
 
@@ -81,16 +82,19 @@ export class StrategyManager extends EventEmitter {
   private portfolio = new Map<Asset, BalanceDetail>();
   private indicatorsResults: IndicatorResults[] = [];
   private currentTimestamp: EpochTimeStamp = 0;
-  private pendingTrailingStops = new Map<UUID, TrailingConfig>();
   /**
-   * The pair of every order created, the SELLs of the trailing stops included, until the manager hears of its outcome: a cancellation
-   * the strategy asks for names it (see cancelOrder)
+   * The stop each BUY asked for (its trailing), by the id of that BUY, until the BUY's outcome arms or drops it, or the strategy
+   * cancels it, or the BUY is forgotten (see keepPendingOrder). Apart from pendingOrders, which forgets an order before the hook of its
+   * outcome: a stop that hook cancels (tools.cancelTrailingOrder) must not be armed after it.
    */
-  private readonly pendingOrderSymbols = new Map<UUID, TradingPair>();
-  /** The SELLs the trailing stops sent, until their outcome: told apart from the SELLs the strategy created (see onOrderCompleted) */
-  private readonly trailingStopSellIds = new Set<UUID>();
-  /** The SELLs the strategy created, with their pair, until their outcome: the stops of that pair hold their trigger (see isTriggerHeld) */
-  private readonly strategySellIds = new Map<UUID, TradingPair>();
+  private readonly pendingTrailingStops = new Map<UUID, TrailingConfig>();
+  /**
+   * Every order created, the SELLs of the trailing stops included, until the manager hears of its outcome: a cancellation the strategy
+   * asks for names its pair (see cancelOrder), a SELL the strategy created holds back the stops of its pair (see isTriggerHeld), and the
+   * outcome of a stop's SELL settles that stop (see onOrderCompleted). Kept until that outcome alone, the orders of a run without a
+   * Trader, where none ends, piled up for the life of the run: MAX_PENDING_ORDERS at most (see keepPendingOrder).
+   */
+  private readonly pendingOrders = new Map<UUID, OrderRecord>();
   /** The stops whose trigger isTriggerHeld held back, until the hold of their pair ends: each is said once per hold */
   private readonly heldStopIds = new Set<UUID>();
   private consecutiveErrors = 0;
@@ -200,8 +204,9 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onOrderCompleted({ order, exchange }: OrderCompletedEvent) {
-    // Forgotten before anything that may throw, the hook included: from now on, a cancellation of the order names no pair
-    this.pendingOrderSymbols.delete(order.id);
+    // Forgotten before anything that may throw, the hook included, its record kept for what follows: from now on, a cancellation of
+    // the order names no pair
+    const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors = 0;
     // The hook gets its own copy of the event (see copyOrderEvent): what follows reads the event itself
     this.strategy?.onOrderCompleted?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
@@ -210,32 +215,30 @@ export class StrategyManager extends EventEmitter {
 
     // The SELL of a stop settles that stop alone (see settleCompletedStopSell): the other stops of the pair still protect theirs. A
     // SELL the strategy created closed the position the stops of its pair protected.
-    this.strategySellIds.delete(order.id);
-    const isTrailingStopSell = this.trailingStopSellIds.delete(order.id);
-    if (isTrailingStopSell) this.settleCompletedStopSell(order, exchange);
+    if (record?.seller === 'stop') this.settleCompletedStopSell(order, exchange);
     else if (order.side === 'SELL') this.cancelTrailingStopsOfPair(order);
   }
 
   public onOrderCanceled({ order, exchange }: OrderCanceledEvent) {
     // As on a completion (see onOrderCompleted)
-    this.pendingOrderSymbols.delete(order.id);
+    const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors = 0;
     this.strategy?.onOrderCanceled?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
     // A BUY canceled drops the stop it asked for, even after a partial fill
     this.cancelTrailingOrder(order.id);
-    if (this.trailingStopSellIds.delete(order.id)) {
+    if (record?.seller === 'stop') {
       // What it sold before it expired (a MARKET SELL fills what the book allows), or 0 when its cancelation was answered without the
       // fill: the stop then sells its whole amount again, which the Trader caps to what is free
       const sold = isFiniteNumber(order.filled) && order.filled > 0 ? order.filled : 0;
       this.resumeTrailingStop(order.id, 'was canceled', sold, exchange);
-    } else if (this.strategySellIds.delete(order.id)) {
+    } else if (record?.seller === 'strategy') {
       this.releaseTriggersOfPair(order, 'was canceled');
     }
   }
 
   public onOrderErrored({ order, exchange }: OrderErroredEvent) {
     // As on a completion (see onOrderCompleted), the error that trips the circuit breaker included
-    this.pendingOrderSymbols.delete(order.id);
+    const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors++;
     const isConsecutiveErrorsReached = this.maxConsecutiveErrors !== -1 && this.consecutiveErrors >= this.maxConsecutiveErrors;
     // Thrown before the hook and the trailing clean-up, the breaker kept the error that trips it from the strategy, which ended holding
@@ -249,9 +252,9 @@ export class StrategyManager extends EventEmitter {
     }
     // What the order executed before its error, as far as the exchange reported it
     const filled = isFiniteNumber(order.filled) && order.filled > 0 ? order.filled : 0;
-    if (this.trailingStopSellIds.delete(order.id)) {
+    if (record?.seller === 'stop') {
       this.resumeTrailingStop(order.id, 'errored', filled, exchange, order.reason, order.mayBeLive);
-    } else if (this.strategySellIds.delete(order.id)) {
+    } else if (record?.seller === 'strategy') {
       // Released even when that SELL may still be live on the exchange: no outcome of it will follow, and the stops it held would never
       // trigger again
       this.releaseTriggersOfPair(order, 'errored');
@@ -301,11 +304,9 @@ export class StrategyManager extends EventEmitter {
   }
 
   private onTrailingStopTriggered(state: TrailingStopState) {
-    const orderId = this.createOrder({ symbol: state.symbol, side: 'SELL', type: 'MARKET', amount: state.amount });
-    // createOrder kept it as a SELL of the strategy: the SELL of a stop holds no other stop of the pair, each selling its own BUY's fill.
-    // It keeps its pair (see pendingOrderSymbols): the strategy may adopt that SELL, and cancel it.
-    this.strategySellIds.delete(orderId);
-    this.trailingStopSellIds.add(orderId);
+    // Kept as the SELL of a stop, not of the strategy: it holds no other stop of the pair, each selling its own BUY's fill. It keeps
+    // its pair (see pendingOrders): the strategy may adopt that SELL, and cancel it.
+    const orderId = this.relayOrder({ symbol: state.symbol, side: 'SELL', type: 'MARKET', amount: state.amount }, 'stop');
     // The stop sells until that SELL ends (see onOrderCompleted and resumeTrailingStop): the hook gets it with the id of its SELL
     const selling = this.trailingStopManager.setSellOrderId(state.id, orderId) ?? state;
     this.strategy?.onTrailingStopTriggered?.(orderId, selling, this.tools);
@@ -357,12 +358,13 @@ export class StrategyManager extends EventEmitter {
 
   /**
    * Relays the cancellation of `orderId`, with the pair of the order while the manager has not heard of its outcome (see
-   * pendingOrderSymbols). Relayed as a bare id, it named no pair, nor did the strat_cancel notification: a chat fed by several
-   * instances, one per pair, could not tell which one it was about. An id the manager did not create in this run, or of an order whose
-   * end it has heard of, goes alone, and the Trader, which knows no such order, warns of it.
+   * pendingOrders). Relayed as a bare id, it named no pair, nor did the strat_cancel notification: a chat fed by several instances,
+   * one per pair, could not tell which one it was about. An id the manager did not create in this run, or of an order whose end it has
+   * heard of, goes alone, and the Trader, which knows no such order, warns of it. So does that of an order the manager forgot, older
+   * than the MAX_PENDING_ORDERS most recent of those pending (see keepPendingOrder), which the Trader may still know.
    */
   private cancelOrder(orderId: UUID): void {
-    const symbol = this.pendingOrderSymbols.get(orderId);
+    const symbol = this.pendingOrders.get(orderId)?.symbol;
     this.emit<AdviceCancelOrder>(STRATEGY_CANCEL_ORDER_EVENT, symbol ? { id: orderId, symbol } : { id: orderId });
   }
 
@@ -373,6 +375,15 @@ export class StrategyManager extends EventEmitter {
   }
 
   private createOrder(order: StrategyOrder): UUID {
+    // Until its outcome, a SELL of the strategy's own holds back the triggers of the stops of its pair (see isTriggerHeld)
+    return this.relayOrder(order, order.side === 'SELL' ? 'strategy' : undefined);
+  }
+
+  /**
+   * Checks `order`, then relays it to the Trader under the id it draws for it, which it returns, and keeps it pending until its
+   * outcome (see pendingOrders): `seller` says who sells, the strategy or a trailing stop, for a SELL
+   */
+  private relayOrder(order: StrategyOrder, seller?: OrderRecord['seller']): UUID {
     if (!this.currentTimestamp) throw new GekkoError('strategy', 'No candle when relaying advice');
     // In realtime the warmup candles are history, replayed with the Trader active: an order created on one of them went to the
     // exchange at once, priced or centred on a close that could be a year old (in backtest it traded on candles the reports leave out).
@@ -392,13 +403,32 @@ export class StrategyManager extends EventEmitter {
     // The stop of a BUY (checkOrder refuses one on a SELL) is armed once the BUY completes. Kept by reference until then, it was the
     // strategy's object: a change made in between armed another stop than the one checked here, or none (a percentage of 0).
     if (order.trailing) this.pendingTrailingStops.set(id, { ...order.trailing });
-    // Until its outcome, a cancellation of the order names its pair (see cancelOrder)
-    this.pendingOrderSymbols.set(id, order.symbol);
-    // Until its outcome, a SELL holds back the triggers of the stops of its pair (see isTriggerHeld)
-    if (order.side === 'SELL') this.strategySellIds.set(id, order.symbol);
+    // Until its outcome, a cancellation of the order names its pair (see cancelOrder), and a SELL says who sells (see OrderRecord)
+    this.keepPendingOrder(id, seller ? { symbol: order.symbol, seller } : { symbol: order.symbol });
 
     this.emit<AdviceOrder>(STRATEGY_CREATE_ORDER_EVENT, { ...omit(order, 'trailing'), id, orderCreationDate });
     return id;
+  }
+
+  /**
+   * Keeps the order `id` pending until its outcome (see pendingOrders), MAX_PENDING_ORDERS of them at most: beyond, the manager forgets
+   * the oldest, with the stop it asked for, as it forgets an order whose outcome has come. A cancellation of it then goes with its id
+   * alone, and a SELL of the strategy holds back the stops of its pair no more. Only orders that do not end pile up so: without a
+   * Trader, where no stop is ever armed, or more than that many left open on the exchange at once.
+   */
+  private keepPendingOrder(id: UUID, record: OrderRecord) {
+    this.pendingOrders.set(id, record);
+    if (this.pendingOrders.size <= MAX_PENDING_ORDERS) return;
+    const [oldestId] = this.pendingOrders.keys();
+    this.pendingOrders.delete(oldestId);
+    this.pendingTrailingStops.delete(oldestId);
+  }
+
+  /** The record of the order `id`, whose outcome has come, which the manager forgets (see pendingOrders) */
+  private forgetPendingOrder(id: UUID): OrderRecord | undefined {
+    const record = this.pendingOrders.get(id);
+    this.pendingOrders.delete(id);
+    return record;
   }
 
   /**
@@ -416,9 +446,10 @@ export class StrategyManager extends EventEmitter {
     switch (level) {
       case 'debug':
         // Not relayed: the built-in strategies log their indicator values at debug, up to four lines a candle (MACD), which reached the
-        // strat_info subscribers as as many Telegram messages. Not even formatted below GEKKO_LOG_LEVEL: winston formats a line before
-        // its level filter drops it, and with the relay that was most of the cost of a candle in a backtest.
-        if (isLevelEnabled('debug')) debug('strategy', text);
+        // strat_info subscribers as as many Telegram messages. Not even formatted below GEKKO_LOG_LEVEL, which debug checks before it
+        // hands winston anything: winston formats a line before its level filter drops it, and with the relay that was most of the
+        // cost of a candle in a backtest.
+        debug('strategy', text);
         return;
       case 'info':
         info('strategy', text);
@@ -703,7 +734,7 @@ export class StrategyManager extends EventEmitter {
 
   /** The SELLs the strategy created on `symbol` whose outcome has not come yet */
   private getStrategySellIds(symbol: TradingPair): UUID[] {
-    return [...this.strategySellIds].filter(([, pair]) => pair === symbol).map(([id]) => id);
+    return [...this.pendingOrders].filter(([, { symbol: pair, seller }]) => seller === 'strategy' && pair === symbol).map(([id]) => id);
   }
 
   /**

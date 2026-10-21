@@ -21,27 +21,27 @@ import { DebugOrderScriptParams } from './debugOrderScript.types';
 export class DebugOrderScript implements Strategy<DebugOrderScriptParams> {
   static schema = debugOrderScriptStrategySchema;
   private index = 0;
-  /** The number of each order in the block, by id, until it ends */
-  private readonly numbers = new Map<UUID, number>();
-  /** The candle that cancels each order given a cancelAfter, by id, until it ends */
-  private readonly cancelAt = new Map<UUID, number>();
+  /**
+   * The orders created, by id, until each ends: its number in the block, and the candle that cancels it when the block gives it a
+   * cancelAfter, until it is canceled
+   */
+  private readonly orders = new Map<UUID, { number: number; cancelAt?: number }>();
 
   onTimeframeCandleAfterWarmup({ candle, tools }: OnCandleEventParams<DebugOrderScriptParams>, ..._indicators: unknown[]): void {
     const { strategyParams, log, createOrder, cancelOrder } = tools;
 
-    for (const [id, at] of this.cancelAt) {
-      if (this.index < at) continue;
-      log('info', `Order ${this.numbers.get(id)} canceled by the strategy on candle ${this.index}`);
+    for (const [id, order] of this.orders) {
+      if (isNil(order.cancelAt) || this.index < order.cancelAt) continue;
+      log('info', `Order ${order.number} canceled by the strategy on candle ${this.index}`);
       cancelOrder(id);
-      this.cancelAt.delete(id);
+      delete order.cancelAt;
     }
 
     const symbol = candle.keys().next().value!;
     strategyParams.orders.forEach(({ candle: at, side, type, amount, price, cancelAfter }, number) => {
       if (at !== this.index) return;
       const id = createOrder({ symbol, side, type, amount, ...(!isNil(price) && { price }) });
-      this.numbers.set(id, number);
-      if (!isNil(cancelAfter)) this.cancelAt.set(id, this.index + cancelAfter);
+      this.orders.set(id, isNil(cancelAfter) ? { number } : { number, cancelAt: this.index + cancelAfter });
       const atPrice = isNil(price) ? '' : ` at ${price}`;
       log('info', `Order ${number} created on candle ${this.index}: ${side} ${type} of ${amount} on ${symbol}${atPrice}`);
     });
@@ -73,9 +73,8 @@ export class DebugOrderScript implements Strategy<DebugOrderScriptParams> {
    * end, which is the hook the StrategyManager calls at the end of the run.
    */
   private releaseOrder(id: UUID) {
-    const number = this.numbers.get(id);
-    this.numbers.delete(id);
-    this.cancelAt.delete(id);
-    return number ?? 'unknown';
+    const order = this.orders.get(id);
+    this.orders.delete(id);
+    return order?.number ?? 'unknown';
   }
 }

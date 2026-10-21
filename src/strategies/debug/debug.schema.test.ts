@@ -173,7 +173,8 @@ describe('debugOrderScriptStrategySchema', () => {
     expect(debugOrderScriptStrategySchema.parse({ orders: [marketBuy] })).toEqual({ orders: [{ ...marketBuy, amount: 1 }] });
   });
 
-  // cancelAfter 0 would cancel the order on the candle that creates it, before it reaches the exchange
+  // cancelAfter 0 would cancel the order on the next candle, as 1 does: the strategy runs the cancellations of a candle before it
+  // creates the orders of that candle. Refused, so that a block says what it means.
   it.each`
     scenario                     | block                                     | code                   | path
     ${'an unknown key (cancel)'} | ${{ orders: [marketBuy], cancel: 1 }}     | ${'unrecognized_keys'} | ${[]}

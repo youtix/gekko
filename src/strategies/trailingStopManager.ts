@@ -2,7 +2,7 @@ import { TRAILING_STOP_ACTIVATED, TRAILING_STOP_TRIGGERED } from '@constants/eve
 import { Candle } from '@models/candle.types';
 import { CandleBucket } from '@models/event.types';
 import { info, warning } from '@services/logger';
-import { addPrecise } from '@utils/math/math.utils';
+import { addPrecise, isFinitePositive } from '@utils/math/math.utils';
 import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
@@ -21,7 +21,7 @@ export class TrailingStopManager extends EventEmitter {
 
   public addOrder({ id, symbol, amount, trailing, createdAt }: AddOrderParams): void {
     if (!trailing) return;
-    if (!Number.isFinite(amount) || amount <= 0) {
+    if (!isFinitePositive(amount)) {
       warning('trailing stop', `Cannot create trailing stop without a valid amount, current order amount: ${amount}`);
       return;
     }
@@ -33,7 +33,7 @@ export class TrailingStopManager extends EventEmitter {
     }
     // Leaving the trigger out asks for a stop active at once. A trigger given must be a price: 0 and NaN, falsy, passed as if left
     // out, and Infinity armed a stop that never activated.
-    if (!isNil(trailing.trigger) && !(Number.isFinite(trailing.trigger) && trailing.trigger > 0)) {
+    if (!isNil(trailing.trigger) && !isFinitePositive(trailing.trigger)) {
       warning('trailing stop', `Invalid trigger price: ${trailing.trigger}. Must be positive.`);
       return;
     }

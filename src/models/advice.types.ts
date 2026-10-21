@@ -46,9 +46,9 @@ export type AdviceOrder = {
 
 /**
  * A cancellation the strategy asked for (STRATEGY_CANCEL_ORDER_EVENT, Tools.cancelOrder): the id of the order, and its pair when the
- * StrategyManager knows the order, one it created in this run whose outcome it has not heard of yet. Left out otherwise: the Trader,
- * which has forgotten such an order or never had it, then warns of an unknown order, and the EventSubscriber's strat_cancel
- * notification says so.
+ * StrategyManager knows the order, one it created in this run whose outcome it has not heard of yet, among the 10 000 most recent of
+ * those (MAX_PENDING_ORDERS). Left out otherwise: the Trader, which has forgotten such an order or never had it, then warns of an
+ * unknown order, and the EventSubscriber's strat_cancel notification says so.
  */
 export type AdviceCancelOrder = {
   /** Gekko order id, as createOrder returned it */

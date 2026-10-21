@@ -90,13 +90,16 @@ export type Tools<T> = {
    * - `cost`, in the currency of the pair (the USDT of BTC/USDT): a BUY spends at most that, the 5 % kept back for its fee included
    *   (DEFAULT_FEE_BUFFER), so it buys cost × 0.95 / price, and a cost of all the currency free is an all-in BUY; a SELL sells
    *   cost / price, its fee taken from what it brings in.
-   * - `allocation`, a share in percent (25 for 25 %) of the currency free for a BUY, of the asset free for a SELL, as that
-   *   synchronization read them, not of what the orders placed since leave: two BUYs of 50 % on one candle are both sized from the
-   *   whole, and a BUY of 100 % is an all-in BUY.
+   * - `allocation`, a share in percent (25 for 25 %) of a balance that synchronization read, not of what the orders placed since leave
+   *   of it: two BUYs of 50 % on one candle are both sized from the whole. For a BUY, the currency free plus what the Trader's own BUYs
+   *   still open at that read held of it, each its amount at the price it was created with, its filled part included (that part alone
+   *   for one canceled before the read): a share does not depend on whether a synchronization came between two BUYs while the first
+   *   rested on the book. For a SELL, the asset free. A BUY of 100 % buys what an all-in BUY does.
    * - none of them: the order is all-in. A BUY spends the currency free, less what the BUYs placed since then may spend (a BUY of an
-   *   amount its cost at the price of its order plus the 5 % kept back for its fee, any other BUY all it was sized from), keeping back
-   *   5 % of it for the fee; a SELL sells the asset free, less what the SELLs placed since then take. An all-in order the orders before
-   *   it leave nothing to is sized to 0, and refused by the limits of the market (onOrderErrored).
+   *   amount its cost at the price of its order plus the 5 % kept back for its fee, any other BUY all it was sized from or, capped at
+   *   the market maximum, what that maximum costs at its price plus the 5 %), keeping back 5 % of it for the fee; a SELL sells the asset
+   *   free, less what the SELLs placed since then take. An all-in order the orders before it leave nothing to is sized to 0, and refused
+   *   by the limits of the market (onOrderErrored).
    *
    * A BUY sized from a cost or an allocation is capped, with a warning, at the currency the BUYs placed since then leave: with nothing
    * left to spend (none free, no balance read yet, or the BUYs placed since taking it all), it is sized to 0 and refused, as an all-in
@@ -142,7 +145,9 @@ export type Tools<T> = {
    * Strategy.onTrailingStopTriggered). Its outcome arrives through the order hooks: canceled, completed if the order filled first, or
    * errored if the cancelation failed. The request names the pair of the order until that outcome arrives, as the strat_cancel
    * notification of the EventSubscriber shows; an id the strategy did not get in this run, or that of an order whose outcome has
-   * arrived, goes alone, and the Trader warns that it knows no such order.
+   * arrived, goes alone, and the Trader warns that it knows no such order. So does that of an order the StrategyManager forgot: it
+   * keeps the 10 000 most recent whose outcome has not arrived (MAX_PENDING_ORDERS), a bound only orders that do not end reach, as
+   * without a Trader.
    */
   cancelOrder: (orderId: UUID) => void;
   /**

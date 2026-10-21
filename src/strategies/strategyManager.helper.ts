@@ -96,9 +96,9 @@ export const getTrailingProblem = ({ side, trailing }: StrategyOrder): string | 
   const unknownKeys = getUnknownKeys(trailing, TRAILING_KEYS);
   if (unknownKeys.length) return `trailing keys must be one of ${showValues(TRAILING_KEYS)}, got ${showValues(unknownKeys)}`;
   const { percentage, trigger } = trailing;
-  if (!(Number.isFinite(percentage) && percentage > 0 && percentage < 100))
+  if (!(isFinitePositive(percentage) && percentage < 100))
     return `trailing.percentage must be a number above 0 and below 100 (2.5 for 2.5%), got ${inspect(percentage)}`;
-  if (!isNil(trigger) && !(Number.isFinite(trigger) && trigger > 0))
+  if (!isNil(trigger) && !isFinitePositive(trigger))
     return `trailing.trigger must be a price above 0, or left out for a stop active as soon as its BUY completes, got ${inspect(trigger)}`;
 };
 

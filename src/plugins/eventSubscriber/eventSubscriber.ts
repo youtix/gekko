@@ -390,7 +390,8 @@ export class EventSubscriber extends Plugin {
     const requestedAt = Date.now();
     this.notify('strat_cancel', payloads, ({ id, symbol }) =>
       [
-        // The StrategyManager names the pair of an order it created and that has not ended, and knows no other (see AdviceCancelOrder)
+        // The StrategyManager names the pair of an order it created and that has not ended, the 10 000 most recent of those, and knows
+        // no other (see AdviceCancelOrder)
         `Strategy requested order cancellation for ${isNil(symbol) ? 'an order it did not create, or that had ended' : symbol}`,
         `Order Id: ${id}`,
         `At time: ${toISOString(requestedAt)}`,

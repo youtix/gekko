@@ -23,12 +23,13 @@ import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { MarketData, OpenOrder } from '@services/exchange/exchange.types';
-import { debug, error, info, isLevelEnabled, warning } from '@services/logger';
+import { debug, error, info, warning } from '@services/logger';
 import { randomUUID, UUID } from 'node:crypto';
 import path from 'node:path';
 import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
 import { AddIndicatorFn, IndicatorResults, InitParams, OnCandleEventParams, Tools } from './strategy.types';
 import { StrategyManager } from './strategyManager';
+import { MAX_PENDING_ORDERS } from './strategyManager.const';
 import { TrailingStopState } from './trailingStopManager.types';
 
 /** An indicator as the manager uses it: fed each timeframe candle of its pair, then asked for its result */
@@ -88,7 +89,6 @@ vi.mock('@services/logger', () => ({
   info: vi.fn(),
   warning: vi.fn(),
   error: vi.fn(),
-  isLevelEnabled: vi.fn(),
 }));
 
 vi.mock('@services/configuration/configuration', () => {
@@ -105,13 +105,6 @@ vi.mock('@services/configuration/configuration', () => {
 
 /** A text in single quotes, as util.inspect shows a string */
 const quoted = (text: string) => `'${text}'`;
-
-/** The levels LogLevel names, the most severe first: winston prints those down to GEKKO_LOG_LEVEL */
-const LEVELS_BY_SEVERITY: LogLevel[] = ['error', 'warn', 'info', 'debug'];
-
-/** Has the logger's isLevelEnabled answer as it does with this GEKKO_LOG_LEVEL */
-const setGekkoLogLevel = (gekkoLogLevel: LogLevel) =>
-  vi.mocked(isLevelEnabled).mockImplementation(level => LEVELS_BY_SEVERITY.indexOf(level) <= LEVELS_BY_SEVERITY.indexOf(gekkoLogLevel));
 
 /** The strategy exported by the file the strategyPath tests load */
 const externalStrategyMocks = vi.hoisted(() => ({ DebugAdvice: class DebugAdvice {} }));
@@ -158,7 +151,6 @@ describe('StrategyManager', () => {
   };
 
   beforeEach(() => {
-    setGekkoLogLevel('error'); // Its default
     manager = new StrategyManager(1);
     manager.setMarketData(defaultMarketData);
   });
@@ -1528,7 +1520,7 @@ describe('StrategyManager', () => {
           vi.mocked(randomUUID).mockReturnValueOnce(STOP_SELL_ID);
           manager.onOneMinuteBucket(minute(50000, 48000));
           end(STOP_SELL_ID);
-          expect(manager['trailingStopSellIds'].has(STOP_SELL_ID)).toBe(false);
+          expect(manager['pendingOrders'].has(STOP_SELL_ID)).toBe(false);
         });
       });
 
@@ -2486,7 +2478,7 @@ describe('StrategyManager', () => {
             });
 
             it('forgets that SELL', () => {
-              expect(manager['strategySellIds'].has(OWN_SELL_ID)).toBe(false);
+              expect(manager['pendingOrders'].has(OWN_SELL_ID)).toBe(false);
             });
           });
 
@@ -3348,13 +3340,10 @@ describe('StrategyManager', () => {
             expect(manager['pendingTrailingStops'].size).toBe(0);
           });
 
-          it('keeps no SELL of the strategy', () => {
-            expect(manager['strategySellIds'].size).toBe(0);
-          });
-
-          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
-          it('keeps the pair of no order', () => {
-            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed, and a SELL held back the stops
+          // of its pair until then
+          it('keeps no order pending', () => {
+            expect(manager['pendingOrders'].size).toBe(0);
           });
         });
 
@@ -3578,14 +3567,10 @@ describe('StrategyManager', () => {
             expect(manager['pendingTrailingStops'].size).toBe(0);
           });
 
-          // Kept, a SELL held back the stops of its pair until an outcome that never comes
-          it('keeps no SELL of the strategy', () => {
-            expect(manager['strategySellIds'].size).toBe(0);
-          });
-
-          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
-          it('keeps the pair of no order', () => {
-            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed, and a SELL held back the stops
+          // of its pair until then
+          it('keeps no order pending', () => {
+            expect(manager['pendingOrders'].size).toBe(0);
           });
         });
 
@@ -3718,8 +3703,8 @@ describe('StrategyManager', () => {
           });
 
           // Kept, it would never be forgotten: no outcome follows an order refused before it was relayed
-          it('keeps the pair of no order', () => {
-            expect(manager['pendingOrderSymbols'].size).toBe(0);
+          it('keeps no order pending', () => {
+            expect(manager['pendingOrders'].size).toBe(0);
           });
         });
 
@@ -3842,8 +3827,8 @@ describe('StrategyManager', () => {
             expect(listener).not.toHaveBeenCalled();
           });
 
-          it('keeps the pair of no order', () => {
-            expect(target['pendingOrderSymbols'].size).toBe(0);
+          it('keeps no order pending', () => {
+            expect(target['pendingOrders'].size).toBe(0);
           });
         },
       );
@@ -3993,11 +3978,61 @@ describe('StrategyManager', () => {
         },
       );
 
-      // Kept until each order ends, the pairs never outnumber the orders pending
-      it('keeps the pair of no order once every order it created has ended', () => {
+      // Kept until each order ends, the orders kept never outnumber the orders pending
+      it('keeps no order pending once every order it created has ended', () => {
         END_ORDER.completed(BUY);
         END_ORDER.errored(SELL);
-        expect(manager['pendingOrderSymbols'].size).toBe(0);
+        expect(manager['pendingOrders'].size).toBe(0);
+      });
+
+      // Without a Trader no order ends: each was kept for the life of the run, one per advice, 525 600 a year for a screener advising
+      // on every 1m candle. The 10 000 most recent are kept, the oldest forgotten with the stop it asked for. The BUY and the SELL
+      // created above are orders 0 and 1; order n after them is drawn idOf(n).
+      describe('once one more order than the manager keeps is pending', () => {
+        const idOf = (index: number): UUID => `0c0c0c0c-0000-4000-8000-${index.toString().padStart(12, '0')}`;
+        const BUY_ASKING_FOR_A_STOP = { symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', trailing: { percentage: 2 } } as const;
+        const MARKET_BUY = { symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET', amount: 1 } as const;
+        /** Creates the orders numbered `from` to `to` (MARKET BUYs of 1 BTC) */
+        const createOrders = (from: number, to: number) => {
+          for (let index = from; index <= to; index++) manager['createOrder'](MARKET_BUY);
+        };
+
+        beforeEach(() => {
+          let drawn = 2;
+          vi.mocked(randomUUID).mockImplementation(() => idOf(drawn++));
+          // Order 2 asks for a stop, then orders 3 to 10 000 make 10 001 orders pending
+          manager['createOrder'](BUY_ASKING_FOR_A_STOP);
+          createOrders(3, MAX_PENDING_ORDERS);
+        });
+
+        it('keeps 10 000 orders pending', () => {
+          expect(manager['pendingOrders'].size).toBe(10_000);
+        });
+
+        it('relays the cancellation of the oldest, the BUY on BTC/USDT, with its id alone', () => {
+          manager['tools'].cancelOrder(BUY.id);
+          expect(listener.mock.calls).toStrictEqual([[{ id: BUY.id }]]);
+        });
+
+        it('still relays that of the next one, the SELL on ETH/USDT, with its pair', () => {
+          manager['tools'].cancelOrder(SELL.id);
+          expect(listener.mock.calls).toStrictEqual([[{ id: SELL.id, symbol: 'ETH/USDT' }]]);
+        });
+
+        it('relays that of the last one with its pair', () => {
+          manager['tools'].cancelOrder(idOf(MAX_PENDING_ORDERS));
+          expect(listener.mock.calls).toStrictEqual([[{ id: idOf(MAX_PENDING_ORDERS), symbol: 'BTC/USDT' }]]);
+        });
+
+        it('keeps the stop order 2 asked for while it keeps that order', () => {
+          expect(manager['pendingTrailingStops'].has(idOf(2))).toBe(true);
+        });
+
+        // Two more orders forget the oldest two: the SELL, then order 2
+        it('forgets that stop with order 2', () => {
+          createOrders(MAX_PENDING_ORDERS + 1, MAX_PENDING_ORDERS + 2);
+          expect(manager['pendingTrailingStops'].has(idOf(2))).toBe(false);
+        });
       });
     });
 
@@ -4038,27 +4073,21 @@ describe('StrategyManager', () => {
     });
 
     describe('log', () => {
-      // A debug line went to winston, which formats a line before its level filter drops it, and was relayed to the strat_info
-      // subscribers, whatever GEKKO_LOG_LEVEL: four a candle for MACD, most of the cost of a candle in a backtest, and as many Telegram
-      // messages in realtime. The other levels are relayed whatever GEKKO_LOG_LEVEL, and a warning or an error always reaches the
-      // logger, whose buffer keeps it for the log monitoring of Supervision.
+      // A debug line was relayed to the strat_info subscribers: four a candle for MACD, as many Telegram messages in realtime. Below
+      // GEKKO_LOG_LEVEL the logger's debug drops it before winston formats it, which was most of the cost of a candle in a backtest.
+      // The other levels are relayed whatever GEKKO_LOG_LEVEL, and a warning or an error always reaches the logger, whose buffer keeps
+      // it for the log monitoring of Supervision.
       describe.each`
-        level      | logger     | gekkoLogLevel | isLogged | relayed
-        ${'debug'} | ${debug}   | ${'error'}    | ${false} | ${[]}
-        ${'debug'} | ${debug}   | ${'info'}     | ${false} | ${[]}
-        ${'debug'} | ${debug}   | ${'debug'}    | ${true}  | ${[]}
-        ${'info'}  | ${info}    | ${'error'}    | ${true}  | ${['info']}
-        ${'info'}  | ${info}    | ${'debug'}    | ${true}  | ${['info']}
-        ${'warn'}  | ${warning} | ${'error'}    | ${true}  | ${['warn']}
-        ${'warn'}  | ${warning} | ${'debug'}    | ${true}  | ${['warn']}
-        ${'error'} | ${error}   | ${'error'}    | ${true}  | ${['error']}
-        ${'error'} | ${error}   | ${'debug'}    | ${true}  | ${['error']}
-      `('a $level line, with GEKKO_LOG_LEVEL $gekkoLogLevel', ({ level, logger, gekkoLogLevel, isLogged, relayed }) => {
+        level      | logger     | relayed
+        ${'debug'} | ${debug}   | ${[]}
+        ${'info'}  | ${info}    | ${['info']}
+        ${'warn'}  | ${warning} | ${['warn']}
+        ${'error'} | ${error}   | ${['error']}
+      `('a $level line', ({ level, logger, relayed }) => {
         let listener: Mock;
         let failure: unknown;
 
         beforeEach(() => {
-          setGekkoLogLevel(gekkoLogLevel);
           listener = vi.fn();
           manager.on(STRATEGY_INFO_EVENT, listener);
           failure = undefined;
@@ -4069,8 +4098,8 @@ describe('StrategyManager', () => {
           }
         });
 
-        it(isLogged ? 'hands it to the logger' : 'does not hand it to the logger', () => {
-          expect(vi.mocked(logger).mock.calls).toEqual(isLogged ? [['strategy', 'line']] : []);
+        it('hands it to the logger function of its level', () => {
+          expect(vi.mocked(logger).mock.calls).toEqual([['strategy', 'line']]);
         });
 
         it(relayed.length ? 'relays it, at its level' : 'does not relay it', () => {

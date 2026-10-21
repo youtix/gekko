@@ -93,6 +93,12 @@ describe('DebugOrderScript', () => {
       expect(cancellations).toEqual(expected);
     });
 
+    // What the schema refuses 0 for: given past it, 0 does what 1 does
+    it('cancels on the next candle an order given a cancelAfter of 0, the cancelations of a candle running before its orders', () => {
+      play(3, { orders: [{ candle: 0, side: 'BUY', type: 'LIMIT', amount: 1, price: 90, cancelAfter: 0 }] });
+      expect(cancellations).toEqual([{ order: 1, candle: 1 }]);
+    });
+
     it('logs each cancelation with the number of the order and the candle', () => {
       play(3, scriptOf([{ candle: 0, side: 'BUY', type: 'LIMIT', price: 90, cancelAfter: 2 }]));
       expect(logs.at(-1)).toEqual(infoLine('Order 0 canceled by the strategy on candle 2'));

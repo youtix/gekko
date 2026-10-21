@@ -20,6 +20,13 @@ export const SIZING_KEYS = ['amount', 'cost', 'allocation'] as const satisfies r
 export const TRAILING_KEYS = Object.keys({ percentage: true, trigger: true } satisfies Record<keyof TrailingConfig, true>);
 
 /**
+ * The most orders the StrategyManager keeps pending, those whose outcome it has not heard of yet (see StrategyManager.pendingOrders):
+ * beyond, it forgets the oldest. Without a Trader (a screener) no order ever ends, and one kept per advice grew the manager for the
+ * life of the run, about 58 MB a year of advices on 1m candles. With one, the orders pending are those open on the exchange, far fewer.
+ */
+export const MAX_PENDING_ORDERS = 10_000;
+
+/**
  * How a message that is not a string is written (see StrategyManager.log): the objects it holds two levels deep, on one line but for an
  * Error, written with its stack. Not compact, util.inspect wrote an array of more than six items in rows, and whatever held one with it.
  */
