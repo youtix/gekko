@@ -46,13 +46,15 @@ const LINES = {
   ethSell: { level: 'info', message: '[ETH/USDT] Executing short advice due to detected downtrend: @ 20.00000000 (1.00000/-1.00000)' },
   ethNeutral: { level: 'debug', message: '[ETH/USDT] We are currently not in an up or down trend: @ 20.00000000 (1.00000/0.00000)' },
 } satisfies Record<string, LoggedLine>;
-// What the book warns when it skips its first BUY of BTC/USDT: 50 % of the 10 USDT free is 5 USDT, which buys 4.75 USDT once 5 % is
-// kept back for the fee, below the minimum cost of 10 USDT of the market
+// What the book logs when it skips a BUY of BTC/USDT: 50 % of the 10 USDT free is 5 USDT, which buys 4.75 USDT once 5 % is kept back
+// for the fee, below the minimum cost of 10 USDT of the market. Its first skip is a warning, its next ones that line at debug level.
+const BTC_BUY_SKIP =
+  '[BTC/USDT] BUY skipped: 50 % of the 10 USDT free, 4.75 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account';
 const BTC_BUY_SKIPPED: LoggedLine = {
   level: 'warn',
-  message:
-    '[BTC/USDT] BUY skipped: 50 % of the 10 USDT free, 4.75 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account; the next skips of this pair are logged at debug level until a BUY of it is placed',
+  message: `${BTC_BUY_SKIP}; the next skips of this pair are logged at debug level until a BUY of it is placed`,
 };
+const BTC_BUY_SKIPPED_AGAIN: LoggedLine = { level: 'debug', message: BTC_BUY_SKIP };
 
 describe('DEMA Strategy', () => {
   let strategy: DEMA;
@@ -332,17 +334,19 @@ describe('DEMA Strategy', () => {
     });
 
     // 10 USDT free, and a minimum cost of 10 USDT on the market of BTC/USDT alone: the book skips its BUY, which spends its uptrend all
-    // the same, as a refused BUY does
+    // the same, as a refused BUY does. The strategy logs no advice for it, the book's line its only trace: logged before the BUY, the
+    // advice told of an order that was never sent. Every line is asserted, debug included: the book's debug line is what shows a BUY
+    // asked for again.
     it.each`
       case                                                        | steps                                   | expected
-      ${'the next candles of its uptrend advise nothing'}         | ${'up/neutral up/neutral'}              | ${{ orders: [], lines: [LINES.btcBuy, BTC_BUY_SKIPPED] }}
-      ${'the next uptrend advises again, skipped at debug level'} | ${'up/neutral down/neutral up/neutral'} | ${{ orders: [], lines: [LINES.btcBuy, BTC_BUY_SKIPPED, LINES.btcBuy] }}
-      ${'ETH buys its share beside it'}                           | ${'up/up'}                              | ${{ orders: [buy(ETH, 50)], lines: [LINES.btcBuy, BTC_BUY_SKIPPED, LINES.ethBuy] }}
-    `('should take a BUY the book skips as advised, nothing sent: $case', ({ steps, expected }) => {
+      ${'the next candles of its uptrend advise nothing'}         | ${'up/neutral up/neutral'}              | ${{ orders: [], lines: [LINES.btcUp, BTC_BUY_SKIPPED, LINES.ethNeutral, LINES.btcUp, LINES.ethNeutral] }}
+      ${'the next uptrend advises again, skipped at debug level'} | ${'up/neutral down/neutral up/neutral'} | ${{ orders: [], lines: [LINES.btcUp, BTC_BUY_SKIPPED, LINES.ethNeutral, LINES.btcDown, LINES.ethNeutral, LINES.btcUp, BTC_BUY_SKIPPED_AGAIN, LINES.ethNeutral] }}
+      ${'ETH buys its share beside it'}                           | ${'up/up'}                              | ${{ orders: [buy(ETH, 50)], lines: [LINES.btcUp, BTC_BUY_SKIPPED, LINES.ethUp, LINES.ethBuy] }}
+    `('should take a BUY the book skips as advised, nothing sent and no advice logged: $case', ({ steps, expected }) => {
       portfolio = new Map([['USDT', { free: 10, used: 0, total: 10 }]]);
       tools.marketData = new Map([[BTC, { cost: { min: 10 } }]]);
       play(steps);
-      expect({ orders: advices, lines: logs.filter(({ level }) => level !== 'debug') }).toStrictEqual(expected);
+      expect({ orders: advices, lines: logs }).toStrictEqual(expected);
     });
 
     it.each`

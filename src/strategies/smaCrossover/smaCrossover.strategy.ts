@@ -99,9 +99,11 @@ export class SMACrossover implements Strategy<SMACrossoverStrategyParams> {
         log('info', `[${pair}] SMA crossed UP price (${sma.results.toFixed(5)} > ${price.toFixed(5)}) => SELL`);
         this.book.sell({ type: 'MARKET', symbol: pair }, params);
       } else if (!side.wasPriceAboveSMA && this.book.canBuy(pair)) {
-        // Price crossed above SMA => SMA crossed DOWN the price => BUY
-        log('info', `[${pair}] SMA crossed DOWN price (${sma.results.toFixed(5)} < ${price.toFixed(5)}) => BUY`);
-        this.book.buy({ type: 'MARKET', symbol: pair }, params);
+        // Price crossed above SMA => SMA crossed DOWN the price => BUY, logged once placed: a BUY the book skips as too small for the
+        // market (see PositionBook.buy) is told by the book's own line alone. Logged before it, this line, relayed to the strat_info
+        // subscribers, announced a BUY that was never sent.
+        const id = this.book.buy({ type: 'MARKET', symbol: pair }, params);
+        if (id) log('info', `[${pair}] SMA crossed DOWN price (${sma.results.toFixed(5)} < ${price.toFixed(5)}) => BUY`);
       }
     }
   }

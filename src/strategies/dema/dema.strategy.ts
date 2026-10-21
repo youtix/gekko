@@ -95,8 +95,11 @@ export class DEMA implements Strategy<DEMAStrategyParams> {
       }
       if (!trend.isTrendAdviced && this.book.canBuy(pair)) {
         trend.isTrendAdviced = true;
-        log('info', `[${pair}] Executing long advice due to detected uptrend: ${message}`);
-        this.book.buy({ type: 'STICKY', symbol: pair }, params);
+        // Logged once the BUY is placed: one the book skips as too small for the market (see PositionBook.buy) is told by the book's own
+        // line alone. Logged before it, this line, relayed to the strat_info subscribers, told of a long advice executed while nothing
+        // was sent.
+        const id = this.book.buy({ type: 'STICKY', symbol: pair }, params);
+        if (id) log('info', `[${pair}] Executing long advice due to detected uptrend: ${message}`);
       }
     } else if (diff < strategyParams.thresholds.down) {
       log('debug', `[${pair}] We are currently in a downtrend: ${message}`);

@@ -388,14 +388,17 @@ describe('TMA Strategy', () => {
         expect(advices).toStrictEqual([buyOf(BTC, 50)]);
       });
 
-      // The advice on every candle of the uptrend, then the line of the book: a warning the first time, at debug level after it
-      it('should log the advice on every candle of the uptrend, the skip of the book after it', () => {
+      // No advice on the candles whose BUY the book skips, the line of the book alone: a warning the first time, at debug level after
+      // it. Logged before the BUY, the advice went out on every candle of the uptrend, an order announced that was never sent. It comes
+      // with the BUY placed, once the currency funds it.
+      it('should log the skip of the book alone on each candle of the uptrend, and the advice once the BUY is placed', () => {
         play('tickRise,tickPeak tickRise,tickPeak');
+        portfolio = usdt(100);
+        play('tickRise,tickPeak');
         expect(logs).toEqual([
-          { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
           { level: 'warn', message: expect.stringMatching(/^\[BTC\/USDT\] BUY skipped: 50 % of the 10 USDT free, /) },
-          { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
           { level: 'debug', message: expect.stringMatching(/^\[BTC\/USDT\] BUY skipped: 50 % of the 10 USDT free, /) },
+          { level: 'info', message: '[BTC/USDT] Executing long advice due to detected uptrend: 100.02/100.01/100' },
         ]);
       });
     });

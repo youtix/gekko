@@ -450,8 +450,10 @@ describe('SMACrossover Strategy', () => {
       ]);
     });
 
-    // 10 USDT free: half of it, 5 USDT, of which a BUY sized from it costs 95 %, 4.75 USDT, under the minimum cost of 10 USDT
-    it('should take a BUY the book skips as one placed: asked again on the next crossover, not on the next candle', () => {
+    // 10 USDT free: half of it, 5 USDT, of which a BUY sized from it costs 95 %, 4.75 USDT, under the minimum cost of 10 USDT. The
+    // crossover is not logged for a BUY the book skips, the book's line its only trace: logged before the BUY, it announced a BUY that
+    // was never sent.
+    it('should take a BUY the book skips as one placed, its crossover unlogged: asked again on the next crossover, not on the next candle', () => {
       portfolio = new Map([['USDT', { free: 10, used: 0, total: 10 }]]);
       tools.marketData = new Map([
         [symbol, { cost: { min: 10 } }],
@@ -465,9 +467,7 @@ describe('SMACrossover Strategy', () => {
         logs: [
           { level: 'info', message: '[BTC/USDT] Initial state: price below SMA' },
           { level: 'info', message: '[ETH/USDT] Initial state: price below SMA' },
-          { level: 'info', message: '[BTC/USDT] SMA crossed DOWN price (100.00000 < 110.00000) => BUY' },
           { level: 'warn', message: `${skipped}; the next skips of this pair are logged at debug level until a BUY of it is placed` },
-          { level: 'info', message: '[BTC/USDT] SMA crossed DOWN price (100.00000 < 110.00000) => BUY' },
           { level: 'debug', message: skipped },
         ],
       });

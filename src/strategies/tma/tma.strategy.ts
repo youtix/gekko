@@ -75,8 +75,11 @@ export class TMA implements Strategy<TMAStrategyParams> {
     const isDowntrend = (shortToMedium < 0 && mediumToLong > 0) || (shortToMedium > 0 && mediumToLong < 0);
 
     if (isUptrend && this.book.canBuy(pair)) {
-      log('info', `[${pair}] Executing long advice due to detected uptrend: ${smas}`);
-      this.book.buy({ type: 'STICKY', symbol: pair }, params);
+      // Logged once the BUY is placed: one the book skips as too small for the market (see PositionBook.buy) is told by the book's own
+      // line alone, at debug level from its second skip on. Logged before it, this line, relayed to the strat_info subscribers, told on
+      // every candle of the uptrend of a long advice executed while nothing was sent.
+      const id = this.book.buy({ type: 'STICKY', symbol: pair }, params);
+      if (id) log('info', `[${pair}] Executing long advice due to detected uptrend: ${smas}`);
     } else if (isDowntrend && this.book.canSell(pair)) {
       log('info', `[${pair}] Executing short advice due to detected downtrend: ${smas}`);
       this.book.sell({ type: 'STICKY', symbol: pair }, params);
