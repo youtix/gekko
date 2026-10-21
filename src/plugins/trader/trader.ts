@@ -12,8 +12,7 @@ import { FEE_BUFFER_PERCENT } from '@constants/order.const';
 import { ONE_MINUTE } from '@constants/time.const';
 import { describeError } from '@errors/error.helper';
 import { getFirstCandleFromBucket } from '@helpers/candle/candle.helper';
-import { getMarketOrderLimits, toBound } from '@helpers/market/market.helper';
-import { roundToStep } from '@helpers/market/precision.helper';
+import { getMarketOrderLimits, getSentCost, toBound } from '@helpers/market/market.helper';
 import { getAllInBuyAmount, getAllocatedShare, getBuyBudget, getSellAmountOfCost } from '@helpers/order/sizing.helper';
 import { clonePortfolio, createEmptyPortfolio, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { AdviceCancelOrder, AdviceOrder } from '@models/advice.types';
@@ -42,6 +41,7 @@ import {
   computeOrderPricing,
   describeAllocationBase,
   describeBuysPlacedSince,
+  describeMaximumSent,
   getBacktestModeIntervalSyncTime,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
@@ -257,7 +257,8 @@ export class Trader extends Plugin {
    * unreadOrders): of the asset for a SELL, its amount (see sizeSell); of the currency for a BUY, what it may spend (see getBuyBudget),
    * all it was sized from for an all-in BUY (see sizeAllInBuy), its budget for one sized by its cost or by its allocation (see
    * sizeBudgetBuy). A BUY with an amount is placed as asked, never capped: the strategy chose it, and the exchange refuses it when the
-   * market does not take it. How an order sized by its cost or by its allocation came out is then reported (see reportBudgetSizing).
+   * market does not take it. How an order sized by its cost or by its allocation came out is then reported (see reportBudgetSizing), and
+   * one the market refuses for its minimum amount or its minimum cost is warned of, as an all-in BUY is (see warnOfMarketMinimums).
    */
   private sizeOrder(advice: AdviceOrder, price: number, balance: FreeBalanceLeft): { amount: number; taken: number } {
     const budget = this.getBudget(advice, price, balance);
@@ -300,24 +301,25 @@ export class Trader extends Plugin {
       const unit = side === 'BUY' ? currencyName : assetName;
       const held = side === 'BUY' ? (this.heldByOpenBuys.get(currencyName) ?? 0) : 0;
       const asked = getAllocatedShare(held > 0 ? addPrecise(read, held) : read, allocation);
-      return { asked, label: `${order} ${asked} ${unit} (${allocation} % of ${describeAllocationBase(read, held, unit)})` };
+      const share = `${formatEveryDecimal(allocation)} % of ${describeAllocationBase(read, held, unit)}`;
+      return { asked, label: `${order} ${formatEveryDecimal(asked)} ${unit} (${share})` };
     }
     if (isNil(cost)) return;
-    if (side === 'BUY') return { asked: cost, label: `${order} ${cost} ${currencyName}` };
+    if (side === 'BUY') return { asked: cost, label: `${order} ${formatEveryDecimal(cost)} ${currencyName}` };
     const asked = getSellAmountOfCost(cost, price);
-    return { asked, label: `${order} ${asked} ${assetName} (${cost} ${currencyName} at ${price})` };
+    const notional = `${formatEveryDecimal(cost)} ${currencyName} at ${formatEveryDecimal(price)}`;
+    return { asked, label: `${order} ${formatEveryDecimal(asked)} ${assetName} (${notional})` };
   }
 
   /**
    * The most the market takes in one order of the type of `advice`, in its asset: the maximum of the amount range of the market
    * (Binance's LOT_SIZE), narrowed for a MARKET order to that of a market order (Binance's MARKET_LOT_SIZE, see getMarketOrderLimits),
    * as the exchanges check an order before they send it. Undefined when the market sets none: a maximum that is not a finite number
-   * above 0 sets nothing there either (Binance disables a filter bound by setting it to 0).
+   * above 0 sets nothing there either (see toBound: Binance disables a filter bound by setting it to 0).
    */
   private getMaximumAmount({ symbol, type }: AdviceOrder) {
     const marketData = this.getExchange().getMarketData(symbol);
-    const maximum = (type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData).amount?.max;
-    return isFiniteNumber(maximum) && maximum > 0 ? maximum : undefined;
+    return toBound((type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData).amount?.max);
   }
 
   /**
@@ -358,20 +360,19 @@ export class Trader extends Plugin {
     const { read, taken, free } = balance;
     const requestedAmount = budget?.asked ?? advice.amount ?? free;
     if (isNil(advice.amount) && !(requestedAmount > 0)) {
-      const sized = budget?.label ?? `[${id}] All-in SELL ${type} order sized from ${free} ${assetName}`;
+      const sized = budget?.label ?? `[${id}] All-in SELL ${type} order sized from ${formatEveryDecimal(free)} ${assetName}`;
       const cause = this.getEmptyBalanceCause(balance, assetName, 'SELLs');
-      warning('trader', `${sized}: ${requestedAmount} ${assetName} sent, which the market refuses (${cause})`);
+      warning('trader', `${sized}: ${formatEveryDecimal(requestedAmount)} ${assetName} sent, which the market refuses (${cause})`);
       return requestedAmount;
     }
     const isFiniteAmount = Number.isFinite(requestedAmount);
     const isAboveBalance = isFiniteAmount && free > 0 && requestedAmount > free;
     const maximum = this.getMaximumAmount(advice);
-    const asked =
-      budget?.label ?? `[${id}] ${isNil(advice.amount) ? 'All-in SELL' : 'SELL'} ${type} order of ${requestedAmount} ${assetName}`;
+    const order = `${isNil(advice.amount) ? 'All-in SELL' : 'SELL'} ${type} order of ${formatEveryDecimal(requestedAmount)} ${assetName}`;
+    const asked = budget?.label ?? `[${id}] ${order}`;
 
     if (isFiniteAmount && !isNil(maximum) && (isAboveBalance ? free : requestedAmount) > maximum) {
-      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
-      warning('trader', `${asked} above ${capped}, the rest stays held`);
+      warning('trader', `${asked} above ${describeMaximumSent(advice, maximum)}, the rest stays held`);
       return maximum;
     }
     if (!isAboveBalance) {
@@ -382,9 +383,10 @@ export class Trader extends Plugin {
       }
       return requestedAmount;
     }
-    const sent = `${asked} above the free balance: ${free} ${assetName} sent, all that can be sold`;
+    const sent = `${asked} above the free balance: ${formatEveryDecimal(free)} ${assetName} sent, all that can be sold`;
     // The amount sent is then less than the free balance read: what the SELLs placed since take is said
-    const left = `${read} ${assetName} free at the last synchronization, less ${taken} ${assetName} for the SELLs placed since`;
+    const placed = `less ${formatEveryDecimal(taken)} ${assetName} for the SELLs placed since`;
+    const left = `${formatEveryDecimal(read)} ${assetName} free at the last synchronization, ${placed}`;
     warning('trader', taken > 0 ? `${sent} (${left})` : sent);
     return free;
   }
@@ -401,29 +403,31 @@ export class Trader extends Plugin {
    * before it take the asset whole. Sized from no currency at all (none on the account, or no balance read yet), it is said at warn
    * level too: the refusal names the amount of 0, not its cause.
    *
-   * Capped at the most the market takes in one order of its type (see getMaximumAmount), with a warning: all-in is as much as the
-   * market takes, and above it the BUY was refused at each entry signal, an error counting towards the circuit breaker. It then takes
-   * from the currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it.
+   * Capped at the most the market takes in one order of its type (see capBuyAtMaximum), with a warning: all-in is as much as the market
+   * takes, and above it the BUY was refused at each entry signal, an error counting towards the circuit breaker. It then takes from the
+   * currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it.
+   *
+   * Below a minimum of the market, its amount or its cost, it is warned of before it is sent, as a BUY sized by its cost or by its
+   * allocation is (see warnOfMarketMinimums). An all-in BUY is the BUY of the signal strategies on one pair, and that of the last pair to
+   * buy on several: refused unwarned, its reason named a cost the strategy never chose, the share kept back for the fee and the step
+   * taken off, while a BUY allocated 100 %, sized to the same amount, was warned of.
    */
   private sizeAllInBuy(advice: AdviceOrder, price: number, currency: FreeBalanceLeft): { amount: number; taken: number } {
     const { id, type, symbol } = advice;
     const [assetName, currencyName] = symbol.split('/');
     const { read, taken, free } = currency;
     const amount = getAllInBuyAmount(free, price);
-    const maximum = this.getMaximumAmount(advice);
-    const sized = `[${id}] All-in BUY ${type} order sized from ${free} ${currencyName}`;
+    const sized = `[${id}] All-in BUY ${type} order sized from ${formatEveryDecimal(free)} ${currencyName}`;
+    const capped = this.capBuyAtMaximum(advice, price, sized, amount);
+    if (capped) return capped;
 
-    if (Number.isFinite(amount) && !isNil(maximum) && amount > maximum) {
-      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
-      warning('trader', `${sized}: ${amount} ${assetName}, above ${capped}, the rest of the ${currencyName} left unspent`);
-      return { amount: maximum, taken: getBuyBudget(maximum, price) };
-    }
     if (taken > 0) {
-      warning('trader', `${sized}: ${amount} ${assetName} sent (${describeBuysPlacedSince(currency, currencyName)})`);
+      warning('trader', `${sized}: ${formatEveryDecimal(amount)} ${assetName} sent (${describeBuysPlacedSince(currency, currencyName)})`);
     } else if (!(read > 0)) {
       const cause = this.getEmptyBalanceCause(currency, currencyName, 'BUYs');
-      warning('trader', `${sized}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
+      warning('trader', `${sized}: ${formatEveryDecimal(amount)} ${assetName} sent, which the market refuses (${cause})`);
     }
+    this.warnOfMarketMinimums(advice, price, sized, amount);
     return { amount, taken: free };
   }
 
@@ -436,68 +440,110 @@ export class Trader extends Plugin {
    * nothing, it is sized to 0, which the limits of the market refuse, said at warn level with its cause, as for an all-in BUY: the
    * refusal names the amount of 0, not its cause.
    *
-   * Capped at the most the market takes in one order of its type (see getMaximumAmount), with a warning, as an all-in BUY is: it then
+   * Capped at the most the market takes in one order of its type (see capBuyAtMaximum), with a warning, as an all-in BUY is: it then
    * takes from the currency what it may spend (see getBuyBudget), and leaves the rest to the BUYs after it. Otherwise it takes its
    * budget. An allocation of 100 % is an all-in BUY: the same amount, taking as much of the currency, warned of in the same cases, but
    * when the last synchronization read BUYs of the Trader open: its share, of what they held too, is then above what is left, and capped
    * at it with a warning (see getBudget).
    */
   private sizeBudgetBuy(advice: AdviceOrder, price: number, currency: FreeBalanceLeft, { asked, label }: Budget) {
-    const { type, symbol } = advice;
-    const [assetName, currencyName] = symbol.split('/');
+    const [assetName, currencyName] = advice.symbol.split('/');
     const isCapped = asked > currency.free;
     const budget = isCapped ? currency.free : asked;
     const amount = getAllInBuyAmount(budget, price);
-    const maximum = this.getMaximumAmount(advice);
-    const sized = isCapped ? `${label} above the free balance, sized from ${budget} ${currencyName}` : label;
+    const sized = isCapped ? `${label} above the free balance, sized from ${formatEveryDecimal(budget)} ${currencyName}` : label;
+    const capped = this.capBuyAtMaximum(advice, price, sized, amount);
+    if (capped) return capped;
 
-    if (!isNil(maximum) && amount > maximum) {
-      const capped = `the maximum amount of a ${type} order on ${symbol}: ${maximum} ${assetName} sent`;
-      warning('trader', `${sized}: ${amount} ${assetName}, above ${capped}, the rest of the ${currencyName} left unspent`);
-      return { amount: maximum, taken: getBuyBudget(maximum, price) };
-    }
     if (!(budget > 0)) {
       const cause = this.getEmptyBalanceCause(currency, currencyName, 'BUYs');
-      warning('trader', `${label}: ${amount} ${assetName} sent, which the market refuses (${cause})`);
+      warning('trader', `${label}: ${formatEveryDecimal(amount)} ${assetName} sent, which the market refuses (${cause})`);
     } else if (isCapped) {
-      const sent = `${sized}: ${amount} ${assetName} sent`;
+      const sent = `${sized}: ${formatEveryDecimal(amount)} ${assetName} sent`;
       warning('trader', currency.taken > 0 ? `${sent} (${describeBuysPlacedSince(currency, currencyName)})` : sent);
     }
     return { amount, taken: budget };
   }
 
   /**
-   * Says at debug level how an order sized by its cost or by its allocation came out, and warns before it is sent when its cost is below
-   * the minimum cost of the market (see toBound): the market refuses it, an error counting towards the circuit breaker, whose reason names
-   * the cost of the order, not the budget or the share it came from. The cost is that of the amount the exchanges check, truncated to the
-   * amount step of the market as they send it (see roundToStep and roundToMarketPrecision; isSellable values a holding so), at the price of
-   * the order, in decimal (see multiplyPrecise). Valued as sized, an order the truncation took under the minimum was refused unwarned:
-   * 0.0000870833333333333 BTC at 60000 is 5.225 USDT, above a minimum of 5, and is sent as 0.00008 BTC, 4.8 USDT. The warning then says the
-   * amount truncated and the step. The price is the order's: an exchange checks a market order at its ticker, and rounds a limit price to
-   * its tick, which moves the cost by half a tick times the amount at most. A BUY costs less than its budget, the share DEFAULT_FEE_BUFFER
-   * keeps back for the fee: one whose budget is the minimum cost is refused. Not an order sized to 0, nor one the step cuts to 0, which the
-   * market refuses for its amount: the first is warned of with its cause (see sizeSell and sizeBudgetBuy), the refusal of the second names
-   * the step. An order with an amount is not checked, its refusal naming the amount the strategy chose, nor an all-in one.
+   * The sizing of a BUY without an amount (all-in, or sized by its cost or by its allocation) whose `amount` is above the most the market
+   * takes in one order of its type (see getMaximumAmount): capped at it, with a warning that names the order and its sizing (`sized`),
+   * what it buys and the maximum sent, it takes from the currency what that maximum may spend at its price (see getBuyBudget), and leaves
+   * the rest to the BUYs after it. Undefined when the market takes the amount, sets no maximum, or the amount is not a finite number,
+   * left as it is for the exchange to refuse, as a SELL of one is (see sizeSell): at a price so small that the currency buys an infinite
+   * amount (5e-324, which the checks of a price let through), a BUY by its cost or its allocation was capped at the maximum, at that
+   * price, where an all-in BUY was sent as it was.
    */
-  private reportBudgetSizing({ side, symbol }: AdviceOrder, price: number, { label }: Budget, amount: number) {
+  private capBuyAtMaximum(advice: AdviceOrder, price: number, sized: string, amount: number) {
+    const maximum = this.getMaximumAmount(advice);
+    if (!Number.isFinite(amount) || isNil(maximum) || !(amount > maximum)) return;
+    const [assetName, currencyName] = advice.symbol.split('/');
+    const bought = `${formatEveryDecimal(amount)} ${assetName}, above ${describeMaximumSent(advice, maximum)}`;
+    warning('trader', `${sized}: ${bought}, the rest of the ${currencyName} left unspent`);
+    return { amount: maximum, taken: getBuyBudget(maximum, price) };
+  }
+
+  /**
+   * Says at debug level how an order sized by its cost or by its allocation came out, its label (what it asks for, and of what) beside
+   * the amount sized and its price, then warns of it before it is sent when the market refuses it for one of its minimums (see
+   * warnOfMarketMinimums)
+   */
+  private reportBudgetSizing(advice: AdviceOrder, price: number, { label }: Budget, amount: number) {
+    const [assetName] = advice.symbol.split('/');
+    debug('trader', `${label} sized to ${formatEveryDecimal(amount)} ${assetName} at ${formatEveryDecimal(price)}`);
+    this.warnOfMarketMinimums(advice, price, label, amount);
+  }
+
+  /**
+   * Warns before it is sent of an order whose amount the Trader worked out, from its cost, from its allocation or all-in for a BUY, and
+   * which the market refuses for one of its minimums, as both exchanges check them before they send an order (see
+   * assertOrderWithinLimits): the amount, truncated to the amount step of the market as they send it, against the minimum amount, that of
+   * a market order for a MARKET one (see getMarketOrderLimits), then its cost at the price of the order, worked out in decimal, against
+   * the minimum cost (see getSentCost and toBound). `sized` names the order and its sizing, as its other lines do. Refused, the order is
+   * an error counting towards the circuit breaker, whose reason names its amount or its cost, not the budget, the share or the currency
+   * it was sized from. Valued as sized, an order the truncation took under the minimum cost was refused unwarned: 0.0000870833333333333
+   * BTC at 60000 is 5.225 USDT, above a minimum of 5, and is sent as 0.00008 BTC, 4.8 USDT; the warning then says the amount truncated
+   * and the step. A BUY costs less than its budget, the share DEFAULT_FEE_BUFFER keeps back for the fee: one whose budget is the minimum
+   * cost is refused. One whose budget covered the minimum cost, but bought less than the minimum amount, was refused unwarned too: 6 USDT
+   * at 10000 buy 0.00057 BTC, under a minimum of 0.001. One line at most, of the minimum the exchanges check first: an amount below both
+   * is refused for its amount.
+   *
+   * The amount refused is the one sent, whatever price the exchange checks the order at. Its cost is valued at the price of the order: for
+   * a MARKET or a STICKY order, the last close, or the bid of the last synchronization, while an exchange checks a market order at its
+   * ticker as it creates it (the ask for a BUY, the bid for a SELL), and a limit order at its price rounded to its tick. In realtime the
+   * two can lie on either side of the minimum: a BUY of 5.3 USDT at a close of 62499 is sent as 0.00008 BTC, 4.99992 USDT, under a minimum
+   * of 5, which passes at an ask of 62501. So the line says that the market refuses that cost at that price, the one it names. In a
+   * backtest the simulator checks a market order at the close.
+   *
+   * Not an order sized to 0, which is warned of with its cause (see sizeSell, sizeAllInBuy and sizeBudgetBuy), nor one the step cuts to 0,
+   * whose refusal names the step. Nor an order with an amount, whose refusal names the amount the strategy chose, nor an all-in SELL,
+   * whose amount is the asset free.
+   */
+  private warnOfMarketMinimums({ side, type, symbol }: AdviceOrder, price: number, sized: string, amount: number) {
     const [assetName, currencyName] = symbol.split('/');
-    debug('trader', `${label} sized to ${amount} ${assetName} at ${price}`);
     const marketData = this.getExchange().getMarketData(symbol);
-    const minimum = toBound(marketData.cost?.min);
-    if (isNil(minimum)) return;
-    const step = toBound(marketData.precision?.amount);
-    const truncated = roundToStep(amount, step, 'down');
-    const cost = multiplyPrecise(truncated, price);
-    if (!(truncated > 0) || !(cost < minimum)) return;
-    const sent = `${label}: ${amount} ${assetName} at ${price} sent`;
-    // An amount the step cuts is also said as the exchange takes it, the one whose cost the refusal names
+    const limits = type === 'MARKET' ? getMarketOrderLimits(marketData) : marketData;
+    const { sent, cost } = getSentCost(amount, price, limits);
+    if (!(sent > 0)) return;
+    const step = toBound(limits.precision?.amount);
+    // An amount the step cuts is also said as the exchange takes it, the one its refusal names, or whose cost it names
     const onStep =
-      isNil(step) || truncated === amount
+      isNil(step) || sent === amount
         ? ''
-        : `, truncated to ${formatEveryDecimal(truncated)} ${assetName} on the amount step ${formatEveryDecimal(step)} of the market`;
+        : `, truncated to ${formatEveryDecimal(sent)} ${assetName} on the amount step ${formatEveryDecimal(step)} of the market`;
+    const order = `${sized}: ${formatEveryDecimal(amount)} ${assetName} at ${formatEveryDecimal(price)} sent${onStep}`;
+
+    const minimumAmount = toBound(limits.amount?.min);
+    if (!isNil(minimumAmount) && sent < minimumAmount) {
+      const below = `below the minimum amount of ${formatEveryDecimal(minimumAmount)} ${assetName} of a ${type} order on ${symbol}`;
+      return warning('trader', `${order}, ${below}, which the market refuses`);
+    }
+    const minimumCost = toBound(limits.cost?.min);
+    if (isNil(minimumCost) || !(cost < minimumCost)) return;
     const feeBuffer = side === 'BUY' ? ` once ${FEE_BUFFER_PERCENT} % is kept back for the fee` : '';
-    const below = `below the minimum cost of ${formatEveryDecimal(minimum)} ${currencyName} on ${symbol}, which the market refuses`;
-    warning('trader', `${sent}${onStep}, a cost of ${formatEveryDecimal(cost)} ${currencyName}${feeBuffer}, ${below}`);
+    const costSent = `a cost of ${formatEveryDecimal(cost)} ${currencyName}${feeBuffer}`;
+    const below = `below the minimum cost of ${formatEveryDecimal(minimumCost)} ${currencyName} on ${symbol}`;
+    warning('trader', `${order}, ${costSent}, ${below}, which the market refuses at that price`);
   }
 
   /**
@@ -518,8 +564,8 @@ export class Trader extends Plugin {
   private getEmptyBalanceCause({ read, taken }: FreeBalanceLeft, assetName: string, placedSince: 'BUYs' | 'SELLs') {
     // Before any synchronization succeeded, the portfolio is the empty one the Trader starts with (see isFetchedPortfolio)
     if (!isFetchedPortfolio(this.portfolio)) return 'no balance read from the exchange yet';
-    const free = `${read} ${assetName} free at the last synchronization`;
-    return taken > 0 ? `${free}, less ${taken} ${assetName} for the ${placedSince} placed since` : free;
+    const free = `${formatEveryDecimal(read)} ${assetName} free at the last synchronization`;
+    return taken > 0 ? `${free}, less ${formatEveryDecimal(taken)} ${assetName} for the ${placedSince} placed since` : free;
   }
 
   /**
@@ -688,7 +734,8 @@ export class Trader extends Plugin {
    * listeners it had when emit began, and the status and fill logs come first, emitted before the terminal event.
    *
    * A report queues its event several exchange calls after the order ended (the summary, the synchronization), and the events of a
-   * bucket are flushed once, as soon as the plugins have processed it (see PluginsStream). Each report is kept in pendingReports:
+   * bucket are flushed as soon as the plugins have processed it, and in realtime once more before they process the next (see
+   * PluginsStream.deliversQueuedFirst). Each report is kept in pendingReports:
    * - in backtest, they are awaited before the events are flushed (see processOneMinuteBucket and broadcastDeferredEmit), and so are
    *   the launches and cancelations: the simulated exchange answers within a few ticks. The end of an order it settles with a bucket
    *   is delivered with that bucket, and that of an order it ends at once, created or canceled during the flush of the TradingAdvisor,
@@ -696,7 +743,8 @@ export class Trader extends Plugin {
    *   candles late, the count depending on how many ticks each step took (even on the STICKY orders open), and a fill on the last
    *   bucket was never delivered: nothing is flushed after processFinalize.
    * - in realtime, paper trading included, a report waits for the network: awaited, it would hold the bucket, and every plugin, for
-   *   as long as the exchange takes to answer. It is delivered with the first flush after it ends.
+   *   as long as the exchange takes to answer. It is delivered by the first delivery after it ends: as the next bucket arrives, before
+   *   its hooks, when it ends between two buckets.
    *
    * `creationPrice` is the price the order was created with (see TraderOrderMetadata), which estimates the price of a fill the
    * exchange cannot summarize (see estimateExecutionPrice).
@@ -926,9 +974,10 @@ export class Trader extends Plugin {
 
         // Price cannot be zero here because we call processOneMinuteBucket before events (plugins stream)
         // We delegate the order validation (notional, lot, amount) to the exchange, but for the maximum amount the market takes in one
-        // order, which a SELL and a BUY without an amount are capped at, and the minimum cost an order sized by its cost or by its
-        // allocation is warned of (see sizeOrder). An all-in SELL sells what the SELLs before it left of the asset, an all-in BUY spends
-        // what the BUYs before it left of the currency, and a BUY sized by its cost or by its allocation its budget, capped at that.
+        // order, which a SELL and a BUY without an amount are capped at, and the minimum amount and cost an order sized by its cost or by
+        // its allocation, or an all-in BUY, is warned of (see sizeOrder). An all-in SELL sells what the SELLs before it left of the asset,
+        // an all-in BUY spends what the BUYs before it left of the currency, and a BUY sized by its cost or by its allocation its budget,
+        // capped at that.
         const [assetName, currencyName] = symbol.split('/');
         const takenFrom = side === 'SELL' ? assetName : currencyName;
         const { amount, taken } = this.sizeOrder(advice, price, this.getFreeBalanceLeft(takenFrom));

@@ -12,6 +12,7 @@ import {
   mockBacktestModules,
   numberedTextLines,
   rawMarket,
+  refusedMarketOrder,
   runBacktest,
   unreservedRead,
 } from './backtestRun.helper';
@@ -417,6 +418,40 @@ describe('E2E: Backtest of a position book', () => {
       orderCalls: [filledMarketOrder(minute(4), 'BTC/USDT', 'SELL', 0.002, 1), filledMarketOrder(minute(4), 'ETH/USDT', 'SELL', 0.05, 2)],
       // 0.002 × 10000 × 0.999 = 19.98 and 0.05 × 2000 × 0.999 = 99.9 brought in: 4 + 119.88
       balanceReads: [unreservedRead(minute(4), { BTC: 0, ETH: 0, USDT: 123.88 })],
+    });
+  });
+
+  it('Scenario F: a book of one pair sends its all-in BUY, which the Trader warns of once the step takes its cost below the minimum', async () => {
+    const backtest = backtestOf({ assets: ['BTC'], usdt: 5.5, costMin: 5, amountDecimals: 5, steps: [{ candle: 1, side: 'BUY' }] });
+    const { failure, orderCalls, balanceReads } = await runBacktest(backtest, { 'BTC/USDT': flatCandles(60000) });
+
+    // A book of one pair skips nothing: its BUY is all-in, as the signal strategies send it on one pair. 5.5 USDT, less the 5 % kept back
+    // for the fee, buy 0.0000870833333333333 BTC at 60000, 5.225 USDT, sent as 0.00008 BTC on the step of the market, 4.8 USDT: under the
+    // minimum cost of 5, the market refuses it. The Trader says so before it sends it, as it does of a BUY allocated 100 %, where the
+    // refusal alone named a cost of 4.8 the strategy never chose.
+    expect({
+      failure,
+      strategyLines: strategyLines(),
+      traderWarnings: messagesOf('TRADER', 'warn'),
+      orderCalls,
+      balanceReads: balanceReads.slice(3),
+    }).toEqual({
+      failure: undefined,
+      strategyLines: [WARMUP_DONE],
+      traderWarnings: [
+        '[order 1] All-in BUY MARKET order sized from 5.5 USDT: 0.0000870833333333333 BTC at 60000 sent, truncated to 0.00008 BTC on the amount step 0.00001 of the market, a cost of 4.8 USDT once 5 % is kept back for the fee, below the minimum cost of 5 USDT on BTC/USDT, which the market refuses at that price',
+      ],
+      orderCalls: [
+        refusedMarketOrder(
+          minute(2),
+          'BTC/USDT',
+          'BUY',
+          0.0000870833333333333,
+          "OrderOutOfRangeError: [EXCHANGE] Order 'cost' with value 4.8 is out of range. Expected a value between 5 and 1000000.",
+        ),
+      ],
+      // Nothing filled: the synchronization after the refusal reads the balances the account started with
+      balanceReads: [unreservedRead(minute(2), { BTC: 0, USDT: 5.5 })],
     });
   });
 });

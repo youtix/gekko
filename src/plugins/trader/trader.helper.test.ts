@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest';
 import {
   computeOrderPricing,
   describeAllocationBase,
+  describeMaximumSent,
   getBacktestModeIntervalSyncTime,
   PortfolioUpdatesConfig,
   shouldEmitPortfolio,
@@ -80,12 +81,25 @@ describe('trader.helper', () => {
       description                                    | read         | held          | unit      | expected
       ${'the currency read, nothing held'}           | ${1000}      | ${0}          | ${'USDT'} | ${'1000 USDT'}
       ${'the asset read of a SELL'}                  | ${3}         | ${0}          | ${'BTC'}  | ${'3 BTC'}
+      ${'dust read, nothing held'}                   | ${0.0000005} | ${0}          | ${'BTC'}  | ${'0.0000005 BTC'}
       ${'the currency read and what open BUYs held'} | ${525}       | ${475}        | ${'USDT'} | ${'1000 USDT: 525 USDT free at the last synchronization, plus 475 USDT held by the BUYs open then'}
       ${'0.1 and 0.2, added up in decimal'}          | ${0.1}       | ${0.2}        | ${'USDT'} | ${'0.3 USDT: 0.1 USDT free at the last synchronization, plus 0.2 USDT held by the BUYs open then'}
       ${'figures String writes with an exponent'}    | ${0.0000005} | ${0.00000025} | ${'BTC'}  | ${'0.00000075 BTC: 0.0000005 BTC free at the last synchronization, plus 0.00000025 BTC held by the BUYs open then'}
       ${'nothing read and what open BUYs held'}      | ${0}         | ${950}        | ${'USDT'} | ${'950 USDT: 0 USDT free at the last synchronization, plus 950 USDT held by the BUYs open then'}
     `('writes $description as "$expected"', ({ read, held, unit, expected }) => {
       expect(describeAllocationBase(read, held, unit)).toBe(expected);
+    });
+  });
+
+  // The fragment of the warnings of a SELL and of a BUY capped at the most the market takes in one order of their type
+  describe('describeMaximumSent', () => {
+    it.each`
+      description                                   | order                                     | maximum      | expected
+      ${'the maximum of a MARKET order'}            | ${{ type: 'MARKET', symbol: 'BTC/USDT' }} | ${0.5}       | ${'the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent'}
+      ${'the maximum of a STICKY order of ETH'}     | ${{ type: 'STICKY', symbol: 'ETH/BTC' }}  | ${9000}      | ${'the maximum amount of a STICKY order on ETH/BTC: 9000 ETH sent'}
+      ${'a maximum String writes with an exponent'} | ${{ type: 'LIMIT', symbol: 'BTC/USDT' }}  | ${0.0000005} | ${'the maximum amount of a LIMIT order on BTC/USDT: 0.0000005 BTC sent'}
+    `('writes $description as "$expected"', ({ order, maximum, expected }) => {
+      expect(describeMaximumSent(order, maximum)).toBe(expected);
     });
   });
 

@@ -232,6 +232,8 @@ describe('Trader', () => {
   // How a strategy sizes an order: an amount, a cost, an allocation, or none of them for an all-in order
   type Sizing = Pick<AdviceOrder, 'amount' | 'cost' | 'allocation'>;
 
+  // The cost or the allocation given, if any, as the StrategyManager relays them: left out, an order given one was sized all-in, and a
+  // test titled after its cost asserted what an all-in order does
   const buildAdvice = (overrides?: Partial<AdviceOrder>): AdviceOrder => ({
     id: overrides?.id ?? '20a7abd2-546b-4c65-b04d-900b84fa5fe6',
     orderCreationDate: overrides?.orderCreationDate ?? 1_700_000_000_100,
@@ -240,6 +242,7 @@ describe('Trader', () => {
     amount: overrides?.amount,
     price: overrides?.price,
     symbol: overrides?.symbol ?? 'BTC/USDT',
+    ...pick(overrides, ['cost', 'allocation']),
   });
 
   /** The cancellation of `advice` as the StrategyManager relays it for an order it created, still pending: with the pair of the order */
@@ -1447,6 +1450,20 @@ describe('Trader', () => {
         await trader.onStrategyCreateOrder([advice]);
         expect(getPlacedAmount(advice)).toBe(2);
       });
+
+      // At a price so small that the currency buys an infinite amount (5e-324, which the checks of a price let through), the amount is
+      // left as it is for the exchange to refuse, as a SELL of Infinity is: a BUY by its cost or its allocation was capped at the maximum,
+      // at that price, where an all-in BUY was sent as it was
+      it.each`
+        description                  | sizing
+        ${'an all-in LIMIT BUY'}     | ${{}}
+        ${'a LIMIT BUY of 100 USDT'} | ${{ cost: 100 }}
+        ${'a LIMIT BUY of 50 %'}     | ${{ allocation: 50 }}
+      `('places $description at a price of 5e-324 for Infinity BTC', async ({ sizing }) => {
+        const advice = { ...order('BUY', 'LIMIT'), ...sizing, price: 5e-324 };
+        await trader.onStrategyCreateOrder([advice]);
+        expect(getPlacedAmount(advice)).toBe(Infinity);
+      });
     });
 
     // Placed for 0 and refused for it, with a reason that names the amount, not its cause: no currency on the account (a
@@ -1518,16 +1535,15 @@ describe('Trader', () => {
     // A cost in the currency, or a share of the currency read, instead of an amount: on several pairs, the first all-in BUY took all the
     // currency, and the BUYs of the other pairs were refused for want of funds. The account holds 1000 USDT, BTC at 100.
     describe('when a BUY is sized by its cost or by its allocation', () => {
-      const buy = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', symbol: AdviceOrder['symbol'] = 'BTC/USDT') => ({
-        ...buildAdvice({
+      const buy = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', symbol: AdviceOrder['symbol'] = 'BTC/USDT') =>
+        buildAdvice({
           id: `00000000-0000-4000-8000-00000000006${index}`,
           side: 'BUY',
           type,
           symbol,
           price: type === 'LIMIT' ? 95 : undefined,
-        }),
-        ...sizing,
-      });
+          ...sizing,
+        });
       const allInBuy = buy(9, {});
       const balance = (usdtFree: number) =>
         new Map<string, BalanceDetail>([
@@ -1761,15 +1777,14 @@ describe('Trader', () => {
 
         // A SELL by its allocation stays a share of the asset read: what a SELL resting on it holds is not there to sell
         it('places a SELL of 50 % of the 1.5 BTC read free while a SELL of 50 % rests, for 0.75 BTC', async () => {
-          const sellOf = (index: number, type: AdviceOrder['type']) => ({
-            ...buildAdvice({
+          const sellOf = (index: number, type: AdviceOrder['type']) =>
+            buildAdvice({
               id: `00000000-0000-4000-8000-00000000008${index}`,
               side: 'SELL',
               type,
               price: type === 'LIMIT' ? 120 : undefined,
-            }),
-            allocation: 50,
-          });
+              allocation: 50,
+            });
           await trader.onStrategyCreateOrder([sellOf(1, 'LIMIT')]);
           fakeExchange.fetchBalance.mockResolvedValue(
             new Map<string, BalanceDetail>([
@@ -1801,14 +1816,18 @@ describe('Trader', () => {
           expect(getPlacedAmount(advice)).toBe(amount);
         });
 
+        // Capped at the free balance, then at the maximum, the one line is the maximum's: it keeps the free balance the budget was sized
+        // from and leaves out the breakdown of what the BUYs placed since take, which a BUY of 4.75 BTC before it makes 500 USDT
         it.each`
-          description                                              | sizing                 | message
-          ${'a MARKET BUY of 1000 USDT'}                           | ${{ cost: 1000 }}      | ${'BUY MARKET order of 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
-          ${'a MARKET BUY of 100 %'}                               | ${{ allocation: 100 }} | ${'BUY MARKET order of 1000 USDT (100 % of 1000 USDT): 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
-          ${'a MARKET BUY of 2000 USDT, above the 1000 USDT read'} | ${{ cost: 2000 }}      | ${'BUY MARKET order of 2000 USDT above the free balance, sized from 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
-        `('warns once of $description, with what it buys, the maximum sent and the rest', async ({ sizing, message }) => {
-          const advice = buy(1, sizing);
-          await trader.onStrategyCreateOrder([advice]);
+          description                                              | before                        | sizing                 | message
+          ${'a MARKET BUY of 1000 USDT'}                           | ${[]}                         | ${{ cost: 1000 }}      | ${'BUY MARKET order of 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 100 %'}                               | ${[]}                         | ${{ allocation: 100 }} | ${'BUY MARKET order of 1000 USDT (100 % of 1000 USDT): 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 2000 USDT, above the 1000 USDT read'} | ${[]}                         | ${{ cost: 2000 }}      | ${'BUY MARKET order of 2000 USDT above the free balance, sized from 1000 USDT: 9.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 1000 USDT after a BUY of 4.75 BTC'}   | ${[buy(1, { amount: 4.75 })]} | ${{ cost: 1000 }}      | ${'BUY MARKET order of 1000 USDT above the free balance, sized from 500 USDT: 4.75 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+          ${'a MARKET BUY of 60 % after a BUY of 4.75 BTC'}        | ${[buy(1, { amount: 4.75 })]} | ${{ allocation: 60 }}  | ${'BUY MARKET order of 600 USDT (60 % of 1000 USDT) above the free balance, sized from 500 USDT: 4.75 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.5 BTC sent, the rest of the USDT left unspent'}
+        `('warns once of $description, with what it buys, the maximum sent and the rest', async ({ before, sizing, message }) => {
+          const advice = buy(2, sizing);
+          await trader.onStrategyCreateOrder([...before, advice]);
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
         });
 
@@ -1880,6 +1899,18 @@ describe('Trader', () => {
           expect(logger.warning).toHaveBeenCalledOnce();
         });
 
+        // 5 USDT buy 0.0475 BTC at 100, 4.75 USDT: the market refuses it, and an all-in BUY was refused unwarned, a BUY of 100 % warned of
+        it.each`
+          description                            | limits
+          ${'below a minimum cost of 10 USDT'}   | ${{ cost: { min: 10 } }}
+          ${'below a minimum amount of 0.1 BTC'} | ${{ amount: { min: 0.1 } }}
+        `('warns once of it from 5 USDT $description', async ({ limits }) => {
+          trader['portfolio'] = balance(5);
+          fakeExchange.getMarketData.mockReturnValue(limits);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledOnce();
+        });
+
         it.each`
           description                                      | limits                    | amount
           ${'all of the currency'}                         | ${{}}                     | ${0}
@@ -1894,10 +1925,8 @@ describe('Trader', () => {
 
     // The account holds 3 BTC, BTC at 100
     describe('when a SELL is sized by its cost or by its allocation', () => {
-      const sell = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) => ({
-        ...buildAdvice({ id: `00000000-0000-4000-8000-00000000007${index}`, side: 'SELL', type, price }),
-        ...sizing,
-      });
+      const sell = (index: number, sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) =>
+        buildAdvice({ id: `00000000-0000-4000-8000-00000000007${index}`, side: 'SELL', type, price, ...sizing });
       const allInSell = sell(9, {});
 
       // A share of the asset read, or the cost over the price, nothing kept back: the fee comes out of what the SELL brings in. In binary,
@@ -2039,10 +2068,8 @@ describe('Trader', () => {
 
     // The account holds 3 BTC and 1000 USDT, BTC at 100
     describe('the sizing of an order by its cost or by its allocation', () => {
-      const order = (side: AdviceOrder['side'], sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) => ({
-        ...buildAdvice({ side, type, price }),
-        ...sizing,
-      });
+      const order = (side: AdviceOrder['side'], sizing: Sizing, type: AdviceOrder['type'] = 'MARKET', price?: number) =>
+        buildAdvice({ side, type, price, ...sizing });
 
       // What the budget came to, said at debug level whatever its caps
       it.each`
@@ -2084,7 +2111,9 @@ describe('Trader', () => {
       });
 
       // The exchange refuses an order below the minimum cost of the market, with a reason that names the cost of the order, not the
-      // budget or the share it came from: the Trader says which, before it sends the order. A BUY costs 95 % of its budget.
+      // budget or the share it came from: the Trader says which, before it sends the order. A BUY costs 95 % of its budget. The cost is
+      // valued at the price of the order, which an exchange may check at another (the ticker, a limit price on its tick): the line says
+      // that the market refuses it at that price.
       describe('on a market whose minimum cost is 10 USDT', () => {
         beforeEach(() => {
           fakeExchange.getMarketData.mockReturnValue({ cost: { min: 10 } });
@@ -2092,10 +2121,10 @@ describe('Trader', () => {
 
         it.each`
           description                  | advice                               | message
-          ${'a BUY of 10 USDT'}        | ${order('BUY', { cost: 10 })}        | ${'BUY MARKET order of 10 USDT: 0.095 BTC at 100 sent, a cost of 9.5 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a BUY of 0.5 %, 5 USDT'}  | ${order('BUY', { allocation: 0.5 })} | ${'BUY MARKET order of 5 USDT (0.5 % of 1000 USDT): 0.0475 BTC at 100 sent, a cost of 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a SELL of 5 USDT'}        | ${order('SELL', { cost: 5 })}        | ${'SELL MARKET order of 0.05 BTC (5 USDT at 100): 0.05 BTC at 100 sent, a cost of 5 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a SELL of 1 %, 0.03 BTC'} | ${order('SELL', { allocation: 1 })}  | ${'SELL MARKET order of 0.03 BTC (1 % of 3 BTC): 0.03 BTC at 100 sent, a cost of 3 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a BUY of 10 USDT'}        | ${order('BUY', { cost: 10 })}        | ${'BUY MARKET order of 10 USDT: 0.095 BTC at 100 sent, a cost of 9.5 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a BUY of 0.5 %, 5 USDT'}  | ${order('BUY', { allocation: 0.5 })} | ${'BUY MARKET order of 5 USDT (0.5 % of 1000 USDT): 0.0475 BTC at 100 sent, a cost of 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a SELL of 5 USDT'}        | ${order('SELL', { cost: 5 })}        | ${'SELL MARKET order of 0.05 BTC (5 USDT at 100): 0.05 BTC at 100 sent, a cost of 5 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a SELL of 1 %, 0.03 BTC'} | ${order('SELL', { allocation: 1 })}  | ${'SELL MARKET order of 0.03 BTC (1 % of 3 BTC): 0.03 BTC at 100 sent, a cost of 3 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
         `('warns once of $description, with its cost and the minimum', async ({ advice, message }) => {
           await trader.onStrategyCreateOrder([advice]);
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
@@ -2107,7 +2136,7 @@ describe('Trader', () => {
           expect(getPlacedAmount(advice)).toBe(0.095);
         });
 
-        // An order with an amount is refused with a reason that names the amount the strategy chose; all-in is out of its scope
+        // An order with an amount is refused with a reason that names the amount the strategy chose
         it.each`
           description                           | advice
           ${'a BUY of 20 USDT, 19 USDT of BTC'} | ${order('BUY', { cost: 20 })}
@@ -2119,9 +2148,21 @@ describe('Trader', () => {
           expect(logger.warning).not.toHaveBeenCalled();
         });
 
-        it('does not warn of an all-in BUY of 5 USDT', async () => {
+        // The BUY of the signal strategies on one pair: it was refused unwarned, where a BUY allocated 100 %, of the same amount, was warned of
+        it('warns once of an all-in BUY of the 5 USDT free, with its cost and the minimum', async () => {
           trader['portfolio'] = new Map<string, BalanceDetail>([['USDT', { free: 5, used: 0, total: 5 }]]);
-          await trader.onStrategyCreateOrder([order('BUY', {})]);
+          const advice = order('BUY', {});
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] All-in BUY MARKET order sized from 5 USDT: 0.0475 BTC at 100 sent, a cost of 4.75 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price`,
+          );
+        });
+
+        // It sells the asset free, which its refusal names: not this warning's case
+        it('does not warn of an all-in SELL of the 0.05 BTC free, 5 USDT', async () => {
+          trader['portfolio'] = new Map<string, BalanceDetail>([['BTC', { free: 0.05, used: 0, total: 0.05 }]]);
+          await trader.onStrategyCreateOrder([order('SELL', {})]);
           expect(logger.warning).not.toHaveBeenCalled();
         });
 
@@ -2145,21 +2186,32 @@ describe('Trader', () => {
         // last was warned of with the cost of the amount sized, 9.49999999999998 USDT, where its refusal names the 9 USDT of 0.00015 BTC.
         it.each`
           description                           | advice                                   | message
-          ${'a BUY of 10.6 USDT'}               | ${order('BUY', { cost: 10.6 })}          | ${'BUY MARKET order of 10.6 USDT: 0.000167833333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a BUY of 1.07 %, 10.7 USDT'}       | ${order('BUY', { allocation: 1.07 })}    | ${'BUY MARKET order of 10.7 USDT (1.07 % of 1000 USDT): 0.000169416666666667 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a SELL of 10.1 USDT'}              | ${order('SELL', { cost: 10.1 })}         | ${'SELL MARKET order of 0.000168333333333333 BTC (10.1 USDT at 60000): 0.000168333333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a SELL of 0.0056 %, 0.000168 BTC'} | ${order('SELL', { allocation: 0.0056 })} | ${'SELL MARKET order of 0.000168 BTC (0.0056 % of 3 BTC): 0.000168 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a BUY of 10 USDT'}                 | ${order('BUY', { cost: 10 })}            | ${'BUY MARKET order of 10 USDT: 0.000158333333333333 BTC at 60000 sent, truncated to 0.00015 BTC on the amount step 0.00001 of the market, a cost of 9 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a BUY of 10.6 USDT'}               | ${order('BUY', { cost: 10.6 })}          | ${'BUY MARKET order of 10.6 USDT: 0.000167833333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a BUY of 1.07 %, 10.7 USDT'}       | ${order('BUY', { allocation: 1.07 })}    | ${'BUY MARKET order of 10.7 USDT (1.07 % of 1000 USDT): 0.000169416666666667 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a SELL of 10.1 USDT'}              | ${order('SELL', { cost: 10.1 })}         | ${'SELL MARKET order of 0.000168333333333333 BTC (10.1 USDT at 60000): 0.000168333333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a SELL of 0.0056 %, 0.000168 BTC'} | ${order('SELL', { allocation: 0.0056 })} | ${'SELL MARKET order of 0.000168 BTC (0.0056 % of 3 BTC): 0.000168 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a BUY of 10 USDT'}                 | ${order('BUY', { cost: 10 })}            | ${'BUY MARKET order of 10 USDT: 0.000158333333333333 BTC at 60000 sent, truncated to 0.00015 BTC on the amount step 0.00001 of the market, a cost of 9 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
         `('warns once of $description, with the amount the step cuts it to and its cost', async ({ advice, message }) => {
           await trader.onStrategyCreateOrder([advice]);
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
         });
 
+        // As a BUY of 10.6 USDT is: 0.000167833333333333 BTC, sent as 0.00016, 9.6 USDT
+        it('warns once of an all-in BUY of the 10.6 USDT free, with the amount the step cuts it to and its cost', async () => {
+          trader['portfolio'] = new Map<string, BalanceDetail>([['USDT', { free: 10.6, used: 0, total: 10.6 }]]);
+          const advice = order('BUY', {});
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] All-in BUY MARKET order sized from 10.6 USDT: 0.000167833333333333 BTC at 60000 sent, truncated to 0.00016 BTC on the amount step 0.00001 of the market, a cost of 9.6 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price`,
+          );
+        });
+
         // Left as it is by the step, the amount is said once, as on a market without a step
         it.each`
           description                                      | advice                                       | message
-          ${'a SELL of 9 USDT, 0.00015 BTC'}               | ${order('SELL', { cost: 9 })}                | ${'SELL MARKET order of 0.00015 BTC (9 USDT at 60000): 0.00015 BTC at 60000 sent, a cost of 9 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
-          ${'a LIMIT BUY of 9 USDT at 95000, 0.00009 BTC'} | ${order('BUY', { cost: 9 }, 'LIMIT', 95000)} | ${'BUY LIMIT order of 9 USDT: 0.00009 BTC at 95000 sent, a cost of 8.55 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses'}
+          ${'a SELL of 9 USDT, 0.00015 BTC'}               | ${order('SELL', { cost: 9 })}                | ${'SELL MARKET order of 0.00015 BTC (9 USDT at 60000): 0.00015 BTC at 60000 sent, a cost of 9 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a LIMIT BUY of 9 USDT at 95000, 0.00009 BTC'} | ${order('BUY', { cost: 9 }, 'LIMIT', 95000)} | ${'BUY LIMIT order of 9 USDT: 0.00009 BTC at 95000 sent, a cost of 8.55 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
         `('warns once of $description, on the step, with its cost', async ({ advice, message }) => {
           await trader.onStrategyCreateOrder([advice]);
           expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
@@ -2187,6 +2239,161 @@ describe('Trader', () => {
           expect(logger.debug).toHaveBeenCalledExactlyOnceWith(
             'trader',
             `[${advice.id}] BUY MARKET order of 10.6 USDT sized to 0.000167833333333333 BTC at 60000`,
+          );
+        });
+      });
+
+      // The exchanges check the amount, truncated to the amount step, against the minimum amount of the market (that of a market order
+      // for a MARKET one) before its cost: an order whose cost or share covered the minimum cost but bought less was refused for its
+      // amount unwarned, the reason naming an amount the strategy never chose. BTC at 100, the account holding 3 BTC and 1000 USDT.
+      describe('on a market with a minimum amount', () => {
+        it.each`
+          description                                          | limits                                                         | advice                                       | message
+          ${'a BUY of 0.1 USDT'}                               | ${{ amount: { min: 0.001 } }}                                  | ${order('BUY', { cost: 0.1 })}               | ${'BUY MARKET order of 0.1 USDT: 0.00095 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a BUY of 0.01 %, 0.1 USDT'}                       | ${{ amount: { min: 0.001 } }}                                  | ${order('BUY', { allocation: 0.01 })}        | ${'BUY MARKET order of 0.1 USDT (0.01 % of 1000 USDT): 0.00095 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a LIMIT BUY of 0.09 USDT at 95'}                  | ${{ amount: { min: 0.001 } }}                                  | ${order('BUY', { cost: 0.09 }, 'LIMIT', 95)} | ${'BUY LIMIT order of 0.09 USDT: 0.0009 BTC at 95 sent, below the minimum amount of 0.001 BTC of a LIMIT order on BTC/USDT, which the market refuses'}
+          ${'a SELL of 0.05 USDT'}                             | ${{ amount: { min: 0.001 } }}                                  | ${order('SELL', { cost: 0.05 })}             | ${'SELL MARKET order of 0.0005 BTC (0.05 USDT at 100): 0.0005 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a SELL of 0.01 %, 0.0003 BTC'}                    | ${{ amount: { min: 0.001 } }}                                  | ${order('SELL', { allocation: 0.01 })}       | ${'SELL MARKET order of 0.0003 BTC (0.01 % of 3 BTC): 0.0003 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a BUY of 0.105 USDT on a step of 0.0001 BTC'}     | ${{ amount: { min: 0.001 }, precision: { amount: 0.0001 } }}   | ${order('BUY', { cost: 0.105 })}             | ${'BUY MARKET order of 0.105 USDT: 0.0009975 BTC at 100 sent, truncated to 0.0009 BTC on the amount step 0.0001 of the market, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a BUY of 0.1 USDT the step cuts under a minimum'} | ${{ amount: { min: 0.00095 }, precision: { amount: 0.0001 } }} | ${order('BUY', { cost: 0.1 })}               | ${'BUY MARKET order of 0.1 USDT: 0.00095 BTC at 100 sent, truncated to 0.0009 BTC on the amount step 0.0001 of the market, below the minimum amount of 0.00095 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a BUY of 0.1 USDT below a minimum cost too'}      | ${{ amount: { min: 0.001 }, cost: { min: 10 } }}               | ${order('BUY', { cost: 0.1 })}               | ${'BUY MARKET order of 0.1 USDT: 0.00095 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a MARKET BUY of 0.1 USDT below a market minimum'} | ${{ amount: { min: 0.0001 }, market: { min: 0.001 } }}         | ${order('BUY', { cost: 0.1 })}               | ${'BUY MARKET order of 0.1 USDT: 0.00095 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+        `('warns once of $description, with the amount sent and the minimum', async ({ limits, advice, message }) => {
+          fakeExchange.getMarketData.mockReturnValue(limits);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        it('warns once of an all-in BUY of the 0.1 USDT free, with the amount sent and the minimum', async () => {
+          fakeExchange.getMarketData.mockReturnValue({ amount: { min: 0.001 } });
+          trader['portfolio'] = new Map<string, BalanceDetail>([['USDT', { free: 0.1, used: 0, total: 0.1 }]]);
+          const advice = order('BUY', {});
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] All-in BUY MARKET order sized from 0.1 USDT: 0.00095 BTC at 100 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses`,
+          );
+        });
+
+        // At the minimum, on it once truncated, or not bound by the minimum of a market order: the market takes it. An order with an amount
+        // is refused with a reason that names the amount the strategy chose.
+        it.each`
+          description                                       | limits                                                       | advice
+          ${'a BUY of 0.1 USDT, 0.00095 BTC, the minimum'}  | ${{ amount: { min: 0.00095 } }}                              | ${order('BUY', { cost: 0.1 })}
+          ${'a BUY of 0.11 USDT, 0.001 BTC once truncated'} | ${{ amount: { min: 0.001 }, precision: { amount: 0.0001 } }} | ${order('BUY', { cost: 0.11 })}
+          ${'a STICKY BUY of 0.1 USDT, not a market order'} | ${{ amount: { min: 0.0001 }, market: { min: 0.001 } }}       | ${order('BUY', { cost: 0.1 }, 'STICKY')}
+          ${'a BUY of 0.0005 BTC'}                          | ${{ amount: { min: 0.001 } }}                                | ${order('BUY', { amount: 0.0005 })}
+          ${'a SELL of 0.0005 BTC'}                         | ${{ amount: { min: 0.001 } }}                                | ${order('SELL', { amount: 0.0005 })}
+        `('does not warn of $description', async ({ limits, advice }) => {
+          fakeExchange.getMarketData.mockReturnValue(limits);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+
+        // It sells the asset free, which its refusal names
+        it('does not warn of an all-in SELL of the 0.0005 BTC free', async () => {
+          fakeExchange.getMarketData.mockReturnValue({ amount: { min: 0.001 } });
+          trader['portfolio'] = new Map<string, BalanceDetail>([['BTC', { free: 0.0005, used: 0, total: 0.0005 }]]);
+          await trader.onStrategyCreateOrder([order('SELL', {})]);
+          expect(logger.warning).not.toHaveBeenCalled();
+        });
+      });
+
+      // Every figure of a sizing line is written with every decimal, without the exponent String writes below a millionth: a pair priced
+      // in fractions of a satoshi, or the dust a balance is left with, mixed 4.5e-7 with figures written in full in one line
+      describe('figures String writes with an exponent', () => {
+        /** An order placed before the one a row checks, on the same pair */
+        const placedBefore = (side: AdviceOrder['side'], amount: number) => ({
+          ...order(side, { amount }),
+          id: '00000000-0000-4000-8000-000000000091' as const,
+        });
+        const balances = (assets: Record<string, number>) =>
+          new Map<string, BalanceDetail>(Object.entries(assets).map(([asset, free]) => [asset, { free, used: 0, total: free }]));
+
+        // BTC at 0.00000045 USDT, on an amount step of 1 BTC and a minimum cost of 10 USDT
+        describe('at a price of 0.00000045 USDT', () => {
+          beforeEach(() => {
+            trader['prices'].set('BTC/USDT', 4.5e-7);
+            fakeExchange.getMarketData.mockReturnValue({ cost: { min: 10 }, precision: { amount: 1 } });
+          });
+
+          it.each`
+            description                  | advice                               | message
+            ${'a BUY of 10 USDT'}        | ${order('BUY', { cost: 10 })}        | ${'BUY MARKET order of 10 USDT: 21111111.1111111 BTC at 0.00000045 sent, truncated to 21111111 BTC on the amount step 1 of the market, a cost of 9.49999995 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+            ${'a SELL of 0.000001 USDT'} | ${order('SELL', { cost: 0.000001 })} | ${'SELL MARKET order of 2.22222222222222 BTC (0.000001 USDT at 0.00000045): 2.22222222222222 BTC at 0.00000045 sent, truncated to 2 BTC on the amount step 1 of the market, a cost of 0.0000009 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          `('warns once of $description, its price written 0.00000045', async ({ advice, message }) => {
+            await trader.onStrategyCreateOrder([advice]);
+            expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+          });
+
+          it('logs at debug level the 21111111.1111111 BTC a BUY of 10 USDT was sized to at 0.00000045', async () => {
+            const advice = order('BUY', { cost: 10 });
+            await trader.onStrategyCreateOrder([advice]);
+            expect(logger.debug).toHaveBeenCalledExactlyOnceWith(
+              'trader',
+              `[${advice.id}] BUY MARKET order of 10 USDT sized to 21111111.1111111 BTC at 0.00000045`,
+            );
+          });
+        });
+
+        // Dust, BTC at 100: a BUY of 0.00000001 BTC may spend 0.0000010526315789473683 USDT, its cost over the 95 % an all-in BUY spends,
+        // and one of 0.000000001 BTC 0.00000010526315789473685
+        it.each`
+          description                                                        | portfolio                        | before                          | advice                               | message
+          ${'a BUY of 100 % of 0.000002 USDT capped at what a BUY leaves'}   | ${balances({ USDT: 0.000002 })}  | ${[placedBefore('BUY', 1e-8)]}  | ${order('BUY', { allocation: 100 })} | ${'BUY MARKET order of 0.000002 USDT (100 % of 0.000002 USDT) above the free balance, sized from 0.0000009473684210526316 USDT: 0.000000009 BTC sent (0.000002 USDT free at the last synchronization, less 0.0000010526315789473683 USDT for the BUYs placed since, the 5 % kept back for their fee included)'}
+          ${'an all-in BUY of what a BUY leaves of 0.0000005 USDT'}          | ${balances({ USDT: 0.0000005 })} | ${[placedBefore('BUY', 1e-9)]}  | ${order('BUY', {})}                  | ${'All-in BUY MARKET order sized from 0.00000039473684210526315 USDT: 0.00000000375 BTC sent (0.0000005 USDT free at the last synchronization, less 0.00000010526315789473685 USDT for the BUYs placed since, the 5 % kept back for their fee included)'}
+          ${'a SELL of 0.0000009 BTC above what a SELL leaves of 0.0000007'} | ${balances({ BTC: 0.0000007 })}  | ${[placedBefore('SELL', 2e-7)]} | ${order('SELL', { amount: 9e-7 })}   | ${'SELL MARKET order of 0.0000009 BTC above the free balance: 0.0000005 BTC sent, all that can be sold (0.0000007 BTC free at the last synchronization, less 0.0000002 BTC for the SELLs placed since)'}
+          ${'an all-in SELL once a SELL took the 0.0000005 BTC free'}        | ${balances({ BTC: 0.0000005 })}  | ${[placedBefore('SELL', 5e-7)]} | ${order('SELL', {})}                 | ${'All-in SELL MARKET order sized from 0 BTC: 0 BTC sent, which the market refuses (0.0000005 BTC free at the last synchronization, less 0.0000005 BTC for the SELLs placed since)'}
+          ${'a SELL of 50 % once a SELL took the 0.0000005 BTC free'}        | ${balances({ BTC: 0.0000005 })}  | ${[placedBefore('SELL', 5e-7)]} | ${order('SELL', { allocation: 50 })} | ${'SELL MARKET order of 0.00000025 BTC (50 % of 0.0000005 BTC): 0.00000025 BTC sent as asked, which the market refuses unless some of the asset is free by then (0.0000005 BTC free at the last synchronization, less 0.0000005 BTC for the SELLs placed since)'}
+        `('warns once of $description, every figure written in full', async ({ portfolio, before, advice, message }) => {
+          trader['portfolio'] = portfolio;
+          await trader.onStrategyCreateOrder([...before, advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // A maximum of 0.000000001 BTC in one order, BTC at 100
+        it.each`
+          description                          | portfolio                        | advice                                 | message
+          ${'a SELL of 0.000001 BTC'}          | ${balances({ BTC: 3 })}          | ${order('SELL', { amount: 0.000001 })} | ${'SELL MARKET order of 0.000001 BTC above the maximum amount of a MARKET order on BTC/USDT: 0.000000001 BTC sent, the rest stays held'}
+          ${'an all-in BUY of 0.0000005 USDT'} | ${balances({ USDT: 0.0000005 })} | ${order('BUY', {})}                    | ${'All-in BUY MARKET order sized from 0.0000005 USDT: 0.00000000475 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.000000001 BTC sent, the rest of the USDT left unspent'}
+          ${'a BUY of 0.0000005 USDT'}         | ${balances({ USDT: 1000 })}      | ${order('BUY', { cost: 5e-7 })}        | ${'BUY MARKET order of 0.0000005 USDT: 0.00000000475 BTC, above the maximum amount of a MARKET order on BTC/USDT: 0.000000001 BTC sent, the rest of the USDT left unspent'}
+        `('warns once of $description capped at a maximum written 0.000000001', async ({ portfolio, advice, message }) => {
+          trader['portfolio'] = portfolio;
+          fakeExchange.getMarketData.mockReturnValue({ amount: { max: 1e-9 } });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // A cost or a share a strategy gives as it likes, under a minimum cost of 10 USDT, BTC at 100, the account holding 3 BTC and 1000 USDT
+        it.each`
+          description                              | advice                                | message
+          ${'a BUY of 0.0000005 %, 0.000005 USDT'} | ${order('BUY', { allocation: 5e-7 })} | ${'BUY MARKET order of 0.000005 USDT (0.0000005 % of 1000 USDT): 0.0000000475 BTC at 100 sent, a cost of 0.00000475 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a BUY of 0.0000005 USDT'}             | ${order('BUY', { cost: 5e-7 })}       | ${'BUY MARKET order of 0.0000005 USDT: 0.00000000475 BTC at 100 sent, a cost of 0.000000475 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a SELL of 0.0000005 USDT'}            | ${order('SELL', { cost: 5e-7 })}      | ${'SELL MARKET order of 0.000000005 BTC (0.0000005 USDT at 100): 0.000000005 BTC at 100 sent, a cost of 0.0000005 USDT, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+        `('warns once of $description below the minimum cost, every figure written in full', async ({ advice, message }) => {
+          fakeExchange.getMarketData.mockReturnValue({ cost: { min: 10 } });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        // An amount step and minimums under a millionth, BTC at 100: 0.000001 USDT buy 0.0000000095 BTC, 0.0000005 USDT 0.00000000475
+        it.each`
+          description                                     | limits                                                | advice                              | message
+          ${'a BUY of 0.000001 USDT on a step of 1e-9'}   | ${{ cost: { min: 10 }, precision: { amount: 1e-9 } }} | ${order('BUY', { cost: 0.000001 })} | ${'BUY MARKET order of 0.000001 USDT: 0.0000000095 BTC at 100 sent, truncated to 0.000000009 BTC on the amount step 0.000000001 of the market, a cost of 0.0000009 USDT once 5 % is kept back for the fee, below the minimum cost of 10 USDT on BTC/USDT, which the market refuses at that price'}
+          ${'a BUY of 0.000001 USDT, a minimum of 5e-7'}  | ${{ amount: { min: 5e-7 } }}                          | ${order('BUY', { cost: 0.000001 })} | ${'BUY MARKET order of 0.000001 USDT: 0.0000000095 BTC at 100 sent, below the minimum amount of 0.0000005 BTC of a MARKET order on BTC/USDT, which the market refuses'}
+          ${'a BUY of 5e-7 USDT, a minimum cost of 5e-7'} | ${{ cost: { min: 5e-7 } }}                            | ${order('BUY', { cost: 5e-7 })}     | ${'BUY MARKET order of 0.0000005 USDT: 0.00000000475 BTC at 100 sent, a cost of 0.000000475 USDT once 5 % is kept back for the fee, below the minimum cost of 0.0000005 USDT on BTC/USDT, which the market refuses at that price'}
+        `('warns once of $description, the step and the minimums written in full', async ({ limits, advice, message }) => {
+          fakeExchange.getMarketData.mockReturnValue(limits);
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.warning).toHaveBeenCalledExactlyOnceWith('trader', `[${advice.id}] ${message}`);
+        });
+
+        it('logs at debug level the 0.00000000475 BTC a BUY of 0.0000005 USDT was sized to at 100', async () => {
+          const advice = order('BUY', { cost: 5e-7 });
+          await trader.onStrategyCreateOrder([advice]);
+          expect(logger.debug).toHaveBeenCalledExactlyOnceWith(
+            'trader',
+            `[${advice.id}] BUY MARKET order of 0.0000005 USDT sized to 0.00000000475 BTC at 100`,
           );
         });
       });

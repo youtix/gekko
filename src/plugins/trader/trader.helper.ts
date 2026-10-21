@@ -1,5 +1,6 @@
 import { FEE_BUFFER_PERCENT } from '@constants/order.const';
 import { TIMEFRAME_TO_MINUTES } from '@constants/timeframe.const';
+import { AdviceOrder } from '@models/advice.types';
 import { Timeframe } from '@models/configuration.types';
 import { OrderSide } from '@models/order.types';
 import { Portfolio } from '@models/portfolio.types';
@@ -64,12 +65,22 @@ export const getBacktestModeIntervalSyncTime = (timeframe: Timeframe): number =>
 
 /**
  * What the BUYs placed since the last synchronization take from the currency it read, as a warning of a BUY sized from what they leave
- * says it: what each may spend, the share DEFAULT_FEE_BUFFER keeps back for its fee included (see getBuyBudget)
+ * says it: what each may spend, the share DEFAULT_FEE_BUFFER keeps back for its fee included (see getBuyBudget), each figure written with
+ * every decimal, without an exponent (see formatEveryDecimal)
  */
 export const describeBuysPlacedSince = ({ read, taken }: FreeBalanceLeft, currencyName: string) => {
-  const placed = `less ${taken} ${currencyName} for the BUYs placed since`;
+  const placed = `less ${formatEveryDecimal(taken)} ${currencyName} for the BUYs placed since`;
   const feeBuffer = `the ${FEE_BUFFER_PERCENT} % kept back for their fee included`;
-  return `${read} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
+  return `${formatEveryDecimal(read)} ${currencyName} free at the last synchronization, ${placed}, ${feeBuffer}`;
+};
+
+/**
+ * The most the market takes in one order of the type of `order`, `maximum` of its asset (see Trader.getMaximumAmount), as the warning of
+ * an order capped at it says it was sent, a SELL's or a BUY's, the maximum written with every decimal (see formatEveryDecimal)
+ */
+export const describeMaximumSent = ({ type, symbol }: Pick<AdviceOrder, 'type' | 'symbol'>, maximum: number) => {
+  const [assetName] = symbol.split('/');
+  return `the maximum amount of a ${type} order on ${symbol}: ${formatEveryDecimal(maximum)} ${assetName} sent`;
 };
 
 /**
@@ -78,7 +89,7 @@ export const describeBuysPlacedSince = ({ read, taken }: FreeBalanceLeft, curren
  * then each (see Trader.getBudget), written with every decimal, without an exponent (see formatEveryDecimal)
  */
 export const describeAllocationBase = (read: number, held: number, unit: string) => {
-  if (!(held > 0)) return `${read} ${unit}`;
+  if (!(held > 0)) return `${formatEveryDecimal(read)} ${unit}`;
   const free = `${formatEveryDecimal(read)} ${unit} free at the last synchronization`;
   const open = `${formatEveryDecimal(held)} ${unit} held by the BUYs open then`;
   return `${formatEveryDecimal(addPrecise(read, held))} ${unit}: ${free}, plus ${open}`;

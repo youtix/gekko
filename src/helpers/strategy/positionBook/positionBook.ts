@@ -197,9 +197,10 @@ export class PositionBook {
    * Gekko did not place. An all-in BUY is estimated from the currency free alone, as the Trader sizes it from what is left of it.
    *
    * A book that tracks one pair never skips: its all-in BUY is sent as a single-pair strategy always sent it, and refused when the
-   * currency is too little. That refusal is how its tracker learns of a holding present at start-up, read from the portfolio after it
-   * and sold at the next SELL signal (see PositionTracker), and how an account that can neither buy nor sell trips maxConsecutiveErrors,
-   * which stops the bot: skipped, the bot would run on with nothing to trade, every skip after the first logged at debug level.
+   * currency is too little, the Trader warning of it first when it is below a minimum of the market (see Trader.warnOfMarketMinimums).
+   * That refusal is how its tracker learns of a holding present at start-up, read from the portfolio after it and sold at the next SELL
+   * signal (see PositionTracker), and how an account that can neither buy nor sell trips maxConsecutiveErrors, which stops the bot:
+   * skipped, the bot would run on with nothing to trade, every skip after the first logged at debug level.
    *
    * On several pairs a skip teaches the tracker what that refusal would have: the asset free in the portfolio of the hook, when it is
    * enough to sell at the close, is the position (see PositionTracker.adoptHolding), said at info level, and the strategy sells it at its

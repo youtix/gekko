@@ -106,10 +106,12 @@ export type Tools<T> = {
    * BUY is, with a warning that says why. A SELL so sized is capped as a SELL of an amount is, at the asset free less what the SELLs
    * placed since then take; once those take all of the asset read, it is sent as asked, with a warning naming that cause, and the
    * exchange refuses it unless one of them fails first. Every SELL, and every BUY without an amount, is also capped at the most the
-   * market takes in one order of its type, with a warning, the rest held or left unspent. An order sized by a cost or an allocation
-   * whose amount, truncated to the amount step of the market as the exchange takes it, costs less at its price than the minimum cost of
-   * the market (a BUY costs 95 % of its budget at most) is warned of before it is sent, and the exchange refuses it (onOrderErrored,
-   * which counts towards the circuit breaker); one the step cuts to 0 is refused for its amount, its reason naming the step.
+   * market takes in one order of its type, with a warning, the rest held or left unspent. An order sized by a cost or an allocation,
+   * or an all-in BUY, whose amount, truncated to the amount step of the market as the exchange takes it, is below the minimum amount
+   * of the market (that of a market order for a MARKET one), or costs less at its price than its minimum cost (a BUY costs 95 % of its
+   * budget at most), is warned of before it is sent, and the exchange refuses it (onOrderErrored, which counts towards the circuit
+   * breaker); one the step cuts to 0 is refused for its amount, its reason naming the step. The cost is valued at the price of the
+   * order, while a live exchange checks a market order at its ticker: near the minimum the two can disagree.
    *
    * A price left out is the last price of the pair: the limit of a LIMIT order, and what a BUY without an amount, or a SELL of a cost,
    * is sized at. Anything else (NaN, 0, a negative number, Infinity, a quoted number, an allocation above 100) throws a GekkoError

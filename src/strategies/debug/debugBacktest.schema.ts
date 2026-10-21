@@ -24,7 +24,8 @@ export const debugBacktestStrategySchema = z
     allIn: z.boolean().optional(),
     // No built-in strategy orders by cost, and by allocation only the signal strategies on several pairs, so no run of one pair exercised
     // the Trader's sizing from a budget: the amount worked out at the price of the order, the budget of a BUY capped at what the BUYs
-    // placed since the last read leave, the warning of one below the market's minimum cost. Both are bounded as createOrder checks them:
+    // placed since the last read leave, the warning of one below the market's minimum amount or cost. Both are bounded as createOrder
+    // checks them:
     // out of bounds, createOrder would refuse the first order, and stop the bot, only once the strategy placed it, where the schema
     // refuses the block at start-up.
     /**

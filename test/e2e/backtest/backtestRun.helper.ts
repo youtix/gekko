@@ -210,23 +210,26 @@ type Fee = { maker: number; taker: number };
 
 /**
  * The market of a pair as dummy-cex takes it: prices to the cent, amounts to the millionth, and Binance's regular fee of 0.1 %. No
- * minimum cost unless `costMin` sets one, which the simulated exchange refuses an order below.
+ * minimum cost unless `costMin` sets one, which the simulated exchange refuses an order below, nor minimum amount unless `amountMin` sets
+ * one; `amountDecimals` sets another amount step, which the simulated exchange truncates an amount to.
  */
 export const rawMarket = (
   symbol: TradingPair,
   {
     amountMax = 1000,
+    amountMin = 0,
+    amountDecimals = 6,
     priceMin = 0,
     costMin = 0,
     fee = { maker: 0.001, taker: 0.001 },
-  }: { amountMax?: number; priceMin?: number; costMin?: number; fee?: Fee } = {},
+  }: { amountMax?: number; amountMin?: number; amountDecimals?: number; priceMin?: number; costMin?: number; fee?: Fee } = {},
 ) => ({
   symbol,
   marketData: {
     price: { min: priceMin, max: 1000000 },
-    amount: { min: 0, max: amountMax },
+    amount: { min: amountMin, max: amountMax },
     cost: { min: costMin, max: 1000000 },
-    precision: { price: 2, amount: 6 },
+    precision: { price: 2, amount: amountDecimals },
     fee,
   },
 });
