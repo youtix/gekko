@@ -94,7 +94,7 @@ GEKKO_CONFIG_FILE_PATH=./config/importer.local.yml ./dist/gekko
 
 This downloads the 1-minute candles of BTC/USDT from Binance, from 2024-01-01 00:00 to 2024-12-01 00:00 UTC, both minutes included, and stores them in `./db/binance-BTC_USDT.sql`, creating the `db/` directory, which git ignores. An import reads public market data only: it needs no API key. It takes about 8 minutes: Binance answers 1000 minutes per request, and `watch.tickrate` spaces the requests at least 1000 ms apart by default. At the `info` level, Gekko logs its progress at every percent; at `error`, it prints its logo and nothing more.
 
-A minute Binance has no candle for, between two it has, is stored as a flat candle without volume, up to 7 days in a row. A longer gap stops the import with an error naming the pair and the gap, before it writes a flat candle of that gap, and a pair whose history ends before the range does keeps its last minutes missing, with a warning saying how many. Only closed minutes are imported: an `end` at or after the minute in progress is moved back to the last closed minute, with a warning.
+A minute Binance has no candle for, between two it has, is stored as a flat candle without volume, up to 7 days in a row. A longer gap stops the import with an error naming the pair and the gap, before it writes a flat candle of that gap, and a pair whose history starts after the range does, or ends before it does, keeps its first or its last minutes missing, with a warning saying how many. Only closed minutes are imported: an `end` at or after the minute in progress is moved back to the last closed minute, with a warning.
 
 ---
 
@@ -163,7 +163,7 @@ plugins:
     enableConsoleTable: true
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, or whose cost falls under `cost.min`, is refused, and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
+The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, below `amount.min`, or whose cost falls under `cost.min`, is refused (the Trader warns of one it sized, by `cost`, `allocation` or all-in for a BUY, before it sends it: see the Trader's [Sizing](./plugins.md#sizing)), and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
 
 Write assets, the currency and symbols in upper case, as the exchange lists them (`BTC`, `1INCH`, `BTC/USDT`), each `marketData` symbol once. `simulationBalance` lists only the watched assets and the currency, each once and spelt as in `watch`: a balance of any other asset is refused, the simulator never holding it.
 

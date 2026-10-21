@@ -41,11 +41,11 @@ This also installs three git hooks:
 ### Run Tests
 
 ```bash
-bun run test                                          # the unit tests
-bun run test src/utils/collection/ringBuffer.test.ts  # one file
-bun run test:watch                                    # the unit tests, run again as you edit
-bun run test:coverage                                 # the unit tests with coverage, as the pre-push hook and CI run them
-bun run test:e2e                                      # the end-to-end tests
+bun run test                                            # the unit tests
+bun run test src/helpers/collection/ringBuffer.test.ts  # one file
+bun run test:watch                                      # the unit tests, run again as you edit
+bun run test:coverage                                   # the unit tests with coverage, as the pre-push hook and CI run them
+bun run test:e2e                                        # the end-to-end tests
 ```
 
 The unit tests are the `*.test.ts` files next to the code they test in `src/` and `scripts/`, and vitest runs them. `test:coverage` fails when the lines, functions, branches or statements covered fall below 95%.
@@ -63,7 +63,7 @@ bun run type:check
 bun run build:exec  # compiles the executable to dist/gekko
 ```
 
-`format:check` and `lint:check` read the whole repository, the tests, the scripts and the configuration files included, not only `src/`; `bun run format` and `bun run lint` fix what they can. Prettier leaves `documentation/`, whose tables are aligned by hand, and `CHANGELOG.md` alone. A few rules you may meet:
+`format:check` and `lint:check` read the whole repository, the tests, the scripts and the configuration files included, not only `src/`; `bun run format` and `bun run lint` fix what they can. Prettier leaves the root's `documentation/`, whose tables are aligned by hand, and `CHANGELOG.md` alone. A few rules you may meet:
 
 - ESLint has no formatting rule: Prettier formats, and the pre-commit hook applies it to the files you stage.
 - An unused parameter must start with `_`, even one followed by a parameter in use. An error you do not read is caught with `catch {`, since `catch (_err)` is refused too.
