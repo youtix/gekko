@@ -20,6 +20,9 @@ const createConfig = () => ({
 
 /** The configuration with `value` set at `path` in the marketData entry of BTC/USDT */
 const withMarketData = (path: string[], value: unknown) => set(createConfig(), ['marketData', 0, 'marketData', ...path], value);
+/** The configuration whose marketData entry of BTC/USDT has these amount and market ranges */
+const withRanges = (amount: object, market: object) =>
+  set(withMarketData(['amount'], amount), ['marketData', 0, 'marketData', 'market'], market);
 const withTicker = (ticker: Record<string, unknown>) => set(createConfig(), ['initialTicker', 0, 'ticker'], ticker);
 /** The configuration with its `field` list holding its entry, then a copy of it with `value` set at `path` */
 const withRepeatedEntry = (field: 'simulationBalance' | 'marketData' | 'initialTicker', path: string[], value: unknown) => {
@@ -194,6 +197,50 @@ describe('dummyExchangeSchema', () => {
       expect(result.marketData.get('BTC/USDT')?.market).toStrictEqual(market);
     });
 
+    // The market range narrows the amount range for a MARKET order (see getMarketOrderLimits): one that shares no amount with it was
+    // loaded, and the simulator then refused every MARKET order, five in a row stopping the run on the circuit breaker
+    it.each`
+      scenario                                    | amount                          | market                          | ranges
+      ${'a market.max below amount.min'}          | ${{ min: 0.001, max: 1000 }}    | ${{ max: 0.0005 }}              | ${'market (at most 0.0005) and amount (at least 0.001, at most 1000)'}
+      ${'a market range below amount.min'}        | ${{ min: 0.001 }}               | ${{ min: 0.0001, max: 0.0005 }} | ${'market (at least 0.0001, at most 0.0005) and amount (at least 0.001)'}
+      ${'a market.min above amount.max'}          | ${{ min: 0.00001, max: 9000 }}  | ${{ min: 10000 }}               | ${'market (at least 10000) and amount (at least 0.00001, at most 9000)'}
+      ${'a market.min above an amount.max alone'} | ${{ min: 0, max: 9000 }}        | ${{ min: 10000, max: 0 }}       | ${'market (at least 10000) and amount (at most 9000)'}
+      ${'a market.max below a tiny amount.min'}   | ${{ min: 0.000001, max: 9000 }} | ${{ max: 0.00000005 }}          | ${'market (at most 0.00000005) and amount (at least 0.000001, at most 9000)'}
+    `('refuses $scenario at the market range, naming both ranges', ({ amount, market, ranges }) => {
+      const result = dummyExchangeSchema.safeParse(withRanges(amount, market));
+      expect(result.error?.issues).toMatchObject([
+        {
+          path: ['marketData', 0, 'marketData', 'market'],
+          message: `${ranges} have no amount in common: a MARKET order must be within both, so the simulator would refuse every one`,
+        },
+      ]);
+    });
+
+    // A bound of 0 sets none, as the simulator reads it (see toBound), and two ranges that meet at a bound share that amount
+    it.each`
+      scenario                                            | amount                       | market
+      ${'a market range within the amount range'}         | ${{ min: 0, max: 1000 }}     | ${{ min: 0.001, max: 5 }}
+      ${'a market.max equal to amount.min'}               | ${{ min: 0.001, max: 1000 }} | ${{ max: 0.001 }}
+      ${'a market.min equal to amount.max'}               | ${{ min: 0.001, max: 1000 }} | ${{ min: 1000 }}
+      ${'a market.max below an amount.min of 0'}          | ${{ min: 0, max: 1000 }}     | ${{ max: 0.0005 }}
+      ${'a market.min above an amount range without max'} | ${{ min: 0.001 }}            | ${{ min: 10000 }}
+      ${'a market.min above an amount.max of 0'}          | ${{ min: 0.001, max: 0 }}    | ${{ min: 10000 }}
+      ${'a market range of zeros, which sets no bound'}   | ${{ min: 0.001, max: 1000 }} | ${{ min: 0, max: 0 }}
+    `('accepts $scenario', ({ amount, market }) => {
+      const result = dummyExchangeSchema.safeParse(withRanges(amount, market));
+      expect(result.error).toBeUndefined();
+    });
+
+    // Its own refinement reports a range whose min exceeds its max: the two ranges are not compared on top of it
+    it.each`
+      range       | amount                         | market
+      ${'amount'} | ${{ min: 10, max: 5 }}         | ${{ max: 7 }}
+      ${'market'} | ${{ min: 0.00001, max: 9000 }} | ${{ min: 10, max: 5 }}
+    `('reports a $range min above its max as the only issue, beside the other range', ({ range, amount, market }) => {
+      const result = dummyExchangeSchema.safeParse(withRanges(amount, market));
+      expect(result.error?.issues).toMatchObject([{ path: ['marketData', 0, 'marketData', range] }]);
+    });
+
     // Without one, a MARKET order takes the amount range (see getMarketOrderLimits)
     it('leaves market out of the market data when the configuration does', () => {
       const result = dummyExchangeSchema.parse(createConfig());
@@ -289,6 +336,7 @@ describe('dummyExchangeSchema', () => {
       ${'a negative max'}               | ${withMarketData(['price', 'max'], -1)}                                  | ${['exchange', 'marketData', 0, 'marketData', 'price', 'max']}
       ${'a min above its max'}          | ${withMarketData(['cost'], { min: 10, max: 5 })}                         | ${['exchange', 'marketData', 0, 'marketData', 'cost']}
       ${'a market min above its max'}   | ${withMarketData(['market'], { min: 10, max: 5 })}                       | ${['exchange', 'marketData', 0, 'marketData', 'market']}
+      ${'a market range below amount'}  | ${withMarketData(['market'], { max: 0.000005 })}                         | ${['exchange', 'marketData', 0, 'marketData', 'market']}
       ${'a fee of 150 %'}               | ${withMarketData(['fee', 'taker'], 1.5)}                                 | ${['exchange', 'marketData', 0, 'marketData', 'fee', 'taker']}
       ${'a precision given as a step'}  | ${withMarketData(['precision', 'price'], 0.01)}                          | ${['exchange', 'marketData', 0, 'marketData', 'precision', 'price']}
       ${'a bid above the ask'}          | ${withTicker({ bid: 101, ask: 100 })}                                    | ${['exchange', 'initialTicker', 0, 'ticker']}

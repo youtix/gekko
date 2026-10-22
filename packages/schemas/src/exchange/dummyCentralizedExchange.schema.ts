@@ -1,5 +1,7 @@
 import { symbolSchema } from '../configuration/pairConfig.schema';
+import { getMarketOrderLimits, toBound } from '@gekko/shared/helpers/market/market.helper';
 import { TradingPair } from '@gekko/shared/models/utility.types';
+import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
 import { exchangeSchema, feeRateSchema, refuseRepeatedKeys, simulationBalanceSchema } from './exchange.schema';
 import z from 'zod';
 import { MarketData, Ticker } from '@gekko/shared/models/exchange.types';
@@ -75,6 +77,39 @@ const marketOrderRangeSchema = z
   })
   .refine(isMinAtMostMax, { message: minAboveMaxMessage('market') });
 
+/** The bounds of a range of amounts, as the market helpers read them (see toBound), in words: "at least 0.001, at most 1000" */
+const describeRange = ({ min, max }: { min?: number; max?: number }) => {
+  const lowest = toBound(min);
+  const highest = toBound(max);
+  const bounds: string[] = [];
+  if (lowest !== undefined) bounds.push(`at least ${formatEveryDecimal(lowest)}`);
+  if (highest !== undefined) bounds.push(`at most ${formatEveryDecimal(highest)}`);
+  return bounds.join(', ');
+};
+
+/**
+ * Refuses a market range that shares no amount with the amount range it narrows for a MARKET order (see getMarketOrderLimits): a
+ * `market.max` below `amount.min`, or a `market.min` above `amount.max`. Loaded, such market data left a MARKET order no amount to
+ * take: the simulator refused every one (`Expected a value between 0.001 and 0.0005`), five in a row stopping the run on the circuit
+ * breaker. Binance's MARKET_LOT_SIZE always overlaps its LOT_SIZE. A range whose min exceeds its max, already reported, is not compared,
+ * and neither is a bound that sets none (see toBound).
+ */
+const refuseMarketRangeOutsideAmountRange = (
+  { amount, market }: { amount: { min: number; max?: number }; market?: { min?: number; max?: number } },
+  ctx: z.RefinementCtx,
+) => {
+  if (!market || !isMinAtMostMax(amount) || !isMinAtMostMax(market)) return;
+  const narrowed = getMarketOrderLimits({ amount, market }).amount;
+  const lowest = narrowed?.min;
+  const highest = narrowed?.max;
+  if (lowest === undefined || highest === undefined || lowest <= highest) return;
+  ctx.addIssue({
+    code: 'custom',
+    path: ['market'],
+    message: `market (${describeRange(market)}) and amount (${describeRange(amount)}) have no amount in common: a MARKET order must be within both, so the simulator would refuse every one`,
+  });
+};
+
 /**
  * The quote of a pair until its first candle. Zod still runs the refinement after a failed bound: an ask of 0 or below,
  * already reported, is not compared.
@@ -90,21 +125,23 @@ const marketDataSchema = z
   .array(
     z.strictObject({
       symbol: symbolSchema,
-      marketData: z.strictObject({
-        price: limitRangeSchema('price'),
-        amount: limitRangeSchema('amount'),
-        cost: limitRangeSchema('cost'),
-        market: marketOrderRangeSchema.optional(),
-        precision: z.strictObject({
-          price: decimalsToStepSchema('precision.price'),
-          amount: decimalsToStepSchema('precision.amount'),
-          priceSignificantDigits: significantDigitsSchema('precision.priceSignificantDigits').optional(),
-        }),
-        fee: z.strictObject({
-          maker: feeRateSchema('fee.maker'),
-          taker: feeRateSchema('fee.taker'),
-        }),
-      }),
+      marketData: z
+        .strictObject({
+          price: limitRangeSchema('price'),
+          amount: limitRangeSchema('amount'),
+          cost: limitRangeSchema('cost'),
+          market: marketOrderRangeSchema.optional(),
+          precision: z.strictObject({
+            price: decimalsToStepSchema('precision.price'),
+            amount: decimalsToStepSchema('precision.amount'),
+            priceSignificantDigits: significantDigitsSchema('precision.priceSignificantDigits').optional(),
+          }),
+          fee: z.strictObject({
+            maker: feeRateSchema('fee.maker'),
+            taker: feeRateSchema('fee.taker'),
+          }),
+        })
+        .superRefine(refuseMarketRangeOutsideAmountRange),
     }),
   )
   .superRefine(refuseRepeatedKeys('marketData', 'symbol'))
