@@ -41,10 +41,11 @@ const backtest = async ({ variant, configuration }: VariantRequest): Promise<Var
   return { variant, status: 'failed', error: failures.join('; '), ...(stacks.length ? { stack: stacks.join('\n') } : {}), durationMs };
 };
 
-// One variant per worker, so that each backtest starts from modules of its own. Not an async handler: Bun 1.3.14 aborts the whole
-// process (SIGABRT, every worker with it) when the promise an onmessage handler returns rejects, where a promise of the handler's
-// that rejects reaches the main thread as the worker's error event. The worker exits once its outcome is posted: a timer left by the
-// run would keep it alive.
+// One variant per worker, so that each backtest starts from modules of its own. A sync handler, which costs nothing: Bun 1.3.14
+// aborted the whole process (SIGABRT, every worker with it) when the promise an async onmessage handler returns rejected, though
+// only when the main thread had no error listener on the Worker, and Bun 1.4.4 drops such a rejection. runWorker listens, and a
+// listened rejection is the worker's error event under both, as is that of a promise a sync handler leaves floating. The worker
+// exits once its outcome is posted: a timer left by the run would keep it alive.
 self.onmessage = ({ data }: MessageEvent<VariantRequest>) => {
   void backtest(data).then(result => {
     postMessage(result);

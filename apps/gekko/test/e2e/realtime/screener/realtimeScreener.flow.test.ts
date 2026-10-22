@@ -971,7 +971,7 @@ describe('E2E: Realtime Screener Flow', () => {
               maxAdverseExcursion: 5,
             },
           ],
-          interruption: 'The operation was aborted.',
+          interruption: 'The operation was aborted',
         },
       });
     });

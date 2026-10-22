@@ -44,7 +44,7 @@ const pipeline = {
   ignoresAbort: false,
   failsAsAborted: false,
 };
-const abortError = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
+const abortError = () => Object.assign(new Error('The operation was aborted'), { name: 'AbortError' });
 // The registry the helper hands the pipeline, which the fake one never reads: the real one would load every plugin and strategy for nothing
 mock.module('@gekko/plugins/index', () => ({}));
 mock.module('@gekko/core/core/pipeline/pipeline', () => ({
@@ -365,7 +365,7 @@ describe('realtimeRun.helper', () => {
         'should not fail after the line PluginsStream logs as an aborted run closes',
         {
           level: 'error',
-          message: 'Gekko is closing the application due to an error: AbortError [ABORT_ERR]: The operation was aborted.',
+          message: 'Gekko is closing the application due to an error: AbortError [ABORT_ERR]: The operation was aborted',
         },
         undefined,
       ],

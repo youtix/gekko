@@ -284,7 +284,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         // The run is ended through the signal of its pipeline: the plugins are finalised with the AbortError as the failure that stopped
         // it. The harness destroyed the last stream without an error instead, and the report read as that of a completed run, an end no
         // realtime run has in production.
-        interruption: 'The operation was aborted.',
+        interruption: 'The operation was aborted',
       },
     });
   });
@@ -438,7 +438,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         // then each of those of 12:02:30, 12:03:22, 12:04:30, 12:05:02 and 12:06:30 as the next bucket arrives, before its hooks
         portfolioChangeCount: 6,
         benchmarkAsset: 'BTC',
-        interruption: 'The operation was aborted.',
+        interruption: 'The operation was aborted',
         // One point per candle after the warmup, that which completed it included
         equityCurveLength: 7,
       },
