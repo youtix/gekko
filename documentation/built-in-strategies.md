@@ -108,7 +108,7 @@ A strategy places no order during the warmup, the first `watch.warmup.candleCoun
 | RSI          | `period + 1`                                                | 15                               |
 | CCI          | `period`                                                    | 20                               |
 
-GridBot uses no indicator: its warmup only delays the grid (see [When the Grid Starts](#when-the-grid-starts)).
+GridBot uses no indicator but, with `atr` spacing, the ATR of `atrPeriod` candles, which has a value from candle `atrPeriod + 1`: its warmup then needs a `candleCount` of `atrPeriod` or more, and otherwise only delays the grid (see [When the Grid Starts](#when-the-grid-starts)).
 
 ---
 
@@ -442,45 +442,70 @@ The GridBot is a sophisticated **grid trading strategy** that places a series of
 #### How It Works
 
 1. **Start-up Check**: Refuses to start while orders are open on its pair (see [Restarting](#restarting))
-2. **Start**: On the first candle after the warmup, centres the grid on its close and checks it against the market (see [When the Grid Starts](#when-the-grid-starts) and [Prices and Checks](#prices-and-checks))
+2. **Start**: On the first candle after the warmup, centres the grid on its close, turns an `atr` spacing into a step from the ATR of the pair, and checks the grid against the market (see [When the Grid Starts](#when-the-grid-starts), [Spacing Types Explained](#spacing-types-explained) and [Prices and Checks](#prices-and-checks))
 3. **Rebalancing**: Rebalances the portfolio so that it funds every level of the grid with the same quantity, which is not a 50/50 split (see [Rebalancing](#rebalancing))
 4. **Grid Building**: Places buy orders below and sell orders above the center price, all for the same quantity, as far as the free balances fund orders the market takes (see [Grid Building](#grid-building))
 5. **Order Management**: Each level trades back and forth between two adjacent prices of the grid: once its BUY fills it sells one step above, once its SELL fills it buys one step below (see [Order Management](#order-management))
-6. **Range Monitoring**: Never moves the grid, and warns once when the price leaves its range (see [Range Monitoring](#range-monitoring))
+6. **Range Monitoring**: Warns once when the price leaves the grid's range, the grid staying in place unless a reset is configured (see [Range Monitoring](#range-monitoring))
+7. **Grid Reset**: Off by default. With `resetMode`, once `resetConfirmCandles` timeframe candles in a row have closed out of the range on a side it arms, cancels the grid's orders, then rebalances the portfolio and builds a new grid around the price, as at the start (see [Grid Reset](#grid-reset))
 
 #### Key Features
 
 - **Automatic Rebalancing**: Splits the portfolio the way the grid uses it before building the grid, so that little capital sits idle
-- **Three Spacing Types**: Fixed, percent, or logarithmic level distribution
+- **Four Spacing Types**: Fixed, percent, logarithmic, or `atr`, a step that follows the volatility of the pair (its ATR) when the grid starts and at each reset
 - **Orders the Market Takes**: Every order is at least the market's minimum order: a small account gets fewer levels rather than refused orders
 - **Error Recovery**: A refused or canceled order is placed again up to `retryOnError` times, and an order whose outcome is unknown is never placed twice
 - **Range Warnings**: One warning when the price leaves the grid, one line when it is back
+- **Grid Reset**: Off by default: the grid moves to the price once it has closed out of its range for `resetConfirmCandles` candles in a row, at the cost of realizing the loss of the breakout
 
 #### Parameters
 
-| Parameter      | Type                                | Required | Default | Description                                                                                                                                                       |
-|----------------|-------------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `buyLevels`    | integer ≥ 0                         | Yes      | —       | Number of buy levels below center price; the lowest must stay above 0 (see *Lowest buy level*)                                                                    |
-| `sellLevels`   | integer ≥ 0                         | Yes      | —       | Number of sell levels above center price; `buyLevels` and `sellLevels` cannot both be 0                                                                           |
-| `spacingType`  | `percent`, `fixed` or `logarithmic` | Yes      | —       | How levels are spaced                                                                                                                                             |
-| `spacingValue` | number > 0                          | Yes      | —       | Distance between adjacent prices (see below)                                                                                                                      |
-| `retryOnError` | integer ≥ 1                         | No       | `3`     | Times a refused or canceled order is placed again before it is given up; also the orders of unknown outcome tolerated (see [Order Management](#order-management)) |
+| Parameter              | Type                                       | Required | Default | Description                                                                                                                                                       |
+|------------------------|--------------------------------------------|----------|---------|-------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `buyLevels`            | integer ≥ 0                                | Yes      | —       | Number of buy levels below center price; the lowest must stay above 0 (see *Lowest buy level*)                                                                    |
+| `sellLevels`           | integer ≥ 0                                | Yes      | —       | Number of sell levels above center price; `buyLevels` and `sellLevels` cannot both be 0                                                                           |
+| `spacingType`          | `percent`, `fixed`, `logarithmic` or `atr` | Yes      | —       | How levels are spaced                                                                                                                                             |
+| `spacingValue`         | number > 0                                 | Yes      | —       | Distance between adjacent prices (see below)                                                                                                                      |
+| `retryOnError`         | integer ≥ 1                                | No       | `3`     | Times a refused or canceled order is placed again before it is given up; also the orders of unknown outcome tolerated (see [Order Management](#order-management)) |
+| `atrPeriod`            | integer ≥ 1                                | No       | `14`    | Period of the ATR an `atr` spacing reads, in timeframe candles (see [When the Grid Starts](#when-the-grid-starts))                                                |
+| `resetMode`            | `none`, `up`, `down` or `both`             | No       | `none`  | When the grid is reset around the price: never, on a close above the grid, below it, or either way (see [Grid Reset](#grid-reset))                                |
+| `resetConfirmCandles`  | integer ≥ 1                                | No       | `1`     | Timeframe candles in a row that close out of the grid on an armed side before the reset                                                                           |
+| `resetCooldownCandles` | integer ≥ 0                                | No       | `0`     | Timeframe candles after a reset's new grid during which a close out of it does not count towards another reset                                                    |
+
+`atrPeriod` is read with `atr` spacing only, and `resetConfirmCandles` and `resetCooldownCandles` with a `resetMode` other than `none`: given otherwise, they are accepted and ignored.
 
 #### Spacing Types Explained
 
-`spacingValue` is the distance between two adjacent prices of the grid, the center price included:
+`spacingValue` sets the distance between two adjacent prices of the grid, the center price included:
 
 | Type          | `spacingValue` Meaning                 | Example                                                             |
 |---------------|----------------------------------------|---------------------------------------------------------------------|
 | `percent`     | Percent of the center price            | `1` = prices 1 % of the center price apart: 99, 100, 101 around 100 |
 | `fixed`       | Price units                            | `500` = prices $500 apart                                           |
 | `logarithmic` | Ratio between adjacent prices, minus 1 | `0.01` = each price 1 % above the one below it                      |
+| `atr`         | Multiple of the ATR                    | `1.5` = prices 1.5 × the ATR apart: 480 apart with an ATR of 320    |
 
 `percent` spacing is arithmetic, as `fixed` spacing is: each level is `spacingValue` % **of the center price** away from its neighbour, not `spacingValue` % of the neighbour itself. Measured against the prices themselves, the levels are therefore wider at the bottom of the grid than at the top: `10` around 100 places the prices at 50, 60, … 150, so that 50 → 60 is +20 % while 140 → 150 is +7 %. For the same percentage between every two adjacent prices, use `logarithmic` spacing.
 
+`atr` spacing follows the volatility of the pair. When the grid starts, and again at each [reset](#grid-reset), GridBot multiplies `spacingValue` by the [ATR](./indicators.md#atr--average-true-range) of the pair (its Average True Range, of period `atrPeriod` on the timeframe candles) on the last timeframe candle, and rounds the product to the market's price tick at the center price, the nearest tick, a half tick rounding up. The grid is then a `fixed` grid of that step: its prices, bounds, rebalance and quantity are those of a `fixed` grid, and the step stays as it is while the grid trades, whatever the ATR does. On a 5/5 grid at 60000, on a tick of 0.01, `spacingValue: 1.5` and an ATR of 320.0714 give a step of 480.11.
+
+A step too narrow to pay the fees is raised. A level loses money when it sells less than 2 × fee / (1 − fee) above its buy, paying the maker fee (`fee.maker`) on both, and at a fixed step the highest level, whose buy price is the largest, earns the least: the step is raised to the smallest one at which that level breaks even, rounded up to the price tick, and to one tick at least, the floor on a market without a fee. On that grid with a 0.1 % maker fee, the minimum step is 121.09 (119.89 for a grid without sell levels), and an ATR of 40, a step of 60, is raised to it, with a warning logged at the `warn` level each time the step is resolved:
+
+```
+GridBot: ATR spacing: spacingValue 1.5 × ATR 40 is a step of 60 on the price tick 0.01, under 121.09, the minimum step at which every level of the grid breaks even on the maker fee of 0.001 (fee.maker): the grid is spaced by 121.09 instead
+```
+
+On a market without a maker fee, only a step that rounds to 0 is raised, to one tick: `GridBot: ATR spacing: spacingValue 1.5 × ATR 0.002 is a step of 0 on the price tick 0.01, under the price tick: the grid is spaced by one tick, 0.01, instead`. On a market whose tick depends on the price (Hyperliquid's 5 significant digits), the step is also checked on the prices the orders are placed at, rounded to the coarser tick above the next power of ten, and raised to a whole number of that tick until every level breaks even: 9 for 2 sell levels around 9999 at a 0.04 % maker fee, where 8.1 put the highest SELL at 10015, only 8 above its BUY at 10007. An `atr` grid goes through the checks of [Prices and Checks](#prices-and-checks) as any other grid, and their messages name its step and where it comes from, `a step of 480.11 (spacingValue 1.5 × ATR 320.071, atr)`, or `a step of 121.09 (the minimum step, spacingValue 1.5 × ATR 40 giving 60, atr)` once raised, where they name a configured spacing as it is configured, `spacingValue 1 (percent)`.
+
 #### When the Grid Starts
 
-GridBot uses no indicator, and places nothing during the warmup: the grid starts on the first candle after it, centred on that candle's close. In a backtest, `watch.warmup.candleCount` only delays the grid by that many timeframe candles: set it to 0 for the grid to start on the close of the first timeframe candle of `watch.daterange`. In realtime, the grid, or the rebalance that precedes it, goes out when the timeframe candle in progress at start-up closes, whatever `candleCount`: within one timeframe, a minute with `1m` and up to a day with `1d`. A longer warmup only costs history fetches.
+GridBot places nothing during the warmup: the grid starts on the first candle after it, centred on that candle's close. With `percent`, `fixed` or `logarithmic` spacing, it uses no indicator. In a backtest, `watch.warmup.candleCount` then only delays the grid by that many timeframe candles: set it to 0 for the grid to start on the close of the first timeframe candle of `watch.daterange`. In realtime, the grid, or the rebalance that precedes it, goes out when the timeframe candle in progress at start-up closes, whatever `candleCount`: within one timeframe, a minute with `1m` and up to a day with `1d`. A longer warmup only costs history fetches.
+
+With `atr` spacing, the grid needs the ATR on that first candle. The ATR of `atrPeriod` candles has its first value on its `atrPeriod + 1`-th timeframe candle, the true range starting on the second, and the first candle after the warmup is the `candleCount + 1`-th: set `watch.warmup.candleCount` to `atrPeriod` or more, 14 with the default period. In a backtest, the warmup candles are the first timeframe candles of `watch.daterange`, so the grid starts on the close of its `candleCount + 1`-th; in realtime, they are history fetched at start-up, and the grid goes out when the candle in progress at start-up closes, as with the other spacings. With a shorter warmup, the run stops on the first candle after it, before any order (exit code 1):
+
+```
+GridBot: The ATR has no value yet on the first candle after the warmup: with atrPeriod 14 it needs 15 timeframe candles, the warmup's and the first after it, so set watch.warmup.candleCount to 14 or more
+```
 
 #### Prices and Checks
 
@@ -488,7 +513,7 @@ The grid's prices are rounded to the market's price tick (`precision.price`) as 
 
 On a market whose tick depends on the price, Hyperliquid, which takes 5 significant digits in a price (`precision.priceSignificantDigits`, an integer part of more digits being kept whole), each price is rounded to the tick at that price where it is coarser than `precision.price`: one unit of its fifth significant digit, 0.1 from 1000 and 1 from 10000 on. `precision.price` is only the tick at the price the markets were loaded at: a market loaded at 9990 states 0.1, while the exchange takes whole units from 10000 on. So the grid's prices are those the exchange takes as they are: there, a close of 10000.37 centres a grid spaced by 1 (`fixed`) on 10000, its SELLs at 10001 and 10002, where rounded to 0.1 they were 10001.4 and 10002.4, which the exchange takes as 10001 and 10002. A backtest rehearses the rule when its dummy-cex market data states `precision.priceSignificantDigits` (5, as on Hyperliquid): the simulator then rounds the price of every order the same way.
 
-Besides the checks of its parameters at start-up (see [Parameters Are Checked at Start-up](#parameters-are-checked-at-start-up)), GridBot checks the grid against the market when it starts, before any order, and stops the run (exit code 1) when:
+Besides the checks of its parameters at start-up (see [Parameters Are Checked at Start-up](#parameters-are-checked-at-start-up)), GridBot checks the grid against the market when it starts, before any order, and again at each [reset](#grid-reset), stopping the run (exit code 1) when:
 
 - the lowest buy level would be at or below 0, once rounded to the tick: with `percent` spacing, `buyLevels × spacingValue` must stay under 100 (see *Lowest buy level*);
 - the center price is outside the exchange's price limits (`price.min`, `price.max`);
@@ -496,9 +521,9 @@ Besides the checks of its parameters at start-up (see [Parameters Are Checked at
 
 The first and the last checks run again around the price a rebalance ended at (see *Lowest buy level* and *Minimum spacing*).
 
-**Lowest buy level.** The lowest buy level must stay above 0 around every price the grid is centred on. It is checked when the grid starts, and again around the price a rebalance ended at, where the grid is planned again (after a failed rebalance) or built (once it filled). A grid whose lowest buy level would be at or below 0 there stops the run with the error of the start, naming the price the grid would be built around, for example `GridBot: Grid configuration would result in non-positive buy prices: the lowest of buyLevels 2, spaced by spacingValue 5 (fixed) below the center price 9, would be at -1`. No grid order is sent, and the rebalance already filled is not undone. With `fixed` spacing, keep `buyLevels × spacingValue` well under the price: a grid started with its lowest buy level a few ticks above 0 is refused once a rebalance ends a few ticks lower. `percent` and `logarithmic` grids, whose levels scale with the price, meet it only when their lowest buy level rounds to 0 on the tick, after a much larger fall.
+**Lowest buy level.** The lowest buy level must stay above 0 around every price the grid is centred on. It is checked when the grid starts or is reset, and again around the price a rebalance ended at, where the grid is planned again (after a failed rebalance) or built (once it filled). A grid whose lowest buy level would be at or below 0 there stops the run with the error of the start, naming the price the grid would be built around, for example `GridBot: Grid configuration would result in non-positive buy prices: the lowest of buyLevels 2, spaced by spacingValue 5 (fixed) below the center price 9, would be at -1`. No grid order is sent, and the rebalance already filled is not undone. With `fixed` spacing, keep `buyLevels × spacingValue` well under the price: a grid started with its lowest buy level a few ticks above 0 is refused once a rebalance ends a few ticks lower. An `atr` grid, whose step is fixed too, meets it once `buyLevels` steps reach the price, which the ATR of a sharp fall can make them do at a reset. `percent` and `logarithmic` grids, whose levels scale with the price, meet it only when their lowest buy level rounds to 0 on the tick, after a much larger fall.
 
-**Minimum spacing.** Once rounded to the market's price tick, adjacent prices of the grid must stay at least one tick apart. A spacing that rounds two of them to the same price, a level that would buy and sell at that one price, stops the run when the grid starts, again before a failed rebalance is placed again around the price it ended at, so that no second rebalance is paid for a grid that would then be refused, and when the grid is built around the price a rebalance ended at (a `percent` or `logarithmic` step shrinks with the price). The first two check the grid as configured, the last the levels the free balances fund:
+**Minimum spacing.** Once rounded to the market's price tick, adjacent prices of the grid must stay at least one tick apart. A spacing that rounds two of them to the same price, a level that would buy and sell at that one price, stops the run when the grid starts or is reset, again before a failed rebalance is placed again around the price it ended at, so that no second rebalance is paid for a grid that would then be refused, and when the grid is built around the price a rebalance ended at (a `percent` or `logarithmic` step shrinks with the price). The first two check the grid as configured, the last the levels the free balances fund:
 
 ```
 GridBot: Grid configuration would result in a level buying and selling at the same price: spaced by spacingValue 0.001 (percent) around the center price 100, two adjacent prices of the grid would both round to 100 at the price tick 0.01
@@ -510,7 +535,7 @@ On a market whose tick depends on the price, the tick is the one at each price, 
 GridBot: Grid configuration would result in a level buying and selling at the same price: spaced by spacingValue 0.5 (fixed) around the center price 9999, two adjacent prices of the grid would both round to 10001 at the price tick 1, the market taking 5 significant digits in a price (precision.priceSignificantDigits)
 ```
 
-A spacing whose levels earn less than the two maker fees of a round trip (`fee.maker`), a SELL less than 2 × fee / (1 − fee) above its BUY (0.08003 % at a 0.04 % fee, 0.2002 % at 0.1 %), is accepted with one warning, logged at the `warn` level when the grid starts: such a grid loses money at each round trip. For a 5/5 grid at 60000 with a 0.1 % maker fee, no level loses with a spacing of 121.1 or more with `fixed` spacing (100 loses money there), 0.2019 or more with `percent` and 0.002003 or more with `logarithmic`:
+A spacing whose levels earn less than the two maker fees of a round trip (`fee.maker`), a SELL less than 2 × fee / (1 − fee) above its BUY (0.08003 % at a 0.04 % fee, 0.2002 % at 0.1 %), is accepted with one warning, logged at the `warn` level when the grid starts and again at each reset: such a grid loses money at each round trip. For a 5/5 grid at 60000 with a 0.1 % maker fee and a tick of 0.01, no level loses with a spacing of 121.09 or more with `fixed` spacing (121.08 loses on the highest level, and 100 on all ten, as below), 0.2019 or more with `percent` and 0.002003 or more with `logarithmic`. An `atr` step is raised to that minimum (see [Spacing Types Explained](#spacing-types-explained)):
 
 ```
 GridBot: spacingValue 100 (fixed) is under the round-trip fee: a level that sells less than 0.2002 % above its buy, paying the maker fee of 0.001 (fee.maker) on its BUY and on its SELL, loses money at each round trip, 10 out of 10 here, the narrowest selling at 60500, 0.1656 % above its buy at 60400
@@ -520,7 +545,7 @@ GridBot: spacingValue 100 (fixed) is under the round-trip fee: a level that sell
 
 Every level of the grid trades the same quantity. For a quantity `q`, the SELLs need `sellLevels × q` of the asset, and the BUYs need the sum of their prices × `q` of the currency, plus the maker fee (`fee.maker`), which the simulator of backtests and paper trading charges in currency on top of a BUY. The grid is sized on the free balances, rounded down to the market's amount step, so what one side holds beyond what the other side funds stays idle for the whole run.
 
-Before building the grid, GridBot therefore rebalances the free balances to that split with one STICKY order: it buys or sells the amount after which both sides fund the same quantity, the order's own price and fee included. Funds locked in other orders are left out, and reported once at the `info` level. The portfolio is not rebalanced when the grid would leave less than 1 % of its value idle, nor when the rebalance would be smaller than the market's minimum order (`amount.min`, or `cost.min` at the price of the STICKY order): the grid is then built on the balances as they are.
+Before building the grid, at the start and at each [reset](#grid-reset), GridBot therefore rebalances the free balances to that split with one STICKY order: it buys or sells the amount after which both sides fund the same quantity, the order's own price and fee included. Funds locked in other orders are left out, and reported once at the `info` level. The portfolio is not rebalanced when the grid would leave less than 1 % of its value idle, nor when the rebalance would be smaller than the market's minimum order (`amount.min`, or `cost.min` at the price of the STICKY order): the grid is then built on the balances as they are.
 
 The split is not 50/50, since the BUYs, below the center price, cost less than the SELLs are worth. A symmetric grid holds a little more than half of its value in the asset, about 51 % for 5/5 levels spaced by 1 % and 56 % for 20/20 levels spaced by 2 %, and an asymmetric one about its share of sell levels, 76 % for 1 buy and 3 sell levels spaced by 5 at 100. A grid without sell levels is rebalanced all in currency, and one without buy levels all in the asset, buying what the currency pays once the fee is on top.
 
@@ -534,7 +559,7 @@ Each failed attempt before the last is warned of with what follows it:
 
 #### Grid Building
 
-The grid places a LIMIT BUY on each buy level below the center price and a LIMIT SELL on each sell level above it, all for one quantity: the smaller of the free asset split over the sell levels and of the free currency split over the buy prices with the maker fee on top, rounded down to the market's amount step and capped by its maximum at the highest price of the grid. For instance, with no fee, a 2/2 grid spaced by 5 (`fixed`) around 100 needs, for each unit of quantity, 2 of the asset for its SELLs at 105 and 110, and 95 + 90 = 185 of the currency for its BUYs: 5 BTC and 462.5 USDT, its split, give 2.5 a level, with no rebalance. The example configuration below, on the dummy-cex market data of `config/backtest.yml` (a 0.04 % maker fee), started at 61234.56 with 1000 USDT, rebalances with a STICKY BUY of 0.00828635 BTC, then trades 0.00165727 BTC a level.
+The grid places a LIMIT BUY on each buy level below the center price and a LIMIT SELL on each sell level above it, all for one quantity: the smaller of the free asset split over the sell levels and of the free currency split over the buy prices with the maker fee on top, rounded down to the market's amount step and capped by its maximum at the highest price of the grid. For instance, with no fee, a 2/2 grid spaced by 5 (`fixed`) around 100 needs, for each unit of quantity, 2 of the asset for its SELLs at 105 and 110, and 95 + 90 = 185 of the currency for its BUYs: 5 BTC and 462.5 USDT, its split, give 2.5 a level, with no rebalance. The first example configuration below, on the dummy-cex market data of `config/backtest.yml` (a 0.04 % maker fee), started at 61234.56 with 1000 USDT, rebalances with a STICKY BUY of 0.00828635 BTC, then trades 0.00165727 BTC a level.
 
 Every order of the grid is one the market takes: at least its minimum amount (`amount.min`, one amount step) and its minimum cost (`cost.min`) at the lowest price of the grid. When the free balances cannot fund every level with that minimum, each side keeps the levels it funds, the nearest to the center price, and leaves out the farthest, with a warning:
 
@@ -558,15 +583,58 @@ Each of these stops is an error (exit code 1). The TradingAdvisor's `maxConsecut
 
 On a live exchange, a grid order you cancel by hand is placed again for what is left of it, its level giving up at the `retryOnError + 1`-th cancel. After a candle crossed both sides of a price, the BUY and the SELL left at that price can be expired in turn by the exchange's self-trade prevention: each expiry counts as a cancel, and both levels give up after `retryOnError + 1` of them.
 
+During a [reset](#grid-reset), the orders the reset cancels are neither placed again nor followed by their opposite: each level is released as its order ends, filled, canceled or refused, and the new grid replaces it. An order whose outcome is unknown is still left untracked, with the stops of the last case above.
+
 #### Range Monitoring
 
-GridBot never moves its grid. When a timeframe candle closes out of the grid's range, below its lowest price or above its highest, it warns once, naming the price where the grid's orders wait: the grid's price next to the bound the price left, where the bottom level's SELL or the top level's BUY rests once the orders beyond have filled:
+The grid stays where it was built unless a reset moves it (see [Grid Reset](#grid-reset)). When a timeframe candle closes out of the grid's range, below its lowest price or above its highest, GridBot warns once, naming the price where the grid's orders wait: the grid's price next to the bound the price left, where the bottom level's SELL or the top level's BUY rests once the orders beyond have filled. Without a reset on that side (`resetMode: none`, the default, or a reset of the other side only), the warning reads:
 
 ```
 GridBot: Price 111 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 105
 ```
 
-It logs once at the `info` level when a close is back at that price or inside it (`GridBot: Price 105 is back in grid range [90, 110]`), not at every crossing of the bound itself, and warns again when a close is out on the other side. A one-sided grid has its center price for a bound, so a close beyond it on the empty side is out of range at once. When a fill leaves orders on one side of the grid only, GridBot warns once (`GridBot: Only one side of the grid remains active`), until a fill gives it both sides again.
+With a reset on that side, the warning says when the grid is reset, or, during the cooldown after a reset, how long the new grid stays in place (the second line: a grid rebuilt around 112, on the sixth candle of a cooldown of ten, see [Grid Reset](#grid-reset)):
+
+```
+GridBot: Price 111 is out of grid range [90, 110]: the grid is reset once 2 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 105 until then
+GridBot: Price 123 is out of grid range [102, 122]: the grid stays in place for the 4 timeframe candles left of its cooldown (resetCooldownCandles 10), its orders waiting for the price to come back to 117
+```
+
+The candle that triggers a reset logs the reset's line instead of the warning: with `resetConfirmCandles: 1`, outside a cooldown, a close out on an armed side resets the grid without a warning. GridBot logs once at the `info` level when a close is back at the price where the orders wait or inside it (`GridBot: Price 105 is back in grid range [90, 110]`), not at every crossing of the bound itself, and warns again when a close is out on the other side. A one-sided grid has its center price for a bound, so a close beyond it on the empty side is out of range at once. When a fill leaves orders on one side of the grid only, GridBot warns once (`GridBot: Only one side of the grid remains active`), until a fill gives it both sides again.
+
+#### Grid Reset
+
+By default (`resetMode: none`), the grid stays where it was built, whatever the price does. With `resetMode`, GridBot builds a new grid around the price once the price has left the range on a side the mode arms: `up` above the grid, `down` below it, `both` on either side.
+
+**When.** A timeframe candle that closes out of the range on an armed side, above the grid's highest price or below its lowest, counts towards a reset. A close at a bound or inside the range, or out on a side the mode does not arm, starts the count again, and a close out on the other armed side starts it again on that side. Once `resetConfirmCandles` candles in a row have counted, the grid is reset: with 1, the default, at the first close out of the range; with 2 or more, a single close out, such as a spike that comes straight back, passes without a reset. Each candle counted before the last is logged at the `debug` level:
+
+```
+GridBot: Price 111 closed above grid range [90, 110]: 1 of 2 consecutive timeframe candles towards a reset
+```
+
+Nothing is counted while the grid is rebalanced, at the start or at a reset, nor while a reset waits for the grid's orders to end. A one-sided grid has its center price for a bound on its empty side (see [Range Monitoring](#range-monitoring)), so a close beyond it there counts.
+
+**What a reset does.** The reset is logged at the `info` level, numbered in the run (`reset 1`, `reset 2`, …), with the open orders it cancels. For the 2/2 grid spaced by 5 around 100 of [Grid Building](#grid-building), with `resetMode: up` and `resetConfirmCandles: 2`, whose two SELLs filled and turned to BUYs at 100 and 105 as the price rose, the second close above 110 reads:
+
+```
+GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended
+```
+
+Then:
+
+1. Every open order of the grid is canceled. Each level is released as its order ends, canceled, refused, or filled before its cancelation: none is placed again, and a fill does not turn its level to its other side, the new grid replacing every level. What a fill bought or sold is in the balances the new grid is built on.
+2. Once no order of the grid is open, the new grid is built around the last price of the pair, the one the Trader reports with the end of the last order, exactly as at the start: an `atr` step is resolved again, from the ATR of the last timeframe candle; the checks of [Prices and Checks](#prices-and-checks) run around that price, stopping the run with the errors of the start, and a spacing under the round-trip fee is warned of again; the free balances are rebalanced to the split the new grid needs (see [Rebalancing](#rebalancing)); and the grid is built around the price the rebalance ended at, with the lines of the start (`GridBot: Rebalancing - BUY … (STICKY order)`, `GridBot: Rebalance complete, building grid`, `GridBot: Grid built around …`).
+3. The `resetCooldownCandles` timeframe candles that follow the new grid, none by default, do not count towards another reset: a close out of the range during them is warned of with the candles left (see [Range Monitoring](#range-monitoring)), and the count starts after them (the candle that ends the cooldown is not counted either: a close out of the range on it is warned of as the first line above).
+
+In a backtest, the cancelations are heard in the candle that triggered the reset, and the rebalance, or the new grid when it needs none, goes out with the next candle; live, with the bucket that arrives after the last cancelation, which delivers it before its hooks.
+
+**Orders of unknown outcome.** A grid order that errors during the reset while it may still be live on the exchange is no longer followed, as in [Order Management](#order-management): the run stops at once when it was the last order open, or once more than `retryOnError` orders are in that case. A new grid would trade beside such an order, so when the grid would be rebuilt, any order of unknown outcome of the run, left during the reset or before it, stops the run instead (exit code 1):
+
+```
+GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange
+```
+
+**What a reset costs.** A reset trades at the price of the breakout. After a breakout above, the grid has sold its asset on the way up, and its rebalance buys back, higher, the asset the new grid sells; after a breakout below, the grid has bought on the way down, and its rebalance sells, lower, what the new grid does not need. Left in place, the grid would wait for the price to come back into its range, where those levels trade back; a reset realizes the loss of the breakout instead, and a trend that breaks each new grid in turn realizes it at every reset. This is why the reset is off by default, and why `resetConfirmCandles` and `resetCooldownCandles` bound it: the first asks a breakout to last before the grid follows it, the second spaces the resets a trend chains.
 
 #### Restarting
 
@@ -590,6 +658,21 @@ strategy:
   retryOnError: 3
 ```
 
+An `atr` grid that follows a breakout on either side once two timeframe candles in a row have closed out of its range, and lets ten timeframe candles go by after each reset before it counts again; its warmup must give the ATR its value (see [When the Grid Starts](#when-the-grid-starts)):
+
+```yaml
+strategy:
+  name: GridBot
+  buyLevels: 5
+  sellLevels: 5
+  spacingType: atr
+  spacingValue: 1.5
+  atrPeriod: 14
+  resetMode: both
+  resetConfirmCandles: 2
+  resetCooldownCandles: 10
+```
+
 #### When to Use
 
 - **Sideways/ranging markets** with clear support and resistance
@@ -598,7 +681,7 @@ strategy:
 - When you want to profit from volatility without directional bias
 
 > [!CAUTION]
-> Grid strategies can accumulate losses if the price breaks out of the range in one direction: below it, the grid has spent its currency on the asset and holds it as the price falls; above it, the grid has sold its asset and misses the rise. GridBot never moves its grid and has no stop-loss, and it trades all the free balances of its pair: give it only the account you mean it to trade, and stop it yourself when the price leaves the range for good. Stopping Gekko leaves the grid's orders on the exchange: cancel them there.
+> Grid strategies can accumulate losses if the price breaks out of the range in one direction: below it, the grid has spent its currency on the asset and holds it as the price falls; above it, the grid has sold its asset and misses the rise. GridBot moves its grid only when `resetMode` says so, and a reset realizes the loss of the breakout (see [Grid Reset](#grid-reset)). It has no stop-loss, and it trades all the free balances of its pair: give it only the account you mean it to trade, and stop it yourself when the price leaves the range for good. Stopping Gekko leaves the grid's orders on the exchange: cancel them there.
 
 ---
 
