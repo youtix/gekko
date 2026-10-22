@@ -29,7 +29,7 @@ import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '@gekko/core/configuration/configuration';
+import type { Configuration } from '@gekko/schemas/configuration/configuration.types';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { debug, error, info, warning } from '@gekko/core/logger/logger';
 import * as strategies from '@gekko/strategies/index';
@@ -103,7 +103,12 @@ export class StrategyManager extends EventEmitter {
   private strategy?: Strategy<object>;
   private tools: Tools<object>;
 
-  constructor(warmupPeriod: number, maxConsecutiveErrors: number = 5) {
+  /**
+   * Built by the TradingAdvisor from what it reads of the run: the strategy block of the configuration (undefined without one), of
+   * which the strategy gets a copy as its parameters, the warmup's count of timeframe candles and the bound of the circuit breaker
+   * (maxConsecutiveErrors, -1 disabling it). It reads nothing else of the configuration.
+   */
+  constructor(strategyBlock: Configuration['strategy'], warmupPeriod: number, maxConsecutiveErrors: number = 5) {
     super();
     this.warmupPeriod = warmupPeriod;
     this.maxConsecutiveErrors = maxConsecutiveErrors;
@@ -128,7 +133,7 @@ export class StrategyManager extends EventEmitter {
       // A copy of the strategy block, made before the strategy's schema, if any, parses it (see parseStrategyParams): what the schema
       // passes through as it is comes from the copy too. The block is the configuration's, which every plugin keeps: a strategy without
       // schema got that very object, and what it wrote there changed the run id of the PerformanceReporter.
-      strategyParams: cloneDeep(config.getStrategy() ?? {}),
+      strategyParams: cloneDeep(strategyBlock ?? {}),
       marketData: this.marketData,
       cancelTrailingOrder: this.cancelTrailingOrder,
     };

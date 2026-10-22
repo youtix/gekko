@@ -10,7 +10,7 @@ import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Trade } from '@gekko/shared/models/trade.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../configuration/configuration';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { DUMMY_CANDLE_BUFFER_SIZE, DUMMY_CANDLE_BUFFER_TRIM_MARGIN, LIMITS } from '../exchange.const';
 import { InvalidOrder, OrderNotFound } from '../exchange.error';
 import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from '@gekko/shared/models/exchange.types';
@@ -20,6 +20,12 @@ import { difference, isNil, sortedIndexBy, sortedLastIndexBy } from 'lodash-es';
 import { addToBalance, describeShortfall, roundToMarketPrecision } from './dummyCentralizedExchange.helper';
 import { DummyCentralizedExchangeConfig, DummyInternalOrder } from './dummyCentralizedExchange.types';
 
+/**
+ * The exchange of a backtest, and the simulator of paper trading: it fills the orders on the candles it is given (see
+ * processOneMinuteBucket). Built from its dummy-cex section (the fees and order limits of each pair, the starting balances and
+ * tickers) and the watch section: one order book and one balance per watched pair, its clock at the start of the daterange until the
+ * first candle (at the time it is built without a daterange, as in paper trading).
+ */
 export class DummyCentralizedExchange implements Exchange {
   private readonly mutex = new AsyncMutex();
   private readonly ordersMap: Map<string, DummyInternalOrder>;
@@ -40,9 +46,9 @@ export class DummyCentralizedExchange implements Exchange {
   private currentTimestamp: EpochTimeStamp;
   private orderSequence = 0;
 
-  constructor(exchangeConfig: DummyCentralizedExchangeConfig) {
+  constructor(exchangeConfig: DummyCentralizedExchangeConfig, watch: Pick<Watch, 'pairs' | 'daterange'>) {
     const { marketData, simulationBalance, initialTicker } = exchangeConfig;
-    const { pairs, daterange } = config.getWatch();
+    const { pairs, daterange } = watch;
     const symbols = pairs.map(({ symbol }) => symbol);
     // The fees and order limits of a pair come from its marketData entry alone. The configuration schema refuses a watched pair
     // without one, but PaperTradingBinanceExchange builds its dummy directly, from the market data of the real exchange.

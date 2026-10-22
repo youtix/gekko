@@ -6,10 +6,11 @@ import type { BalanceDetail } from '@gekko/shared/models/portfolio.types';
 import type { Asset, TradingPair } from '@gekko/shared/models/utility.types';
 import type { DummyCentralizedExchange } from '@gekko/core/exchange/dummy/dummyCentralizedExchange';
 import type { MarketData } from '@gekko/shared/models/exchange.types';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
 import { mock } from 'bun:test';
 import { mapValues, range } from 'lodash-es';
-import { mockConfiguration, type RawConfiguration } from '../helpers/configuration.helper';
+import { createFlowContext, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
 import { MockWinston } from '../mocks/winston.mock';
@@ -46,14 +47,11 @@ export const candlesClosingAt = (
 export const flatCandles = (price: number): Candle[] =>
   range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
 
-/** The configuration the next getter of the mocked configuration reads: that of the run in progress (see runBacktest) */
-let configuration: RawConfiguration | undefined;
-
 /**
  * Mocks what the backtest flows mock, to be called at the top of the file, before anything imports the pipeline: winston, whose lines
- * the flows read; ccxt, which the injecter loads with CCXTExchange though a backtest builds no exchange client (the mock spares the
- * load of the real one, which backtestMissingCandles.flow.test.ts keeps); and the configuration, parsed as the loader parses a file
- * (see mockConfiguration), the one runBacktest is given.
+ * the flows read; and ccxt, which the run's services load with CCXTExchange though a backtest builds no exchange client (the mock spares
+ * the load of the real one, which backtestMissingCandles.flow.test.ts keeps). Not the configuration: runBacktest builds the context of
+ * each run from the configuration it is given (createFlowContext).
  *
  * It also sets the log level of the flows, info. The logger reads GEKKO_LOG_LEVEL once, as the pipeline loads it, and hands winston a
  * debug line only when the level lets it through: inherited from the shell, a level of debug exported for a run of the bot added lines
@@ -65,18 +63,6 @@ export const mockBacktestModules = () => {
   process.env.GEKKO_LOG_LEVEL = 'info';
   mock.module('winston', () => MockWinston);
   mock.module('ccxt', () => createCcxtModuleMock());
-  mockConfiguration(() => {
-    if (!configuration) throw new Error('No backtest configured: runBacktest sets the configuration of its run');
-    return configuration;
-  });
-};
-
-/**
- * Sets the configuration the mocked getters read until the next run: for what a test builds with Gekko's modules outside a run, the
- * storage of an import that writes a database file, before a backtest reads it
- */
-export const useConfiguration = (raw: RawConfiguration) => {
-  configuration = raw;
 };
 
 /** A balance read from the simulated exchange, dated by its clock: the close of the last candle it had processed */
@@ -152,8 +138,12 @@ export const unreservedRead = (at: EpochTimeStamp, amounts: Record<Asset, number
   balance: mapValues(amounts, amount => ({ free: amount, used: 0, total: amount })),
 });
 
-/** What a run left: the error it stopped with, undefined when it reached the end of its range, and what the exchange was asked */
-export type BacktestRun = { failure?: Error; balanceReads: BalanceRead[]; orderCalls: OrderCall[] };
+/**
+ * What a run left: the error it stopped with, undefined when it reached the end of its range, what the exchange was asked, and the
+ * context it ran on, its configuration and its services (the storage it read, to close as main() does), undefined when the schema
+ * refused its configuration
+ */
+export type BacktestRun = { failure?: Error; balanceReads: BalanceRead[]; orderCalls: OrderCall[]; context?: RunContext };
 
 /** Records each balance read and each order call the pipeline makes of the simulated exchange, as it makes them */
 const recordExchange = (exchange: DummyCentralizedExchange, run: BacktestRun) => {
@@ -186,33 +176,36 @@ const recordExchange = (exchange: DummyCentralizedExchange, run: BacktestRun) =>
   exchange.cancelOrder = (symbol, id) => record({ call: 'cancelOrder', id }, cancelOrder(symbol, id));
 };
 
-/** Builds the storage and the exchange the pipeline is given, the injecter keeping the ones it built first, then runs the pipeline */
-const startBacktest = async (candles: Record<TradingPair, Candle[]>, run: BacktestRun) => {
-  const { inject } = await import('@gekko/core/injecter/injecter');
-  inject.reset();
-  // An in-memory database is one of its own, built once the configuration of the run is set: it creates the tables of its pairs. A
-  // database file is left to the pipeline, which opens it as a backtest does.
+/**
+ * Builds the context of the run from its configuration, then the storage and the exchange of its services, which the pipeline is given
+ * in turn, the services keeping the ones they built first, then runs the pipeline on that context
+ */
+const startBacktest = async (backtest: RawConfiguration, candles: Record<TradingPair, Candle[]>, run: BacktestRun) => {
+  const context = await createFlowContext(backtest);
+  run.context = context;
+  // An in-memory database is one of its own, built with the services of the run: it creates the tables of its pairs. A database file
+  // is left to the pipeline, which opens it as a backtest does.
   const pairs = Object.entries(candles) as [TradingPair, Candle[]][];
   if (pairs.length) {
-    const storage = inject.storage() as SQLiteStorage;
+    const storage = context.services.storage() as SQLiteStorage;
     for (const [symbol, pairCandles] of pairs) seedDatabaseWithCandles(storage, symbol, pairCandles);
   }
-  recordExchange(inject.exchange() as DummyCentralizedExchange, run);
+  recordExchange(context.services.exchange() as DummyCentralizedExchange, run);
   const { gekkoPipeline } = await import('@gekko/core/core/pipeline/pipeline');
   const plugins = await import('@gekko/plugins/index');
-  await gekkoPipeline({ plugins });
+  await gekkoPipeline({ context, plugins });
 };
 
 /**
- * Runs the backtest of `backtest`, the 1-minute candles of each pair seeded in its in-memory database first, to its end: the error it
- * stopped with, undefined when it completed, and every balance read and order call made of the simulated exchange. Caught rather than
- * asserted through `rejects`, which Bun waits on past the test's timeout: a backtest that froze would hang the suite instead of failing
- * its scenario. So is a configuration the harness refuses, whose getters throw at the first read, before any promise exists.
+ * Runs the backtest of `backtest` on a context of its own (createFlowContext), the 1-minute candles of each pair seeded in its in-memory
+ * database first, to its end: the error it stopped with, undefined when it completed, every balance read and order call made of the
+ * simulated exchange, and the context. Caught rather than asserted through `rejects`, which Bun waits on past the test's timeout: a
+ * backtest that froze would hang the suite instead of failing its scenario. So is a configuration the schema refuses, whose GekkoError
+ * createFlowContext throws before the run starts.
  */
 export const runBacktest = async (backtest: RawConfiguration, candles: Record<TradingPair, Candle[]> = {}): Promise<BacktestRun> => {
-  configuration = backtest;
   const run: BacktestRun = { balanceReads: [], orderCalls: [] };
-  run.failure = await startBacktest(candles, run).then(
+  run.failure = await startBacktest(backtest, candles, run).then(
     () => undefined,
     (error: Error) => error,
   );

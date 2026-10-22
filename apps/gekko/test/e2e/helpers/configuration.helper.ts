@@ -1,7 +1,6 @@
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { configurationSchema } from '@gekko/schemas/configuration/configuration.schema';
-import { mock } from 'bun:test';
-import { some } from 'lodash-es';
-import { z } from 'zod';
+import type { z } from 'zod';
 
 /** A configuration as its file holds it, before the schema reads it: dates as text, balances and market data as lists */
 export type RawConfiguration = z.input<typeof configurationSchema>;
@@ -9,41 +8,20 @@ export type RawConfiguration = z.input<typeof configurationSchema>;
 type PaperExchange = Extract<RawConfiguration['exchange'], { name: 'paper-binance' }>;
 
 /**
- * Mocks the configuration singleton with the configuration `raw` gives, read through the schema as the loader reads a file, its getters
- * handing out the sections the schema returns: a flow runs only a configuration Gekko accepts, with the defaults Gekko gives it. The
- * flows mocked getters over literals, which ran configurations the loader refuses (a `verbose` key, the market data of a pair that is
- * not watched) and went without the defaults (no orderSynchInterval: the orders were polled every millisecond).
+ * The context of a run of a flow, built from `raw` as the executable builds its own from its file (createRunContext): the configuration
+ * as the schema outputs it, its defaults applied, and the services of the run, the storage and the exchange the flow seeds or reads
+ * among them. A configuration the loader refuses is refused alike, before anything runs, with a GekkoError listing the issues of the
+ * schema (`[CONFIGURATION] Invalid configuration object: …`): a flow runs only a configuration Gekko accepts, with the defaults Gekko
+ * gives it. The flows mocked getters over literals, which ran configurations the loader refuses (a `verbose` key, the market data of a
+ * pair that is not watched) and went without the defaults (no orderSynchInterval: the orders were polled every millisecond).
  *
- * `raw` is read on every call of a getter, so that a test sets the configuration of its next run by changing what `raw` reads. The
- * schema is loaded by the factory of the mock, which Bun runs when the configuration is first imported, after the other mocks of the
- * file: the helper loads nothing of src before them.
+ * One context per run: a flow that changes its configuration between two runs builds a new one. Imported when called rather than at the
+ * top of the file, as the context loads the logger and ccxt, which the flows mock first: the helper loads nothing of the packages before
+ * the mocks of the flow.
  */
-export const mockConfiguration = (raw: RawConfiguration | (() => RawConfiguration)) => {
-  const read = typeof raw === 'function' ? raw : () => raw;
-  mock.module('@gekko/core/configuration/configuration', async () => {
-    const { configurationSchema } = await import('@gekko/schemas/configuration/configuration.schema');
-    const parse = () => {
-      const result = configurationSchema.safeParse(read());
-      if (!result.success) throw new Error(`Invalid configuration of the flow:\n${z.prettifyError(result.error)}`);
-      return result.data;
-    };
-    return {
-      config: {
-        showLogo: () => parse().showLogo,
-        getPlugins: () => parse().plugins,
-        getStrategy: () => parse().strategy,
-        getWatch: () => parse().watch,
-        getExchange: () => parse().exchange,
-        // The rule of Configuration.getStorage: a storage in backtest mode or with a CandleWriter only. Handed out in every mode, it let
-        // a realtime flow without a CandleWriter pass with a plugin that needs a storage, where Gekko fails at start-up with such a
-        // configuration ("Missing or unknown storage")
-        getStorage: () => {
-          const { storage, watch, plugins } = parse();
-          return storage && (watch.mode === 'backtest' || some(plugins, { name: 'CandleWriter' })) ? storage : undefined;
-        },
-      },
-    };
-  });
+export const createFlowContext = async (raw: RawConfiguration): Promise<RunContext> => {
+  const { createRunContext } = await import('@gekko/core/run/runContext.helper');
+  return createRunContext(raw);
 };
 
 /** A watch.daterange as a file writes it, from bounds in epoch milliseconds */

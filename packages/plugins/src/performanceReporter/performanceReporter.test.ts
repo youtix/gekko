@@ -3,7 +3,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { PortfolioReport } from '../analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '../analyzers/roundTripAnalyzer/roundTrip.types';
-import { config } from '@gekko/core/configuration/configuration';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import * as fs from 'fs';
 import path from 'path';
@@ -25,8 +25,8 @@ vi.mock('@gekko/core/logger/logger', () => ({
   error: vi.fn(),
 }));
 
-// A backtest on one pair, as config.getWatch() returns it: the timeframe belongs to the watch, not to a pair.
-const WATCH = vi.hoisted<Watch>(() => ({
+// A backtest on one pair, as the configuration's watch section gives it: the timeframe belongs to the watch, not to a pair.
+const WATCH: Watch = {
   mode: 'backtest',
   assets: ['BTC'],
   currency: 'USDT',
@@ -34,14 +34,9 @@ const WATCH = vi.hoisted<Watch>(() => ({
   timeframe: '1h',
   tickrate: 1000,
   warmup: { tickrate: 1000, candleCount: 0 },
-}));
-
-vi.mock('@gekko/core/configuration/configuration', () => ({
-  config: {
-    getWatch: vi.fn(() => WATCH),
-    getStrategy: vi.fn(() => ({ name: 'DEMA' })),
-  },
-}));
+};
+// The strategy block of that backtest, which names its rows
+const STRATEGY = { name: 'DEMA' };
 
 const HEADER =
   'id;report type;pair;timeframe;net profit;total return;yearly profit;win rate;market;alpha;sharpe ratio;sortino ratio;max drawdown;total changes;trade count;start time;end time;duration;exposure;start balance;final balance;start price;end price;standard deviation;downside deviation;longest drawdown duration;benchmark asset;top maes;status';
@@ -162,14 +157,16 @@ describe('PerformanceReporter', () => {
 
   /** A reporter built while the configuration watches `watch` instead of WATCH. */
   const reporterWatching = (watch: Partial<Watch>) => {
-    vi.mocked(config.getWatch).mockReturnValueOnce({ ...WATCH, ...watch });
-    const watchingReporter = new PerformanceReporter(baseConfig);
+    const watchingReporter = new PerformanceReporter(
+      baseConfig,
+      createPluginContext({ watch: { ...WATCH, ...watch }, strategy: STRATEGY }),
+    );
     watchingReporter.setFs({ lockSync: lockSyncMock });
     return watchingReporter;
   };
 
   beforeEach(() => {
-    reporter = new PerformanceReporter(baseConfig);
+    reporter = new PerformanceReporter(baseConfig, createPluginContext({ watch: WATCH, strategy: STRATEGY }));
     reporter['setFs']({ lockSync: lockSyncMock });
 
     // Reset individual mocks instead of clearAllMocks() to adhere to rules
@@ -436,8 +433,8 @@ describe('PerformanceReporter', () => {
       /** Writes the row of a run whose strategy block has a ';' in a parameter, and returns the file. */
       const writeRowWithSeparatorInStrategy = () => {
         const file = useInMemoryFile();
-        vi.mocked(config.getStrategy).mockReturnValueOnce({ name: 'grid', sides: 'buy;sell' });
-        const gridReporter = new PerformanceReporter(baseConfig);
+        const strategy = { name: 'grid', sides: 'buy;sell' };
+        const gridReporter = new PerformanceReporter(baseConfig, createPluginContext({ watch: WATCH, strategy }));
         gridReporter.setFs({ lockSync: lockSyncMock });
         gridReporter.onPerformanceReport(samplePortfolioReport);
         return file;

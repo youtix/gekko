@@ -1,28 +1,16 @@
 import type { TradingPair } from '@gekko/shared/models/utility.types';
-import type { SQLiteStorage as Storage } from '@gekko/core/storage/sqlite.storage';
-import { afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
+import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { candleTables, countCandles, readCandles, seedDatabaseWithCandles } from './database.helper';
-
-// Defined before the storage is imported, which reads the configuration as it loads
-mock.module('@gekko/core/configuration/configuration', () => ({
-  config: {
-    getStorage: () => ({ type: 'sqlite', database: ':memory:' }),
-    getWatch: () => ({ mode: 'backtest' }),
-  },
-}));
 
 describe('database.helper', () => {
   const symbol = 'BTC/USDT';
   const firstHour = { start: 0, end: 60 * 60_000 };
-  let SQLiteStorage: typeof Storage;
-  let storage: Storage;
-
-  beforeAll(async () => {
-    ({ SQLiteStorage } = await import('@gekko/core/storage/sqlite.storage'));
-  });
+  let storage: SQLiteStorage;
 
   beforeEach(() => {
-    storage = new SQLiteStorage([symbol]);
+    // The storage of a backtest of BTC on an in-memory database, as the services of its run build it
+    storage = new SQLiteStorage({ type: 'sqlite', database: ':memory:' }, { mode: 'backtest', pairs: [{ symbol }] });
   });
 
   afterEach(() => {

@@ -10,9 +10,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, type RawConfiguration } from '../../helpers/configuration.helper';
+import type { RawConfiguration } from '../../helpers/configuration.helper';
 import { candleTables, countCandles, readCandles } from '../../helpers/database.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  realtimeRunContext,
+  runRealtimeFor,
+  runRealtimeUntil,
+  useRealtimeConfiguration,
+} from '../../helpers/realtimeRun.helper';
 import { type Gap, MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 
@@ -29,10 +36,10 @@ type StorageSection = NonNullable<RawConfiguration['storage']>;
 /** The storage of most scenarios, which writes each minute as it closes: realtime's insertThreshold is 1 by default */
 const IN_MEMORY: StorageSection = { type: 'sqlite', database: ':memory:' };
 
-// The storage of the next run, which setUpRun sets: the schema parses the configuration on every read
-let mockStorage: StorageSection = IN_MEMORY;
+// The storage of the next run, which setUpRun sets before it builds the run's context
+let runStorage: StorageSection = IN_MEMORY;
 
-mockConfiguration(() => ({
+useRealtimeConfiguration(() => ({
   watch: {
     mode: 'realtime',
     assets: ['BTC', 'ETH', 'LTC'],
@@ -42,7 +49,7 @@ mockConfiguration(() => ({
     warmup: { candleCount: 0, tickrate: 100 },
   },
   exchange: { name: 'binance' },
-  storage: mockStorage,
+  storage: runStorage,
   plugins: [{ name: 'CandleWriter' }],
 }));
 
@@ -62,12 +69,13 @@ const minute = (n: number) => FIRST_MINUTE + n * ONE_MINUTE;
 /** That minute, as the log lines write it */
 const at = (n: number) => new Date(minute(n)).toISOString();
 
-/** Sets the storage of the scenario's run, then builds it, which creates the table of each pair: it reads insertThreshold as it is built */
+/**
+ * Sets the storage of the scenario's run, then builds it with the services of the run's context, which creates the table of each pair:
+ * it reads insertThreshold as it is built
+ */
 const setUpRun = async (storage: StorageSection = IN_MEMORY) => {
-  mockStorage = storage;
-  const { inject } = await import('@gekko/core/injecter/injecter');
-  inject.reset();
-  return inject.storage() as SQLiteStorage;
+  runStorage = storage;
+  return (await realtimeRunContext()).services.storage() as SQLiteStorage;
 };
 
 /** Runs the realtime pipeline `minutes` minutes, one at a time, and what `read` reads at the end of each */

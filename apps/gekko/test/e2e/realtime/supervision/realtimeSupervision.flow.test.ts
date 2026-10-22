@@ -4,8 +4,14 @@ import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { pick } from 'lodash-es';
 import type { z } from 'zod';
 import { REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, type RawConfiguration } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, runRealtimeUntilEnd } from '../../helpers/realtimeRun.helper';
+import type { RawConfiguration } from '../../helpers/configuration.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  runRealtimeFor,
+  runRealtimeUntilEnd,
+  useRealtimeConfiguration,
+} from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService } from '../../mocks/fetcher.mock';
 import { clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
@@ -21,9 +27,9 @@ mockRealtimeModules();
 // environment cannot add the debug lines
 process.env.GEKKO_LOG_LEVEL = 'info';
 
-// 2. Mock Configuration: one pair on Binance, Supervision as the only plugin, its options set by each scenario
+// 2. Configuration: one pair on Binance, Supervision as the only plugin, its options set by each scenario
 let supervision: Omit<z.input<typeof supervisionSchema>, 'name' | 'token' | 'botUsername'>;
-mockConfiguration(
+useRealtimeConfiguration(
   (): RawConfiguration => ({
     watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', warmup: { candleCount: 0 } },
     exchange: { name: 'binance' },
@@ -89,9 +95,7 @@ const botLines = () =>
 // --------------------------------------------------------------------------
 
 describe('E2E: Realtime Supervision', () => {
-  beforeEach(async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
+  beforeEach(() => {
     clearLogs();
     MockFetcherService.reset();
     MockFetcherService.when('getUpdates').thenReturn(getUpdates);

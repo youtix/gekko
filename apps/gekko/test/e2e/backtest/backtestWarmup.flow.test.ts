@@ -126,9 +126,9 @@ describe('E2E: Backtest warmup', () => {
       shortest: { failure: shortest.failure, warmupLines: warmupLines(), orderCalls: shortest.orderCalls },
     }).toEqual({
       oneMinuteShort: {
-        // The harness reads the configuration through the schema, as the loader does (see mockConfiguration)
+        // The harness checks the configuration with the schema, as the loader does (see createFlowContext)
         failure: [
-          'Invalid configuration of the flow:',
+          '[CONFIGURATION] Invalid configuration object:',
           '✖ watch.daterange must hold more whole 5m candles than warmup.candleCount (2), or the warmup never ends and the strategy never trades: it holds 2 from 2024-01-01T00:05:00.000Z, its first 5m boundary, so it must end at 2024-01-01T00:19:00.000Z or later',
           '  → at watch.daterange',
         ].join('\n'),

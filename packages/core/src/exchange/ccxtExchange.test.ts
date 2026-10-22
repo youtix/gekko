@@ -1,6 +1,5 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
-import { config } from '../configuration/configuration';
 import * as logger from '../logger/logger';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import { assertOrderWithinLimits } from '@gekko/shared/helpers/market/market.helper';
@@ -10,11 +9,9 @@ import { CCXTExchange } from './ccxtExchange';
 import { BROKER_MAX_RETRIES_ON_FAILURE, LIMITS, MAX_MY_TRADES_PAGES } from './exchange.const';
 import { ExchangeNetworkError, InvalidOrder, OrderNotFound, OrderOutcomeUnknown } from './exchange.error';
 import { checkMandatoryFeatures, createExchange, mapCcxtOrderToOrder, mapCcxtTradeToTrade, mapOhlcvToCandles } from './exchange.helper';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import type { CCXTExchangeConfig } from '@gekko/schemas/exchange/exchange.types';
 
-vi.mock('../configuration/configuration', () => ({
-  config: { getWatch: vi.fn(), getExchange: vi.fn() },
-}));
 vi.mock('../core/heart/heart');
 // The real validation runs (vi.fn(impl) survives mockReset), spied to check how the exchange calls it
 vi.mock('@gekko/shared/helpers/market/market.helper', async importOriginal => {
@@ -80,7 +77,8 @@ vi.mock('ccxt', async importOriginal => {
   return { ...errors, default: { ...errors, TRUNCATE: functions.TRUNCATE, binance: MockExchange, hyperliquid: MockExchange } };
 });
 
-const mockWatchConfig = { pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }] };
+// The watch section the exchange is built with: the pairs whose balances fetchBalance reads
+const watch: Pick<Watch, 'pairs'> = { pairs: [{ symbol: 'BTC/USDT' }] };
 const binanceConfig = {
   name: 'binance' as const,
   apiKey: 'key',
@@ -102,8 +100,6 @@ const hyperliquidConfig = {
 
 describe('CCXTExchange', () => {
   beforeEach(() => {
-    (config.getWatch as Mock).mockReturnValue(mockWatchConfig);
-
     // Mock createExchange to return both publicClient and privateClient
     (createExchange as Mock).mockImplementation(config => {
       const exchangeClass = (ccxt as any)[config.name];
@@ -120,7 +116,7 @@ describe('CCXTExchange', () => {
       ${'binance'}     | ${binanceConfig}     | ${'binance'}
       ${'hyperliquid'} | ${hyperliquidConfig} | ${'hyperliquid'}
     `('initializes $exchangeName exchange correctly', ({ config: cfg, expectedName }) => {
-      expect(new CCXTExchange(cfg).getExchangeName()).toBe(expectedName);
+      expect(new CCXTExchange(cfg, watch).getExchangeName()).toBe(expectedName);
     });
 
     it.each`
@@ -128,7 +124,7 @@ describe('CCXTExchange', () => {
       ${true}
       ${false}
     `('creates exchange with sandbox=$sandbox', ({ sandbox }) => {
-      new CCXTExchange({ ...binanceConfig, sandbox });
+      new CCXTExchange({ ...binanceConfig, sandbox }, watch);
       expect(createExchange).toHaveBeenCalledWith({ ...binanceConfig, sandbox });
     });
 
@@ -136,7 +132,7 @@ describe('CCXTExchange', () => {
       (checkMandatoryFeatures as Mock).mockImplementationOnce(() => {
         throw new Error('Missing fetchOHLCV feature');
       });
-      expect(() => new CCXTExchange(binanceConfig)).toThrow('Missing fetchOHLCV feature');
+      expect(() => new CCXTExchange(binanceConfig, watch)).toThrow('Missing fetchOHLCV feature');
     });
   });
 
@@ -156,7 +152,7 @@ describe('CCXTExchange', () => {
       ${'hyperliquid'} | ${hyperliquidConfig} | ${builtInMapping} | ${{ spotCurrencyMapping: learnedMapping }}
     `('on $exchangeName', ({ exchangeConfig, mapping, privateOptions }) => {
       beforeEach(() => {
-        exchange = new CCXTExchange(exchangeConfig);
+        exchange = new CCXTExchange(exchangeConfig, watch);
         // createExchange creates the public client first. Each client gets spies and options of its own: the mocked ccxt shares
         // those of its prototype between instances
         [publicInstance, privateInstance] = (ccxt as any)[exchangeConfig.name].mock.instances.slice(-2);
@@ -204,7 +200,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
     });
 
@@ -235,7 +231,7 @@ describe('CCXTExchange', () => {
       ${'hyperliquid'} | ${hyperliquidConfig} | ${{ price: 0.1, amount: 0.01 }}     | ${{ price: 0.1, amount: 0.01, priceSignificantDigits: 5 }}
     `('getMarketData states the precision of a $exchangeName market', ({ exchangeConfig, marketPrecision, expected }) => {
       instance.market.mockReturnValue({ limits: {}, precision: marketPrecision });
-      expect(new CCXTExchange(exchangeConfig).getMarketData('BTC/USDC').precision).toEqual(expected);
+      expect(new CCXTExchange(exchangeConfig, watch).getMarketData('BTC/USDC').precision).toEqual(expected);
     });
 
     it('getExchangeName returns configured name', () => {
@@ -253,7 +249,7 @@ describe('CCXTExchange', () => {
 
     /** An exchange whose ccxt client resolves the symbols as above and answers fetchTickers with `tickers` */
     const exchangeWithTickers = (exchangeConfig: CCXTExchangeConfig, tickers: object) => {
-      const exchange = new CCXTExchange(exchangeConfig);
+      const exchange = new CCXTExchange(exchangeConfig, watch);
       const instance = (ccxt as any)[exchangeConfig.name].mock.instances.at(-1);
       instance.market.mockImplementation((symbol: string) => ({ symbol: unifiedSymbols[symbol] }));
       instance.fetchTickers.mockResolvedValue(tickers);
@@ -298,7 +294,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
     });
 
@@ -317,7 +313,7 @@ describe('CCXTExchange', () => {
 
   describe('fetchOHLCV', () => {
     it('fetches and maps candles', async () => {
-      const exchange = new CCXTExchange(binanceConfig);
+      const exchange = new CCXTExchange(binanceConfig, watch);
       const instance = (ccxt as any).binance.mock.instances.at(-1);
       const ohlcv = [[1000, 1, 2, 1, 1.5, 100]];
       const candles = [{ start: 1000 }];
@@ -335,7 +331,7 @@ describe('CCXTExchange', () => {
       let exchange: CCXTExchange;
 
       beforeEach(() => {
-        exchange = new CCXTExchange(binanceConfig);
+        exchange = new CCXTExchange(binanceConfig, watch);
       });
 
       it.each`
@@ -418,7 +414,7 @@ describe('CCXTExchange', () => {
     const crowdedMillisecond = makeTrades(limit + 500, () => 1000);
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockImplementation((symbol: string) => (symbol === market.symbol ? market : undefined));
       instance.fetchMyTrades.mockResolvedValue([trade]);
@@ -553,7 +549,7 @@ describe('CCXTExchange', () => {
       const history = [...makeTrades(fillsPerAnswer, index => 1000 + index, 'eth', { symbol: 'ETH/USDC:USDC' }), ...fillsOfSymbol];
 
       beforeEach(() => {
-        exchange = new CCXTExchange(hyperliquidConfig);
+        exchange = new CCXTExchange(hyperliquidConfig, watch);
         instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
         instance.market.mockReturnValue({ symbol: 'BTC/USDC', base: 'BTC', quote: 'USDC' });
         instance.fetchMyTrades.mockImplementation(serveHistory(history, fillsPerAnswer));
@@ -572,7 +568,7 @@ describe('CCXTExchange', () => {
 
   describe('fetchOrder', () => {
     it('fetches and maps order', async () => {
-      const exchange = new CCXTExchange(binanceConfig);
+      const exchange = new CCXTExchange(binanceConfig, watch);
       const instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.fetchOrder.mockResolvedValue({ id: '1' });
       (mapCcxtOrderToOrder as Mock).mockReturnValue({ id: '1' });
@@ -621,7 +617,7 @@ describe('CCXTExchange', () => {
       let privateInstance: any;
 
       beforeEach(() => {
-        exchange = new CCXTExchange(exchangeConfig);
+        exchange = new CCXTExchange(exchangeConfig, watch);
         // Spies of each client's own: the mocked ccxt shares those of its prototype between instances
         [publicInstance, privateInstance] = (ccxt as any)[exchangeConfig.name].mock.instances.slice(-2);
         publicInstance.fetchOpenOrders = vi.fn(async () => []);
@@ -643,7 +639,7 @@ describe('CCXTExchange', () => {
       let instance: any;
 
       beforeEach(() => {
-        exchange = new CCXTExchange(binanceConfig);
+        exchange = new CCXTExchange(binanceConfig, watch);
         instance = (ccxt as any).binance.mock.instances.at(-1);
       });
 
@@ -694,7 +690,7 @@ describe('CCXTExchange', () => {
       let instance: any;
 
       beforeEach(() => {
-        exchange = new CCXTExchange(binanceConfig);
+        exchange = new CCXTExchange(binanceConfig, watch);
         instance = (ccxt as any).binance.mock.instances.at(-1);
         instance.market.mockReturnValue({ symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT' });
       });
@@ -716,7 +712,7 @@ describe('CCXTExchange', () => {
       });
 
       it('keys the balances of every watched pair', async () => {
-        (config.getWatch as Mock).mockReturnValue({ pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }] });
+        exchange = new CCXTExchange(binanceConfig, { pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }] });
         instance.market.mockImplementation((symbol: string) => ({ symbol, base: symbol.split('/')[0], quote: 'USDT' }));
         instance.fetchBalance.mockResolvedValue({ BTC: btc, ETH: other, USDT: usd });
         expect(Object.fromEntries(await exchange.fetchBalance())).toEqual({ BTC: btc, ETH: other, USDT: usd });
@@ -731,8 +727,7 @@ describe('CCXTExchange', () => {
       let instance: any;
 
       beforeEach(() => {
-        (config.getWatch as Mock).mockReturnValue({ pairs: [{ symbol: 'BTC/USDC' }] });
-        exchange = new CCXTExchange(hyperliquidConfig);
+        exchange = new CCXTExchange(hyperliquidConfig, { pairs: [{ symbol: 'BTC/USDC' }] });
         instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
         instance.market.mockReturnValue({ symbol: 'BTC/USDC', base: 'BTC', baseName: 'UBTC', quote: 'USDC' });
       });
@@ -745,7 +740,7 @@ describe('CCXTExchange', () => {
         ${'reads the asset under the base when both have a balance'}  | ${'BTC/USDC'}  | ${{ USDC: usd, BTC: btc, UBTC: other }} | ${{ BTC: btc, USDC: usd }}
         ${'zeroes an asset under neither the base nor baseName'}      | ${'BTC/USDC'}  | ${{ USDC: usd, HYPE: other }}           | ${{ BTC: zero, USDC: usd }}
       `('$description', async ({ symbol, balance, expected }) => {
-        (config.getWatch as Mock).mockReturnValue({ pairs: [{ symbol }] });
+        exchange = new CCXTExchange(hyperliquidConfig, { pairs: [{ symbol }] });
         instance.fetchBalance.mockResolvedValue(balance);
         expect(Object.fromEntries(await exchange.fetchBalance())).toEqual(expected);
       });
@@ -765,7 +760,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits });
       instance.createOrder.mockResolvedValue({ id: '1', status: 'open' });
@@ -820,7 +815,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits });
       instance.fetchTicker.mockResolvedValue({ ask: 101, bid: 100, last: 100.5 });
@@ -963,7 +958,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits, precision });
       // The price rounded to the tick, as ccxt rounds it for Binance; the amount is truncated by ccxt's own decimalToPrecision
@@ -1014,7 +1009,7 @@ describe('CCXTExchange', () => {
 
     // Hyperliquid's amountToPrecision rounds half up: an all-in order on a balance of 0.000059958 BTC would be sent as 0.00006
     it('sends the amount truncated to the step of the market to hyperliquid', async () => {
-      exchange = new CCXTExchange(hyperliquidConfig);
+      exchange = new CCXTExchange(hyperliquidConfig, watch);
       instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
       await create(exchange, instance, 0.000059958, 120000);
       expect(instance.createOrder).toHaveBeenCalledWith('BTC/USDT', type, 'BUY', 0.00005, 120000);
@@ -1072,7 +1067,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(hyperliquidConfig);
+      exchange = new CCXTExchange(hyperliquidConfig, watch);
       instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits, precision: { amount: 0.01, price: 0.1 } });
       instance.priceToPrecision.mockReturnValue('10000');
@@ -1106,7 +1101,7 @@ describe('CCXTExchange', () => {
 
     // A rounding Binance does not make, its tick being precision.price: the warning then names no rule
     it('warns without naming significant digits on an exchange that states none', async () => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       await exchange.createLimitOrder('BTC/USDC', 'SELL', 1, 10000.4);
       expect(logger.warning).toHaveBeenCalledWith(
         'exchange',
@@ -1174,7 +1169,7 @@ describe('CCXTExchange', () => {
       const answer = { id: '1', status: 'canceled', amount: 1, filled: 0.4, remaining: 0.6, timestamp: 1704346468838 };
 
       beforeEach(() => {
-        exchange = new CCXTExchange(binanceConfig);
+        exchange = new CCXTExchange(binanceConfig, watch);
         instance = (ccxt as any).binance.mock.instances.at(-1);
         instance.cancelOrder.mockResolvedValue(answer);
       });
@@ -1202,7 +1197,7 @@ describe('CCXTExchange', () => {
       ${'no order at all'}                        | ${undefined}
     `('answered with $description', ({ answer }) => {
       beforeEach(() => {
-        exchange = new CCXTExchange(hyperliquidConfig);
+        exchange = new CCXTExchange(hyperliquidConfig, watch);
         instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
         instance.cancelOrder.mockResolvedValue(answer);
         instance.fetchOrder.mockResolvedValue(orderReadBack);
@@ -1225,7 +1220,7 @@ describe('CCXTExchange', () => {
 
     describe('answered with the acknowledgement of Hyperliquid, read back with a timeout on every attempt', () => {
       beforeEach(() => {
-        exchange = new CCXTExchange(hyperliquidConfig);
+        exchange = new CCXTExchange(hyperliquidConfig, watch);
         instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
         instance.cancelOrder.mockResolvedValue(hyperliquidAcknowledgement);
         instance.fetchOrder.mockRejectedValue(
@@ -1263,7 +1258,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(hyperliquidConfig);
+      exchange = new CCXTExchange(hyperliquidConfig, watch);
       instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits });
       instance.fetchTicker.mockResolvedValue({ ask: 101, bid: 100, last: 100.5 });
@@ -1368,7 +1363,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits, base: 'BTC', quote: 'USDT' });
       instance.fetchTicker.mockResolvedValue({ ask: 101, bid: 100, last: 100.5 });
@@ -1418,7 +1413,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits });
       instance.fetchTicker.mockResolvedValue({ ask: 101, bid: 100, last: 100.5 });
@@ -1472,7 +1467,7 @@ describe('CCXTExchange', () => {
 
   // Nothing was sent: the ticker of a market order failed before its creation
   it('rejects a market order whose ticker failed with an internal error of Binance as not sent, not as an outcome unknown', async () => {
-    const exchange = new CCXTExchange(binanceConfig);
+    const exchange = new CCXTExchange(binanceConfig, watch);
     const instance = (ccxt as any).binance.mock.instances.at(-1);
     instance.market.mockReturnValue({ limits: { amount: { min: 0.1, max: 10 }, cost: { min: 10 } } });
     instance.fetchTicker.mockRejectedValue(unexpectedResponse);
@@ -1483,7 +1478,7 @@ describe('CCXTExchange', () => {
 
   // A cancelation that fails so is not a creation: the order layer tells whether the order is still open (see Order.orderErrored)
   it('rejects a cancelation failed with an internal error of Binance with that error, not an OrderOutcomeUnknown', async () => {
-    const exchange = new CCXTExchange(binanceConfig);
+    const exchange = new CCXTExchange(binanceConfig, watch);
     const instance = (ccxt as any).binance.mock.instances.at(-1);
     instance.cancelOrder.mockRejectedValue(unexpectedResponse);
     await expect(exchange.cancelOrder('BTC/USDT', '1')).rejects.toBe(unexpectedResponse);
@@ -1503,7 +1498,7 @@ describe('CCXTExchange', () => {
     let instance: any;
 
     beforeEach(() => {
-      exchange = new CCXTExchange(binanceConfig);
+      exchange = new CCXTExchange(binanceConfig, watch);
       instance = (ccxt as any).binance.mock.instances.at(-1);
       instance.market.mockReturnValue({ limits });
       instance.fetchTicker.mockResolvedValue({ ask: 101, bid: 100, last: 100.5 });

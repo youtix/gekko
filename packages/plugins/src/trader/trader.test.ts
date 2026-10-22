@@ -11,9 +11,10 @@ import {
 import { EMPTY_ORDER_SUMMARY } from '@gekko/shared/constants/order.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { AdviceCancelOrder, AdviceOrder } from '@gekko/shared/models/advice.types';
-import { Watch } from '@gekko/schemas/configuration/configuration.types';
+import { Configuration, Watch } from '@gekko/schemas/configuration/configuration.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
-import { config } from '@gekko/core/configuration/configuration';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { OrderSummary } from '@gekko/core/core/order/order.types';
 import * as logger from '@gekko/core/logger/logger';
 import { noop, omit, pick } from 'lodash-es';
@@ -32,9 +33,10 @@ const { orderActions } = vi.hoisted(() => ({
   },
 }));
 
-// A realtime run on BTC/USDT at 1m, as config.getWatch() returns it: the timeframe belongs to the watch, and the pairs are derived from
-// the assets. Typed, so that it keeps the shape of the schema's output: untyped, it kept a retired option and put the timeframe on the
-// pair, so that the Trader ran without one and its backtest synchronizations were tested on a fallback no configuration reaches
+// A realtime run on BTC/USDT at 1m, as the configuration's watch section gives it: the timeframe belongs to the watch, and the pairs
+// are derived from the assets. Typed, so that it keeps the shape of the schema's output: untyped, it kept a retired option and put the
+// timeframe on the pair, so that the Trader ran without one and its backtest synchronizations were tested on a fallback no
+// configuration reaches
 const baseWatch: Watch = {
   assets: ['BTC'],
   currency: 'USDT',
@@ -53,13 +55,6 @@ const cloneWatch = (): Watch => ({
 });
 
 type OrderListener = (...args: unknown[]) => unknown;
-
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const getWatch = vi.fn(() => cloneWatch());
-  const getStrategy = vi.fn(() => ({}));
-  const getExchange = vi.fn(() => ({ name: 'dummy-cex' }));
-  return { config: { getWatch, getStrategy, getExchange } };
-});
 
 const tick = async (count = 3) => {
   for (let i = 0; i < count; i++) {
@@ -106,22 +101,16 @@ function createOrderMock(type: 'STICKY' | 'MARKET' | 'LIMIT', requiresPrice = fa
     if (!handlers.size) store.delete(event);
   };
 
-  function MockOrder(
-    this: any,
-    symbol: string,
-    id: string,
-    side: string,
-    amount: number,
-    priceOrExchange: unknown,
-    maybeExchange?: unknown,
-  ) {
+  // The signature of the order classes: a LIMIT order keeps its price, a MARKET or STICKY one goes to the market whatever its price, and
+  // each reads its exchange, the mode and its synchronization interval in the context of the run, its last argument
+  function MockOrder(this: any, symbol: string, id: string, side: string, amount: number, price: number | undefined, context: RunContext) {
     ensureStore(this);
     this.symbol = symbol;
     this.id = id;
     this.side = side;
     this.amount = amount;
-    this.price = requiresPrice ? priceOrExchange : undefined;
-    this.exchange = requiresPrice ? maybeExchange : priceOrExchange;
+    this.price = requiresPrice ? price : undefined;
+    this.context = context;
     this.cancel = orderActions.cancel;
     this.launch = orderActions.launch;
     this.checkOrder = orderActions.checkOrder;
@@ -182,7 +171,14 @@ function createOrderMock(type: 'STICKY' | 'MARKET' | 'LIMIT', requiresPrice = fa
     return Promise.allSettled(handlers.map(listener => listener(...args)));
   };
 
-  return MockOrder as unknown as new (symbol: string, id: string, side: string, amount: number, exchange: unknown) => any;
+  return MockOrder as unknown as new (
+    symbol: string,
+    id: string,
+    side: string,
+    amount: number,
+    price: number | undefined,
+    context: RunContext,
+  ) => any;
 }
 
 vi.mock('@gekko/core/core/order/sticky/stickyOrder', () => ({
@@ -210,9 +206,10 @@ describe('Trader', () => {
     fetchBalance: Mock;
     getMarketData: Mock;
   };
-  const getWatchMock = config.getWatch as unknown as Mock;
-  const getExchangeMock = config.getExchange as unknown as Mock;
-  const getStrategyMock = config.getStrategy as unknown as Mock;
+  /** The context of the run the Trader is built in: a run that watches `watch`, on the simulated exchange of a backtest */
+  const contextOf = (watch: Watch = cloneWatch()) => createPluginContext({ watch, exchange: { name: 'dummy-cex' } });
+  /** The context of the Trader of the test, which the describes below read */
+  let context: RunContext;
 
   const getOrdersMap = () => (trader as any).orders;
   const getOrderMetadata = (id: string) => getOrdersMap().get(id);
@@ -265,11 +262,8 @@ describe('Trader', () => {
   });
 
   beforeEach(() => {
-    getWatchMock.mockReturnValue(cloneWatch());
-    getExchangeMock.mockReturnValue({ name: 'dummy-cex' });
-    getStrategyMock.mockReturnValue({});
-
-    trader = new Trader();
+    context = contextOf();
+    trader = new Trader(undefined, context);
     // Default currentTimestamp to something valid so dates in events are not 0
     trader['currentTimestamp'] = 1_700_000_000_000;
 
@@ -317,7 +311,7 @@ describe('Trader', () => {
       const className = Object.getOwnPropertyDescriptor(Trader, 'name')!;
       Object.defineProperty(Trader, 'name', { value: 'GO' });
       try {
-        expect(new Trader().emitterName).toBe('Trader');
+        expect(new Trader(undefined, contextOf()).emitterName).toBe('Trader');
       } finally {
         Object.defineProperty(Trader, 'name', className);
       }
@@ -358,9 +352,8 @@ describe('Trader', () => {
       let filteredTrader: Trader;
 
       beforeEach(() => {
-        getWatchMock.mockReturnValue(cloneWatch());
         // threshold 1%, dust 1
-        filteredTrader = new Trader({ portfolioUpdates: { threshold: 1, dust: 1 } });
+        filteredTrader = new Trader({ portfolioUpdates: { threshold: 1, dust: 1 } }, contextOf());
         filteredTrader['currentTimestamp'] = 1_700_000_000_000;
         filteredTrader['getExchange'] = vi.fn().mockReturnValue(fakeExchange);
         filteredTrader['addDeferredEmit'] = vi.fn();
@@ -412,7 +405,7 @@ describe('Trader', () => {
       ]);
 
       beforeEach(async () => {
-        trader = new Trader({ portfolioUpdates: { threshold: 1, dust: 10 } });
+        trader = new Trader({ portfolioUpdates: { threshold: 1, dust: 10 } }, contextOf());
         trader['currentTimestamp'] = 1_700_000_000_000;
         trader['getExchange'] = vi.fn().mockReturnValue(fakeExchange);
         trader['addDeferredEmit'] = vi.fn();
@@ -468,7 +461,8 @@ describe('Trader', () => {
     const exchangeSynchInterval = 60_000;
 
     beforeEach(() => {
-      getExchangeMock.mockReturnValue({ name: 'binance', exchangeSynchInterval });
+      // A live exchange, which the Trader synchronizes with every exchangeSynchInterval in realtime
+      vi.mocked(context.configuration.getExchange).mockReturnValue({ name: 'binance', exchangeSynchInterval } as Configuration['exchange']);
     });
 
     it('synchronizes at once', async () => {
@@ -584,7 +578,7 @@ describe('Trader', () => {
           .map(([, portfolio]) => portfolio);
 
       beforeEach(() => {
-        trader = new Trader({ portfolioUpdates: { threshold: 1, dust: 10 } });
+        trader = new Trader({ portfolioUpdates: { threshold: 1, dust: 10 } }, contextOf());
         trader['currentTimestamp'] = 1_700_000_000_000;
         trader['getExchange'] = vi.fn().mockReturnValue(fakeExchange);
         trader['addDeferredEmit'] = vi.fn();
@@ -680,8 +674,7 @@ describe('Trader', () => {
     `(
       'synchronizes $calls time(s) in a backtest at $timeframe on a bucket of minute $minute since the epoch',
       async ({ timeframe, start, calls }) => {
-        getWatchMock.mockReturnValue({ ...cloneWatch(), timeframe });
-        trader = new Trader();
+        trader = new Trader(undefined, contextOf({ ...cloneWatch(), timeframe }));
         trader['currentTimestamp'] = 1_700_000_000_000; // Not the first bucket, which the backtest does not synchronize on
         (trader as any).mode = 'backtest';
         const synchronizeSpy = vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
@@ -835,6 +828,18 @@ describe('Trader', () => {
       const advice = buildAdvice();
       await trader.onStrategyCreateOrder([advice]);
       expect(getOrdersMap().size).toBe(1);
+    });
+
+    // An order reads the exchange it is placed on, the mode and its synchronization interval in the context of the run
+    it.each`
+      type
+      ${'MARKET'}
+      ${'LIMIT'}
+      ${'STICKY'}
+    `('builds a $type order with the context of the run, its last argument', async ({ type }) => {
+      const advice = buildAdvice({ type, price: 95 });
+      await trader.onStrategyCreateOrder([advice]);
+      expect(getOrderInstance(advice.id)?.context).toBe(context);
     });
 
     it.each`

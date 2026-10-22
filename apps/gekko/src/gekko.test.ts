@@ -1,13 +1,37 @@
-import { config } from '@gekko/core/configuration/configuration';
+import { loadConfigurationFile } from '@gekko/core/configuration/configuration.helper';
 import { gekkoPipeline } from '@gekko/core/core/pipeline/pipeline';
-import { inject } from '@gekko/core/injecter/injecter';
 import { debug, error, warning } from '@gekko/core/logger/logger';
+import { createRunContext } from '@gekko/core/run/runContext.helper';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-vi.mock('@gekko/core/configuration/configuration', () => ({ config: { showLogo: vi.fn() } }));
+const { RegisteredPlugin } = vi.hoisted(() => ({ RegisteredPlugin: class RegisteredPlugin {} }));
+
+vi.mock('@gekko/core/configuration/configuration.helper', () => ({ loadConfigurationFile: vi.fn() }));
+vi.mock('@gekko/core/run/runContext.helper', () => ({ createRunContext: vi.fn() }));
 vi.mock('@gekko/core/core/pipeline/pipeline', () => ({ gekkoPipeline: vi.fn() }));
-vi.mock('@gekko/core/injecter/injecter', () => ({ inject: { storage: vi.fn(), closeStorage: vi.fn() } }));
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
+// The registry main() hands the pipeline: one class stands for the plugins, which the mocked pipeline never builds
+vi.mock('@gekko/plugins/index', () => ({ RegisteredPlugin }));
+
+/** The configuration file the tests run, which GEKKO_CONFIG_FILE_PATH names */
+const CONFIGURATION_FILE = './config/backtest.yml';
+
+/** What loadConfigurationFile reads of it, before the schema checks it: handed to createRunContext as it is */
+const FILE_CONTENT = { watch: { mode: 'backtest' } };
+
+/** The context main() builds of the file: getters and services whose answers each test sets */
+const context = {
+  configuration: {
+    showLogo: vi.fn(),
+    getPlugins: vi.fn(),
+    getStrategy: vi.fn(),
+    getWatch: vi.fn(),
+    getStorage: vi.fn(),
+    getExchange: vi.fn(),
+  },
+  services: { exchange: vi.fn(), storage: vi.fn(), closeStorage: vi.fn() },
+} satisfies RunContext;
 
 /** The listener gekko.ts registered for a process event, which the process.on spy captured instead of registering */
 const handlerOf = (event: string) => {
@@ -52,11 +76,34 @@ describe('main', () => {
     // gekko.ts registers process-level handlers: capture them, so that none is left on the vitest process
     vi.spyOn(process, 'on').mockImplementation(() => process);
     initialExitCode = process.exitCode;
+    vi.stubEnv('GEKKO_CONFIG_FILE_PATH', CONFIGURATION_FILE);
+    vi.mocked(loadConfigurationFile).mockReturnValue(FILE_CONTENT);
+    vi.mocked(createRunContext).mockReturnValue(context);
   });
 
   afterEach(() => {
     vi.restoreAllMocks(); // the process.exit, process.on and console.log spies
+    vi.unstubAllEnvs();
     process.exitCode = initialExitCode;
+  });
+
+  describe('when it starts', () => {
+    beforeEach(async () => {
+      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      await import('./gekko');
+    });
+
+    it('loads the configuration file GEKKO_CONFIG_FILE_PATH names', () => {
+      expect(loadConfigurationFile).toHaveBeenCalledExactlyOnceWith(CONFIGURATION_FILE);
+    });
+
+    it('builds the context of the run from its content, naming the file as its source', () => {
+      expect(createRunContext).toHaveBeenCalledExactlyOnceWith(FILE_CONTENT, `file ${CONFIGURATION_FILE}`);
+    });
+
+    it('runs the pipeline on that context, with the plugin classes of @gekko/plugins/index', () => {
+      expect(gekkoPipeline).toHaveBeenCalledExactlyOnceWith({ context, plugins: expect.objectContaining({ RegisteredPlugin }) });
+    });
   });
 
   describe('when the pipeline ends normally', () => {
@@ -70,7 +117,7 @@ describe('main', () => {
     });
 
     it('closes the storage', () => {
-      expect(inject.closeStorage).toHaveBeenCalledOnce();
+      expect(context.services.closeStorage).toHaveBeenCalledOnce();
     });
   });
 
@@ -80,7 +127,7 @@ describe('main', () => {
     beforeEach(async () => {
       closeFailure = await unwrittenMinutesError();
       vi.mocked(gekkoPipeline).mockResolvedValue([]);
-      vi.mocked(inject.closeStorage).mockImplementation(() => {
+      vi.mocked(context.services.closeStorage).mockImplementation(() => {
         throw closeFailure;
       });
     });
@@ -112,9 +159,9 @@ describe('main', () => {
 
   describe('when no storage is configured', () => {
     beforeEach(() => {
-      // Importer mode without CandleWriter: the factory would throw, as the real one does
+      // Importer mode without CandleWriter: the services' storage() would throw, as the real one does
       vi.mocked(gekkoPipeline).mockResolvedValue([]);
-      vi.mocked(inject.storage).mockImplementation(() => {
+      vi.mocked(context.services.storage).mockImplementation(() => {
         throw new Error('[INJECTER] Missing or unknown storage.');
       });
     });
@@ -126,21 +173,14 @@ describe('main', () => {
     it('does not create a storage to close it', async () => {
       await import('./gekko');
 
-      expect(inject.storage).not.toHaveBeenCalled();
+      expect(context.services.storage).not.toHaveBeenCalled();
     });
   });
 
-  describe('when the configuration cannot be loaded', () => {
+  describe('when GEKKO_CONFIG_FILE_PATH is not set', () => {
     beforeEach(async () => {
-      // The real module, which builds `config` when it is evaluated: without a file to read, its evaluation throws a GekkoError
-      vi.doUnmock('@gekko/core/configuration/configuration');
       vi.stubEnv('GEKKO_CONFIG_FILE_PATH', undefined);
       await import('./gekko');
-    });
-
-    afterEach(() => {
-      vi.unstubAllEnvs();
-      vi.doMock('@gekko/core/configuration/configuration', () => ({ config }));
     });
 
     it('logs its one-line message at error level', () => {
@@ -158,8 +198,41 @@ describe('main', () => {
       expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
     });
 
+    it('builds no context', () => {
+      expect(createRunContext).not.toHaveBeenCalled();
+    });
+
     it('does not start the pipeline', () => {
       expect(gekkoPipeline).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('when the configuration file is refused', () => {
+    /** As createRunContext refuses a file the schema refuses, naming the file and each issue */
+    const refusal = [`Invalid configuration file ${CONFIGURATION_FILE}:`, '✖ Invalid input', '  → at watch.mode'].join('\n');
+
+    beforeEach(async () => {
+      const { GekkoError } = await import('@gekko/shared/errors/gekko.error');
+      vi.mocked(createRunContext).mockImplementation(() => {
+        throw new GekkoError('configuration', refusal);
+      });
+      await import('./gekko');
+    });
+
+    it('logs its message at error level', () => {
+      expect(error).toHaveBeenCalledWith('gekko', `[CONFIGURATION] ${refusal}`);
+    });
+
+    it('exits with code 1', () => {
+      expect(process.exit).toHaveBeenCalledExactlyOnceWith(1);
+    });
+
+    it('does not start the pipeline', () => {
+      expect(gekkoPipeline).not.toHaveBeenCalled();
+    });
+
+    it('closes no storage, none having been created', () => {
+      expect(context.services.closeStorage).not.toHaveBeenCalled();
     });
   });
 
@@ -184,7 +257,7 @@ describe('main', () => {
     });
 
     it('closes the storage before exiting', () => {
-      const [closeCallOrder] = vi.mocked(inject.closeStorage).mock.invocationCallOrder;
+      const [closeCallOrder] = vi.mocked(context.services.closeStorage).mock.invocationCallOrder;
       const [exitCallOrder] = vi.mocked(process.exit).mock.invocationCallOrder;
       expect(closeCallOrder).toBeLessThan(exitCallOrder);
     });
@@ -213,7 +286,7 @@ describe('main', () => {
     beforeEach(async () => {
       const { ApplicationStopError } = await import('@gekko/shared/errors/applicationStop.error');
       vi.mocked(gekkoPipeline).mockRejectedValue(new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)'));
-      vi.mocked(inject.closeStorage).mockImplementation(() => {
+      vi.mocked(context.services.closeStorage).mockImplementation(() => {
         throw checkpointError;
       });
       await import('./gekko');
@@ -264,7 +337,7 @@ describe('main', () => {
       const { GekkoError } = await import('@gekko/shared/errors/gekko.error');
       const failure = new GekkoError('exchange', 'binance GET https://api.binance.com/api/v3/openOrders 503 Service Unavailable');
       vi.mocked(gekkoPipeline).mockRejectedValue(failure);
-      vi.mocked(inject.closeStorage).mockImplementation(() => {
+      vi.mocked(context.services.closeStorage).mockImplementation(() => {
         throw checkpointError;
       });
       await import('./gekko');
@@ -322,7 +395,7 @@ describe('main', () => {
     });
 
     it('closes the storage before exiting', () => {
-      const [closeCallOrder] = vi.mocked(inject.closeStorage).mock.invocationCallOrder;
+      const [closeCallOrder] = vi.mocked(context.services.closeStorage).mock.invocationCallOrder;
       const [exitCallOrder] = vi.mocked(process.exit).mock.invocationCallOrder;
       expect(closeCallOrder).toBeLessThan(exitCallOrder);
     });
@@ -389,7 +462,7 @@ describe('main', () => {
       ${false} | ${0}       | ${'does not print'}
     `('$outcome the logo when showLogo() returns $showLogo', async ({ showLogo, printCount }) => {
       const consoleLog = vi.spyOn(console, 'log').mockImplementation(() => {});
-      vi.mocked(config.showLogo).mockReturnValue(showLogo);
+      vi.mocked(context.configuration.showLogo).mockReturnValue(showLogo);
 
       await import('./gekko');
 
@@ -437,7 +510,7 @@ describe('main', () => {
       });
 
       it('closes the storage before exiting', () => {
-        const [closeCallOrder] = vi.mocked(inject.closeStorage).mock.invocationCallOrder;
+        const [closeCallOrder] = vi.mocked(context.services.closeStorage).mock.invocationCallOrder;
         const [exitCallOrder] = vi.mocked(process.exit).mock.invocationCallOrder;
         expect(closeCallOrder).toBeLessThan(exitCallOrder);
       });
@@ -448,7 +521,7 @@ describe('main', () => {
 
       beforeEach(async () => {
         closeFailure = await unwrittenMinutesError();
-        vi.mocked(inject.closeStorage).mockImplementation(() => {
+        vi.mocked(context.services.closeStorage).mockImplementation(() => {
           throw closeFailure;
         });
       });
@@ -514,7 +587,7 @@ describe('main', () => {
       });
 
       it('closes the storage before exiting', () => {
-        const [closeCallOrder] = vi.mocked(inject.closeStorage).mock.invocationCallOrder;
+        const [closeCallOrder] = vi.mocked(context.services.closeStorage).mock.invocationCallOrder;
         const [exitCallOrder] = vi.mocked(process.exit).mock.invocationCallOrder;
         expect(closeCallOrder).toBeLessThan(exitCallOrder);
       });
@@ -524,7 +597,7 @@ describe('main', () => {
       const closeError = new Error('database is locked');
 
       beforeEach(() => {
-        vi.mocked(inject.closeStorage).mockImplementation(() => {
+        vi.mocked(context.services.closeStorage).mockImplementation(() => {
           throw closeError;
         });
       });

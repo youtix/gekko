@@ -4,7 +4,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset } from '@gekko/shared/models/utility.types';
-import { config } from '@gekko/core/configuration/configuration';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { error, info, warning } from '@gekko/core/logger/logger';
 import { calculatePortfolioTotalValue, createEmptyPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { omit } from 'lodash-es';
@@ -17,13 +17,6 @@ import { logPortfolioReport } from './portfolioAnalyzer.helper';
 // Mock dependencies
 vi.mock('./portfolioAnalyzer.helper', () => ({
   logPortfolioReport: vi.fn(),
-}));
-
-vi.mock('@gekko/core/configuration/configuration', () => ({
-  config: {
-    getWatch: vi.fn(),
-    getStrategy: vi.fn(),
-  },
 }));
 
 vi.mock('@gekko/core/logger/logger', () => ({
@@ -46,6 +39,18 @@ const bucketAt = (minute: number, btc: number, eth = 10) => {
   bucket.set('ETH/USDT', { start: minute * ONE_MINUTE, open: eth, high: eth, low: eth, close: eth, volume: 1 });
   return bucket;
 };
+/** The context of a backtest at 1m without warmup, on these assets against USDT, as the configuration's watch section gives it */
+const contextWatching = (assets: Asset[]) =>
+  createPluginContext({
+    watch: {
+      assets,
+      currency: 'USDT',
+      timeframe: '1m',
+      mode: 'backtest',
+      warmup: { candleCount: 0, tickrate: 1000 },
+      pairs: assets.map(asset => ({ symbol: `${asset}/USDT` as const })),
+    },
+  });
 /** A portfolio holding these amounts and nothing else */
 const holding = (btc: number, eth = 0, usdt = 0): Portfolio =>
   new Map([
@@ -60,16 +65,10 @@ describe('PortfolioAnalyzer', () => {
   let deferredEmitSpy: MockInstance;
 
   beforeEach(() => {
-    vi.mocked(config.getWatch).mockReturnValue({
-      assets: ['BTC', 'ETH'],
-      currency: 'USDT',
-      timeframe: '1m',
-      mode: 'backtest',
-      warmup: { candleCount: 0 },
-      pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }],
-    } as any);
-
-    analyzer = new PortfolioAnalyzer({ enableConsoleTable: false, name: 'PortfolioAnalyzer', riskFreeReturn: 5 });
+    analyzer = new PortfolioAnalyzer(
+      { enableConsoleTable: false, name: 'PortfolioAnalyzer', riskFreeReturn: 5 },
+      contextWatching(['BTC', 'ETH']),
+    );
 
     // Performance report uses `emit`, Equity Snapshot uses `addDeferredEmit`
     emitSpy = vi.spyOn(analyzer as any, 'emit').mockImplementation(() => {});
@@ -83,16 +82,7 @@ describe('PortfolioAnalyzer', () => {
       ${'enableConsoleTable'} | ${false}
       ${'benchmarkAsset'}     | ${'SOL'}
     `('should use default config values and fallback - $property = $expected', ({ property, expected }) => {
-      vi.mocked(config.getWatch).mockReturnValue({
-        assets: ['SOL', 'ETH'],
-        currency: 'USDT',
-        timeframe: '1m',
-        mode: 'backtest',
-        warmup: { candleCount: 0 },
-        pairs: [{ symbol: 'SOL/USDT' }, { symbol: 'ETH/USDT' }],
-      } as any);
-
-      const analyzerObj = new PortfolioAnalyzer({ name: 'PortfolioAnalyzer' } as any);
+      const analyzerObj = new PortfolioAnalyzer({ name: 'PortfolioAnalyzer' } as any, contextWatching(['SOL', 'ETH']));
       expect((analyzerObj as any)[property]).toBe(expected);
     });
   });
@@ -115,17 +105,11 @@ describe('PortfolioAnalyzer', () => {
       return bucket;
     };
     /** An analyzer built while the configuration watches these assets on USDT, with that benchmarkAsset option */
-    const analyzerWatching = (assets: Asset[], benchmarkAsset?: Asset) => {
-      vi.mocked(config.getWatch).mockReturnValue({
-        assets,
-        currency: 'USDT',
-        timeframe: '1m',
-        mode: 'backtest',
-        warmup: { candleCount: 0 },
-        pairs: assets.map(asset => ({ symbol: `${asset}/USDT` })),
-      } as any);
-      return new PortfolioAnalyzer({ enableConsoleTable: false, name: 'PortfolioAnalyzer', riskFreeReturn: 5, benchmarkAsset });
-    };
+    const analyzerWatching = (assets: Asset[], benchmarkAsset?: Asset) =>
+      new PortfolioAnalyzer(
+        { enableConsoleTable: false, name: 'PortfolioAnalyzer', riskFreeReturn: 5, benchmarkAsset },
+        contextWatching(assets),
+      );
     /**
      * The report of a run holding 1000 USDT, its events in the order the pipeline delivers them (see PluginsStream): the bucket of minute
      * 1 completes the warmup at the start closes, the bucket of minute 2 closes the next timeframe candle at the end closes
@@ -224,14 +208,20 @@ describe('PortfolioAnalyzer', () => {
     });
 
     it('should use console table log if enabled', () => {
-      const tableAnalyzer = new PortfolioAnalyzer({ enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 });
+      const tableAnalyzer = new PortfolioAnalyzer(
+        { enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 },
+        contextWatching(['BTC', 'ETH']),
+      );
       (tableAnalyzer as any).processFinalize();
       expect(logPortfolioReport).toHaveBeenCalled();
     });
 
     // The table prints the reason above it (see logPortfolioReport), in place of the info line that carried it
     it('should hand the table the reason the run stopped before its end', () => {
-      const tableAnalyzer = new PortfolioAnalyzer({ enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 });
+      const tableAnalyzer = new PortfolioAnalyzer(
+        { enableConsoleTable: true, name: 'PortfolioAnalyzer', riskFreeReturn: 5 },
+        contextWatching(['BTC', 'ETH']),
+      );
       (tableAnalyzer as any).processFinalize(new Error('a stream upstream failed'));
       expect(logPortfolioReport).toHaveBeenCalledWith({ ...EMPTY_PORTFOLIO_REPORT, interruption: 'a stream upstream failed' }, 'USDT');
     });

@@ -4,7 +4,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../configuration/configuration';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { debug } from '../logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
@@ -15,8 +15,13 @@ import { mkdirSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Storage } from './storage';
 import { IN_MEMORY } from './storage.const';
-import { CandleDateranges, MissingCandleCount } from './storage.types';
+import { CandleDateranges, MissingCandleCount, StorageConfig } from './storage.types';
 
+/**
+ * The storage of a run in an SQLite file, on bun:sqlite. Built from the storage section (the file, storage.database) and the watch
+ * section: a table per watched pair, created if need be, but in a backtest, which opens the file read-only and refuses a pair without
+ * a table (see Storage for the mode's other effects).
+ */
 export class SQLiteStorage extends Storage {
   db: Database;
   /** storage.database, the path of the SQLite file */
@@ -29,12 +34,13 @@ export class SQLiteStorage extends Storage {
   /** CandleWriter closes the storage when it is finalised, and main() closes it again on its way out (see close) */
   private closed = false;
 
-  constructor(symbols: TradingPair[]) {
-    super();
-    const database = config.getStorage()?.database;
+  constructor(storageConfig: StorageConfig, watch: Pick<Watch, 'mode' | 'pairs'>) {
+    super(storageConfig, watch);
+    const { database } = storageConfig;
     if (!database) throw new GekkoError('storage', 'No database to open: set storage.database to the path of the SQLite file.');
+    const symbols = watch.pairs.map(({ symbol }) => symbol);
     this.database = database;
-    this.readOnly = config.getWatch().mode === 'backtest' && database !== IN_MEMORY;
+    this.readOnly = watch.mode === 'backtest' && database !== IN_MEMORY;
     this.db = this.open(database);
     try {
       if (this.readOnly) {

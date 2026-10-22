@@ -4,9 +4,14 @@ import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { range } from 'lodash-es';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
 import { startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration } from '../../helpers/configuration.helper';
 import { readCandles } from '../../helpers/database.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeFor } from '../../helpers/realtimeRun.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  realtimeRunContext,
+  runRealtimeFor,
+  useRealtimeConfiguration,
+} from '../../helpers/realtimeRun.helper';
 import { createCcxtModuleMock, MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs } from '../../mocks/winston.mock';
 
@@ -87,10 +92,10 @@ mock.module('ccxt', () => {
   return { ...ccxt, hyperliquid: MockHyperliquid, default: { ...ccxt.default, hyperliquid: MockHyperliquid } };
 });
 
-// 2. Mock Configuration: the candles of BTC/USDC on Hyperliquid, written by a CandleWriter, for a TradingAdvisor that reads the account
-// at walletAddress, after a warmup of two candles
+// 2. Configuration: the candles of BTC/USDC on Hyperliquid, written by a CandleWriter, for a TradingAdvisor that reads the account at
+// walletAddress, after a warmup of two candles
 const WALLET_ADDRESS = '0x00000000000000000000000000000000000000aa';
-mockConfiguration({
+useRealtimeConfiguration({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDC', timeframe: '1m', warmup: { candleCount: 2, tickrate: 100 } },
   exchange: { name: 'hyperliquid', walletAddress: WALLET_ADDRESS },
   storage: { type: 'sqlite', database: ':memory:' },
@@ -110,9 +115,7 @@ const minute = (hours: number, minutes: number) => Date.UTC(2024, 0, 1, hours, m
 // --------------------------------------------------------------------------
 
 describe('E2E: Realtime on Hyperliquid', () => {
-  beforeEach(async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
+  beforeEach(() => {
     clearLogs();
     MockCCXTExchange.reset();
     MockHyperliquid.clients = [];
@@ -123,8 +126,7 @@ describe('E2E: Realtime on Hyperliquid', () => {
   afterEach(() => endRealtimeRun());
 
   it('Scenario A: two clients without the builder fee, the candles read by the public one, the account by the private one', async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    const storage = inject.storage() as SQLiteStorage;
+    const storage = (await realtimeRunContext()).services.storage() as SQLiteStorage;
     // Kept open once the run is over, for the scenario to read what it holds
     storage.close = () => {};
 

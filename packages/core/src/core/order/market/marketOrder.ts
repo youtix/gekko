@@ -2,17 +2,22 @@ import { describeError, toError } from '@gekko/shared/errors/error.helper';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../../configuration/configuration';
 import { InvalidOrder, OrderNotFound } from '../../../exchange/exchange.error';
 import { debug, error, warning } from '../../../logger/logger';
+import type { RunContext } from '../../../run/runContext.types';
 import { bindAll } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { Order } from '../order';
 
-// Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so a handler reports a
-// failure through orderErrored and never throws: a thrown error would be an unhandled rejection.
-// One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order
-// the exchange no longer knows.
+/**
+ * An order at the market price. Receives its pair, its id, its side and its amount, the price it was sized from (unused: the exchange
+ * fills it at its own price), then the context of its run (see Order): it settles from the answer to its creation, and is polled every
+ * orderSynchInterval only when that answer leaves it open in realtime.
+ * Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so a handler reports a
+ * failure through orderErrored and never throws: a thrown error would be an unhandled rejection.
+ * One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order the
+ * exchange no longer knows.
+ */
 export class MarketOrder extends Order {
   // A poll or a cancelation of the order is in flight: neither another poll nor a cancelation is sent until it has answered
   private isChecking: boolean;
@@ -20,8 +25,8 @@ export class MarketOrder extends Order {
   // flight, then again at each check, until the order ends (see cancel)
   private isCanceling: boolean;
 
-  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, amount: number, _price?: number) {
-    super(symbol, gekkoOrderId, side, 'MARKET', amount);
+  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, amount: number, _price: number | undefined, context: RunContext) {
+    super(symbol, gekkoOrderId, side, 'MARKET', amount, context);
     this.isChecking = false;
     this.isCanceling = false;
 
@@ -96,7 +101,7 @@ export class MarketOrder extends Order {
     // ends, as a limit order is: the strategy waits for its end, and a cancelation that failed on the network is sent again. That is
     // the only interval of a market order.
     warning('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order still open after its creation, unexpected for a market order`);
-    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, config.getExchange().orderSynchInterval);
+    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, this.orderSynchInterval);
   }
 
   protected handleCreateOrderError(error: unknown) {

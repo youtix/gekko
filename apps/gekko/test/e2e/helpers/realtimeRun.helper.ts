@@ -1,11 +1,13 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { LAST_FLUSH_TIMEOUT } from '@gekko/core/bots/telegram/telegram.const';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { jest, mock, setDefaultTimeout } from 'bun:test';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
 import { isTextLine, logStore, MockWinston, type LoggedLine, type TextLine } from '../mocks/winston.mock';
 import { advanceClock, yieldToEventLoop } from './clock.helper';
+import { createFlowContext, type RawConfiguration } from './configuration.helper';
 
 /**
  * The realtime runs of the e2e flows, on real minutes under the fake clock of clock.helper. A realtime run never ends by itself: the bot
@@ -15,6 +17,8 @@ import { advanceClock, yieldToEventLoop } from './clock.helper';
  */
 
 type RealtimeRun = {
+  /** The configuration and the services the run goes on */
+  context: RunContext;
   controller: AbortController;
   hasEnded: boolean;
   /** What the run ended with: the error it rejected with, the AbortError of endRealtimeRun included */
@@ -24,6 +28,12 @@ type RealtimeRun = {
 };
 
 let run: RealtimeRun | undefined;
+
+/** The configuration the runs of the file are built from, as useRealtimeConfiguration was given it */
+let readConfiguration: (() => RawConfiguration) | undefined;
+
+/** The context of the next run, once a test asked for it before the run started (realtimeRunContext) */
+let nextContext: RunContext | undefined;
 
 /**
  * How long, in fake time, endRealtimeRun waits for an aborted run to end: the plugins are finalised then, the last flush of the Telegram
@@ -67,6 +77,28 @@ export const mockRealtimeModules = () => {
   setDefaultTimeout(REALTIME_TEST_TIMEOUT);
 };
 
+/**
+ * Sets the configuration the realtime runs of the file are built from, to be called at the top of the file: `raw`, or what the function
+ * returns when a run's context is built, so that a scenario sets the configuration of its run by changing what the function reads. A
+ * context is built per run, with the services of that run, the configuration checked by the schema as the loader checks a file (see
+ * createFlowContext): a scenario that changes the configuration once its run's context is built changes nothing of that run.
+ */
+export const useRealtimeConfiguration = (raw: RawConfiguration | (() => RawConfiguration)) => {
+  readConfiguration = typeof raw === 'function' ? raw : () => raw;
+};
+
+/**
+ * The context of the run in progress, or of the next one, built now from the configuration of the file (useRealtimeConfiguration) as it
+ * reads at this point, for a scenario that seeds or reads the storage of its run, or reads its exchange: the next run started goes on
+ * that context, its services keeping what they built. endRealtimeRun forgets it, so that the next scenario's run gets a context of its own.
+ */
+export const realtimeRunContext = async (): Promise<RunContext> => {
+  if (run) return run.context;
+  if (!readConfiguration) throw new Error('No configuration for the realtime runs: call useRealtimeConfiguration() first');
+  nextContext ??= await createFlowContext(readConfiguration());
+  return nextContext;
+};
+
 /** Starts the run, unless one is in progress: the one a test waits on, or ends */
 const currentRun = async () => {
   if (!run) await startRealtimeRun();
@@ -74,20 +106,22 @@ const currentRun = async () => {
 };
 
 /**
- * Starts the realtime pipeline of the configuration, with the signal endRealtimeRun aborts, and lets the event loop build it and
- * initialise its plugins before the clock moves: the pipeline reads the minute in progress where the test set the fake clock. Its
- * outcome is held at once, a run that fails while nothing awaits it being an unhandled rejection. The runRealtime… functions start it
- * when no run is in progress: called alone, it lets a test look at the run before its first minute.
+ * Starts the realtime pipeline on the context of the next run (realtimeRunContext), with the signal endRealtimeRun aborts, and lets the
+ * event loop build it and initialise its plugins before the clock moves: the pipeline reads the minute in progress where the test set the
+ * fake clock. Its outcome is held at once, a run that fails while nothing awaits it being an unhandled rejection. The runRealtime…
+ * functions start it when no run is in progress: called alone, it lets a test look at the run before its first minute.
  */
 export const startRealtimeRun = async () => {
   if (run) throw new Error('A realtime run is in progress already: endRealtimeRun ends it');
   if (!jest.isFakeTimers()) throw new Error('A realtime run goes on the fake clock: call startFakeClock() first');
+  const context = await realtimeRunContext();
+  nextContext = undefined;
   const { gekkoPipeline } = await import('@gekko/core/core/pipeline/pipeline');
   const plugins = await import('@gekko/plugins/index');
   const controller = new AbortController();
-  const started: RealtimeRun = { controller, hasEnded: false, isEndReported: false };
+  const started: RealtimeRun = { context, controller, hasEnded: false, isEndReported: false };
   const end = (failure: unknown) => Object.assign(started, { hasEnded: true, failure });
-  gekkoPipeline({ plugins, signal: controller.signal }).then(
+  gekkoPipeline({ context, plugins, signal: controller.signal }).then(
     () => end(new Error('The realtime run completed, as only a run whose candles end does')),
     end,
   );
@@ -137,13 +171,13 @@ export const runRealtimeUntilEnd = async ({ maxMinutes }: { maxMinutes: number }
 };
 
 /**
- * Ends the run in progress through the signal of gekkoPipeline, as nothing else ends a realtime run but a failure or the circuit
- * breaker: every stream is destroyed, the bucket in progress is finished, and the plugins are finalised with the AbortError as the
- * failure that stopped the run, which the analyzers report as their interruption and a strategy's end() receives. In production SIGINT
- * and SIGTERM exit without finalising the plugins. The fake clock moves until the run is over, up to END_OF_RUN_TIMEOUT, the Telegram
- * bots' last flush included, then the real timers are back: the fake timers left are dropped, the polls of the orders still open among
- * them, which the Trader leaves running when it is finalised, as such orders stay on the exchange when Gekko stops. Nothing to abort when
- * the run ended already (a stop, a failure).
+ * Ends the run in progress through the signal of gekkoPipeline, as nothing else ends a realtime run but a failure or the circuit breaker,
+ * and forgets its context, or the one realtimeRunContext built for a run that never started: every stream is destroyed, the bucket in
+ * progress is finished, and the plugins are finalised with the AbortError as the failure that stopped the run, which the analyzers report
+ * as their interruption and a strategy's end() receives. In production SIGINT and SIGTERM exit without finalising the plugins. The fake
+ * clock moves until the run is over, up to END_OF_RUN_TIMEOUT, the Telegram bots' last flush included, then the real timers are back: the
+ * fake timers left are dropped, the polls of the orders still open among them, which the Trader leaves running when it is finalised, as
+ * such orders stay on the exchange when Gekko stops. Nothing to abort when the run ended already (a stop, a failure).
  *
  * Then fails the test when the run did not end, when it ended by itself without a runRealtime… call reporting it (a test that only
  * advanced the clock), when it failed otherwise than with the AbortError as it was ended, or when a plugin failed to finalise:
@@ -152,6 +186,7 @@ export const runRealtimeUntilEnd = async ({ maxMinutes }: { maxMinutes: number }
 export const endRealtimeRun = async () => {
   const ending = run;
   run = undefined;
+  nextContext = undefined;
   const wasRunning = !!ending && !ending.hasEnded;
   if (ending && wasRunning) {
     ending.controller.abort();

@@ -6,7 +6,6 @@ import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Trade } from '@gekko/shared/models/trade.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../configuration/configuration';
 import { debug, error, warning } from '../logger/logger';
 import { formatDurationUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
 import { addPrecise } from '@gekko/shared/utils/math/math.utils';
@@ -27,6 +26,7 @@ import {
   retry,
   translateErrors,
 } from './exchange.helper';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { CCXTExchangeConfig } from '@gekko/schemas/exchange/exchange.types';
 import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback, Ticker } from '@gekko/shared/models/exchange.types';
 
@@ -45,14 +45,19 @@ import { Exchange, FetchOHLCVParams, MarketData, OpenOrder, OrderSettledCallback
  *   creation that leaves nothing to follow the order by, that read failing, throws OrderOutcomeUnknown: the order may be live too.
  *   So does a creation the exchange answers with a failure that is not a refusal of the order (see sendCreation).
  * ccxt's own retries are off too (maxRetriesOnFailure: 0 in createExchange).
+ * Built from its exchange section (binance or hyperliquid, which the configuration names) and the pairs of the watch section, whose
+ * balances fetchBalance reads.
  */
 export class CCXTExchange implements Exchange {
   protected publicClient: CCXT;
   protected privateClient: CCXT;
   protected exchangeName: string;
+  /** The watched pairs: fetchBalance keys the balance of each by the asset and the currency of its symbol */
+  private readonly pairs: Watch['pairs'];
 
-  constructor(exchangeConfig: CCXTExchangeConfig) {
+  constructor(exchangeConfig: CCXTExchangeConfig, watch: Pick<Watch, 'pairs'>) {
     const { name, sandbox } = exchangeConfig;
+    this.pairs = watch.pairs;
 
     const { publicClient, privateClient } = createExchange(exchangeConfig);
     this.publicClient = publicClient;
@@ -265,9 +270,8 @@ export class CCXTExchange implements Exchange {
   public async fetchBalance() {
     return retry<Portfolio>(async () => {
       const balance = await this.privateClient.fetchBalance(PARAMS.fetchBalance[this.exchangeName]);
-      const { pairs } = config.getWatch();
       const portfolio: Portfolio = new Map();
-      for (const { symbol } of pairs) {
+      for (const { symbol } of this.pairs) {
         // Keyed by the asset and the currency of the configured symbol, the names the rest of Gekko reads the portfolio with
         // (symbol.split('/')). ccxt keys the balance by its unified codes, the base and the quote of the market, which may differ:
         // it lists Hyperliquid's wrapped spot tokens (UBTC, UETH, USOL...) under the coins they wrap (symbol BTC/USDC, base BTC,

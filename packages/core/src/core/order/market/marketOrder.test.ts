@@ -8,29 +8,20 @@ import {
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { ExchangeNetworkError, InvalidOrder, OrderNotFound, OrderOutcomeUnknown } from '../../../exchange/exchange.error';
 import * as Logger from '../../../logger/logger';
+import { createRunContextMock } from '../../../run/runContext.mock';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Transaction } from '../order.types';
 import { MarketOrder } from './marketOrder';
-
-const { mockConfig } = vi.hoisted(() => ({
-  mockConfig: {
-    getWatch: vi.fn(),
-    getExchange: vi.fn(),
-  },
-}));
 
 vi.mock('../../../logger/logger', () => ({
   debug: vi.fn(),
   info: vi.fn(),
   warning: vi.fn(),
   error: vi.fn(),
-}));
-
-vi.mock('../../../configuration/configuration', () => ({
-  config: mockConfig,
 }));
 
 const fakeExchange = {
@@ -40,11 +31,12 @@ const fakeExchange = {
   fetchMyTrades: vi.fn(),
 };
 
-vi.mock('../../../injecter/injecter', () => ({
-  inject: {
-    exchange: () => fakeExchange,
-  },
-}));
+// The run the orders belong to: the watch and the exchange section mockConfig returns (set by each test), fakeExchange as its exchange
+const mockConfig = { getWatch: vi.fn(), getExchange: vi.fn() };
+const context = createRunContextMock({
+  configuration: mockConfig,
+  services: { exchange: () => fakeExchange as unknown as Exchange },
+});
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
 // A response the test settles itself, to act while the exchange call is in flight
@@ -77,7 +69,7 @@ describe('MarketOrder', () => {
     vi.useFakeTimers();
     setMode('backtest');
     mockConfig.getExchange.mockReturnValue({ orderSynchInterval: 1000 });
-    order = new MarketOrder('BTC/USDT', orderId, side, amount);
+    order = new MarketOrder('BTC/USDT', orderId, side, amount, undefined, context);
   });
 
   afterEach(() => {
@@ -311,7 +303,7 @@ describe('MarketOrder', () => {
     beforeEach(() => {
       setMode('realtime');
       fakeExchange.fetchOrder.mockResolvedValue(open);
-      order = new MarketOrder('BTC/USDT', orderId, side, amount);
+      order = new MarketOrder('BTC/USDT', orderId, side, amount, undefined, context);
       terminalEvents = recordTerminalEvents();
     });
 
@@ -448,7 +440,7 @@ describe('MarketOrder', () => {
       fakeExchange.createMarketOrder.mockResolvedValue(open);
       fakeExchange.fetchOrder.mockResolvedValue(open);
       fakeExchange.cancelOrder.mockResolvedValue(canceled);
-      order = new MarketOrder('BTC/USDT', orderId, side, amount);
+      order = new MarketOrder('BTC/USDT', orderId, side, amount, undefined, context);
       terminalEvents = recordTerminalEvents();
       await order.launch();
     });
@@ -654,7 +646,7 @@ describe('MarketOrder', () => {
     beforeEach(async () => {
       setMode(mode);
       fakeExchange.cancelOrder.mockResolvedValue(canceled);
-      order = new MarketOrder('BTC/USDT', orderId, side, amount);
+      order = new MarketOrder('BTC/USDT', orderId, side, amount, undefined, context);
       creation = deferred();
       fakeExchange.createMarketOrder.mockReturnValueOnce(creation.promise);
       launch = order.launch();
@@ -698,7 +690,7 @@ describe('MarketOrder', () => {
       fakeExchange.createMarketOrder.mockResolvedValue(open);
       fakeExchange.fetchOrder.mockResolvedValue(open);
       fakeExchange.cancelOrder.mockResolvedValue(canceled);
-      order = new MarketOrder('BTC/USDT', orderId, side, amount);
+      order = new MarketOrder('BTC/USDT', orderId, side, amount, undefined, context);
     });
 
     it('polls nothing before the creation has answered', async () => {

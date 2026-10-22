@@ -6,8 +6,14 @@ import type { Trader } from '@gekko/plugins/trader/trader';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import { isNil, isObjectLike, range } from 'lodash-es';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
+import { paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  runRealtimeFor,
+  runRealtimeUntil,
+  useRealtimeConfiguration,
+} from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, findLoggedObject, isTextLine, logStore } from '../../mocks/winston.mock';
 
@@ -22,7 +28,7 @@ mockRealtimeModules();
 // GEKKO_LOG_LEVEL lets it through, and the logger is loaded after this, by the pipeline
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
-// 2. Mock Configuration
+// 2. Configuration, which each run reads as it starts (see useRealtimeConfiguration)
 /** What a scenario runs on the paper exchange, BTC against USDT on 1-minute candles without a warmup */
 type PaperRun = {
   strategy: NonNullable<RawConfiguration['strategy']>;
@@ -33,7 +39,7 @@ type PaperRun = {
 
 let paper: PaperRun;
 
-mockConfiguration(() => ({
+useRealtimeConfiguration(() => ({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', tickrate: 100, warmup: { candleCount: 0 } },
   exchange:
     paper.exchange ??
@@ -124,9 +130,6 @@ const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findL
 
 describe('E2E: Realtime Paper Trader Flow', () => {
   beforeEach(async () => {
-    // Reset inject singletons
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
     clearLogs();
 
     // Reset mocks

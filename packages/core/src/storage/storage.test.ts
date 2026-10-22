@@ -4,12 +4,10 @@ import { TradingPair } from '@gekko/shared/models/utility.types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { Storage } from './storage';
 import { INSERT_THRESHOLD } from './storage.const';
+import { StorageConfig } from './storage.types';
 
-const { mockConfig } = vi.hoisted(() => ({
-  mockConfig: { getWatch: vi.fn(), getStorage: vi.fn() },
-}));
-
-vi.mock('../configuration/configuration', () => ({ config: mockConfig }));
+/** The storage section of an in-memory database, without an insertThreshold */
+const IN_MEMORY: StorageConfig = { type: 'sqlite', database: ':memory:' };
 
 class TestStorage extends Storage {
   public insertCandles = vi.fn();
@@ -21,27 +19,21 @@ class TestStorage extends Storage {
 }
 
 describe('Storage', () => {
-  beforeEach(() => {
-    mockConfig.getWatch.mockReturnValue({ mode: 'backtest' });
-    mockConfig.getStorage.mockReturnValue({ type: 'sqlite', database: ':memory:' });
-  });
-
   describe('constructor', () => {
     it.each`
-      mode          | storage                   | expected
-      ${'backtest'} | ${{ insertThreshold: 5 }} | ${5}
-      ${'realtime'} | ${{ insertThreshold: 5 }} | ${5}
-      ${'importer'} | ${{ insertThreshold: 1 }} | ${1}
-      ${'realtime'} | ${undefined}              | ${1}
-      ${'realtime'} | ${{}}                     | ${1}
-      ${'importer'} | ${undefined}              | ${INSERT_THRESHOLD}
-      ${'importer'} | ${{}}                     | ${INSERT_THRESHOLD}
-      ${'backtest'} | ${{}}                     | ${INSERT_THRESHOLD}
-    `('sets the insert threshold to $expected in $mode mode with storage $storage', ({ mode, storage, expected }) => {
-      mockConfig.getWatch.mockReturnValue({ mode });
-      mockConfig.getStorage.mockReturnValue(storage);
-      expect(new TestStorage()['insertThreshold']).toBe(expected);
-    });
+      mode          | insertThreshold | expected
+      ${'backtest'} | ${5}            | ${5}
+      ${'realtime'} | ${5}            | ${5}
+      ${'importer'} | ${1}            | ${1}
+      ${'realtime'} | ${undefined}    | ${1}
+      ${'importer'} | ${undefined}    | ${INSERT_THRESHOLD}
+      ${'backtest'} | ${undefined}    | ${INSERT_THRESHOLD}
+    `(
+      'sets the insert threshold to $expected in $mode mode with storage.insertThreshold $insertThreshold',
+      ({ mode, insertThreshold, expected }) => {
+        expect(new TestStorage({ ...IN_MEMORY, insertThreshold }, { mode })['insertThreshold']).toBe(expected);
+      },
+    );
 
     it.each`
       mode          | expected
@@ -49,8 +41,7 @@ describe('Storage', () => {
       ${'realtime'} | ${false}
       ${'backtest'} | ${false}
     `('gives the real candles written the last word in $mode mode: $expected', ({ mode, expected }) => {
-      mockConfig.getWatch.mockReturnValue({ mode });
-      expect(new TestStorage()['hasLastWord']).toBe(expected);
+      expect(new TestStorage(IN_MEMORY, { mode })['hasLastWord']).toBe(expected);
     });
   });
 
@@ -62,8 +53,7 @@ describe('Storage', () => {
     let storage: TestStorage;
 
     beforeEach(() => {
-      mockConfig.getStorage.mockReturnValue({ type: 'sqlite', database: ':memory:', insertThreshold: 2 });
-      storage = new TestStorage();
+      storage = new TestStorage({ ...IN_MEMORY, insertThreshold: 2 }, { mode: 'backtest' });
     });
 
     it('keeps the bucket in the buffer while the insert threshold is not reached', () => {
@@ -103,8 +93,7 @@ describe('Storage', () => {
     };
 
     beforeEach(() => {
-      mockConfig.getStorage.mockReturnValue({ type: 'sqlite', database: ':memory:', insertThreshold: 10 });
-      storage = new TestStorage();
+      storage = new TestStorage({ ...IN_MEMORY, insertThreshold: 10 }, { mode: 'backtest' });
       storage.addBucket(new Map(symbols.map(symbol => [symbol, { start: 0 } as Candle])));
       storage.insertCandles.mockImplementation((symbol: string) => {
         if (symbol === 'ETH/USDT') throw new Error('database is locked');
@@ -140,7 +129,7 @@ describe('Storage', () => {
       ${'kPEPE/USDC'}         | ${'CANDLES_KPEPE_USDC'}
       ${'FLX-CRCL/USDC:USDC'} | ${'CANDLES_FLX-CRCL_USDC:USDC'}
     `('names the table of $symbol $expected', ({ symbol, expected }) => {
-      expect(new TestStorage()['getTable'](symbol)).toBe(expected);
+      expect(new TestStorage(IN_MEMORY, { mode: 'backtest' })['getTable'](symbol)).toBe(expected);
     });
   });
 });

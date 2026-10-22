@@ -1,32 +1,19 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { Storage } from '@gekko/core/storage/storage';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CandleWriter } from './candleWriter';
 import { candleWriterSchema } from '@gekko/schemas/plugins/candleWriter.schema';
 
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const Configuration = vi.fn(function () {
-    return {
-      getWatch: vi.fn(() => ({
-        pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }],
-        warmup: {},
-      })),
-      getStrategy: vi.fn(() => ({})),
-      showLogo: vi.fn(),
-      getPlugins: vi.fn(),
-      getStorage: vi.fn(),
-      getExchange: vi.fn(),
-    };
-  });
-  return { config: new Configuration() };
-});
-
 describe('CandleWriter', () => {
   let writer: CandleWriter;
   let fakeStorage: Storage;
   beforeEach(() => {
-    const config = { name: 'CandleWriter' };
-    writer = new CandleWriter(config);
+    // A realtime run on BTC/USDT, whose candles the writer stores
+    const context = createPluginContext({
+      watch: { mode: 'realtime', pairs: [{ symbol: 'BTC/USDT' }], warmup: { candleCount: 0, tickrate: 1000 } },
+    });
+    writer = new CandleWriter({ name: 'CandleWriter' }, context);
     fakeStorage = { addBucket: vi.fn(), close: vi.fn() } as unknown as Storage;
     writer.getStorage = (): Storage => fakeStorage;
   });

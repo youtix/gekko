@@ -2,12 +2,19 @@ import { Timeframe, Watch } from '@gekko/schemas/configuration/configuration.typ
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
 import type { RunContext } from '../run/runContext.types';
-import { transitionalContext } from './plugin.helper';
 import { Exchange } from '@gekko/shared/models/exchange.types';
 import { Storage } from '../storage/storage';
 import { SequentialEventEmitter } from './sequentialEventEmitter';
 import { PluginMissingServiceError } from './plugin.error';
 
+/**
+ * The base of every plugin. The pipeline builds each one (createPlugins) from its options, the output of its own schema, and from the
+ * run's context: the configuration, of which the base keeps the watch (its timeframe, warmup, mode, pairs, assets and currency) and the
+ * strategy block, and the services the run shares. A plugin reads its configuration there, never from a module, and hands the context,
+ * or what it reads of it, to what it builds: the Trader the context to its orders, the TradingAdvisor the strategy block to its
+ * StrategyManager. The services its static configuration names in `inject` are handed to it by the pipeline once it is built, through
+ * setExchange and setStorage: getExchange and getStorage return them from processInit onwards.
+ */
 export abstract class Plugin extends SequentialEventEmitter {
   private storage?: Storage;
   private exchange?: Exchange;
@@ -22,13 +29,12 @@ export abstract class Plugin extends SequentialEventEmitter {
   /** The run's configuration and services, which a plugin hands to what it builds (the Trader to its orders) */
   protected readonly context: RunContext;
 
-  // `context` is optional during the monorepo wave only: a plugin not yet converted runs on the transitional singletons
-  constructor(pluginName: string, context?: RunContext) {
+  constructor(pluginName: string, context: RunContext) {
     super(pluginName);
-    this.context = context ?? transitionalContext();
-    const { timeframe, warmup, mode, pairs, assets, currency } = this.context.configuration.getWatch();
+    this.context = context;
+    const { timeframe, warmup, mode, pairs, assets, currency } = context.configuration.getWatch();
 
-    this.strategySettings = this.context.configuration.getStrategy();
+    this.strategySettings = context.configuration.getStrategy();
 
     this.pluginName = pluginName;
     this.timeframe = timeframe;

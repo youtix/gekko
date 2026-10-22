@@ -8,24 +8,20 @@ import { InvalidOrder } from '../exchange.error';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { map, omit, range } from 'lodash-es';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { DummyCentralizedExchange } from './dummyCentralizedExchange';
 import type { DummyCentralizedExchangeConfig } from './dummyCentralizedExchange.types';
 
-vi.mock('../../configuration/configuration', () => ({
-  config: {
-    getWatch: () => ({
-      pairs: [
-        { symbol: 'BTC/USDT', timeframe: '1m' },
-        { symbol: 'ETH/USDT', timeframe: '1m' },
-      ],
-      daterange: { start: '2024-01-01' },
-    }),
-  },
-}));
 vi.mock('../../logger/logger', () => ({ error: vi.fn() }));
 
 const SYMBOL: `${string}/${string}` = 'BTC/USDT';
 const ETH_SYMBOL: `${string}/${string}` = 'ETH/USDT';
+
+/** The watch section the exchange is built with: BTC/USDT and ETH/USDT, from the first minute of 2024, the time the tests run at */
+const watch: Pick<Watch, 'pairs' | 'daterange'> = {
+  pairs: [{ symbol: SYMBOL }, { symbol: ETH_SYMBOL }],
+  daterange: { start: Date.UTC(2024, 0, 1), end: Date.UTC(2024, 0, 2) },
+};
 
 const defaultMarketData = {
   price: { min: 1, max: 10_000 },
@@ -61,7 +57,7 @@ const createSimulationBalance = (btc: number, usdt: number) =>
   ]);
 
 const createExchange = (overrides: Partial<DummyCentralizedExchangeConfig> = {}) =>
-  new DummyCentralizedExchange({ ...baseConfig, ...overrides });
+  new DummyCentralizedExchange({ ...baseConfig, ...overrides }, watch);
 
 const sampleCandle = (start: number, overrides: Partial<Candle> = {}): Candle => ({
   id: undefined,
@@ -117,6 +113,18 @@ describe('DummyCentralizedExchange', () => {
     it('accepts marketData for each watched pair, and for a pair that is not watched', () => {
       const marketData = createMarketData(defaultMarketData).set('DOGE/USDT', defaultMarketData);
       expect(() => createExchange({ marketData })).not.toThrow();
+    });
+
+    // Its clock dates what happens before the first candle: the start of the daterange in a backtest, the time it is built at without
+    // one (a paper session, whose watch section has none). The tests run at 2024-01-01T00:00:00Z.
+    it.each`
+      daterange                                                     | expected
+      ${{ start: Date.UTC(2023, 5, 1), end: Date.UTC(2023, 5, 2) }} | ${Date.UTC(2023, 5, 1)}
+      ${undefined}                                                  | ${Date.UTC(2024, 0, 1)}
+    `('dates an order placed before the first candle $expected given the daterange $daterange', async ({ daterange, expected }) => {
+      const exchange = new DummyCentralizedExchange(baseConfig, { ...watch, daterange });
+      const { timestamp } = await exchange.createLimitOrder(SYMBOL, 'BUY', 1, 95);
+      expect(timestamp).toBe(expected);
     });
   });
 

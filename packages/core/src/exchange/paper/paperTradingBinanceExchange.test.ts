@@ -1,16 +1,13 @@
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
-import { config } from '../../configuration/configuration';
 import { info } from '../../logger/logger';
-import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { CCXTExchange } from '../ccxtExchange';
 import { DummyCentralizedExchange } from '../dummy/dummyCentralizedExchange';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { PaperTradingBinanceExchange } from './paperTradingBinanceExchange';
 
-vi.mock('../../configuration/configuration', () => ({
-  config: { getWatch: vi.fn(), getExchange: vi.fn() },
-}));
 vi.mock('../../logger/logger', () => ({ info: vi.fn(), debug: vi.fn(), error: vi.fn() }));
 
 vi.mock('../ccxtExchange', () => {
@@ -38,7 +35,8 @@ vi.mock('../dummy/dummyCentralizedExchange', () => {
   return { DummyCentralizedExchange: MockDummy };
 });
 
-const mockWatchConfig = { pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }] };
+// The watch section of a paper session: BTC/USDT, without a daterange
+const watch: Pick<Watch, 'pairs' | 'daterange'> = { pairs: [{ symbol: 'BTC/USDT' }] };
 const mockExchangeConfig = {
   name: 'paper-binance' as const,
   verbose: false,
@@ -66,7 +64,6 @@ const realExchangeConfig = () => vi.mocked(CCXTExchange).mock.calls[0][0];
 
 describe('PaperTradingBinanceExchange', () => {
   beforeEach(() => {
-    (config.getWatch as Mock).mockReturnValue(mockWatchConfig);
     // A fresh object per call, as CCXTExchange builds one
     vi.mocked(CCXTExchange.prototype.getMarketData).mockImplementation(() => structuredClone(REAL_MARKET_DATA));
     // The portfolio of the simulator built from mockExchangeConfig
@@ -80,12 +77,17 @@ describe('PaperTradingBinanceExchange', () => {
 
   describe('Constructor', () => {
     it('returns paper-binance as exchange name', () => {
-      expect(new PaperTradingBinanceExchange(mockExchangeConfig).getExchangeName()).toBe('paper-binance');
+      expect(new PaperTradingBinanceExchange(mockExchangeConfig, watch).getExchangeName()).toBe('paper-binance');
     });
 
     it('creates CCXTExchange with binance config', () => {
-      new PaperTradingBinanceExchange(mockExchangeConfig);
-      expect(CCXTExchange).toHaveBeenCalledWith(expect.objectContaining({ name: 'binance' }));
+      new PaperTradingBinanceExchange(mockExchangeConfig, watch);
+      expect(realExchangeConfig()).toMatchObject({ name: 'binance' });
+    });
+
+    it('hands its watch section to the CCXTExchange that reads Binance', () => {
+      new PaperTradingBinanceExchange(mockExchangeConfig, watch);
+      expect(vi.mocked(CCXTExchange).mock.calls[0][1]).toBe(watch);
     });
 
     it.each`
@@ -94,24 +96,32 @@ describe('PaperTradingBinanceExchange', () => {
       ${'http://127.0.0.1:3128'}
       ${undefined}
     `('creates the CCXTExchange that reads the market data with the proxy $proxy of the config', ({ proxy }) => {
-      new PaperTradingBinanceExchange({ ...mockExchangeConfig, proxy });
+      new PaperTradingBinanceExchange({ ...mockExchangeConfig, proxy }, watch);
       expect(realExchangeConfig().proxy).toBe(proxy);
     });
   });
 
   describe('loadMarkets', () => {
     it('loads markets from real exchange', async () => {
-      const exchange = new PaperTradingBinanceExchange(mockExchangeConfig);
+      const exchange = new PaperTradingBinanceExchange(mockExchangeConfig, watch);
       await exchange.loadMarkets();
       expect(CCXTExchange.prototype.loadMarkets).toHaveBeenCalled();
     });
 
     it('creates DummyCentralizedExchange with simulation config', async () => {
-      const exchange = new PaperTradingBinanceExchange(mockExchangeConfig);
+      const exchange = new PaperTradingBinanceExchange(mockExchangeConfig, watch);
       await exchange.loadMarkets();
-      expect(DummyCentralizedExchange).toHaveBeenCalledWith(
-        expect.objectContaining({ name: 'dummy-cex', simulationBalance: expect.any(Map) }),
-      );
+      expect(vi.mocked(DummyCentralizedExchange).mock.calls[0][0]).toMatchObject({ name: 'dummy-cex', simulationBalance: expect.any(Map) });
+    });
+
+    it('hands its watch section to the simulator', async () => {
+      await new PaperTradingBinanceExchange(mockExchangeConfig, watch).loadMarkets();
+      expect(vi.mocked(DummyCentralizedExchange).mock.calls[0][1]).toBe(watch);
+    });
+
+    it('gives the simulator the market data of every pair of its watch section', async () => {
+      await new PaperTradingBinanceExchange(mockExchangeConfig, { pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }] }).loadMarkets();
+      expect([...simulatorMarketData().keys()]).toEqual(['BTC/USDT', 'ETH/USDT']);
     });
 
     it.each`
@@ -123,7 +133,7 @@ describe('PaperTradingBinanceExchange', () => {
       ${{ maker: 0.0005, taker: 0.001 }} | ${{ maker: 0.0005, taker: 0.001 }}
       ${{ maker: 0, taker: 0 }}          | ${{ maker: 0, taker: 0 }}
     `('gives the simulator the real market data with the fees $fee when feeOverride is $feeOverride', async ({ feeOverride, fee }) => {
-      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride });
+      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride }, watch);
       await exchange.loadMarkets();
       expect(simulatorMarketData().get('BTC/USDT')).toEqual({ ...REAL_MARKET_DATA, fee });
     });
@@ -137,7 +147,7 @@ describe('PaperTradingBinanceExchange', () => {
       ${[['BTC', 0.5], ['ETH', 2.25], ['USDT', 1500]]} | ${'Initial portfolio: 0.5 BTC, 2.25 ETH, 1,500 USDT'}
     `('logs the portfolio of the simulator at info level: $message', async ({ balances, message }) => {
       vi.mocked(DummyCentralizedExchange.prototype.fetchBalance).mockResolvedValue(createPortfolio(balances));
-      await new PaperTradingBinanceExchange(mockExchangeConfig).loadMarkets();
+      await new PaperTradingBinanceExchange(mockExchangeConfig, watch).loadMarkets();
       expect(info).toHaveBeenCalledWith('exchange', message);
     });
 
@@ -149,7 +159,7 @@ describe('PaperTradingBinanceExchange', () => {
     `(
       'gives the simulator the amount limits of a market order of the real market when feeOverride is $feeOverride',
       async ({ feeOverride }) => {
-        const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride });
+        const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride }, watch);
         await exchange.loadMarkets();
         expect(simulatorMarketData().get('BTC/USDT')?.market).toEqual({ min: 0, max: 86.27382215 });
       },
@@ -158,7 +168,7 @@ describe('PaperTradingBinanceExchange', () => {
 
   describe('getMarketData', () => {
     it('returns the real market data before loadMarkets', () => {
-      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } });
+      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } }, watch);
       expect(exchange.getMarketData('BTC/USDT')).toEqual(REAL_MARKET_DATA);
     });
 
@@ -168,19 +178,19 @@ describe('PaperTradingBinanceExchange', () => {
       ${{ maker: 0.0008 }} | ${{ maker: 0.0008, taker: 0.002 }}
       ${{ taker: 0.003 }}  | ${{ maker: 0.001, taker: 0.003 }}
     `('returns the fees $fee the simulator charges after loadMarkets when feeOverride is $feeOverride', async ({ feeOverride, fee }) => {
-      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride });
+      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride }, watch);
       await exchange.loadMarkets();
       expect(exchange.getMarketData('BTC/USDT').fee).toEqual(fee);
     });
 
     it('returns the very market data the simulator was given once markets are loaded', async () => {
-      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } });
+      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } }, watch);
       await exchange.loadMarkets();
       expect(exchange.getMarketData('BTC/USDT')).toBe(simulatorMarketData().get('BTC/USDT'));
     });
 
     it('returns the real market data of a pair that is not watched', async () => {
-      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } });
+      const exchange = new PaperTradingBinanceExchange({ ...mockExchangeConfig, feeOverride: { maker: 0.0008 } }, watch);
       await exchange.loadMarkets();
       expect(exchange.getMarketData('ETH/USDT')).toEqual(REAL_MARKET_DATA);
     });
@@ -190,7 +200,7 @@ describe('PaperTradingBinanceExchange', () => {
     let exchange: PaperTradingBinanceExchange;
 
     beforeEach(async () => {
-      exchange = new PaperTradingBinanceExchange(mockExchangeConfig);
+      exchange = new PaperTradingBinanceExchange(mockExchangeConfig, watch);
       await exchange.loadMarkets();
     });
 
@@ -214,7 +224,7 @@ describe('PaperTradingBinanceExchange', () => {
     let exchange: PaperTradingBinanceExchange;
 
     beforeEach(async () => {
-      exchange = new PaperTradingBinanceExchange(mockExchangeConfig);
+      exchange = new PaperTradingBinanceExchange(mockExchangeConfig, watch);
       await exchange.loadMarkets();
     });
 

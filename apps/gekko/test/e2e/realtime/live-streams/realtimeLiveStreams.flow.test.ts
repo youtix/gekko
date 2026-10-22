@@ -5,15 +5,17 @@ import { pick, range } from 'lodash-es';
 import { fileURLToPath } from 'node:url';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
 import { advanceClock, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
+import { paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
 import { readCandles } from '../../helpers/database.helper';
 import {
   endRealtimeRun,
   mockRealtimeModules,
+  realtimeRunContext,
   runRealtimeFor,
   runRealtimeUntil,
   runRealtimeUntilEnd,
   startRealtimeRun,
+  useRealtimeConfiguration,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, findLoggedObject, findTextLine, findTextLines, isTextLine, logStore } from '../../mocks/winston.mock';
@@ -29,9 +31,9 @@ mockRealtimeModules();
 // through, and the logger is loaded after this, by the pipeline
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
-// 2. Mock Configuration: each scenario sets the configuration of its run
+// 2. Configuration: each scenario sets the configuration of its run
 let configuration: RawConfiguration;
-mockConfiguration(() => configuration);
+useRealtimeConfiguration(() => configuration);
 
 // --------------------------------------------------------------------------
 // HELPERS
@@ -63,8 +65,7 @@ const strategyLines = () =>
 
 /** The storage of the run, the CandleWriter's: kept open once the run is over, for the scenario to read what it holds */
 const openStorage = async () => {
-  const { inject } = await import('@gekko/core/injecter/injecter');
-  const storage = inject.storage() as SQLiteStorage;
+  const storage = (await realtimeRunContext()).services.storage() as SQLiteStorage;
   storage.close = () => {};
   return storage;
 };
@@ -74,9 +75,7 @@ const openStorage = async () => {
 // --------------------------------------------------------------------------
 
 describe('E2E: Realtime live streams', () => {
-  beforeEach(async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
+  beforeEach(() => {
     clearLogs();
     MockCCXTExchange.reset();
     startFakeClock();

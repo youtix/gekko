@@ -3,36 +3,22 @@ import { Candle } from '@gekko/shared/models/candle.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
+import { Timeframe, Watch } from '@gekko/schemas/configuration/configuration.types';
 import { TelegramBot } from '@gekko/core/bots/telegram/TelegramBot';
-import { config } from '@gekko/core/configuration/configuration';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { debug, getBufferedLogs, warning } from '@gekko/core/logger/logger';
 import { BufferedLog } from '@gekko/shared/models/log.types';
 import { noop } from 'lodash-es';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Supervision } from './supervision';
 import { supervisionSchema } from '@gekko/schemas/plugins/supervision.schema';
-import { SUBSCRIPTION_NAMES } from './supervision.types';
+import { SUBSCRIPTION_NAMES, SupervisionConfig } from './supervision.types';
 
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), warning: vi.fn(), getBufferedLogs: vi.fn(() => []) }));
 // Only records how the plugin builds its bot: each test then puts fakeBot in its place
 vi.mock('@gekko/core/bots/telegram/TelegramBot', () => ({ TelegramBot: vi.fn(function () {}) }));
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const Configuration = vi.fn(function () {
-    return {
-      getWatch: vi.fn(() => ({
-        pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }],
-        mode: 'realtime',
-        warmup: { candleCount: 0 },
-      })),
-      getStrategy: vi.fn(() => ({})),
-      showLogo: vi.fn(),
-      getPlugins: vi.fn(),
-      getStorage: vi.fn(),
-      getExchange: vi.fn(),
-    };
-  });
-  return { config: new Configuration() };
-});
+// A realtime run on BTC/USDT, as the configuration's watch section gives it
+const WATCH: Partial<Watch> = { pairs: [{ symbol: 'BTC/USDT' }], mode: 'realtime', warmup: { candleCount: 0, tickrate: 1000 } };
 
 describe('Supervision', () => {
   let plugin: Supervision;
@@ -50,10 +36,13 @@ describe('Supervision', () => {
     candleCheckInterval: 100,
     candleStaleThreshold: 300,
   };
+  /** The plugin built with these options, in a run watching `watch` */
+  const createSupervision = (options: SupervisionConfig = baseConfig, watch = WATCH) =>
+    new Supervision(options, createPluginContext({ watch }));
 
   beforeEach(() => {
     vi.useFakeTimers();
-    plugin = new Supervision(baseConfig);
+    plugin = createSupervision();
     plugin['bot'] = fakeBot as any;
   });
 
@@ -67,7 +56,7 @@ describe('Supervision', () => {
     ${'a configured chat id'} | ${-1001234567890}
     ${'no chat id'}           | ${undefined}
   `('builds its bot with $scenario', ({ chatId }) => {
-    new Supervision({ ...baseConfig, chatId });
+    createSupervision({ ...baseConfig, chatId });
     expect(TelegramBot).toHaveBeenLastCalledWith('t', 'bot-name', expect.any(Function), chatId);
   });
 
@@ -127,7 +116,7 @@ describe('Supervision', () => {
       cpuTime = 0;
       vi.spyOn(process, 'cpuUsage').mockImplementation(previous => ({ user: cpuTime - (previous?.user ?? 0), system: 0 }));
       // Built once the counter is stubbed, as the plugin is once the process has started
-      plugin = new Supervision(baseConfig);
+      plugin = createSupervision();
       plugin['bot'] = fakeBot as any;
     });
 
@@ -251,8 +240,7 @@ describe('Supervision', () => {
       ].join('\n');
     /** A plugin watching the timeframe on the exchange, subscribed to the check */
     const setUp = (timeframe: string, exchangeName = 'binance') => {
-      vi.mocked(config.getWatch).mockReturnValue({ pairs: [], mode: 'realtime', warmup: { candleCount: 0 }, timeframe } as any);
-      plugin = new Supervision(baseConfig);
+      plugin = createSupervision(baseConfig, { ...WATCH, pairs: [], timeframe: timeframe as Timeframe });
       plugin['bot'] = fakeBot as any;
       plugin.setExchange({ getExchangeName: () => exchangeName, fetchOHLCV } as any);
       plugin['handleCommand']('/sub_candle_check');
@@ -492,7 +480,7 @@ describe('Supervision', () => {
     });
 
     it('names the age of the last bucket in whole minutes', async () => {
-      plugin = new Supervision({ ...baseConfig, candleCheckInterval: ONE_MINUTE, candleStaleThreshold: 3 * ONE_MINUTE });
+      plugin = createSupervision({ ...baseConfig, candleCheckInterval: ONE_MINUTE, candleStaleThreshold: 3 * ONE_MINUTE });
       plugin['bot'] = fakeBot as any;
       toggleSubscription();
       await vi.advanceTimersByTimeAsync(4 * ONE_MINUTE); // Stale at the check of the 4th minute only: 3 minutes is not older
@@ -501,7 +489,7 @@ describe('Supervision', () => {
 
     // Written "minute(s)" whatever the age
     it('names an age of one whole minute in the singular', async () => {
-      plugin = new Supervision({ ...baseConfig, candleCheckInterval: ONE_MINUTE / 2, candleStaleThreshold: ONE_MINUTE });
+      plugin = createSupervision({ ...baseConfig, candleCheckInterval: ONE_MINUTE / 2, candleStaleThreshold: ONE_MINUTE });
       plugin['bot'] = fakeBot as any;
       toggleSubscription();
       await vi.advanceTimersByTimeAsync(1.5 * ONE_MINUTE); // Stale at the check of 90 s only: 60 s is not older

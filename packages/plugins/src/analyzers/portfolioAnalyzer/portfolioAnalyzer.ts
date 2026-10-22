@@ -18,6 +18,7 @@ import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { first, isNil, omit } from 'lodash-es';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '@gekko/schemas/plugins/analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
@@ -79,8 +80,8 @@ export class PortfolioAnalyzer extends Plugin {
   private portfolioChangeCount: number = 0;
   private currentTimestamp: EpochTimeStamp = 0;
 
-  constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig) {
-    super(PLUGIN_NAME);
+  constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig, context: RunContext) {
+    super(PLUGIN_NAME, context);
 
     this.riskFreeReturn = riskFreeReturn ?? 5;
     this.enableConsoleTable = enableConsoleTable ?? false;

@@ -3,8 +3,9 @@ import { find } from 'lodash-es';
 
 /**
  * The configuration of one run, as the schema outputs it (readConfigurationFile or parseConfiguration): a getter per section. Built
- * by createRunContext and read through the RunContext every plugin, stream, order, exchange and storage receives. The file helpers
- * (loadConfigurationFile, parseConfiguration, readConfigurationFile) are in configuration/configuration.helper.ts.
+ * by createRunContext and read through the RunContext the plugins and the orders receive; the streams, the exchanges and the storage
+ * receive the sections they read instead (see Services). The file helpers (loadConfigurationFile, parseConfiguration,
+ * readConfigurationFile) are in configuration/configuration.helper.ts.
  */
 export class Configuration {
   constructor(private readonly configuration: ConfigurationModel) {}

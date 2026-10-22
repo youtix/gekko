@@ -2,17 +2,21 @@ import { describeError, toError } from '@gekko/shared/errors/error.helper';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../../configuration/configuration';
 import { InvalidOrder, OrderNotFound } from '../../../exchange/exchange.error';
 import { debug, error } from '../../../logger/logger';
+import type { RunContext } from '../../../run/runContext.types';
 import { bindAll } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { Order } from '../order';
 
-// Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so a handler reports a
-// failure through orderErrored and never throws: a thrown error would be an unhandled rejection.
-// One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order
-// the exchange no longer knows.
+/**
+ * An order at the price the strategy asked for. Receives its pair, its id, its side, its amount and its price, then the context of
+ * its run (see Order): in realtime it is polled every orderSynchInterval from its creation, in a backtest the simulator settles it.
+ * Nobody awaits launch(), cancel() or checkOrder() (the Trader floats them, an interval runs checkOrder), so a handler reports a
+ * failure through orderErrored and never throws: a thrown error would be an unhandled rejection.
+ * One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order the
+ * exchange no longer knows.
+ */
 export class LimitOrder extends Order {
   private readonly price: number;
   // A poll or a cancelation of the order is in flight: neither another poll nor a cancelation is sent until it has answered
@@ -21,16 +25,15 @@ export class LimitOrder extends Order {
   // flight, then again at each check, until the order ends (see cancel)
   private isCanceling: boolean;
 
-  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, amount: number, price: number) {
-    super(symbol, gekkoOrderId, side, 'LIMIT', amount);
-    const orderSync = config.getExchange().orderSynchInterval;
+  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, amount: number, price: number, context: RunContext) {
+    super(symbol, gekkoOrderId, side, 'LIMIT', amount, context);
     this.price = price;
     this.isChecking = false;
     this.isCanceling = false;
 
     bindAll(this, [this.checkOrder.name]);
 
-    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, orderSync);
+    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, this.orderSynchInterval);
   }
 
   public async launch(): Promise<void> {

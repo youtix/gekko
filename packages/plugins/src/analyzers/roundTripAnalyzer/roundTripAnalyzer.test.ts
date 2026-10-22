@@ -6,26 +6,26 @@ import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEven
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '@gekko/core/configuration/configuration';
+import { Watch } from '@gekko/schemas/configuration/configuration.types';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { error, info, warning } from '@gekko/core/logger/logger';
 import { beforeEach, describe, expect, it, MockInstance, vi } from 'vitest';
+import { AnalyzerConfig } from '../analyzer.types';
 import { TradingReport } from './roundTrip.types';
 import { RoundTripAnalyzer } from './roundTripAnalyzer';
 import { EMPTY_TRADING_REPORT, LATE_FILL_CANDLES, PLUGIN_NAME } from './roundTripAnalyzer.const';
 import { logFinalize, logRoundtrip } from './roundTripAnalyzer.helper';
 
-const { watchOf } = vi.hoisted(() => ({
-  /** The watch of a run on these assets, each against USDT, on a 1m timeframe */
-  watchOf: (assets: string[]) => ({
-    pairs: assets.map(asset => ({ symbol: `${asset}/USDT`, timeframe: '1m' })),
-    assets,
-    currency: 'USDT',
-    timeframe: '1m',
-    warmup: { candleCount: 100, tickrate: 1000 },
-    mode: 'realtime',
-    tickrate: 1000,
-  }),
-}));
+/** The watch of a run on these assets, each against USDT, on a 1m timeframe */
+const watchOf = (assets: Asset[]): Partial<Watch> => ({
+  pairs: assets.map(asset => ({ symbol: `${asset}/USDT` as const })),
+  assets,
+  currency: 'USDT',
+  timeframe: '1m',
+  warmup: { candleCount: 100, tickrate: 1000 },
+  mode: 'realtime',
+  tickrate: 1000,
+});
 
 vi.mock('@gekko/core/logger/logger');
 // The portfolio and the math helpers stay actual: the decimal ones work out the equities and the P&L, as in a run. Of the statistics,
@@ -43,27 +43,13 @@ vi.mock('./roundTripAnalyzer.helper', async importOriginal => ({
   logFinalize: vi.fn(),
   logRoundtrip: vi.fn(),
 }));
-// A run on BTC and ETH, unless a test watches others (see watching)
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const Configuration = vi.fn(function () {
-    return {
-      getWatch: vi.fn(() => watchOf(['BTC', 'ETH'])),
-      getStrategy: vi.fn(() => ({})),
-      showLogo: vi.fn(),
-      getPlugins: vi.fn(),
-      getStorage: vi.fn(),
-      getExchange: vi.fn(),
-    };
-  });
-  return { config: new Configuration() };
-});
 
 const CONFIG = { name: PLUGIN_NAME, riskFreeReturn: 2, enableConsoleTable: true };
 const DAY = 24 * 60 * ONE_MINUTE;
 
-/** The next analyzer built watches these assets, each against USDT */
-const watching = (assets: Asset[]) =>
-  vi.spyOn(config, 'getWatch').mockReturnValueOnce(watchOf(assets) as ReturnType<typeof config.getWatch>);
+/** An analyzer built with these options in a run on these assets, each against USDT: BTC and ETH unless a test watches others */
+const createAnalyzer = (options: AnalyzerConfig = CONFIG, assets: Asset[] = ['BTC', 'ETH']) =>
+  new RoundTripAnalyzer(options, createPluginContext({ watch: watchOf(assets) }));
 /** A portfolio the Trader read, with these balances */
 const holding = (balances: Record<string, number>): Portfolio =>
   new Map(Object.entries(balances).map(([asset, total]) => [asset, { free: total, used: 0, total }]));
@@ -159,7 +145,7 @@ describe('RoundTripAnalyzer', () => {
   };
 
   beforeEach(() => {
-    analyzer = new RoundTripAnalyzer(CONFIG);
+    analyzer = createAnalyzer();
   });
 
   describe('constructor', () => {
@@ -173,12 +159,11 @@ describe('RoundTripAnalyzer', () => {
     });
 
     it('should fall back to the risk-free return of 5 % the schema defaults to when the configuration has none', () => {
-      expect(new RoundTripAnalyzer({ name: PLUGIN_NAME, enableConsoleTable: false } as any)['riskFreeReturn']).toBe(5);
+      expect(createAnalyzer({ name: PLUGIN_NAME, enableConsoleTable: false } as any)['riskFreeReturn']).toBe(5);
     });
 
     it('should track the round trips of every watched pair, in the order of watch.assets', () => {
-      watching(['ETH', 'BTC', 'XRP']);
-      expect([...new RoundTripAnalyzer(CONFIG)['trackers'].keys()]).toEqual(['ETH/USDT', 'BTC/USDT', 'XRP/USDT']);
+      expect([...createAnalyzer(CONFIG, ['ETH', 'BTC', 'XRP'])['trackers'].keys()]).toEqual(['ETH/USDT', 'BTC/USDT', 'XRP/USDT']);
     });
 
     it('should give each tracker the asset of its pair', () => {
@@ -192,19 +177,18 @@ describe('RoundTripAnalyzer', () => {
         ${['ETH', 'SOL']} | ${undefined}   | ${'ETH'} | ${'the first asset by default, BTC not watched'}
         ${['BTC', 'ETH']} | ${'ETH'}       | ${'ETH'} | ${'the asset configured'}
       `('should measure the market on $expected watching $assets: $description', ({ assets, benchmarkAsset, expected }) => {
-        watching(assets);
-        expect(new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset })['benchmarkPair']).toBe(`${expected}/USDT`);
+        expect(createAnalyzer({ ...CONFIG, benchmarkAsset }, assets)['benchmarkPair']).toBe(`${expected}/USDT`);
       });
 
       it('should refuse a benchmark asset that is not watched, naming the watched assets', () => {
-        expect(() => new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset: 'SOL' })).toThrow(
+        expect(() => createAnalyzer({ ...CONFIG, benchmarkAsset: 'SOL' })).toThrow(
           '[ROUNDTRIP ANALYZER] benchmarkAsset must be one of the watched assets (BTC and ETH), got "SOL"',
         );
       });
 
       // Reported in one line by main(), as the run stops while the plugins are built
       it('should refuse it with a GekkoError', () => {
-        expect(() => new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset: 'SOL' })).toThrow(GekkoError);
+        expect(() => createAnalyzer({ ...CONFIG, benchmarkAsset: 'SOL' })).toThrow(GekkoError);
       });
     });
   });
@@ -227,7 +211,7 @@ describe('RoundTripAnalyzer', () => {
     `(
       'should take the close of the benchmark pair, $expected with the benchmark $benchmarkAsset, as the end price',
       ({ benchmarkAsset, expected }) => {
-        analyzer = new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset });
+        analyzer = createAnalyzer({ ...CONFIG, benchmarkAsset });
         analyzer['processOneMinuteBucket'](bucketAt(1, { 'BTC/USDT': 100, 'ETH/USDT': 10 }));
         expect(analyzer['endPrice']).toBe(expected);
       },
@@ -303,7 +287,7 @@ describe('RoundTripAnalyzer', () => {
       // A portfolio of 1 BTC, 10 ETH and 1,000 USDT, received during the warmup, which the bucket of minute 1 completes
       const PORTFOLIO = holding({ BTC: 1, ETH: 10, USDT: 1000 });
       const completeWarmup = (benchmarkAsset?: Asset) => {
-        analyzer = new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset });
+        analyzer = createAnalyzer({ ...CONFIG, benchmarkAsset });
         analyzer.onPortfolioChange([PORTFOLIO]);
         runMinute(1, CLOSES, { completesWarmup: true });
       };
@@ -647,8 +631,7 @@ describe('RoundTripAnalyzer', () => {
     });
 
     it('should not name the pair of a round trip on a run that watches one', () => {
-      watching(['BTC']);
-      analyzer = new RoundTripAnalyzer(CONFIG);
+      analyzer = createAnalyzer(CONFIG, ['BTC']);
       analyzer.onOrderCompleted([
         completed('BTC/USDT', 'BUY', ONE_MINUTE, 100, 1, 0, holding({ BTC: 1, USDT: 900 })),
         completed('BTC/USDT', 'SELL', 2 * ONE_MINUTE, 110, 1, 0, holding({ USDT: 1010 })),
@@ -657,7 +640,7 @@ describe('RoundTripAnalyzer', () => {
     });
 
     it('should go on numbering them after the round trips the warmup closed, which the report leaves out', () => {
-      analyzer = new RoundTripAnalyzer(CONFIG);
+      analyzer = createAnalyzer();
       deferredEmitSpy = vi.spyOn(analyzer as any, 'addDeferredEmit');
       analyzer.onOrderCompleted([
         completed('BTC/USDT', 'BUY', 0, 100, 1, 0, holding({ BTC: 1, USDT: 900 })),
@@ -696,7 +679,7 @@ describe('RoundTripAnalyzer', () => {
     };
     let deferredEmitSpy: MockInstance;
     const run = async (benchmarkAsset?: Asset) => {
-      analyzer = new RoundTripAnalyzer({ ...CONFIG, benchmarkAsset });
+      analyzer = createAnalyzer({ ...CONFIG, benchmarkAsset });
       deferredEmitSpy = vi.spyOn(analyzer as any, 'addDeferredEmit');
       analyzer.onPortfolioChange([holding({ USDT: 2000 })]);
       CLOSES.forEach((closes, minute) => {
@@ -850,8 +833,7 @@ describe('RoundTripAnalyzer', () => {
     let report: TradingReport;
     let deferredEmitSpy: MockInstance;
     beforeEach(async () => {
-      watching(['BTC']);
-      analyzer = new RoundTripAnalyzer(CONFIG);
+      analyzer = createAnalyzer(CONFIG, ['BTC']);
       deferredEmitSpy = vi.spyOn(analyzer as any, 'addDeferredEmit');
       runMinute(0, { 'BTC/USDT': 10_000 }, { completesWarmup: true });
       analyzer.onPortfolioChange([holding({ BTC: 1, USDT: 100_000 })]);
@@ -1120,8 +1102,7 @@ describe('RoundTripAnalyzer', () => {
       deferredEmitSpy.mock.calls.filter(([name]) => name === ROUNDTRIP_COMPLETED_EVENT).map(([, roundTrip]) => roundTrip);
 
     beforeEach(() => {
-      watching(['BTC']);
-      analyzer = new RoundTripAnalyzer(CONFIG);
+      analyzer = createAnalyzer(CONFIG, ['BTC']);
       deferredEmitSpy = vi.spyOn(analyzer as any, 'addDeferredEmit');
     });
 

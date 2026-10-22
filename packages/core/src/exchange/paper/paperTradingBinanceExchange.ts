@@ -3,7 +3,7 @@ import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Trade } from '@gekko/shared/models/trade.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../configuration/configuration';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { info } from '../../logger/logger';
 import { CCXTExchange } from '../ccxtExchange';
 import { DummyCentralizedExchange } from '../dummy/dummyCentralizedExchange';
@@ -27,25 +27,34 @@ import { PaperTradingBinanceExchangeConfig } from './paperTradingBinanceExchange
  *
  * Read Operations: Delegated to CCXTExchange (fetchOHLCV, fetchTicker, onNewCandle, etc.)
  * Write Operations: Simulated locally via DummyCentralizedExchange (createLimitOrder, etc.)
+ *
+ * Built from its paper-binance section (the starting balances, the fee override, the proxy) and the watch section: loadMarkets reads
+ * the market and the ticker of each watched pair, and the watch section goes on to the CCXTExchange that reads Binance and to the
+ * simulator loadMarkets builds.
  */
 export class PaperTradingBinanceExchange implements Exchange, DummyExchange {
   private readonly realExchange: CCXTExchange;
   private readonly exchangeConfig: PaperTradingBinanceExchangeConfig;
+  private readonly watch: Pick<Watch, 'pairs' | 'daterange'>;
   private simulatedExchange!: DummyCentralizedExchange;
   /** Set by loadMarkets: the market data the simulator trades with, fee override included */
   private simulatedMarketData?: Map<TradingPair, MarketData>;
 
-  constructor(exchangeConfig: PaperTradingBinanceExchangeConfig) {
+  constructor(exchangeConfig: PaperTradingBinanceExchangeConfig, watch: Pick<Watch, 'pairs' | 'daterange'>) {
     // Use CCXTExchange for read operations (public endpoints only, no auth required)
-    this.realExchange = new CCXTExchange({
-      name: 'binance',
-      verbose: exchangeConfig.verbose,
-      sandbox: false,
-      exchangeSynchInterval: exchangeConfig.exchangeSynchInterval,
-      orderSynchInterval: exchangeConfig.orderSynchInterval,
-      proxy: exchangeConfig.proxy, // routes the public client, hence all the market data traffic, through the configured proxy
-    });
+    this.realExchange = new CCXTExchange(
+      {
+        name: 'binance',
+        verbose: exchangeConfig.verbose,
+        sandbox: false,
+        exchangeSynchInterval: exchangeConfig.exchangeSynchInterval,
+        orderSynchInterval: exchangeConfig.orderSynchInterval,
+        proxy: exchangeConfig.proxy, // routes the public client, hence all the market data traffic, through the configured proxy
+      },
+      watch,
+    );
     this.exchangeConfig = exchangeConfig;
+    this.watch = watch;
   }
 
   /* -------------------------------------------------------------------------- */
@@ -53,7 +62,7 @@ export class PaperTradingBinanceExchange implements Exchange, DummyExchange {
   /* -------------------------------------------------------------------------- */
 
   public async loadMarkets(): Promise<void> {
-    const { pairs } = config.getWatch();
+    const { pairs } = this.watch;
 
     // Load real market data from Binance via CCXTExchange
     await this.realExchange.loadMarkets();
@@ -65,14 +74,17 @@ export class PaperTradingBinanceExchange implements Exchange, DummyExchange {
     const tickers = await Promise.all(pairs.map(async ({ symbol }) => [symbol, await this.realExchange.fetchTicker(symbol)] as const));
 
     // Initialize simulated exchange with real market constraints
-    this.simulatedExchange = new DummyCentralizedExchange({
-      name: 'dummy-cex',
-      marketData,
-      simulationBalance: this.exchangeConfig.simulationBalance,
-      initialTicker: new Map(tickers),
-      exchangeSynchInterval: this.exchangeConfig.exchangeSynchInterval,
-      orderSynchInterval: this.exchangeConfig.orderSynchInterval,
-    });
+    this.simulatedExchange = new DummyCentralizedExchange(
+      {
+        name: 'dummy-cex',
+        marketData,
+        simulationBalance: this.exchangeConfig.simulationBalance,
+        initialTicker: new Map(tickers),
+        exchangeSynchInterval: this.exchangeConfig.exchangeSynchInterval,
+        orderSynchInterval: this.exchangeConfig.orderSynchInterval,
+      },
+      this.watch,
+    );
     this.simulatedMarketData = marketData;
 
     info('exchange', '🔶 PAPER TRADING MODE - Using simulated orders with real market data');

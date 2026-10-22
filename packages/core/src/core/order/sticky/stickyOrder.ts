@@ -2,18 +2,23 @@ import { describeError, toError } from '@gekko/shared/errors/error.helper';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../../configuration/configuration';
 import { InvalidOrder, OrderNotFound } from '../../../exchange/exchange.error';
 import { Ticker } from '@gekko/shared/models/exchange.types';
 import { debug, error, warning } from '../../../logger/logger';
+import type { RunContext } from '../../../run/runContext.types';
 import { addPrecise } from '@gekko/shared/utils/math/math.utils';
 import { bindAll } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { Order } from '../order';
 import { OrderCancelDetails } from '../order.types';
 
-// One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order the
-// exchange no longer knows.
+/**
+ * A limit order that stays the best bid (ask) of the book, moved as the market goes past it. Receives its pair, its id, its side and
+ * its amount, the price it was sized from (unused: it is priced from the ticker), then the context of its run (see Order): in realtime
+ * it is polled, and may move, every orderSynchInterval from its creation, in a backtest the simulator settles it.
+ * One exchange call at a time: a cancelation sent twice in parallel would be answered OrderNotFound the second time, an order the
+ * exchange no longer knows.
+ */
 export class StickyOrder extends Order {
   // The cancelation was asked and the order has not ended yet: it is sent as soon as the order has an id and no other call is in
   // flight, then again at each check, until the order ends (see cancel). No move starts meanwhile.
@@ -33,9 +38,8 @@ export class StickyOrder extends Order {
   // answered
   private isChecking: boolean;
 
-  constructor(symbol: TradingPair, gekkoOrderId: UUID, action: OrderSide, amount: number, _price?: number) {
-    super(symbol, gekkoOrderId, action, 'STICKY', amount);
-    const orderSync = config.getExchange().orderSynchInterval;
+  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, amount: number, _price: number | undefined, context: RunContext) {
+    super(symbol, gekkoOrderId, side, 'STICKY', amount, context);
     this.isCanceling = false;
     this.isMoving = false;
     this.isMoveOutcomeUnknown = false;
@@ -44,7 +48,7 @@ export class StickyOrder extends Order {
 
     bindAll(this, [this.checkOrder.name]);
 
-    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, orderSync);
+    if (this.mode === 'realtime') this.interval = setInterval(this.checkOrder, this.orderSynchInterval);
   }
 
   public async launch(): Promise<void> {

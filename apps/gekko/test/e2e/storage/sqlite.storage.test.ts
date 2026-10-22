@@ -1,23 +1,22 @@
-import type { SQLiteStorage as ISQLiteStorage } from '@gekko/core/storage/sqlite.storage';
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock } from 'bun:test';
+import type { Candle } from '@gekko/shared/models/candle.types';
+import type { TradingPair } from '@gekko/shared/models/utility.types';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
+import { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
+import type { StorageConfig } from '@gekko/core/storage/storage.types';
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { copyFileSync, existsSync, mkdtempSync, rmSync, truncateSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-const IN_MEMORY = { type: 'sqlite', database: ':memory:', insertThreshold: 1 };
-// Read by the configuration mock on each call: the tests on database files and on a minute inserted twice change them, then
-// restore them. The storage reads the mode when it is built: it decides what a written candle replaces among the stored ones.
-let storageConfig: Record<string, unknown> = IN_MEMORY;
-let mode = 'backtest';
+const IN_MEMORY: StorageConfig = { type: 'sqlite', database: ':memory:', insertThreshold: 1 };
+// The storage section and the mode of the storages the tests build: the tests on database files and on a minute inserted twice change
+// them, then restore them. The storage reads the mode when it is built: it decides what a written candle replaces among the stored ones.
+let storageConfig: StorageConfig = IN_MEMORY;
+let mode: Watch['mode'] = 'backtest';
 
-// Mocks for configuration must be defined before imports that evaluate them
-mock.module('@gekko/core/configuration/configuration', () => ({
-  config: {
-    getStorage: () => storageConfig,
-    getWatch: () => ({ mode }),
-  },
-}));
+/** The storage of the pairs, built as the services of a run build it, from the storage section and the watch: its mode and its pairs */
+const storageOf = (symbols: TradingPair[]) => new SQLiteStorage(storageConfig, { mode, pairs: symbols.map(symbol => ({ symbol })) });
 
 const MINUTE = 60_000;
 const start = 1_700_000_040_000;
@@ -26,12 +25,6 @@ const end = start + 3 * MINUTE;
 const candles = [0, 1, 3].map(minute => ({ start: start + minute * MINUTE, open: 10, high: 12, low: 9, close: 11, volume: minute + 1 }));
 
 describe('SQLiteStorage', () => {
-  let SQLiteStorage: typeof ISQLiteStorage;
-
-  beforeAll(async () => {
-    ({ SQLiteStorage } = await import('@gekko/core/storage/sqlite.storage'));
-  });
-
   describe('table names', () => {
     describe.each([
       ['BTC/USDT', 'CANDLES_BTC_USDT'],
@@ -42,10 +35,10 @@ describe('SQLiteStorage', () => {
       ['FLX-CRCL/USDC:USDC', 'CANDLES_FLX-CRCL_USDC:USDC'],
       ['A"B/USDT', 'CANDLES_A"B_USDT'],
     ] as const)('%s', (symbol, table) => {
-      let storage: ISQLiteStorage;
+      let storage: SQLiteStorage;
 
       beforeEach(() => {
-        storage = new SQLiteStorage([symbol]);
+        storage = storageOf([symbol]);
         candles.forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
       });
 
@@ -74,7 +67,7 @@ describe('SQLiteStorage', () => {
     });
 
     it('reads a table created by the former, unquoted statement', () => {
-      const storage = new SQLiteStorage([]);
+      const storage = storageOf([]);
       storage.db.run(
         'CREATE TABLE IF NOT EXISTS CANDLES_BTC_USDT (id INTEGER PRIMARY KEY AUTOINCREMENT, start INTEGER UNIQUE, open REAL NOT NULL, high REAL NOT NULL, low REAL NOT NULL, close REAL NOT NULL, volume REAL NOT NULL)',
       );
@@ -97,7 +90,7 @@ describe('SQLiteStorage', () => {
     });
 
     // Every row checks that the minute keeps its row and its id
-    it.each([
+    it.each<[Watch['mode'], string, Candle, Candle, Candle]>([
       // Any run but an import only replaces a stored made-up candle (flat, no volume), with one that traded
       ['realtime', 'replaces a made-up candle (flat, no volume) with a real one', flat(10, 0), real(20, 42), real(20, 42)],
       ['realtime', 'replaces a made-up candle with a flat candle that traded', flat(10, 0), flat(20, 5), flat(20, 5)],
@@ -116,7 +109,7 @@ describe('SQLiteStorage', () => {
       ['importer', 'replaces a made-up candle with a candle it made up', flat(10, 0), madeUp(20), flat(20, 0)],
     ])('in %s mode, %s', (runMode, _scenario, stored, inserted, expected) => {
       mode = runMode;
-      const storage = new SQLiteStorage([symbol]);
+      const storage = storageOf([symbol]);
       storage.addBucket(new Map([[symbol, stored]]));
       storage.addBucket(new Map([[symbol, inserted]]));
       const candles = storage.getCandles(symbol, { start, end: start });
@@ -128,10 +121,10 @@ describe('SQLiteStorage', () => {
   describe('minutes of an interval', () => {
     const symbol = 'BTC/USDT';
     const offGrid = { ...candles[0], start: start + 2 * MINUTE + 1 }; // Inside the missing minute, but not its start
-    let storage: ISQLiteStorage;
+    let storage: SQLiteStorage;
 
     beforeEach(() => {
-      storage = new SQLiteStorage([symbol]);
+      storage = storageOf([symbol]);
       [...candles, offGrid].forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
     });
 
@@ -162,7 +155,7 @@ describe('SQLiteStorage', () => {
     const startImport = (path: string) => {
       storageConfig = { type: 'sqlite', database: path, insertThreshold: 1000 };
       mode = 'importer';
-      const storage = new SQLiteStorage([symbol]);
+      const storage = storageOf([symbol]);
       candles.forEach(candle => storage.addBucket(new Map([[symbol, candle]])));
       return storage;
     };
@@ -239,7 +232,7 @@ describe('SQLiteStorage', () => {
       writeCandles(database);
       storageConfig = { type: 'sqlite', database };
       mode = 'backtest';
-      const storage = new SQLiteStorage([symbol]);
+      const storage = storageOf([symbol]);
       const read = storage.getCandles(symbol, { start, end });
       storage.close();
       expect(read).toHaveLength(candles.length);
@@ -249,7 +242,7 @@ describe('SQLiteStorage', () => {
       writeCandles(database);
       storageConfig = { type: 'sqlite', database };
       mode = 'backtest';
-      const storage = new SQLiteStorage([symbol]);
+      const storage = storageOf([symbol]);
       const write = () => storage.db.run('DELETE FROM CANDLES_BTC_USDT');
       try {
         expect(write).toThrow('attempt to write a readonly database');
@@ -262,7 +255,7 @@ describe('SQLiteStorage', () => {
       const missing = missingDatabase();
       storageConfig = { type: 'sqlite', database: missing };
       mode = 'backtest';
-      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${missing} (unable to open database file).`);
+      expect(() => storageOf([symbol])).toThrow(`[STORAGE] Cannot open the database ${missing} (unable to open database file).`);
     });
 
     it('does not create the database it refused in backtest mode', () => {
@@ -270,7 +263,7 @@ describe('SQLiteStorage', () => {
       storageConfig = { type: 'sqlite', database: missing };
       mode = 'backtest';
       try {
-        new SQLiteStorage([symbol]);
+        storageOf([symbol]);
       } catch {
         // Expected
       }
@@ -281,20 +274,18 @@ describe('SQLiteStorage', () => {
       writeCandles(database);
       storageConfig = { type: 'sqlite', database };
       mode = 'backtest';
-      expect(() => new SQLiteStorage([symbol, 'ETH/USDT'])).toThrow(
-        `[STORAGE] ${database} holds no candles of ETH/USDT: import them first.`,
-      );
+      expect(() => storageOf([symbol, 'ETH/USDT'])).toThrow(`[STORAGE] ${database} holds no candles of ETH/USDT: import them first.`);
     });
 
-    // The refused storage never reached the injecter, which closes the one it created: its connection held the database until the
-    // garbage collector closed it. SQLite lets a connection take the database out of WAL mode only while no other one holds it, and
-    // refuses with "database is locked" otherwise.
+    // The refused storage never reached the services of the run, whose closeStorage() closes the one they created: its connection held
+    // the database until the garbage collector closed it. SQLite lets a connection take the database out of WAL mode only while no
+    // other one holds it, and refuses with "database is locked" otherwise.
     it('closes the connection of a backtest it refuses for a pair without a table, leaving the database to the next connection', () => {
       writeCandles(database);
       storageConfig = { type: 'sqlite', database };
       mode = 'backtest';
       try {
-        new SQLiteStorage([symbol, 'ETH/USDT']);
+        storageOf([symbol, 'ETH/USDT']);
       } catch {
         // Expected
       }
@@ -306,7 +297,7 @@ describe('SQLiteStorage', () => {
       }
     });
 
-    it.each([
+    it.each<[Watch['mode'], string, (path: string) => void, string, string]>([
       ['backtest', 'a text file', writeText, 'file is not a database', BACKTEST_HINT],
       ['importer', 'a text file', writeText, 'file is not a database', ''],
       ['backtest', 'a database cut within its header', writeCutDatabase, 'database disk image is malformed', BACKTEST_HINT],
@@ -316,7 +307,7 @@ describe('SQLiteStorage', () => {
       write(file);
       storageConfig = { type: 'sqlite', database: file };
       mode = runMode;
-      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${file} (${failure}).${hint}`);
+      expect(() => storageOf([symbol])).toThrow(`[STORAGE] Cannot open the database ${file} (${failure}).${hint}`);
     });
 
     it('names the path of a database it cannot create', () => {
@@ -324,7 +315,7 @@ describe('SQLiteStorage', () => {
       writeCandles(blocked); // A file, where the next database wants a directory
       storageConfig = { type: 'sqlite', database: join(blocked, 'candles.sql') };
       mode = 'importer';
-      expect(() => new SQLiteStorage([symbol])).toThrow(`[STORAGE] Cannot open the database ${join(blocked, 'candles.sql')}`);
+      expect(() => storageOf([symbol])).toThrow(`[STORAGE] Cannot open the database ${join(blocked, 'candles.sql')}`);
     });
   });
 });

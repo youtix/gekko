@@ -1,11 +1,12 @@
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { candleWriterSchema } from '@gekko/schemas/plugins/candleWriter.schema';
 import { CandleWriterConfig } from './candleWriter.types';
 
 export class CandleWriter extends Plugin {
-  constructor({ name }: CandleWriterConfig) {
-    super(name);
+  constructor({ name }: CandleWriterConfig, context: RunContext) {
+    super(name, context);
   }
 
   // --------------------------------------------------------------------------

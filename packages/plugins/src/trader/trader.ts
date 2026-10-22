@@ -33,7 +33,7 @@ import { OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Plugin } from '@gekko/core/plugin/plugin';
-import { config } from '@gekko/core/configuration/configuration';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { OrderErrorEventPayload, OrderSummary } from '@gekko/core/core/order/order.types';
 import { debug, error, info, warning } from '@gekko/core/logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
@@ -106,9 +106,9 @@ export class Trader extends Plugin {
    */
   private readonly unreadOrders = new Map<UUID, UnreadOrder>();
 
-  constructor(parameters?: { portfolioUpdates?: PortfolioUpdatesConfig }) {
+  constructor(parameters: { portfolioUpdates?: PortfolioUpdatesConfig } | undefined, context: RunContext) {
     // Not Trader.name: a minified build (bun build --minify) renames the class, and the Trader logged its events and failures as "GO"
-    super('Trader');
+    super('Trader', context);
     this.orders = new Map();
     this.portfolioUpdatesConfig = parameters?.portfolioUpdates ?? null;
   }
@@ -1003,7 +1003,7 @@ export class Trader extends Plugin {
         });
 
         // Create order
-        const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price);
+        const orderInstance = new ORDER_FACTORY[type](symbol, id, side, amount, price, this.context);
         // The order as initiated, which the events of its cancelation flow relay as the creation flow does (see onStrategyCancelOrder)
         this.orders.set(id, { orderInstance, order: orderInitiated, price, synchronizationCount: this.synchronizationCount });
         // Until the balance is read again, the orders after it can only take what it leaves (see unreadOrders): a SELL its amount of the
@@ -1045,7 +1045,7 @@ export class Trader extends Plugin {
 
   protected processInit(): void {
     if (this.mode === 'realtime') {
-      const exchangeSync = config.getExchange().exchangeSynchInterval;
+      const exchangeSync = this.context.configuration.getExchange().exchangeSynchInterval;
       this.syncInterval = setInterval(() => this.synchronizeInBackground(), exchangeSync);
     }
     this.synchronizeInBackground();

@@ -1,12 +1,17 @@
 import { Candle } from '@gekko/shared/models/candle.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Nullable, TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../configuration/configuration';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Interval } from 'date-fns';
 import { toUpper } from 'lodash-es';
 import { INSERT_THRESHOLD } from './storage.const';
-import { CandleDateranges, MissingCandleCount } from './storage.types';
+import { CandleDateranges, MissingCandleCount, StorageConfig } from './storage.types';
 
+/**
+ * The candle storage of a run, one table of 1-minute candles per pair. Built from the storage section (its insertThreshold) and the
+ * mode of the watch section: how many minutes it buffers before it writes them, and whether the candles it writes have the last word
+ * over those stored.
+ */
 export abstract class Storage {
   protected buffer: CandleBucket[];
   protected insertThreshold: number;
@@ -16,11 +21,10 @@ export abstract class Storage {
    */
   protected readonly hasLastWord: boolean;
 
-  constructor() {
-    const { mode } = config.getWatch();
+  constructor(storageConfig: StorageConfig, { mode }: Pick<Watch, 'mode'>) {
     this.buffer = [];
     // Realtime writes each minute as it closes; the importer batches its inserts
-    this.insertThreshold = config.getStorage()?.insertThreshold ?? (mode === 'realtime' ? 1 : INSERT_THRESHOLD);
+    this.insertThreshold = storageConfig.insertThreshold ?? (mode === 'realtime' ? 1 : INSERT_THRESHOLD);
     this.hasLastWord = mode === 'importer';
   }
 

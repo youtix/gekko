@@ -1,26 +1,40 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import type { GekkoPipelineOptions } from '@gekko/core/core/pipeline/pipeline.types';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
 import { MockCCXTExchange } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
 import { clearLogs, logStore, MockWinston, type LoggedLine } from '../mocks/winston.mock';
 import { advanceClock, REALTIME_START, startFakeClock } from './clock.helper';
+import { paperExchange, type RawConfiguration } from './configuration.helper';
 import {
   endRealtimeRun,
   mockRealtimeModules,
+  realtimeRunContext,
   runRealtimeFor,
   runRealtimeUntil,
   runRealtimeUntilEnd,
   startRealtimeRun,
+  useRealtimeConfiguration,
 } from './realtimeRun.helper';
 
 mockRealtimeModules();
+
+/** The configuration of the runs, BTC on the paper exchange, which a test changes before the context of its run is built */
+const realtimeOf = (assets: RawConfiguration['watch']['assets']): RawConfiguration => ({
+  watch: { mode: 'realtime', assets, currency: 'USDT', timeframe: '1m' },
+  exchange: paperExchange([{ assetName: 'USDT', balance: 1000 }]),
+  plugins: [],
+});
+let configuration = realtimeOf(['BTC']);
+useRealtimeConfiguration(() => configuration);
 
 /**
  * The pipeline the helper runs, in place of gekkoPipeline: it never ends by itself unless `stopsAt` is set, and once its signal is
  * aborted it rejects with an AbortError `endsAfterAbort` ms later, as the plugins are finalised.
  */
 const pipeline = {
+  context: undefined as RunContext | undefined,
   signal: undefined as AbortSignal | undefined,
   startedAt: undefined as number | undefined,
   endedAt: undefined as number | undefined,
@@ -31,10 +45,11 @@ const pipeline = {
   failsAsAborted: false,
 };
 const abortError = () => Object.assign(new Error('The operation was aborted.'), { name: 'AbortError' });
-// The registry the helper hands the pipeline: loading the real one builds the configuration singleton, which no test of this file mocks
+// The registry the helper hands the pipeline, which the fake one never reads: the real one would load every plugin and strategy for nothing
 mock.module('@gekko/plugins/index', () => ({}));
 mock.module('@gekko/core/core/pipeline/pipeline', () => ({
-  gekkoPipeline: ({ signal }: Pick<GekkoPipelineOptions, 'signal'>) => {
+  gekkoPipeline: ({ context, signal }: Pick<GekkoPipelineOptions, 'context' | 'signal'>) => {
+    pipeline.context = context;
     pipeline.signal = signal;
     pipeline.startedAt = Date.now();
     return new Promise<void>((_resolve, reject) => {
@@ -64,7 +79,9 @@ const rejectionMessageOf = async (promise: Promise<unknown>) => ((await rejectio
 describe('realtimeRun.helper', () => {
   beforeEach(() => {
     clearLogs();
+    configuration = realtimeOf(['BTC']);
     Object.assign(pipeline, {
+      context: undefined,
       signal: undefined,
       startedAt: undefined,
       endedAt: undefined,
@@ -130,6 +147,18 @@ describe('realtimeRun.helper', () => {
       expect(pipeline.signal).toBeInstanceOf(AbortSignal);
     });
 
+    it('should hand the pipeline a context built from the configuration as it reads when the run starts', async () => {
+      configuration = realtimeOf(['ETH', 'BTC']);
+      await startRealtimeRun();
+      expect(pipeline.context?.configuration.getWatch().pairs).toEqual([{ symbol: 'ETH/USDT' }, { symbol: 'BTC/USDT' }]);
+    });
+
+    it('should go on the context realtimeRunContext built before the run started', async () => {
+      const prepared = await realtimeRunContext();
+      await startRealtimeRun();
+      expect(pipeline.context).toBe(prepared);
+    });
+
     it('should refuse to start a second run while one is in progress', async () => {
       await startRealtimeRun();
       expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run is in progress already: endRealtimeRun ends it');
@@ -138,6 +167,27 @@ describe('realtimeRun.helper', () => {
     it('should refuse to start a run on the real clock', async () => {
       jest.useRealTimers();
       expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run goes on the fake clock: call startFakeClock() first');
+    });
+  });
+
+  describe('realtimeRunContext', () => {
+    beforeEach(() => startFakeClock());
+
+    it('should hand out the context of the run in progress', async () => {
+      await startRealtimeRun();
+      expect(await realtimeRunContext()).toBe(pipeline.context!);
+    });
+
+    it('should hand out the same context until the run starts', async () => {
+      const prepared = await realtimeRunContext();
+      configuration = realtimeOf(['ETH']);
+      expect(await realtimeRunContext()).toBe(prepared);
+    });
+
+    it('should refuse a configuration the schema refuses, with its issues', async () => {
+      configuration = realtimeOf(['btc']);
+      const failure = await rejectionOf(realtimeRunContext());
+      expect((failure as Error).message).toStartWith('[CONFIGURATION] Invalid configuration object:\n');
     });
   });
 
@@ -226,6 +276,12 @@ describe('realtimeRun.helper', () => {
         expect(jest.isFakeTimers()).toBe(false);
       });
 
+      it('should give the next run a context of its own', async () => {
+        const ended = pipeline.context;
+        await endRealtimeRun();
+        expect(await realtimeRunContext()).not.toBe(ended!);
+      });
+
       it('should drop the fake timers left, as the polls of the orders still open: none for a fake clock or on the real one', async () => {
         // Every 5 ms, so that the interval, were it kept on the real clock, would fire within the 30 ms waited below
         let polls = 0;
@@ -255,6 +311,12 @@ describe('realtimeRun.helper', () => {
         Object.assign(pipeline, behaviour);
         expect(await rejectionMessageOf(endRealtimeRun())).toBe(failure);
       });
+    });
+
+    it('should forget the context realtimeRunContext built for a run that never started', async () => {
+      const prepared = await realtimeRunContext();
+      await endRealtimeRun();
+      expect(await realtimeRunContext()).not.toBe(prepared);
     });
 
     describe('when the run ended by itself', () => {

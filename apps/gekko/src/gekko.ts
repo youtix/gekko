@@ -33,24 +33,28 @@ $$    $$/ $$       |$$ | $$  |$$ | $$  |$$    $$/
  $$$$$$/  $$$$$$$$/ $$/   $$/ $$/   $$/  $$$$$$/
 `;
 
-/** Closes the storage if one was created. A no-op until main() has loaded the injecter, before which none can be. */
+/** Closes the storage if one was created. A no-op until main() has built the context of the run, before which none can be. */
 let closeStorage = () => {};
 
 export const main = async () => {
   let exitCode: number | undefined; // undefined: the run ended normally
   try {
-    // Not imported statically, and neither are the injecter and the pipeline, which import it: `config` is built when its module
-    // is evaluated and throws on an invalid configuration file. From a static import, that error would be thrown before the
-    // process handlers are registered and printed raw by Bun, instead of being reported below like any other failure.
-    const { config } = await import('@gekko/core/configuration/configuration');
+    const path = process.env['GEKKO_CONFIG_FILE_PATH'];
+    if (!path) throw new GekkoError('configuration', 'Missing GEKKO_CONFIG_FILE_PATH environment variable');
+    // Imported here rather than statically, as the pipeline and the plugins are below: a module that throws as it is evaluated (a strategy
+    // of custom/ importing a path that moved, which the plugins load with the built-in ones) would throw before the process handlers are
+    // registered, printed raw by Bun, instead of being reported below like any other failure.
+    const { loadConfigurationFile } = await import('@gekko/core/configuration/configuration.helper');
+    const { createRunContext } = await import('@gekko/core/run/runContext.helper');
+    // The configuration and the services of the run, which the pipeline hands to every plugin: the file read and checked by the schema
+    const context = createRunContext(loadConfigurationFile(path), `file ${path}`);
     // eslint-disable-next-line no-console
-    if (config.showLogo()) console.log(LOGO);
+    if (context.configuration.showLogo()) console.log(LOGO);
     info('gekko', logVersion());
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    closeStorage = () => inject.closeStorage();
+    closeStorage = () => context.services.closeStorage();
     const { gekkoPipeline } = await import('@gekko/core/core/pipeline/pipeline');
     const plugins = await import('@gekko/plugins/index');
-    await gekkoPipeline({ plugins }); // Launch bot
+    await gekkoPipeline({ context, plugins }); // Launch bot
   } catch (e) {
     if (e instanceof ApplicationStopError) {
       // An orderly stop (circuit breaker) is not a crash: exit 0 so that a restart-on-failure supervisor leaves it stopped

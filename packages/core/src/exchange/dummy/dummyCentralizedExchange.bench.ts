@@ -1,23 +1,18 @@
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { bench } from '@gekko/shared/utils/bench/bench.mock';
-import { describe, vi } from 'vitest';
+import { describe } from 'vitest';
 import { DummyCentralizedExchange } from './dummyCentralizedExchange';
 import { DEFAULT_TICKER } from './dummyCentralizedExchange.const';
 import { DummyCentralizedExchangeConfig } from './dummyCentralizedExchange.types';
 
 const SYMBOL: `${string}/${string}` = 'BTC/USDT';
 
-vi.mock('../../configuration/configuration', () => ({
-  config: {
-    getWatch: vi.fn(() => ({
-      pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }],
-      daterange: {
-        start: '2020-01-01T00:00:00Z',
-        end: '2020-01-02T00:00:00Z',
-      },
-    })),
-  },
-}));
+/** The watch section of a backtest of BTC/USDT over the first day of 2020 */
+const watch: Pick<Watch, 'pairs' | 'daterange'> = {
+  pairs: [{ symbol: SYMBOL }],
+  daterange: { start: Date.UTC(2020, 0, 1), end: Date.UTC(2020, 0, 2) },
+};
 
 const defaultMarketData = {
   price: { min: 1, max: 10_000 },
@@ -40,7 +35,7 @@ describe('DummyCentralizedExchange Benchmarks', async () => {
     initialTicker: new Map([[SYMBOL, DEFAULT_TICKER]]),
   };
 
-  const exchange = new DummyCentralizedExchange(exchangeConfig);
+  const exchange = new DummyCentralizedExchange(exchangeConfig, watch);
   const numberOfOrders = 10000;
 
   // Setup orders that won't be filled

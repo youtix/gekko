@@ -11,9 +11,11 @@ import {
 } from '@gekko/shared/models/event.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
+import { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Trader } from '../trader/trader';
 import { PortfolioUpdatesConfig } from '../trader/trader.helper';
 import { TelegramBot } from '@gekko/core/bots/telegram/TelegramBot';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { debug, info, warning } from '@gekko/core/logger/logger';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import { toTimestamp } from '@gekko/shared/utils/date/date.utils';
@@ -27,28 +29,15 @@ import { EVENT_NAMES } from './eventSubscriber.types';
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 // Only records how the plugin builds its bot: each test then puts fakeBot in its place
 vi.mock('@gekko/core/bots/telegram/TelegramBot', () => ({ TelegramBot: vi.fn(function () {}) }));
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const Configuration = vi.fn(function () {
-    return {
-      getWatch: vi.fn(() => ({
-        pairs: [
-          { symbol: 'BTC/USD', timeframe: '1m' },
-          { symbol: 'ETH/USD', timeframe: '1m' },
-        ],
-        assets: ['BTC', 'ETH'],
-        currency: 'USD',
-        mode: 'realtime',
-        warmup: {},
-      })),
-      getStrategy: vi.fn(() => ({})),
-      showLogo: vi.fn(),
-      getPlugins: vi.fn(),
-      getStorage: vi.fn(),
-      getExchange: vi.fn(),
-    };
-  });
-  return { config: new Configuration() };
-});
+
+// A realtime run on BTC and ETH against USD, as the configuration's watch section gives it
+const WATCH: Partial<Watch> = {
+  pairs: [{ symbol: 'BTC/USD' }, { symbol: 'ETH/USD' }],
+  assets: ['BTC', 'ETH'],
+  currency: 'USD',
+  mode: 'realtime',
+  warmup: { candleCount: 0, tickrate: 1000 },
+};
 
 // The orders a real Trader places, in the describe that feeds the subscriber with one: placed at once, they end when the test emits
 // their end, filled as they were created
@@ -96,7 +85,7 @@ describe('EventSubscriber', () => {
   let plugin: EventSubscriber;
 
   beforeEach(() => {
-    plugin = new EventSubscriber({ name: 'EventSubscriber', botUsername: 'bot_name', token: 't' });
+    plugin = new EventSubscriber({ name: 'EventSubscriber', botUsername: 'bot_name', token: 't' }, createPluginContext({ watch: WATCH }));
     plugin['bot'] = fakeBot as any;
   });
 
@@ -111,7 +100,10 @@ describe('EventSubscriber', () => {
     ${'a configured chat id'} | ${-1001234567890}
     ${'no chat id'}           | ${undefined}
   `('builds its bot with $scenario', ({ chatId }) => {
-    const subscriber = new EventSubscriber({ name: 'EventSubscriber', botUsername: 'bot_name', token: 't', chatId });
+    const subscriber = new EventSubscriber(
+      { name: 'EventSubscriber', botUsername: 'bot_name', token: 't', chatId },
+      createPluginContext({ watch: WATCH }),
+    );
     expect(TelegramBot).toHaveBeenLastCalledWith('t', 'bot_name', subscriber['handleCommand'], chatId);
   });
 
@@ -1439,8 +1431,11 @@ help - Show help information`);
     /** The answer to /portfolio at 12:15:10, after the Trader's run of 12:00 to 12:15 */
     const answerAfterRun = async (portfolioUpdates?: PortfolioUpdatesConfig) => {
       vi.useFakeTimers({ toFake: ['Date'], now: at('12:00:00') });
-      const trader = new Trader(portfolioUpdates && { portfolioUpdates });
-      const subscriber = new EventSubscriber({ name: 'EventSubscriber', botUsername: 'bot_name', token: 't' });
+      const trader = new Trader(portfolioUpdates && { portfolioUpdates }, createPluginContext({ watch: WATCH }));
+      const subscriber = new EventSubscriber(
+        { name: 'EventSubscriber', botUsername: 'bot_name', token: 't' },
+        createPluginContext({ watch: WATCH }),
+      );
       // As the pipeline wires the plugins: each event the Trader emits to the handler of its name (see wirePlugins)
       const handlers = subscriber as unknown as Record<string, (payloads: unknown[]) => void>;
       for (const event of Trader.getStaticConfiguration().eventsEmitted) {

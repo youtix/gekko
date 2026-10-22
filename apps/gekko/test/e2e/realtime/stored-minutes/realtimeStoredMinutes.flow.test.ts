@@ -1,4 +1,5 @@
 import type { Candle } from '@gekko/shared/models/candle.types';
+import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { mkdtempSync, rmSync } from 'node:fs';
@@ -6,9 +7,9 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { generateSyntheticCandle } from '../../fixtures/syntheticData';
 import { startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration } from '../../helpers/configuration.helper';
+import { createFlowContext, type RawConfiguration } from '../../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../../helpers/database.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeFor } from '../../helpers/realtimeRun.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeFor, useRealtimeConfiguration } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 
@@ -20,14 +21,15 @@ import { clearLogs, isTextLine, logStore } from '../../mocks/winston.mock';
 // the next test starts (see realtimeRun.helper)
 mockRealtimeModules();
 
-// 2. Mock Configuration: a CandleWriter storing BTC in a database file, which each test creates in a directory of its own
+// 2. Configuration: a CandleWriter storing BTC in a database file, which each test creates in a directory of its own
 let database: string;
-mockConfiguration(() => ({
+const writerOfBtc = (): RawConfiguration => ({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', warmup: { candleCount: 0 } },
   exchange: { name: 'binance' },
   storage: { type: 'sqlite', database },
   plugins: [{ name: 'CandleWriter' }],
-}));
+});
+useRealtimeConfiguration(writerOfBtc);
 
 // --------------------------------------------------------------------------
 // HELPERS
@@ -56,11 +58,9 @@ const readDatabaseFile = () => {
 describe('E2E: Realtime run on stored minutes', () => {
   let directory: string;
 
-  beforeEach(async () => {
+  beforeEach(() => {
     directory = mkdtempSync(join(tmpdir(), 'gekko-e2e-stored-minutes-'));
     database = join(directory, 'candles.sqlite');
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
     clearLogs();
     MockCCXTExchange.reset();
     startFakeClock();
@@ -76,9 +76,9 @@ describe('E2E: Realtime run on stored minutes', () => {
   });
 
   it("Scenario A: a stored made-up minute replaced by a traded one; a stored traded or made-up one kept against the run's", async () => {
-    // A database an earlier run left: 12:00 and 12:03 made up, 12:01 and 12:02 traded, written as they are
-    const { SQLiteStorage } = await import('@gekko/core/storage/sqlite.storage');
-    const earlierRun = new SQLiteStorage(['BTC/USDT']);
+    // A database an earlier run left: 12:00 and 12:03 made up, 12:01 and 12:02 traded, written as they are, through the storage of that
+    // run's own context
+    const earlierRun = (await createFlowContext(writerOfBtc())).services.storage() as SQLiteStorage;
     const stored = {
       twelveOne: { start: minute(12, 1), open: 1001, high: 1011, low: 991, close: 1005, volume: 7 },
       twelveTwo: { start: minute(12, 2), open: 1002, high: 1012, low: 992, close: 1006, volume: 8 },

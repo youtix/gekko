@@ -10,7 +10,8 @@ import type { ConfigurationReader } from './runContext.types';
 /**
  * The services of one run, built from its configuration the first time they are asked for and shared from then on: the exchange the
  * configuration names (CCXTExchange for binance and hyperliquid, the backtest simulator for dummy-cex, the paper exchange for
- * paper-binance) and the SQLite storage of the watched pairs. One instance per run, in its RunContext.
+ * paper-binance) and the SQLite storage of the watched pairs. One instance per run, in its RunContext. Receives the configuration of
+ * the run, and hands each service the sections it reads: its own (the exchange section, the storage section) and the watch section.
  */
 export class Services {
   private storageInstance?: Storage;
@@ -22,8 +23,7 @@ export class Services {
     if (this.storageInstance) return this.storageInstance;
     const storageConfig = this.configuration.getStorage();
     if (!storageConfig?.type) throw new GekkoError('injecter', 'Missing or unknown storage.');
-    const { pairs } = this.configuration.getWatch();
-    this.storageInstance = new SQLiteStorage(pairs.map(({ symbol }) => symbol));
+    this.storageInstance = new SQLiteStorage(storageConfig, this.configuration.getWatch());
     return this.storageInstance;
   }
 
@@ -36,16 +36,17 @@ export class Services {
     if (this.exchangeInstance) return this.exchangeInstance;
     const exchangeConfig = this.configuration.getExchange();
     if (!exchangeConfig?.name) throw new GekkoError('injecter', 'Missing or unknown exchange.');
+    const watch = this.configuration.getWatch();
     switch (exchangeConfig.name) {
       case 'binance':
       case 'hyperliquid':
-        this.exchangeInstance = new CCXTExchange(exchangeConfig);
+        this.exchangeInstance = new CCXTExchange(exchangeConfig, watch);
         break;
       case 'dummy-cex':
-        this.exchangeInstance = new DummyCentralizedExchange(exchangeConfig);
+        this.exchangeInstance = new DummyCentralizedExchange(exchangeConfig, watch);
         break;
       case 'paper-binance':
-        this.exchangeInstance = new PaperTradingBinanceExchange(exchangeConfig);
+        this.exchangeInstance = new PaperTradingBinanceExchange(exchangeConfig, watch);
         break;
       default:
         throw new GekkoError('injecter', 'Missing or unknown exchange.');

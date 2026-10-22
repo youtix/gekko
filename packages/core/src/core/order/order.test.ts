@@ -7,9 +7,11 @@ import {
   ORDER_STATUS_CHANGED_EVENT,
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { OrderState } from '@gekko/shared/models/order.types';
 import { ExchangeNetworkError, OrderNotFound, OrderOutcomeUnknown } from '../../exchange/exchange.error';
 import * as logger from '../../logger/logger';
+import { createRunContextMock } from '../../run/runContext.mock';
 import type { Mock, MockInstance } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Order } from './order';
@@ -21,12 +23,6 @@ vi.mock('../../logger/logger', () => ({
   error: vi.fn(),
 }));
 
-vi.mock('../../configuration/configuration', () => ({
-  config: {
-    getWatch: () => ({ mode: 'backtest', pairs: [{ symbol: 'BTC/USDT' }] }),
-  },
-}));
-
 const fakeExchange = {
   createLimitOrder: vi.fn(),
   createMarketOrder: vi.fn(),
@@ -36,11 +32,12 @@ const fakeExchange = {
   getInterval: vi.fn(() => 50),
 };
 
-vi.mock('../../injecter/injecter', () => ({
-  inject: {
-    exchange: () => fakeExchange,
-  },
-}));
+// The run the orders belong to: the watch and the exchange section mockConfig returns (set in beforeEach), fakeExchange as its exchange
+const mockConfig = { getWatch: vi.fn(), getExchange: vi.fn() };
+const context = createRunContextMock({
+  configuration: mockConfig,
+  services: { exchange: () => fakeExchange as unknown as Exchange },
+});
 
 class TestOrder extends Order {
   public handleCancelOrderSuccess = vi.fn();
@@ -62,7 +59,21 @@ describe('order', () => {
     Object.values(fakeExchange).forEach(value => {
       if (typeof value === 'function') value.mockReset?.();
     });
-    testOrder = new TestOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 'STICKY', 10);
+    mockConfig.getWatch.mockReturnValue({ mode: 'backtest', pairs: [{ symbol: 'BTC/USDT' }] });
+    mockConfig.getExchange.mockReturnValue({ orderSynchInterval: 1000 });
+    testOrder = new TestOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 'STICKY', 10, context);
+  });
+
+  // What the order reads of the context of its run, once, as it is built
+  describe('constructor', () => {
+    it.each`
+      field                   | source                                      | expected
+      ${'exchange'}           | ${'context.services.exchange()'}            | ${fakeExchange}
+      ${'mode'}               | ${'the watch section'}                      | ${'backtest'}
+      ${'orderSynchInterval'} | ${'the orderSynchInterval of the exchange'} | ${1000}
+    `('takes its $field from $source', ({ field, expected }) => {
+      expect(testOrder[field as 'exchange' | 'mode' | 'orderSynchInterval']).toBe(expected);
+    });
   });
 
   it('should have status "initializing" upon creation', () => {
@@ -524,7 +535,7 @@ describe('order', () => {
       ${'filled'}    | ${0.09}
       ${'remaining'} | ${0.01}
     `('reports $expected $field for an order of 0.1 whose two transactions filled 0.02 and 0.07', ({ field, expected }) => {
-      const order = new TestOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 'STICKY', 0.1);
+      const order = new TestOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 'STICKY', 0.1, context);
       const listener = vi.fn();
       order.on(ORDER_CANCELED_EVENT, listener);
       order['applyOrderUpdate']({ id: 'tx1', status: 'open', filled: 0.02, timestamp: 1000 });

@@ -4,8 +4,11 @@ import { Candle } from '@gekko/shared/models/candle.types';
 import { OrderCompletedEvent } from '@gekko/shared/models/event.types';
 import { OrderState } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
+import { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Trader } from './trader';
 import { DummyCentralizedExchange } from '@gekko/core/exchange/dummy/dummyCentralizedExchange';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import type { MockInstance } from 'vitest';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,15 +17,7 @@ import { StickyOrder } from '@gekko/core/core/order/sticky/stickyOrder';
 // A STICKY order in backtest, on the real simulated exchange: nothing polls it there, the exchange settles it through the callback
 // of its creation, and the Trader checks it once per bucket, which moves it once the market has gone past its price.
 
-const { mockConfig, injected } = vi.hoisted(() => ({
-  mockConfig: { getWatch: vi.fn(), getExchange: vi.fn(), getStrategy: vi.fn() },
-  injected: { exchange: undefined as unknown },
-}));
-
-vi.mock('@gekko/core/configuration/configuration', () => ({ config: mockConfig }));
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
-// The orders reach the simulated exchange through the injecter, as in a backtest
-vi.mock('@gekko/core/injecter/injecter', () => ({ inject: { exchange: () => injected.exchange } }));
 
 const SYMBOL: TradingPair = 'BTC/USDT';
 const ORDER_ID = 'ee21e130-48bc-405f-be0c-46e9bf17b52e';
@@ -37,21 +32,24 @@ type Prices = Pick<Candle, 'low' | 'high' | 'close'>;
 const createBucket = (minute: number, { low, high, close }: Prices) =>
   new Map<TradingPair, Candle>([[SYMBOL, { start: START + minute * ONE_MINUTE, open: close, high, low, close, volume: 1 }]]);
 
-/** The simulated exchange of the backtest, which the orders reach through the injecter, once it has settled the first bucket */
-const startBacktest = async (firstBucket: Map<TradingPair, Candle>) => {
-  mockConfig.getWatch.mockReturnValue({
-    mode: 'backtest',
-    pairs: [{ symbol: SYMBOL, timeframe: '1m' }],
-    timeframe: '1m',
-    warmup: { candleCount: 0 },
-    assets: ['BTC'],
-    currency: 'USDT',
-    daterange: { start: START, end: START + 10 * ONE_MINUTE },
-  });
-  mockConfig.getExchange.mockReturnValue({ name: 'dummy-cex', exchangeSynchInterval: 600_000, orderSynchInterval: 1_000 });
-  mockConfig.getStrategy.mockReturnValue({});
+// A backtest of the first ten minutes from START on BTC/USDT at 1m, as the configuration's watch section gives it
+const WATCH: Watch = {
+  mode: 'backtest',
+  pairs: [{ symbol: SYMBOL }],
+  timeframe: '1m',
+  tickrate: 1000,
+  warmup: { candleCount: 0, tickrate: 1000 },
+  assets: ['BTC'],
+  currency: 'USDT',
+  daterange: { start: START, end: START + 10 * ONE_MINUTE },
+};
 
-  const exchange = new DummyCentralizedExchange({
+/**
+ * The simulated exchange of the backtest, once it has settled the first bucket, and the context of the run, its configuration and the
+ * service the orders reach that exchange through
+ */
+const startBacktest = async (firstBucket: Map<TradingPair, Candle>) => {
+  const exchangeConfig = {
     name: 'dummy-cex',
     exchangeSynchInterval: 600_000,
     orderSynchInterval: 1_000,
@@ -61,10 +59,11 @@ const startBacktest = async (firstBucket: Map<TradingPair, Candle>) => {
       ['USDT', 1_000],
     ]),
     initialTicker: new Map(),
-  });
-  injected.exchange = exchange;
+  } as const;
+  const exchange = new DummyCentralizedExchange(exchangeConfig, WATCH);
+  const context = createPluginContext({ watch: WATCH, exchange: exchangeConfig }, { exchange: () => exchange });
   await exchange.processOneMinuteBucket(firstBucket);
-  return exchange;
+  return { exchange, context };
 };
 
 // The order is placed at the close of 100 of the first minute. The next candle never reaches it, and closes past it: the order is
@@ -76,11 +75,12 @@ describe.each`
 `('A STICKY $side order in backtest', ({ side, placedAt, runAway, movedTo, reached }) => {
   const firstBucket = createBucket(0, { low: 99.5, high: 100.5, close: 100 });
   let exchange: DummyCentralizedExchange;
+  let context: RunContext;
   let createLimitOrder: MockInstance<DummyCentralizedExchange['createLimitOrder']>;
   let cancelOrder: MockInstance<DummyCentralizedExchange['cancelOrder']>;
 
   beforeEach(async () => {
-    exchange = await startBacktest(firstBucket);
+    ({ exchange, context } = await startBacktest(firstBucket));
     createLimitOrder = vi.spyOn(exchange, 'createLimitOrder');
     cancelOrder = vi.spyOn(exchange, 'cancelOrder');
   });
@@ -98,7 +98,7 @@ describe.each`
 
     beforeEach(async () => {
       terminalEvents = [];
-      order = new StickyOrder(SYMBOL, ORDER_ID, side, 1);
+      order = new StickyOrder(SYMBOL, ORDER_ID, side, 1, undefined, context);
       TERMINAL_EVENTS.forEach(event => order.on(event, () => terminalEvents.push(event)));
       await order.launch();
       firstTransaction = await createLimitOrder.mock.results[0].value;
@@ -174,7 +174,7 @@ describe.each`
     };
 
     beforeEach(async () => {
-      trader = new Trader();
+      trader = new Trader(undefined, context);
       trader.setExchange(exchange);
       addDeferredEmit = vi.spyOn(trader, 'addDeferredEmit');
       await trader.processInputStream(firstBucket);
@@ -214,10 +214,10 @@ describe.each`
   let terminalEvents: string[];
 
   beforeEach(async () => {
-    const exchange = await startBacktest(createBucket(0, { low: close, high: close, close }));
+    const { exchange, context } = await startBacktest(createBucket(0, { low: close, high: close, close }));
     createLimitOrder = vi.spyOn(exchange, 'createLimitOrder');
     cancelOrder = vi.spyOn(exchange, 'cancelOrder');
-    const order = new StickyOrder(SYMBOL, ORDER_ID, side, 1);
+    const order = new StickyOrder(SYMBOL, ORDER_ID, side, 1, undefined, context);
     terminalEvents = [];
     TERMINAL_EVENTS.forEach(event => order.on(event, () => terminalEvents.push(event)));
     await order.launch();

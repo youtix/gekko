@@ -6,8 +6,8 @@ import type { traderSchema } from '@gekko/schemas/plugins/trader.schema';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { z } from 'zod';
 import { REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil } from '../../helpers/realtimeRun.helper';
+import { paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
+import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, useRealtimeConfiguration } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { clearLogs, findLoggedObject, findTextLines } from '../../mocks/winston.mock';
 
@@ -22,8 +22,8 @@ mockRealtimeModules();
 // environment cannot add the debug lines
 process.env.GEKKO_LOG_LEVEL = 'info';
 
-// 2. Mock Configuration: paper trading of BTC, DebugRealtime buying 1 BTC on the first candle, 12:00, and selling it on the second,
-// unless a run gives the block of another strategy
+// 2. Configuration: paper trading of BTC, DebugRealtime buying 1 BTC on the first candle, 12:00, and selling it on the second, unless a
+// run gives the block of another strategy
 type PaperRun = {
   balance: { BTC: number; USDT: number };
   trader?: Omit<z.input<typeof traderSchema>, 'name'>;
@@ -32,7 +32,7 @@ type PaperRun = {
   strategy?: NonNullable<RawConfiguration['strategy']>;
 };
 let paperRun: PaperRun;
-mockConfiguration(
+useRealtimeConfiguration(
   (): RawConfiguration => ({
     watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', warmup: { candleCount: 0 } },
     exchange: {
@@ -74,8 +74,6 @@ const countSynchronizations = () => findTextLines('Synchronizing data with paper
 
 describe('E2E: Realtime paper trading options', () => {
   beforeEach(async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
     clearLogs();
     MockCCXTExchange.reset();
     // The closes of 12:00 and 12:01, the candles DebugRealtime buys and sells on, then two more

@@ -13,8 +13,14 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock,
 import { isObjectLike } from 'lodash-es';
 import type { z } from 'zod';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, paperExchange } from '../../helpers/configuration.helper';
-import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, runRealtimeUntilEnd } from '../../helpers/realtimeRun.helper';
+import { paperExchange } from '../../helpers/configuration.helper';
+import {
+  endRealtimeRun,
+  mockRealtimeModules,
+  runRealtimeUntil,
+  runRealtimeUntilEnd,
+  useRealtimeConfiguration,
+} from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService, SUBSCRIBE_ALL_UPDATES } from '../../mocks/fetcher.mock';
 import { clearLogs, findLoggedObject, findTextLine, isTextLine, logStore, ORDER_ID } from '../../mocks/winston.mock';
@@ -48,7 +54,7 @@ mockRealtimeModules();
 // GEKKO_LOG_LEVEL lets it through, and the logger is loaded after this, by the pipeline
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
-// 2. Mock Configuration
+// 2. Configuration, which each run reads as it starts (see useRealtimeConfiguration)
 let mockStrategyConfig: typeof DEFAULT_MOCK_STRATEGY_CONFIG | OrderScript | PositionBookSteps = DEFAULT_MOCK_STRATEGY_CONFIG;
 // The options of the Trader: none, unless a run sets some
 let mockTraderOptions: Omit<z.input<typeof traderSchema>, 'name'> = {};
@@ -58,7 +64,7 @@ let mockExchangeSynchInterval: number | undefined;
 let mockBalances: typeof DEFAULT_BALANCES = DEFAULT_BALANCES;
 // None, unless a run sets one: configured after the Trader, whose order events it hears in the same delivery
 let mockAnalyzer: 'RoundTripAnalyzer' | undefined;
-mockConfiguration(() => ({
+useRealtimeConfiguration(() => ({
   watch: {
     mode: 'realtime',
     assets: ['BTC', 'ETH'],
@@ -114,14 +120,12 @@ const laterUpdates = (url: string) => {
 };
 
 /**
- * Sets up a run: the injecter, the logs, the posts and the ccxt mock as at load, the strategy, the Trader, the synchronization periods,
- * the balances and the analyzer of the configuration back to their defaults, no command after the subscription, and the fake clock
- * started at REALTIME_START (see clock.helper). The chat subscribes to every notification with the command the bot's first poll gets,
- * then sends the commands a run sets; an unbound bot first drops what was queued before start-up (offset=-1), here nothing.
+ * Sets up a run: the logs, the posts and the ccxt mock as at load, the strategy, the Trader, the synchronization periods, the balances
+ * and the analyzer of the configuration back to their defaults, no command after the subscription, and the fake clock started at
+ * REALTIME_START (see clock.helper). The chat subscribes to every notification with the command the bot's first poll gets, then sends
+ * the commands a run sets; an unbound bot first drops what was queued before start-up (offset=-1), here nothing.
  */
-const setUpRun = async () => {
-  const { inject } = await import('@gekko/core/injecter/injecter');
-  inject.reset();
+const setUpRun = () => {
   clearLogs();
   MockFetcherService.reset();
   commands = [];
@@ -227,7 +231,7 @@ describe('E2E: Realtime Screener Flow', () => {
   // afterEach would end the run after the first test.
   describe('one run of 5 candles: on each, DebugAdvice advises BTC and ETH, and every order fills on the next candle', () => {
     beforeAll(async () => {
-      await setUpRun();
+      setUpRun();
       // BTC closes at 100 on the candles DebugAdvice sells on, 110 on those it buys on; ETH at 2000 and 2200
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', zigzag(100, 110));
       MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag(2000, 2200));

@@ -1,21 +1,14 @@
 import type { TradingPair } from '@gekko/shared/models/utility.types';
+import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import { Database } from 'bun:sqlite';
 import { omit } from 'lodash-es';
 import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
+import { createFlowContext, rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { clearLogs, logStore } from '../mocks/winston.mock';
-import {
-  candlesClosingAt,
-  minute,
-  mockBacktestModules,
-  rawMarket,
-  runBacktest,
-  unreservedRead,
-  useConfiguration,
-} from './backtestRun.helper';
+import { candlesClosingAt, minute, mockBacktestModules, rawMarket, runBacktest, unreservedRead } from './backtestRun.helper';
 
 mockBacktestModules();
 
@@ -27,18 +20,18 @@ const CANDLES = candlesClosingAt({ 1: 9000, 3: 11000 });
 let directory: string;
 
 /**
- * Writes the candles of BTC into the database file as an import does: through the storage of the importer mode, which creates the file
- * and its table, switches it to WAL, buffers the candles and inserts them when it closes, the WAL copied into the file
+ * Writes the candles of BTC into the database file as an import does: through the storage of the importer mode, built by the services of
+ * an import's context, which creates the file and its table, switches it to WAL, buffers the candles and inserts them when it closes, the
+ * WAL copied into the file
  */
 const importCandles = async (database: string) => {
-  useConfiguration({
+  const { services } = await createFlowContext({
     watch: { mode: 'importer', assets: ['BTC'], currency: 'USDT', daterange: DATERANGE },
     exchange: { name: 'binance' },
     storage: { type: 'sqlite', database },
     plugins: [{ name: 'CandleWriter' }],
   });
-  const { SQLiteStorage } = await import('@gekko/core/storage/sqlite.storage');
-  const storage = new SQLiteStorage(['BTC/USDT']);
+  const storage = services.storage() as SQLiteStorage;
   for (const candle of CANDLES) storage.addBucket(new Map([['BTC/USDT', candle]]));
   storage.close();
 };
@@ -74,10 +67,9 @@ describe('E2E: Backtest on a database file', () => {
     await importCandles(database);
     const imported = readFileSync(database);
 
-    const { failure, balanceReads } = await runBacktest(backtestOn(database, ['BTC']));
+    const { failure, balanceReads, context } = await runBacktest(backtestOn(database, ['BTC']));
     // As main() does once a run is over
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.closeStorage();
+    context?.services.closeStorage();
     const reader = new Database(database, { readonly: true });
     const rowCount = reader.query('SELECT count(*) AS count FROM "CANDLES_BTC_USDT"').get();
     reader.close();

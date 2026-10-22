@@ -19,6 +19,7 @@ import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { CandleBucketBatcher } from '@gekko/core/core/batcher/candleBatcher/candleBucketBatcher';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { error, info } from '@gekko/core/logger/logger';
@@ -35,8 +36,8 @@ export class TradingAdvisor extends Plugin {
   private strategyManager?: StrategyManager;
   private maxConsecutiveErrors: number;
 
-  constructor({ name, strategyName, strategyPath, maxConsecutiveErrors }: TradingAdvisorConfiguration) {
-    super(name);
+  constructor({ name, strategyName, strategyPath, maxConsecutiveErrors }: TradingAdvisorConfiguration, context: RunContext) {
+    super(name, context);
     this.strategyName = strategyName;
     this.strategyPath = strategyPath;
     this.maxConsecutiveErrors = maxConsecutiveErrors;
@@ -50,7 +51,7 @@ export class TradingAdvisor extends Plugin {
 
   // --- BEGIN INTERNALS ---
   private async setUpStrategy() {
-    this.strategyManager = new StrategyManager(this.warmupPeriod, this.maxConsecutiveErrors);
+    this.strategyManager = new StrategyManager(this.context.configuration.getStrategy(), this.warmupPeriod, this.maxConsecutiveErrors);
     await this.strategyManager.createStrategy(this.strategyName, this.strategyPath);
   }
 

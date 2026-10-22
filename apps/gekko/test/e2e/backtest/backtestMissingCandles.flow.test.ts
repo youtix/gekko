@@ -1,7 +1,8 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
 import { beforeEach, describe, expect, it, mock } from 'bun:test';
-import { mockConfiguration, rawDaterange } from '../helpers/configuration.helper';
+import { createFlowContext, rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { MockWinston } from '../mocks/winston.mock';
 
@@ -27,7 +28,7 @@ const marketData = (symbol: string) => ({
   },
 });
 
-mockConfiguration({
+const CONFIGURATION: RawConfiguration = {
   watch: {
     mode: 'backtest',
     assets: ['BTC', 'ETH'],
@@ -45,13 +46,15 @@ mockConfiguration({
   },
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [],
-});
+};
 
 describe('E2E: Backtest on a database with missing candles', () => {
+  /** The context of the run, whose in-memory database the pipeline reads: seeded with the candles of each pair first */
+  let context: RunContext;
+
   beforeEach(async () => {
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
-    const storage = inject.storage() as SQLiteStorage;
+    context = await createFlowContext(CONFIGURATION);
+    const storage = context.services.storage() as SQLiteStorage;
     seedDatabaseWithCandles(storage, 'BTC/USDT', candlesWithout());
     seedDatabaseWithCandles(storage, 'ETH/USDT', candlesWithout(4, 5));
   });
@@ -62,7 +65,7 @@ describe('E2E: Backtest on a database with missing candles', () => {
 
     // Caught rather than asserted through `rejects`, which Bun waits on past the test's timeout: a backtest that froze would hang the
     // suite instead of failing this test
-    const failure = await gekkoPipeline({ plugins }).then(
+    const failure = await gekkoPipeline({ context, plugins }).then(
       () => new Error('The backtest ran'),
       (error: Error) => error,
     );

@@ -13,7 +13,9 @@ export type ServiceProvider = Pick<Services, 'exchange' | 'storage' | 'closeStor
 /**
  * Everything a run reads that no module reads from the environment: its configuration and the services built from it. Built by
  * createRunContext (one per run: the executable's, a Fox worker's, a test's), handed to gekkoPipeline and, by it, to every plugin's
- * constructor and down to the streams, the orders, the exchange and the storage. No module-level singleton holds one.
+ * constructor, and by a plugin to what it builds that reads it (the Trader to its orders). The streams, the exchanges and the storage
+ * receive what they read of it instead: the sections of the configuration, the exchange, the storage. No module-level singleton holds
+ * one.
  */
 export type RunContext = {
   readonly configuration: ConfigurationReader;

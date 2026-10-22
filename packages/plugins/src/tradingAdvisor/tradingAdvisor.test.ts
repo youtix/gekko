@@ -11,7 +11,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { IndicatorNames } from '@gekko/indicators/indicator.types';
 import { StrategyOrder } from '@gekko/shared/models/advice.types';
 import { Candle } from '@gekko/shared/models/candle.types';
-import { Timeframe, Watch } from '@gekko/schemas/configuration/configuration.types';
+import { Configuration, Timeframe, Watch } from '@gekko/schemas/configuration/configuration.types';
 import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import {
   CandleBucket,
@@ -23,7 +23,7 @@ import {
 } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '@gekko/core/configuration/configuration';
+import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { Exchange, MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { error } from '@gekko/core/logger/logger';
 import {
@@ -70,7 +70,6 @@ const { strategy, TestStrategy } = vi.hoisted(() => {
 
 // The real registry answers undefined for a name it does not export, a module mock throws: MissingStrategy plays that name
 vi.mock('@gekko/strategies/index', () => ({ TestStrategy, MissingStrategy: undefined }));
-vi.mock('@gekko/core/configuration/configuration', () => ({ config: { getWatch: vi.fn(), getStrategy: vi.fn() } }));
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -108,6 +107,9 @@ const watch = (timeframe: Timeframe, warmupCandleCount: number): Watch => ({
   mode: 'backtest',
   warmup: { tickrate: 1000, candleCount: warmupCandleCount },
 });
+
+// The strategy block of a configuration, which a strategy without schema gets whole as its parameters
+const STRATEGY_BLOCK = { name: 'TestStrategy', period: 14 };
 
 const MARKET_DATA = new Map<TradingPair, MarketData>([
   ['BTC/USDT', { amount: { min: 0.0001 }, price: { min: 0.01 } }],
@@ -194,6 +196,8 @@ type AdvisorOptions = Partial<{
   maxConsecutiveErrors: number;
   strategyName: string;
   strategyPath: string;
+  /** The strategy block of the configuration, none by default */
+  strategyBlock: Configuration['strategy'];
 }>;
 
 /** What the listeners of an advisor record while flushDeferredEvents broadcasts its queue: the payloads delivered, by event */
@@ -201,10 +205,11 @@ type DeliveryRecorder = { delivered?: Map<string, unknown[]> };
 const recorders = new WeakMap<TradingAdvisor, DeliveryRecorder>();
 
 /**
- * An advisor set up as the pipeline does it: built from its parsed configuration, given the exchange it asks for, and listened to on
- * every event it emits before it queues any, as the pipeline wires the plugins before it starts the stream: an event queued while
- * nobody listens reaches nobody. The listeners record the deferred events flushDeferredEvents broadcasts, not the events emitted at
- * once (the error line of the strategy).
+ * An advisor set up as the pipeline does it: built from its parsed configuration in the context of a backtest on BTC and ETH (see
+ * watch) whose strategy block is the one given, if any, given the exchange it asks for, and listened to on every event it emits before
+ * it queues any, as the pipeline wires the plugins before it starts the stream: an event queued while nobody listens reaches nobody.
+ * The listeners record the deferred events flushDeferredEvents broadcasts, not the events emitted at once (the error line of the
+ * strategy).
  */
 const createAdvisor = ({
   timeframe = '3m',
@@ -212,9 +217,10 @@ const createAdvisor = ({
   maxConsecutiveErrors = 5,
   strategyName = 'TestStrategy',
   strategyPath,
+  strategyBlock,
 }: AdvisorOptions = {}) => {
-  vi.mocked(config.getWatch).mockReturnValue(watch(timeframe, warmupCandleCount));
-  const advisor = new TradingAdvisor({ name: 'TradingAdvisor', strategyName, strategyPath, maxConsecutiveErrors });
+  const context = createPluginContext({ watch: watch(timeframe, warmupCandleCount), strategy: strategyBlock });
+  const advisor = new TradingAdvisor({ name: 'TradingAdvisor', strategyName, strategyPath, maxConsecutiveErrors }, context);
   advisor.setExchange(exchange as Exchange);
   const recorder: DeliveryRecorder = {};
   for (const event of EMITTED_EVENTS) {
@@ -285,7 +291,7 @@ describe('TradingAdvisor', () => {
     // One bucket, before any timeframe candle: a 3m candle takes three
     describe('on the first one-minute bucket', () => {
       beforeEach(async () => {
-        await sendBuckets(await startAdvisor(), 1);
+        await sendBuckets(await startAdvisor({ strategyBlock: STRATEGY_BLOCK }), 1);
       });
 
       it.each`
@@ -293,6 +299,7 @@ describe('TradingAdvisor', () => {
         ${'the market data of every watched pair'} | ${expect.objectContaining({ tools: expect.objectContaining({ marketData: MARKET_DATA }) })}
         ${'the balance fetched from the exchange'} | ${expect.objectContaining({ portfolio: FETCHED_BALANCE })}
         ${'the candles of that bucket'}            | ${expect.objectContaining({ candle: oneMinuteBucket(0) })}
+        ${'the strategy block as its parameters'}  | ${expect.objectContaining({ tools: expect.objectContaining({ strategyParams: STRATEGY_BLOCK }) })}
       `('gives the strategy $given', ({ expected }) => {
         expect(strategy.init).toHaveBeenCalledExactlyOnceWith(expected);
       });
@@ -810,12 +817,12 @@ describe('TradingAdvisor', () => {
 
     // Every plugin keeps the block: the PerformanceReporter makes its run id of it
     it('leaves the strategy block of the configuration as it was', async () => {
-      vi.mocked(config.getStrategy).mockReturnValue({ name: 'TestStrategy', thresholds: { up: 1 } });
+      const strategyBlock = { name: 'TestStrategy', thresholds: { up: 1 } };
       strategy.init.mockImplementation(({ tools }) => {
         (tools.strategyParams as { thresholds: { up: number } }).thresholds.up = 9;
       });
-      await sendBuckets(await startAdvisor(), 3);
-      expect(config.getStrategy()).toEqual({ name: 'TestStrategy', thresholds: { up: 1 } });
+      await sendBuckets(await startAdvisor({ strategyBlock }), 3);
+      expect(strategyBlock).toEqual({ name: 'TestStrategy', thresholds: { up: 1 } });
     });
 
     // Two 3m candles closing at 103 and 106: the ribbon of an EMA(1) and an EMA(2) is ready on the second one

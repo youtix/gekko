@@ -13,6 +13,7 @@ import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import { first, isNil, sortBy, sumBy } from 'lodash-es';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { calculatePerformanceStatistics, pickBenchmarkAsset } from '../analyzer.helper';
 import { analyzerSchema } from '@gekko/schemas/plugins/analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
@@ -73,8 +74,8 @@ export class RoundTripAnalyzer extends Plugin {
   private warmupCompleted: boolean;
   private enableConsoleTable: boolean;
 
-  constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig) {
-    super(PLUGIN_NAME);
+  constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig, context: RunContext) {
+    super(PLUGIN_NAME, context);
 
     this.benchmarkAsset = pickBenchmarkAsset(this.assets, benchmarkAsset, 'roundtrip analyzer');
     this.benchmarkPair = `${this.benchmarkAsset}/${this.currency}`;

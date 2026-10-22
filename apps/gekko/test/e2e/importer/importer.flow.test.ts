@@ -1,11 +1,12 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import type { Candle } from '@gekko/shared/models/candle.types';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
 import { afterEach, beforeEach, describe, expect, it, mock, setSystemTime, spyOn } from 'bun:test';
 import { last } from 'lodash-es';
 import { generateSyntheticCandle } from '../fixtures/syntheticData';
-import { mockConfiguration, rawDaterange } from '../helpers/configuration.helper';
+import { createFlowContext, rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { candleTables, readCandles, seedDatabaseWithCandles } from '../helpers/database.helper';
 import { createCcxtModuleMock, type Gap, MockCCXTExchange, MockNetworkError } from '../mocks/ccxt.mock';
 import { MockWinston, clearLogs, isTextLine, logStore } from '../mocks/winston.mock';
@@ -31,25 +32,26 @@ const HOUR = { start: START, end: minute(60) };
 /** Under load, the first import of a run pays for the cold imports of the whole pipeline */
 const TIMEOUT = 60_000;
 
-// The configuration of the next import, which setUpImport sets: the schema parses it on every read
-let mockAssets = ['BTC'];
-let mockDaterange: Range = HOUR;
+mock.module('ccxt', () => createCcxtModuleMock());
 
-mockConfiguration(() => ({
+/** The configuration of an import of the assets over the range, into an in-memory database */
+const importOf = (assets: string[], daterange: Range): RawConfiguration => ({
   watch: {
     mode: 'importer',
-    assets: mockAssets,
+    assets,
     currency: 'USDT',
-    daterange: rawDaterange(mockDaterange),
+    daterange: rawDaterange(daterange),
     tickrate: 100,
     warmup: { candleCount: 0 },
   },
   exchange: { name: 'binance' }, // Matches key in mocking below
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [{ name: 'CandleWriter' }], // Enable writing to DB
-}));
+});
 
-mock.module('ccxt', () => createCcxtModuleMock());
+// The assets of the scenario and the context of its imports, which setUpImport sets: its storage holds what each import wrote
+let importedAssets: string[];
+let context: RunContext;
 
 // --------------------------------------------------------------------------
 // HELPERS
@@ -59,32 +61,33 @@ mock.module('ccxt', () => createCcxtModuleMock());
 type ImportSetup = { assets: string[]; daterange: Range; gaps?: typeof MockCCXTExchange.simulatedGaps };
 
 /**
- * Sets the configuration of the scenario's import, then builds its storage, which creates the tables of the pairs it is built for. The
- * beforeEach built it before the scenario set its pairs, for the pairs of the scenario before: B found the ETH table A had created, and
- * A failed when it ran after a scenario of BTC alone.
+ * Builds the context of the scenario's imports from its configuration, then its storage, which creates the tables of the pairs it is
+ * built for. The beforeEach built it before the scenario set its pairs, for the pairs of the scenario before: B found the ETH table A had
+ * created, and A failed when it ran after a scenario of BTC alone.
  */
 const setUpImport = async ({ assets, daterange, gaps = [] }: ImportSetup) => {
-  mockAssets = assets;
-  mockDaterange = daterange;
+  importedAssets = assets;
   MockCCXTExchange.simulatedGaps = gaps;
-  const { inject } = await import('@gekko/core/injecter/injecter');
-  inject.reset();
-  const storage = inject.storage() as SQLiteStorage;
+  context = await createFlowContext(importOf(assets, daterange));
+  const storage = context.services.storage() as SQLiteStorage;
   // CandleWriter closes the storage at the end of an import: the candles are inserted, and the in-memory database kept for the assertions
   storage.close = () => storage['flush']();
   return storage;
 };
 
 /**
- * Runs an import, over `daterange` when one is given, into the storage setUpImport built, to its end: the error it failed with, and
- * undefined when it completed. Caught rather than asserted through `rejects`, which Bun waits on past the test's timeout: an import
- * that froze would hang the suite instead of failing its scenario.
+ * Runs an import into the storage setUpImport built, to its end: the error it failed with, and undefined when it completed. Over
+ * `daterange` when one is given, it reads the configuration of that range, with the services of the scenario, whose in-memory database
+ * holds what the imports before it wrote, as the database file of two imports would. Caught rather than asserted through `rejects`,
+ * which Bun waits on past the test's timeout: an import that froze would hang the suite instead of failing its scenario.
  */
 const runImport = async (daterange?: Range) => {
-  if (daterange) mockDaterange = daterange;
+  const run = daterange
+    ? { configuration: (await createFlowContext(importOf(importedAssets, daterange))).configuration, services: context.services }
+    : context;
   const { gekkoPipeline } = await import('@gekko/core/core/pipeline/pipeline');
   const plugins = await import('@gekko/plugins/index');
-  return gekkoPipeline({ plugins }).then(
+  return gekkoPipeline({ context: run, plugins }).then(
     () => undefined,
     (error: Error) => error,
   );

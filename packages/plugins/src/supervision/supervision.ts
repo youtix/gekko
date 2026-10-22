@@ -5,6 +5,7 @@ import { Candle } from '@gekko/shared/models/candle.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { LAST_FLUSH_TIMEOUT } from '@gekko/core/bots/telegram/telegram.const';
 import { TelegramBot } from '@gekko/core/bots/telegram/TelegramBot';
 import { FastCandleBatcher } from '@gekko/core/core/batcher/candleBatcher/fastCandleBatcher';
@@ -64,20 +65,23 @@ export class Supervision extends Plugin {
   /** The candle alert being sent, if any (see checkCandleFreshness). It never rejects. */
   private candleAlertInFlight?: Promise<void>;
 
-  constructor({
-    name,
-    token,
-    botUsername,
-    chatId,
-    cpuThreshold,
-    memoryThreshold,
-    cpuCheckInterval,
-    memoryCheckInterval,
-    logMonitoringInterval,
-    candleCheckInterval,
-    candleStaleThreshold,
-  }: SupervisionConfig) {
-    super(name);
+  constructor(
+    {
+      name,
+      token,
+      botUsername,
+      chatId,
+      cpuThreshold,
+      memoryThreshold,
+      cpuCheckInterval,
+      memoryCheckInterval,
+      logMonitoringInterval,
+      candleCheckInterval,
+      candleStaleThreshold,
+    }: SupervisionConfig,
+    context: RunContext,
+  ) {
+    super(name, context);
     this.bot = new TelegramBot(token, botUsername, this.handleCommand.bind(this), chatId);
     this.cpuThreshold = cpuThreshold;
     this.memoryThreshold = memoryThreshold;

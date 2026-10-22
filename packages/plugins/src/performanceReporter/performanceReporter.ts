@@ -1,6 +1,7 @@
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { PERCENT_ROUNDING } from '../analyzers/analyzer.const';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { lockSync as defaultLockSync } from '@gekko/core/fs/fs.service';
 import { Fs } from '@gekko/shared/models/fs.types';
 import { error } from '@gekko/core/logger/logger';
@@ -86,8 +87,8 @@ export class PerformanceReporter extends Plugin {
 
   private readonly header = this.columns.map(({ header }) => header).join(';');
 
-  constructor({ name, filePath, fileName }: PerformanceReporterConfig) {
-    super(name);
+  constructor({ name, filePath, fileName }: PerformanceReporterConfig, context: RunContext) {
+    super(name, context);
     this.filePath = path.join(filePath, fileName);
   }
 

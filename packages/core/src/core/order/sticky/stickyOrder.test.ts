@@ -8,22 +8,17 @@ import {
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { OrderState } from '@gekko/shared/models/order.types';
 import { ExchangeNetworkError, InvalidOrder, OrderNotFound } from '../../../exchange/exchange.error';
 import * as logger from '../../../logger/logger';
+import { createRunContextMock } from '../../../run/runContext.mock';
 import { assertOrderWithinLimits } from '@gekko/shared/helpers/market/market.helper';
 import { round } from '@gekko/shared/utils/math/round.utils';
 import type { Mock } from 'vitest';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { Transaction } from '../order.types';
 import { StickyOrder } from './stickyOrder';
-
-const { mockConfig } = vi.hoisted(() => ({
-  mockConfig: {
-    getWatch: vi.fn(),
-    getExchange: vi.fn(),
-  },
-}));
 
 const fakeExchange = {
   fetchTicker: vi.fn(),
@@ -33,21 +28,18 @@ const fakeExchange = {
   fetchOrder: vi.fn(),
 };
 
+// The run the orders belong to: the watch and the exchange section mockConfig returns (set by each test), fakeExchange as its exchange
+const mockConfig = { getWatch: vi.fn(), getExchange: vi.fn() };
+const context = createRunContextMock({
+  configuration: mockConfig,
+  services: { exchange: () => fakeExchange as unknown as Exchange },
+});
+
 vi.mock('../../../logger/logger', () => ({
   debug: vi.fn(),
   info: vi.fn(),
   warning: vi.fn(),
   error: vi.fn(),
-}));
-
-vi.mock('../../../configuration/configuration', () => ({
-  config: mockConfig,
-}));
-
-vi.mock('../../../injecter/injecter', () => ({
-  inject: {
-    exchange: () => fakeExchange,
-  },
 }));
 
 type Deferred<T> = { promise: Promise<T>; resolve: (value: T) => void };
@@ -85,7 +77,7 @@ describe('StickyOrder', () => {
   });
 
   const createOrder = async (side: 'BUY' | 'SELL', amount = 5) => {
-    const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', side, amount);
+    const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', side, amount, undefined, context);
     await order.launch();
     await flushAsync();
     return order;
@@ -191,7 +183,7 @@ describe('StickyOrder', () => {
       });
 
       it('keeps polling the order status once the order is placed', async () => {
-        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
 
         await order.launch();
 
@@ -199,7 +191,7 @@ describe('StickyOrder', () => {
       });
 
       it('gives the exchange no callback: the order is polled', async () => {
-        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
 
         await order.launch();
 
@@ -216,7 +208,7 @@ describe('StickyOrder', () => {
 
         beforeEach(() => {
           fakeExchange.fetchTicker.mockRejectedValue(failure);
-          order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+          order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
         });
 
         it('resolves instead of rejecting', async () => {
@@ -661,7 +653,7 @@ describe('StickyOrder', () => {
     });
 
     it('calls orderErrored on OrderNotFound for an order without id', () => {
-      const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+      const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
       const spy = vi.spyOn(order as any, 'orderErrored');
       order['handleCancelOrderError'](new OrderNotFound('Not found'));
       expect(spy).toHaveBeenCalled();
@@ -1022,7 +1014,7 @@ describe('StickyOrder', () => {
     beforeEach(() => {
       vi.useFakeTimers();
       mockConfig.getWatch.mockReturnValue({ mode: 'realtime', pairs: [{ symbol: 'BTC/USDT' }] });
-      order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+      order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
     });
 
     afterEach(() => {
@@ -1293,7 +1285,7 @@ describe('StickyOrder', () => {
     beforeEach(async () => {
       vi.useFakeTimers();
       mockConfig.getWatch.mockReturnValue({ mode: 'realtime', pairs: [{ symbol: 'BTC/USDT' }] });
-      order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+      order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
       terminalEvents = [];
       [ORDER_COMPLETED_EVENT, ORDER_CANCELED_EVENT, ORDER_ERRORED_EVENT].forEach(event =>
         order.on(event, () => terminalEvents.push(event)),
@@ -1427,7 +1419,7 @@ describe('StickyOrder', () => {
       let launch: Promise<void>;
 
       beforeEach(async () => {
-        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5);
+        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 5, undefined, context);
         creation = deferred();
         fakeExchange.createLimitOrder.mockReturnValueOnce(creation.promise);
         launch = order.launch();
@@ -1759,7 +1751,7 @@ describe('StickyOrder', () => {
 
       beforeEach(async () => {
         fakeExchange.createLimitOrder.mockResolvedValue(state('order-1', 'open', { filled: 0, remaining: 1, price: 102 }));
-        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1);
+        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1, undefined, context);
         await order.launch();
       });
 
@@ -1867,7 +1859,7 @@ describe('StickyOrder', () => {
         ${'the order is canceled at creation'} | ${fakeExchange.createLimitOrder}
       `('reports neither a fill nor what is left when $path', async ({ response }) => {
         response.mockResolvedValue(state('order-1', 'canceled'));
-        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1);
+        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1, undefined, context);
         const listener = vi.fn();
         order.on(ORDER_CANCELED_EVENT, listener);
 
@@ -1879,7 +1871,7 @@ describe('StickyOrder', () => {
       });
 
       it('places the whole amount again when a move cancels the order', async () => {
-        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1);
+        const order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 1, undefined, context);
         await order.launch();
         fakeExchange.fetchTicker.mockResolvedValue({ bid: 200, ask: 210 });
 
@@ -1910,7 +1902,7 @@ describe('StickyOrder', () => {
       // while the bid is at 200, and the order moves, the cancelation answered with that fill: what is left is placed again at 202
       const moveAfterEachFill = async (amount: number, fills: number[], minimumAmount = 0.01, minimumCost?: number) => {
         placeAsTheExchange(minimumAmount, minimumCost);
-        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', amount);
+        order = new StickyOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', amount, undefined, context);
         await order.launch();
         fakeExchange.fetchTicker.mockResolvedValue({ bid: 200, ask: 210 });
         for (const filled of fills) {

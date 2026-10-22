@@ -14,6 +14,7 @@ import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { PERCENT_ROUNDING } from '../analyzers/analyzer.const';
 import { Plugin } from '@gekko/core/plugin/plugin';
+import type { RunContext } from '@gekko/core/run/runContext.types';
 import { LAST_FLUSH_TIMEOUT } from '@gekko/core/bots/telegram/telegram.const';
 import { TelegramBot } from '@gekko/core/bots/telegram/TelegramBot';
 import { debug, info, warning } from '@gekko/core/logger/logger';
@@ -53,8 +54,8 @@ export class EventSubscriber extends Plugin {
   /** How many sends have failed in a row since the last one that went through, or the start: see logSendFailure */
   private failedSends = 0;
 
-  constructor({ name, token, botUsername, chatId }: EventSubscriberConfig) {
-    super(name);
+  constructor({ name, token, botUsername, chatId }: EventSubscriberConfig, context: RunContext) {
+    super(name, context);
     bindAll(this, [this.handleCommand.name]);
     this.bot = new TelegramBot(token, botUsername, this.handleCommand, chatId);
   }

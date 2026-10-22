@@ -1,169 +1,79 @@
-import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { Watch } from '@gekko/schemas/configuration/configuration.types';
-import { config } from '../configuration/configuration';
-import { SQLiteStorage } from '../storage/sqlite.storage';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { config } from '../configuration/configuration';
+import { setCurrentRunContext } from '../run/currentRun.helper';
+import { createRunContextMock } from '../run/runContext.mock';
+import { Services } from '../run/services';
+import { Storage } from '../storage/storage';
 import { inject } from './injecter';
 
-const { BinanceExchangeMock, DummyCentralizedExchangeMock, PaperTradingBinanceExchangeMock } = vi.hoisted(() => ({
-  BinanceExchangeMock: vi.fn(function (cfg) {
-    return { exchangeName: cfg.name, type: 'ccxt' };
-  }),
-  DummyCentralizedExchangeMock: vi.fn(function (cfg) {
-    return { exchangeName: cfg.name, type: 'dummy' };
-  }),
-  PaperTradingBinanceExchangeMock: vi.fn(function (cfg) {
-    return { exchangeName: cfg.name, type: 'paper' };
+// The services the transitional `inject` falls back on, for a run started without a context: built by the shim, faked here
+vi.mock('../run/services', () => ({
+  Services: vi.fn(function () {
+    return { exchange: vi.fn(() => 'fallback exchange'), storage: vi.fn(() => 'fallback storage'), closeStorage: vi.fn() };
   }),
 }));
 
-vi.mock('../configuration/configuration', () => ({
-  config: { getStorage: vi.fn(), getExchange: vi.fn(), getWatch: vi.fn() },
-}));
-
-vi.mock('../storage/sqlite.storage', () => ({
-  SQLiteStorage: vi.fn(function () {
-    return { close: vi.fn() };
-  }),
-}));
-
-vi.mock('../exchange/ccxtExchange', () => ({
-  CCXTExchange: BinanceExchangeMock,
-}));
-vi.mock('../exchange/dummy/dummyCentralizedExchange', () => ({
-  DummyCentralizedExchange: DummyCentralizedExchangeMock,
-}));
-vi.mock('../exchange/paper/paperTradingBinanceExchange', () => ({
-  PaperTradingBinanceExchange: PaperTradingBinanceExchangeMock,
-}));
-
-describe('Injecter', () => {
-  const getStorageMock = vi.mocked(config.getStorage);
-  const getExchangeMock = vi.mocked(config.getExchange);
-  const getWatchMock = vi.mocked(config.getWatch);
-
+// The transitional shim of the monorepo wave: it hands out the services of the run in progress, else those it builds from the
+// transitional `config`, and goes with it once no module imports it
+describe('inject', () => {
   beforeEach(() => {
     inject.reset();
-    getStorageMock.mockClear();
-    getExchangeMock.mockClear();
-    getWatchMock.mockClear();
   });
 
-  describe('storage', () => {
-    it('returns cached storage instance on subsequent calls', () => {
-      getStorageMock.mockReturnValue({ type: 'sqlite', database: '' });
-      // Checked against the parsed watch rather than cast to it: cast, it kept fillGaps, an option the schema refuses
-      getWatchMock.mockReturnValue({
-        pairs: [{ symbol: 'BTC/USDT' }],
-        assets: ['BTC'],
-        currency: 'USDT',
-        timeframe: '1h',
-        mode: 'backtest',
-        tickrate: 1000,
-        warmup: { candleCount: 100, tickrate: 1000 },
-      });
-      const first = inject.storage();
-      const second = inject.storage();
-      expect(second).toBe(first);
-      expect(getStorageMock).toHaveBeenCalledTimes(1);
+  describe('during a run the pipeline set the context of', () => {
+    const exchange = {} as Exchange;
+    const storage = {} as Storage;
+    const closeStorage = vi.fn();
+
+    beforeEach(() => {
+      setCurrentRunContext(createRunContextMock({ services: { exchange: () => exchange, storage: () => storage, closeStorage } }));
     });
 
-    it('builds the storage once, with the watched symbols in order', () => {
-      getStorageMock.mockReturnValue({ type: 'sqlite', database: ':memory:' });
-      // Not in alphabetical order, so a sorted list would not match either
-      getWatchMock.mockReturnValue({ pairs: [{ symbol: 'ETH/USDT' }, { symbol: 'BTC/USDT' }] } as unknown as Watch);
-
-      inject.storage();
-      inject.storage();
-
-      expect(SQLiteStorage).toHaveBeenCalledExactlyOnceWith(['ETH/USDT', 'BTC/USDT']);
+    it.each`
+      service       | expected
+      ${'exchange'} | ${exchange}
+      ${'storage'}  | ${storage}
+    `('hands out the $service of the run', ({ service, expected }) => {
+      expect(inject[service as 'exchange' | 'storage']()).toBe(expected);
     });
 
-    it('throws GekkoError if storage config is missing', () => {
-      getStorageMock.mockReturnValue(undefined);
-      expect(() => inject.storage()).toThrow(GekkoError);
-    });
-  });
-
-  describe('closeStorage', () => {
-    it('does not throw when no storage is configured', () => {
-      getStorageMock.mockReturnValue(undefined);
-      expect(() => inject.closeStorage()).not.toThrow();
-    });
-
-    it('does not create a storage when none was created', () => {
-      getStorageMock.mockReturnValue({ type: 'sqlite', database: ':memory:' });
-      getWatchMock.mockReturnValue({ pairs: [{ symbol: 'BTC/USDT' }] } as unknown as Watch);
-
+    it('closes the storage of the run', () => {
       inject.closeStorage();
-
-      expect(SQLiteStorage).not.toHaveBeenCalled();
+      expect(closeStorage).toHaveBeenCalledOnce();
     });
 
-    it('closes the storage that was created, once', () => {
-      getStorageMock.mockReturnValue({ type: 'sqlite', database: '' });
-      getWatchMock.mockReturnValue({ pairs: [{ symbol: 'BTC/USDT' }] } as unknown as Watch);
-      const storage = inject.storage();
+    it('builds no services of its own', () => {
+      inject.exchange();
+      expect(Services).not.toHaveBeenCalled();
+    });
 
-      inject.closeStorage();
-
-      expect(storage.close).toHaveBeenCalledOnce();
+    it('forgets the run once reset', () => {
+      inject.reset();
+      expect(inject.exchange()).toBe('fallback exchange');
     });
   });
 
-  describe('exchange', () => {
-    const testCases = [
-      {
-        name: 'binance',
-        config: { name: 'binance', apiKey: 'k', secret: 's' },
-        mock: BinanceExchangeMock,
-      },
-      {
-        name: 'hyperliquid',
-        config: { name: 'hyperliquid', privateKey: 'pk', walletAddress: 'wa' },
-        mock: BinanceExchangeMock,
-      },
-      {
-        name: 'dummy-cex',
-        config: { name: 'dummy-cex', simulationBalance: {} },
-        mock: DummyCentralizedExchangeMock,
-      },
-      {
-        name: 'paper-binance',
-        config: { name: 'paper-binance', simulationBalance: {} },
-        mock: PaperTradingBinanceExchangeMock,
-      },
-    ];
-
-    it.each(testCases)('instantiates and caches $name exchange', ({ config: cfg, mock }) => {
-      getExchangeMock.mockReturnValue(cfg as any);
-      getWatchMock.mockReturnValue({
-        pairs: [{ symbol: 'BTC/USDT' }],
-        assets: ['BTC'],
-        currency: 'USDT',
-        timeframe: '1h',
-        mode: 'backtest',
-        tickrate: 1000,
-        warmup: { candleCount: 100, tickrate: 1000 },
-      });
-
-      const first = inject.exchange();
-      const second = inject.exchange();
-
-      expect(first).toMatchObject({ exchangeName: cfg.name });
-      expect(second).toBe(first);
-      expect(mock).toHaveBeenCalledTimes(1);
-      expect(mock).toHaveBeenCalledWith(cfg);
+  describe('without a run in progress', () => {
+    it.each`
+      service       | expected
+      ${'exchange'} | ${'fallback exchange'}
+      ${'storage'}  | ${'fallback storage'}
+    `('hands out the $service of the services it builds from the transitional configuration', ({ service, expected }) => {
+      expect(inject[service as 'exchange' | 'storage']()).toBe(expected);
     });
 
-    it('throws GekkoError if exchange config is missing', () => {
-      getExchangeMock.mockReturnValue(undefined as any);
-      expect(() => inject.exchange()).toThrow(GekkoError);
+    it('builds those services from the transitional configuration, once', () => {
+      inject.exchange();
+      inject.storage();
+      expect(Services).toHaveBeenCalledExactlyOnceWith(config);
     });
 
-    it('throws GekkoError for unknown exchange name', () => {
-      getExchangeMock.mockReturnValue({ name: 'unknown' } as any);
-      expect(() => inject.exchange()).toThrow(GekkoError);
+    it('builds them again once reset', () => {
+      inject.exchange();
+      inject.reset();
+      inject.exchange();
+      expect(Services).toHaveBeenCalledTimes(2);
     });
   });
 });

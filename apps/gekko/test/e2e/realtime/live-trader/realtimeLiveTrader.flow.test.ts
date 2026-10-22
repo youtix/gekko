@@ -3,13 +3,14 @@ import type { debugOrderScriptStrategySchema } from '@gekko/schemas/strategies/d
 import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
 import type { z } from 'zod';
 import { startFakeClock } from '../../helpers/clock.helper';
-import { mockConfiguration, type RawConfiguration } from '../../helpers/configuration.helper';
+import type { RawConfiguration } from '../../helpers/configuration.helper';
 import {
   endRealtimeRun,
   mockRealtimeModules,
   runRealtimeUntil,
   runRealtimeUntilEnd,
   startRealtimeRun,
+  useRealtimeConfiguration,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange, type AccountCall, type BalanceEntry, type CreationFault } from '../../mocks/ccxt.mock';
 import { clearLogs, findLoggedObject, findTextLine, numberedTextLines, type TextLine } from '../../mocks/winston.mock';
@@ -33,11 +34,11 @@ type StrategyBlock = NonNullable<RawConfiguration['strategy']>;
 /** Binance's testnet, on which a Trader needs no disclaimer: its orders spend no real money */
 const TESTNET: BinanceExchange = { name: 'binance', sandbox: true, apiKey: 'testnet-key', secret: 'testnet-secret' };
 
-// 2. Mock Configuration
+// 2. Configuration, which each run reads as it starts (see useRealtimeConfiguration)
 let exchange: BinanceExchange;
 let isDisclaimerAccepted: boolean | undefined;
 let strategy: StrategyBlock;
-mockConfiguration(() => ({
+useRealtimeConfiguration(() => ({
   watch: { mode: 'realtime', assets: ['BTC'], currency: 'USDT', timeframe: '1m', tickrate: 100, warmup: { candleCount: 0 } },
   exchange,
   plugins: [{ name: 'TradingAdvisor', strategyName: strategy.name }, { name: 'Trader' }, { name: 'RoundTripAnalyzer' }],
@@ -110,10 +111,7 @@ const BEFORE_FIRST_ORDER_CALLS: AccountCall[] = [...START_UP_CALLS, { method: 'f
 // --------------------------------------------------------------------------
 
 describe('E2E: Realtime Live Trader Flow', () => {
-  beforeEach(async () => {
-    // Reset inject singletons
-    const { inject } = await import('@gekko/core/injecter/injecter');
-    inject.reset();
+  beforeEach(() => {
     clearLogs();
 
     // Reset mocks

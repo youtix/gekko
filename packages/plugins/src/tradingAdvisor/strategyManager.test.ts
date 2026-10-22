@@ -21,7 +21,6 @@ import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '@gekko/core/configuration/configuration';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { debug, error, info, warning } from '@gekko/core/logger/logger';
 import { randomUUID, UUID } from 'node:crypto';
@@ -91,17 +90,8 @@ vi.mock('@gekko/core/logger/logger', () => ({
   error: vi.fn(),
 }));
 
-vi.mock('@gekko/core/configuration/configuration', () => {
-  const Configuration = vi.fn(function () {
-    return {
-      getStrategy: vi.fn(() => ({ each: 1, wait: 0 })),
-      getWatch: vi.fn(() => ({
-        pairs: [{ symbol: 'BTC/USDT', timeframe: '1m' }],
-      })),
-    };
-  });
-  return { config: new Configuration() };
-});
+/** The strategy block of the configuration the managers below are built with, unless a test gives another */
+const STRATEGY_BLOCK = { name: 'DummyStrategy', each: 1, wait: 0 };
 
 /** A text in single quotes, as util.inspect shows a string */
 const quoted = (text: string) => `'${text}'`;
@@ -151,14 +141,13 @@ describe('StrategyManager', () => {
   };
 
   beforeEach(() => {
-    manager = new StrategyManager(1);
+    manager = new StrategyManager(STRATEGY_BLOCK, 1);
     manager.setMarketData(defaultMarketData);
   });
 
   describe('Constructor', () => {
     it('initializes with default empty config if no strategy config exists', () => {
-      vi.mocked(config.getStrategy).mockReturnValueOnce(undefined as any);
-      const m = new StrategyManager(1);
+      const m = new StrategyManager(undefined, 1);
       expect(m['tools'].strategyParams).toEqual({});
     });
   });
@@ -227,8 +216,7 @@ describe('StrategyManager', () => {
     `('of a class from $origin that declares a schema', ({ strategyPath }) => {
       describe('when the strategy block is valid', () => {
         beforeEach(async () => {
-          vi.mocked(config.getStrategy).mockReturnValue({ name: 'SchemaStrategy', period: 14 });
-          manager = new StrategyManager(1);
+          manager = new StrategyManager({ name: 'SchemaStrategy', period: 14 }, 1);
           await manager.createStrategy('SchemaStrategy', strategyPath);
           manager.onOneMinuteBucket(bucket); // Runs init
         });
@@ -255,8 +243,7 @@ describe('StrategyManager', () => {
         ${'the configuration has no strategy block'} | ${undefined}                                          | ${'✖ Invalid input: expected number, received undefined\n  → at period'}
       `('when $problem', ({ block, issues }) => {
         beforeEach(() => {
-          vi.mocked(config.getStrategy).mockReturnValue(block);
-          manager = new StrategyManager(1);
+          manager = new StrategyManager(block, 1);
         });
 
         it('refuses the strategy with a GekkoError', async () => {
@@ -279,8 +266,7 @@ describe('StrategyManager', () => {
 
     describe('of a class that declares no schema', () => {
       beforeEach(async () => {
-        vi.mocked(config.getStrategy).mockReturnValue({ name: 'DummyStrategy', each: 1, wait: 0 });
-        manager = new StrategyManager(1);
+        manager = new StrategyManager({ name: 'DummyStrategy', each: 1, wait: 0 }, 1);
         await manager.createStrategy('DummyStrategy');
         manager.onOneMinuteBucket(bucket); // Runs init
       });
@@ -514,7 +500,7 @@ describe('StrategyManager', () => {
       `(
         'emits the warmup event once, with candle $completing, over that candle and the 3 after it, with a warmup of $warmupPeriod',
         ({ warmupPeriod, completing }) => {
-          const target = new StrategyManager(warmupPeriod);
+          const target = new StrategyManager(STRATEGY_BLOCK, warmupPeriod);
           const warmupListener = vi.fn();
           target.on(STRATEGY_WARMUP_COMPLETED_EVENT, warmupListener);
           sendCandles(target, completing + 3);
@@ -532,7 +518,7 @@ describe('StrategyManager', () => {
         ${5}         | ${9}    | ${6}
         ${0}         | ${3}    | ${1}
       `('counts $age candle(s) of $candles, with a warmup of $warmupPeriod', ({ warmupPeriod, candles, age }) => {
-        const target = new StrategyManager(warmupPeriod);
+        const target = new StrategyManager(STRATEGY_BLOCK, warmupPeriod);
         sendCandles(target, candles);
         expect(target['age']).toBe(age);
       });
@@ -621,7 +607,7 @@ describe('StrategyManager', () => {
           {
             order,
             exchange,
-            tools: expect.objectContaining({ strategyParams: { each: 1, wait: 0 } }),
+            tools: expect.objectContaining({ strategyParams: STRATEGY_BLOCK }),
           },
           { results: 'indicator', symbol: 'BTC/USDT' },
         );
@@ -687,7 +673,7 @@ describe('StrategyManager', () => {
           {
             order,
             exchange,
-            tools: expect.objectContaining({ strategyParams: { each: 1, wait: 0 } }),
+            tools: expect.objectContaining({ strategyParams: STRATEGY_BLOCK }),
           },
           { results: 'indicator', symbol: 'BTC/USDT' },
         );
@@ -708,7 +694,7 @@ describe('StrategyManager', () => {
           {
             order,
             exchange,
-            tools: expect.objectContaining({ strategyParams: { each: 1, wait: 0 } }),
+            tools: expect.objectContaining({ strategyParams: STRATEGY_BLOCK }),
           },
           { results: 'indicator', symbol: 'BTC/USDT' },
         );
@@ -806,7 +792,7 @@ describe('StrategyManager', () => {
           let target: StrategyManager;
 
           beforeEach(() => {
-            target = new StrategyManager(warmupPeriod);
+            target = new StrategyManager(STRATEGY_BLOCK, warmupPeriod);
             for (let candleNumber = 1; candleNumber <= candleCount; candleNumber++) {
               target.onOneMinuteBucket(bucket);
               target.onTimeFrameCandle(bucket);
@@ -835,7 +821,7 @@ describe('StrategyManager', () => {
       `(
         'says nothing at error level when the run ends after $candleCount timeframe candles, with a warmup of $warmupPeriod',
         ({ warmupPeriod, candleCount }) => {
-          const target = new StrategyManager(warmupPeriod);
+          const target = new StrategyManager(STRATEGY_BLOCK, warmupPeriod);
           for (let candleNumber = 1; candleNumber <= candleCount; candleNumber++) {
             target.onOneMinuteBucket(bucket);
             target.onTimeFrameCandle(bucket);
@@ -885,7 +871,7 @@ describe('StrategyManager', () => {
       });
 
       it('never stops the run when maxConsecutiveErrors is -1', () => {
-        expect(firstErrorThatThrows(new StrategyManager(1, -1), 10)).toBeUndefined();
+        expect(firstErrorThatThrows(new StrategyManager(STRATEGY_BLOCK, 1, -1), 10)).toBeUndefined();
       });
 
       // A breaker of two errors in a row: the first goes by, the second trips it. The second is the error of a BUY with a trailing stop,
@@ -908,7 +894,7 @@ describe('StrategyManager', () => {
 
         beforeEach(() => {
           strategy = { onOrderErrored: vi.fn() };
-          target = new StrategyManager(0, 2);
+          target = new StrategyManager(STRATEGY_BLOCK, 0, 2);
           target.setMarketData(defaultMarketData);
           target['strategy'] = strategy as any;
           target.onOneMinuteBucket(bucket);
@@ -1904,7 +1890,7 @@ describe('StrategyManager', () => {
         // refused): its SELL is sent again on each minute at or below the stop price, and the refusals count towards the circuit breaker,
         // which stops the run
         it('stops the run once the SELL of a stop is refused maxConsecutiveErrors times in a row', () => {
-          const target = new StrategyManager(0, 3);
+          const target = new StrategyManager(STRATEGY_BLOCK, 0, 3);
           target.setMarketData(MARKET_MINIMUMS);
           const sells: AdviceOrder[] = [];
           target.on(STRATEGY_CREATE_ORDER_EVENT, (advice: AdviceOrder) => sells.push(advice));
@@ -2693,8 +2679,7 @@ describe('StrategyManager', () => {
 
       beforeEach(async () => {
         block = { name: 'DummyStrategy', each: 1, thresholds: { up: 1 } };
-        vi.mocked(config.getStrategy).mockReturnValue(block);
-        manager = new StrategyManager(1);
+        manager = new StrategyManager(block, 1);
         manager.setMarketData(defaultMarketData);
         await manager.createStrategy('DummyStrategy');
         const strategy: any = manager['strategy'];
@@ -2895,7 +2880,7 @@ describe('StrategyManager', () => {
 
       beforeEach(() => {
         // Without warmup the first candle completes it: its warmup event follows onEachTimeframeCandle
-        manager = new StrategyManager(0);
+        manager = new StrategyManager(STRATEGY_BLOCK, 0);
         manager.setMarketData(defaultMarketData);
         indicator = { onNewCandle: vi.fn(), getResult: vi.fn(() => null) };
         manager['indicators'].push({ indicator, symbol: 'BTC/USDT' } as any);
@@ -3258,7 +3243,7 @@ describe('StrategyManager', () => {
 
       // Only a one-minute bucket sets the clock: the TradingAdvisor always sends one before a timeframe candle
       it('refuses an order while no one-minute bucket has set the clock', () => {
-        const target = new StrategyManager(0);
+        const target = new StrategyManager(STRATEGY_BLOCK, 0);
         target.setMarketData(defaultMarketData);
         target.onTimeFrameCandle(bucket); // A warmup of no candle is over with the first one
         expect(() => target['createOrder']({ symbol: 'BTC/USDT', side: 'BUY', type: 'STICKY', amount: 1 })).toThrow(
@@ -3762,7 +3747,7 @@ describe('StrategyManager', () => {
       let target: StrategyManager;
 
       const createTarget = (warmupPeriod: number) => {
-        target = new StrategyManager(warmupPeriod);
+        target = new StrategyManager(STRATEGY_BLOCK, warmupPeriod);
         target.setMarketData(defaultMarketData);
         target['strategy'] = strategy as any;
         target.on(STRATEGY_CREATE_ORDER_EVENT, listener);
@@ -4239,7 +4224,7 @@ describe('StrategyManager', () => {
         const [[, written]] = vi.mocked(info).mock.calls;
         // The functions are those bindAll made, whatever lodash names them
         expect(String(written).replaceAll(/\[Function: \w+\]/g, '[Function]')).toBe(
-          `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { each: 1, wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function] }`,
+          `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { name: ${quoted('DummyStrategy')}, each: 1, wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function] }`,
         );
       });
 

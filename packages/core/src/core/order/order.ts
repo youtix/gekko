@@ -11,11 +11,10 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { OrderSide, OrderState, OrderType } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../configuration/configuration';
 import { ExchangeNetworkError, OrderOutcomeUnknown } from '../../exchange/exchange.error';
 import { Exchange, OrderSettledCallback } from '@gekko/shared/models/exchange.types';
-import { inject } from '../../injecter/injecter';
 import { debug, error, info, warning } from '../../logger/logger';
+import type { RunContext } from '../../run/runContext.types';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { addPrecise, isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { isNil } from 'lodash-es';
@@ -24,6 +23,12 @@ import EventEmitter from 'node:events';
 import { OrderCancelDetails, OrderCancelEventPayload, OrderErrorEventPayload, OrderStatus, OrderSummary, Transaction } from './order.types';
 import { createOrderSummary, getWeightedAverage } from './order.helper';
 
+/**
+ * An order the Trader places, followed until it ends in one of the terminal events. Built with the context of its run, its last
+ * parameter: the order is placed on the exchange of `context.services.exchange()`, settled by the simulator in a backtest and polled
+ * in realtime (the mode of `context.configuration.getWatch()`), every orderSynchInterval of `context.configuration.getExchange()`.
+ * The order reads them once, as it is built, and keeps no reference to the context.
+ */
 export abstract class Order extends EventEmitter {
   private status: OrderStatus;
   protected readonly transactions: Map<string, Transaction>;
@@ -32,6 +37,8 @@ export abstract class Order extends EventEmitter {
   protected readonly side: OrderSide;
   protected readonly gekkoOrderId: UUID;
   protected readonly mode: Watch['mode'];
+  /** How often the order is polled in realtime: the orderSynchInterval of the exchange section */
+  protected readonly orderSynchInterval: number;
   protected readonly symbol: TradingPair;
   /** The amount ordered, in the asset: less what filled, what a canceled order left, and what a STICKY order places again after a move */
   protected readonly amount: number;
@@ -41,16 +48,17 @@ export abstract class Order extends EventEmitter {
   // Polls the order in realtime (see the subclasses), until it is over (see setStatus)
   protected interval?: Timer;
 
-  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, type: OrderType, amount: number) {
+  constructor(symbol: TradingPair, gekkoOrderId: UUID, side: OrderSide, type: OrderType, amount: number, context: RunContext) {
     super();
-    const { mode } = config.getWatch();
-    this.exchange = inject.exchange();
+    const { configuration, services } = context;
+    this.exchange = services.exchange();
     this.status = 'initializing';
     this.transactions = new Map();
     this.type = type;
     this.side = side;
     this.gekkoOrderId = gekkoOrderId;
-    this.mode = mode;
+    this.mode = configuration.getWatch().mode;
+    this.orderSynchInterval = configuration.getExchange().orderSynchInterval;
     this.symbol = symbol;
     this.amount = amount;
   }
