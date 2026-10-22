@@ -1,5 +1,6 @@
 import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { ApplicationStopError } from '@errors/applicationStop.error';
+import type { RoundTrip } from '@models/event.types';
 import type { LogLevel } from '@models/logLevel.types';
 import type { Tag } from '@models/tag.types';
 import type { traderSchema } from '@plugins/trader/trader.schema';
@@ -7,14 +8,16 @@ import type { DummyCentralizedExchange } from '@services/exchange/dummy/dummyCen
 import { ExchangeNetworkError } from '@services/exchange/exchange.error';
 import type { DebugAdviceParams } from '@strategies/debug/debugAdvice.types';
 import type { debugOrderScriptStrategySchema } from '@strategies/debug/debugOrderScript.schema';
+import type { debugPositionBookStrategySchema } from '@strategies/debug/debugPositionBook.schema';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
+import { isObjectLike } from 'lodash-es';
 import type { z } from 'zod';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { mockConfiguration, paperExchange } from '../../helpers/configuration.helper';
 import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, runRealtimeUntilEnd } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService, SUBSCRIBE_ALL_UPDATES } from '../../mocks/fetcher.mock';
-import { clearLogs, findTextLine, isTextLine, logStore, ORDER_ID } from '../../mocks/winston.mock';
+import { clearLogs, findLoggedObject, findTextLine, isTextLine, logStore, ORDER_ID } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -25,6 +28,15 @@ const DEFAULT_MOCK_STRATEGY_CONFIG: { name: string } & Partial<DebugAdviceParams
 
 /** The block of DebugOrderScript, which creates these orders on the first pair on their candles, counted from 0 */
 type OrderScript = { name: 'DebugOrderScript'; orders: z.input<typeof debugOrderScriptStrategySchema>['orders'] };
+
+/**
+ * The block of DebugPositionBook, which plays these steps on their candles, counted from 0: a MARKET BUY of each pair of a step, sized
+ * by its position book, or an all-in MARKET SELL of each
+ */
+type PositionBookSteps = { name: 'DebugPositionBook'; steps: z.input<typeof debugPositionBookStrategySchema>['steps'] };
+
+/** What the paper account holds at start-up of each asset and of the currency, unless a run sets its own */
+const DEFAULT_BALANCES = { BTC: 100, ETH: 100, USDT: 300000 };
 
 const TELEGRAM_TOKEN = 'test-token';
 const TELEGRAM_USERNAME = 'test-bot';
@@ -37,12 +49,15 @@ mockRealtimeModules();
 process.env.GEKKO_LOG_LEVEL = 'debug';
 
 // 2. Mock Configuration
-let mockStrategyConfig: typeof DEFAULT_MOCK_STRATEGY_CONFIG | OrderScript = DEFAULT_MOCK_STRATEGY_CONFIG;
+let mockStrategyConfig: typeof DEFAULT_MOCK_STRATEGY_CONFIG | OrderScript | PositionBookSteps = DEFAULT_MOCK_STRATEGY_CONFIG;
 // The options of the Trader: none, unless a run sets some
 let mockTraderOptions: Omit<z.input<typeof traderSchema>, 'name'> = {};
 // Left out, the defaults of the schema
 let mockOrderSynchInterval: number | undefined;
 let mockExchangeSynchInterval: number | undefined;
+let mockBalances: typeof DEFAULT_BALANCES = DEFAULT_BALANCES;
+// None, unless a run sets one: configured after the Trader, whose order events it hears in the same delivery
+let mockAnalyzer: 'RoundTripAnalyzer' | undefined;
 mockConfiguration(() => ({
   watch: {
     mode: 'realtime',
@@ -54,9 +69,9 @@ mockConfiguration(() => ({
   },
   exchange: {
     ...paperExchange([
-      { assetName: 'BTC', balance: 100 },
-      { assetName: 'ETH', balance: 100 },
-      { assetName: 'USDT', balance: 300000 },
+      { assetName: 'BTC', balance: mockBalances.BTC },
+      { assetName: 'ETH', balance: mockBalances.ETH },
+      { assetName: 'USDT', balance: mockBalances.USDT },
     ]),
     orderSynchInterval: mockOrderSynchInterval,
     exchangeSynchInterval: mockExchangeSynchInterval,
@@ -64,6 +79,7 @@ mockConfiguration(() => ({
   plugins: [
     { name: 'TradingAdvisor', strategyName: mockStrategyConfig.name },
     { name: 'Trader', ...mockTraderOptions },
+    ...(mockAnalyzer ? [{ name: mockAnalyzer }] : []),
     { name: 'EventSubscriber', token: TELEGRAM_TOKEN, botUsername: TELEGRAM_USERNAME },
   ],
   strategy: mockStrategyConfig,
@@ -98,10 +114,10 @@ const laterUpdates = (url: string) => {
 };
 
 /**
- * Sets up a run: the injecter, the logs, the posts and the ccxt mock as at load, the strategy, the Trader and the synchronization periods
- * of the configuration back to their defaults, no command after the subscription, and the fake clock started at REALTIME_START (see
- * clock.helper). The chat subscribes to every notification with the command the bot's first poll gets, then sends the commands a run
- * sets; an unbound bot first drops what was queued before start-up (offset=-1), here nothing.
+ * Sets up a run: the injecter, the logs, the posts and the ccxt mock as at load, the strategy, the Trader, the synchronization periods,
+ * the balances and the analyzer of the configuration back to their defaults, no command after the subscription, and the fake clock
+ * started at REALTIME_START (see clock.helper). The chat subscribes to every notification with the command the bot's first poll gets,
+ * then sends the commands a run sets; an unbound bot first drops what was queued before start-up (offset=-1), here nothing.
  */
 const setUpRun = async () => {
   const { inject } = await import('@services/injecter/injecter');
@@ -119,6 +135,8 @@ const setUpRun = async () => {
   mockTraderOptions = {};
   mockOrderSynchInterval = undefined;
   mockExchangeSynchInterval = undefined;
+  mockBalances = DEFAULT_BALANCES;
+  mockAnalyzer = undefined;
   startFakeClock();
 };
 
@@ -190,6 +208,10 @@ const linesOf = (tag: Uppercase<Tag>, level: LogLevel) =>
     .filter(isTextLine)
     .filter(line => line._tag === tag && line.level === level)
     .map(({ message }) => message);
+
+/** The round trips the RoundTripAnalyzer logged as they closed, oldest first: numbered from 0, where its report is named */
+const loggedRoundTrips = () =>
+  logStore.map(({ message }) => message).filter(message => isObjectLike(message) && typeof (message as RoundTrip).id === 'number');
 
 /** The reason an order lost on the network at its creation ends with: placed or not, nobody knows */
 const OUTCOME_UNKNOWN =
@@ -760,6 +782,194 @@ describe('E2E: Realtime Screener Flow', () => {
           ),
         },
       ]);
+    });
+
+    it('Scenario J: a round trip on each pair, overlapping: each notified with the P&L of its own fills, numbered as they close', async () => {
+      // DebugPositionBook trades both pairs from 20,000 USDT and nothing else: it buys ETH on candle 0, BTC on candle 1, then sells ETH on
+      // candle 2 and BTC on candle 3. Each MARKET order fills as it is sent, at the close of its candle, the clock of the simulator, and its
+      // end is heard as the next candle arrives, before the plugins process it: ETH is held from 12:01 to 12:03, BTC from 12:02 to 12:04,
+      // two round trips that overlap without coinciding, ETH's closing first.
+      // BTC closes at 1000 on the candles of 12:00 and 12:01, at 1050 on that of 12:02, which falls to 980, then at 1100 and 1200; ETH at
+      // 2000, 2100, 1900, 1950 and 2000. The run processes the candles of 12:00 to 12:04.
+      MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
+        { close: 1000 },
+        { close: 1000 },
+        { close: 1050, low: 980 },
+        { close: 1100 },
+        { close: 1200 },
+      ]);
+      MockCCXTExchange.setPredefinedCandles('ETH/USDT', [
+        { close: 2000 },
+        { close: 2100 },
+        { close: 1900 },
+        { close: 1950 },
+        { close: 2000 },
+      ]);
+      mockBalances = { BTC: 0, ETH: 0, USDT: 20000 };
+      mockAnalyzer = 'RoundTripAnalyzer';
+      mockStrategyConfig = {
+        name: 'DebugPositionBook',
+        steps: [
+          { candle: 0, side: 'BUY', symbols: ['ETH/USDT'] },
+          { candle: 1, side: 'BUY', symbols: ['BTC/USDT'] },
+          { candle: 2, side: 'SELL', symbols: ['ETH/USDT'] },
+          { candle: 3, side: 'SELL', symbols: ['BTC/USDT'] },
+        ],
+      };
+
+      // Until BTC's round trip closes, its SELL heard as the candle of 12:04 arrives, at 12:05:02. The run is then ended through the signal
+      // of its pipeline, the plugins finalised with the AbortError as the failure that stopped it: the RoundTripAnalyzer logs its report.
+      await runRealtimeUntil(() => loggedRoundTrips().length === 2, { maxMinutes: 6 });
+      await endRealtimeRun();
+
+      // The book shares the currency between the pairs not invested. On candle 0 both are flat: ETH's BUY is allocated 50 % of the 20,000
+      // USDT the Trader read, 10,000, which buy 10,000 × 0.95 / 2000 = 4.75 ETH once 5 % is kept back for the fee. On candle 1 BTC is the
+      // last pair not invested: its BUY goes all-in, sized from the 10,490.5 USDT the Trader read after ETH's, 10,490.5 × 0.95 / 1000 =
+      // 9.965975 BTC. Each SELL sells all of its asset. The simulator takes its fee, Binance's 0.1 %, in USDT: on top of the cost of a BUY,
+      // out of what a SELL brings in. 20,000 - 9500 - 9.5 - 9,965.975 - 9.965975 + 9025 - 9.025 + 10,962.5725 - 10.9625725 =
+      // 20,482.1439525 USDT at the end, and nothing else.
+      const at = (minutes: number) => Date.UTC(2024, 0, 1, 12, minutes);
+      expect({
+        notified: postsWith('Roundtrip completed for '),
+        roundTrips: loggedRoundTrips(),
+        report: findLoggedObject(logged => logged.id === 'TRADING REPORT'),
+      }).toEqual({
+        // Each round trip notified as it closes, with the P&L of its own fills and its profit, rounded down as the console rounds it
+        notified: [
+          message(
+            'Roundtrip completed for ETH/USDT',
+            'PnL: -493.525',
+            'Profit: -2.47%',
+            'Duration: 2 minutes',
+            'Entry Price: 2,000',
+            'Exit Price: 1,900',
+            'Max Adverse Excursion: 5%',
+            'At time: 2024-01-01T12:03:00.000Z',
+            '------',
+          ),
+          message(
+            'Roundtrip completed for BTC/USDT',
+            'PnL: 975.6689525',
+            'Profit: 4.76%',
+            'Duration: 2 minutes',
+            'Entry Price: 1,000',
+            'Exit Price: 1,100',
+            'Max Adverse Excursion: 2%',
+            'At time: 2024-01-01T12:04:00.000Z',
+            '------',
+          ),
+        ],
+        // Numbered across the pairs in the order they close: ETH's, which BTC's overlaps, first
+        roundTrips: [
+          {
+            id: 0,
+            symbol: 'ETH/USDT',
+            entryAt: at(1),
+            entryPrice: 2000,
+            // The whole portfolio before its BUY: after it, 4.75 ETH at its price, 2000, and the 10,490.5 USDT left, its fee of 9.5 given
+            // back
+            entryEquity: 20000,
+            exitAt: at(3),
+            exitPrice: 1900,
+            // 4.75 × 2000 and 4.75 × 1900, and the fees of both, 9.5 and 9.025
+            cost: 9500,
+            proceeds: 9025,
+            fees: 18.525,
+            // 9025 - 9500 - 18.525
+            pnl: -493.525,
+            // -493.525 / 20,000 × 100
+            profit: -2.467625,
+            // (2000 - 1900) / 2000 × 100, for the low of 12:02, the last candle it holds: that of 12:01, at 2100, is above its entry
+            maxAdverseExcursion: 5,
+            duration: 2 * ONE_MINUTE,
+          },
+          {
+            id: 1,
+            symbol: 'BTC/USDT',
+            entryAt: at(2),
+            entryPrice: 1000,
+            // The whole portfolio before its BUY: after it, 9.965975 BTC at its price, 1000, the 4.75 ETH at their last close, 2100, and
+            // the 514.559025 USDT left, its fee of 9.965975 given back: 9,965.975 + 9975 + 514.559025 + 9.965975
+            entryEquity: 20465.5,
+            exitAt: at(4),
+            exitPrice: 1100,
+            // 9.965975 × 1000 and 9.965975 × 1100, and the fees of both, 9.965975 and 10.9625725
+            cost: 9965.975,
+            proceeds: 10962.5725,
+            fees: 20.9285475,
+            // 10,962.5725 - 9,965.975 - 20.9285475
+            pnl: 975.6689525,
+            // 975.6689525 / 20,465.5 × 100, to 15 significant digits
+            profit: 4.76738390217683,
+            // (1000 - 980) / 1000 × 100, for the low of 12:02: that of 12:03, at 1100, is above its entry
+            maxAdverseExcursion: 2,
+            duration: 2 * ONE_MINUTE,
+          },
+        ],
+        report: {
+          id: 'TRADING REPORT',
+          // From the close of the candle that completed the warmup, 12:00's, to that of the last candle processed, 12:04's
+          periodStartAt: at(1),
+          periodEndAt: at(5),
+          formattedDuration: '4 minutes',
+          // The whole portfolio, 20,000 USDT at the start and 20,482.1439525 at the end, nothing else held then: the P&L of the two
+          // round trips, 975.6689525 - 493.525
+          netProfit: 482.1439525,
+          // The period is shorter than a day: annualized over a day, 1/366 of the year 2024, 482.1439525 × 366
+          annualizedNetProfit: 176464.686615,
+          // 482.1439525 / 20,000 × 100
+          totalReturnPct: 2.4107197625,
+          // 2.4107197625 × 366
+          annualizedReturnPct: 882.323433075,
+          // BTC's, watched, the benchmark by default: from its close of 12:00, 1000, to that of 12:04, 1200
+          benchmarkAsset: 'BTC',
+          startPrice: 1000,
+          endPrice: 1200,
+          marketReturnPct: 20,
+          // 2.4107197625 - 20
+          alpha: -17.5892802375,
+          // The union of the two round trips, 12:01 to 12:04: 3 of the 4 minutes, where added up they would fill the period
+          exposurePct: 75,
+          // The returns are the profits of the two round trips, -2.467625 and 4.76738390217683: their population standard deviation, half
+          // the gap between them, and the root mean square of the loss over both, 2.467625 / √2
+          volatility: 3.617504451088415,
+          downsideDeviation: 1.7448743709254542,
+          // 877.323433075, the annualized return less the risk-free 5, over each deviation × √(2 returns × 366 a year)
+          sharpeRatio: 8.96386102636035,
+          sortinoRatio: 18.584035448121035,
+          startBalance: 20000,
+          finalBalance: 20482.1439525,
+          // BTC's round trip made money, ETH's lost: 1 of 2
+          winRate: 50,
+          topMAEs: [5, 2],
+          // The four orders, each completed
+          tradeCount: 4,
+          // In the order of watch.assets: each pair's round trip, its two trades, its P&L, and the half of the period it was held
+          pairs: [
+            {
+              symbol: 'BTC/USDT',
+              roundTripCount: 1,
+              winCount: 1,
+              winRate: 100,
+              tradeCount: 2,
+              pnl: 975.6689525,
+              exposurePct: 50,
+              maxAdverseExcursion: 2,
+            },
+            {
+              symbol: 'ETH/USDT',
+              roundTripCount: 1,
+              winCount: 0,
+              winRate: 0,
+              tradeCount: 2,
+              pnl: -493.525,
+              exposurePct: 50,
+              maxAdverseExcursion: 5,
+            },
+          ],
+          interruption: 'The operation was aborted.',
+        },
+      });
     });
   });
 });

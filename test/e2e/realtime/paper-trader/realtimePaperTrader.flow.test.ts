@@ -212,16 +212,20 @@ describe('E2E: Realtime Paper Trader Flow', () => {
           symbol: 'BTC/USDT',
           entryAt: at(1),
           entryPrice: 100,
-          // The pair equity after the BUY, 101 × 100 + 299,899.9 = 309,999.9, its fee given back: the 100 BTC × 100 + 300,000 USDT held
-          // before it
+          // The whole portfolio before the BUY: after it, 101 BTC at its price, 100, and 299,899.9 USDT, 309,999.9, its fee given back:
+          // the 100 BTC × 100 + 300,000 USDT held before it
           entryEquity: 310000,
           exitAt: at(2),
           exitPrice: 110,
-          // 100 × 110 + 300,009.79
-          exitEquity: 311009.79,
-          pnl: 1009.79,
-          // 1,009.79 / 310,000 × 100, to 15 significant digits
-          profit: 0.325738709677419,
+          // From its fills alone: the BUY of 1 BTC at 100, the SELL of 1 BTC at 110, and their fees, 0.1 and 0.11
+          cost: 100,
+          proceeds: 110,
+          fees: 0.21,
+          // 110 - 100 - 0.21: the 100 BTC held before the round trip are not its own. Valued with them, from the pair equity before the
+          // BUY to the pair equity after the SELL, 100 × 110 + 300,009.79, it made 1,009.79, their rise from 100 to 110 included.
+          pnl: 9.79,
+          // 9.79 / 310,000 × 100, to 15 significant digits
+          profit: 0.00315806451612903,
           // (100 - 95) / 100 × 100 for the low on the candle of 12:01
           maxAdverseExcursion: mae,
           duration: ONE_MINUTE,
@@ -233,8 +237,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         periodStartAt: at(1),
         periodEndAt: at(3),
         formattedDuration: '2 minutes',
-        // The pair equity from 310,000 to 312,009.79, 100 × 120 + 300,009.79 at the last close: the 100 BTC held throughout gain 2,000,
-        // the round trip 9.79, 10 less the fees of 0.1 and 0.11
+        // The whole portfolio, from 310,000 to 312,009.79, 100 × 120 + 300,009.79 at the last close: the 100 BTC held throughout gain
+        // 2,000, the round trip 9.79, 10 less the fees of 0.1 and 0.11
         netProfit: 2009.79,
         // The period is shorter than a day: annualized over a day, 1/366 of the year 2024, 2,009.79 × 366
         annualizedNetProfit: 735583.14,
@@ -242,7 +246,8 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         totalReturnPct: 0.64831935483871,
         // 2,009.79 / 310,000 × 100 × 366, to 15 significant digits
         annualizedReturnPct: 237.284883870968,
-        // From the close of 12:00, 100, to that of 12:02, 120
+        // BTC's, the one asset watched: from its close of 12:00, 100, to that of 12:02, 120
+        benchmarkAsset: 'BTC',
         marketReturnPct: 20,
         // 0.64831935483871 - 20
         alpha: -19.35168064516129,
@@ -260,6 +265,19 @@ describe('E2E: Realtime Paper Trader Flow', () => {
         winRate: 100,
         topMAEs: [mae],
         tradeCount: 2,
+        // The one pair: its round trip, a win of 9.79, its two trades and its exposure
+        pairs: [
+          {
+            symbol: 'BTC/USDT',
+            roundTripCount: 1,
+            winCount: 1,
+            winRate: 100,
+            tradeCount: 2,
+            pnl: 9.79,
+            exposurePct: 50,
+            maxAdverseExcursion: mae,
+          },
+        ],
         // The run is ended through the signal of its pipeline: the plugins are finalised with the AbortError as the failure that stopped
         // it. The harness destroyed the last stream without an error instead, and the report read as that of a completed run, an end no
         // realtime run has in production.

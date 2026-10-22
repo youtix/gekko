@@ -168,25 +168,27 @@ describe('E2E: Realtime paper trading options', () => {
     [
       'taker 0.2 %: the MARKET orders pay it',
       { taker: 0.002 },
-      // The BUY of 1 BTC at 100 costs 100.2: 101 BTC and 299,899.8 USDT, worth 309,999.8 at 100, and 310,000 with the fee given back.
-      // The SELL at 110 brings 110 - 0.22 = 109.78: 300,009.58 USDT and 100 BTC, worth 311,009.58 at 110.
-      { exitEquity: 311009.58, pnl: 1009.58, profit: 0.325670967741935 },
+      // The BUY of 1 BTC at 100 pays 0.2: 101 BTC and 299,899.8 USDT, worth 309,999.8 at 100, and 310,000 with the fee given back. The
+      // SELL of 1 BTC at 110 pays 0.22: 110 - 100 - 0.42.
+      { fees: 0.42, pnl: 9.58, profit: 0.00309032258064516 },
     ],
     [
       "maker 0: the taker fee it leaves out stays Binance's, 0.1 %",
       { maker: 0 },
-      // The BUY costs 100.1, the SELL brings 109.89: 300,009.79 USDT and 100 BTC, worth 311,009.79 at 110
-      { exitEquity: 311009.79, pnl: 1009.79, profit: 0.325738709677419 },
+      // The BUY pays 0.1, the SELL 0.11: 110 - 100 - 0.21
+      { fees: 0.21, pnl: 9.79, profit: 0.00315806451612903 },
     ],
-  ])('Scenario B: feeOverride %s', async (_title, feeOverride, { exitEquity, pnl, profit }) => {
+  ])('Scenario B: feeOverride %s', async (_title, feeOverride, { fees, pnl, profit }) => {
     paperRun = { balance: { BTC: 100, USDT: 300000 }, feeOverride, analyzer: 'RoundTripAnalyzer' };
 
     // The round trip exits on the second candle, and is heard as the third arrives, before the plugins process it
     const isRoundTrip = (message: Record<string, any>) => message.id === 0 && 'exitAt' in message;
     await runRealtimeUntil(() => findLoggedObject(isRoundTrip) !== undefined, { maxMinutes: 5 });
 
-    // From the BUY on the candle of 12:00, filled at its end, to the SELL on that of 12:01. The profit is the pnl over the entry equity,
-    // in %, to 15 significant digits. The low of the candle held, 110, is above the entry price: no adverse excursion.
+    // From the BUY on the candle of 12:00, filled at its end, to the SELL on that of 12:01. Its P&L is that of its fills, 1 BTC bought at
+    // 100 and sold at 110, less their fees: the 100 BTC held before it, which that move valued 1,000 higher, are not its own. The profit
+    // is the pnl over the entry equity, the whole portfolio before the BUY, in %, to 15 significant digits. The low of the candle held,
+    // 110, is above the entry price: no adverse excursion.
     expect(findLoggedObject(isRoundTrip)).toEqual({
       id: 0,
       symbol: 'BTC/USDT',
@@ -195,7 +197,9 @@ describe('E2E: Realtime paper trading options', () => {
       entryEquity: 310000,
       exitAt: minute(12, 2),
       exitPrice: 110,
-      exitEquity,
+      cost: 100,
+      proceeds: 110,
+      fees,
       pnl,
       profit,
       maxAdverseExcursion: 0,

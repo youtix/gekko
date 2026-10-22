@@ -271,15 +271,21 @@ describe('E2E: Realtime Live Trader Flow', () => {
           entryAt: at(buyFilledAt),
           entryPrice: 100,
           // After the BUY the account holds 0.999 BTC and 9,900 USDT, 99.9 + 9,900 at 100, and the fee of 0.1 is given back: 10,000,
-          // the equity before the BUY
+          // the whole portfolio before the BUY
           entryEquity: 10000,
           exitAt: at(sellFilledAt),
           exitPrice: 110,
-          // The SELL of 0.999 at 110 brings 109.89 less its fee of 0.10989: 9,900 + 109.78011 USDT, and no BTC is left
-          exitEquity: 10009.78011,
-          pnl: 9.78011,
-          // 9.78011 / 10,000 × 100
-          profit: 0.0978011,
+          // From its fills: the BUY of 1 BTC at 100, the SELL of 0.999 BTC at 110, and their fees as the Trader reports them, in USDT, 0.1
+          // and 0.10989
+          cost: 100,
+          proceeds: 109.89,
+          fees: 0.20989,
+          // 109.89 - 100 - 0.20989. The account made 9.78011, from 10,000 USDT to 10,009.78011: Binance took the BUY's fee in BTC, 0.001
+          // of the 1 bought, which the round trip counts twice, at 0.1 USDT in its fees and again through the 0.999 BTC sold for the 1
+          // bought. The order events do not say which asset a fee was taken in.
+          pnl: 9.68011,
+          // 9.68011 / 10,000 × 100
+          profit: 0.0968011,
           // The one candle it reads, 12:01's, never falls below the entry price of 100
           maxAdverseExcursion: 0,
           duration: ONE_MINUTE,
