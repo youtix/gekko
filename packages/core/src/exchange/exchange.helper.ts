@@ -2,11 +2,12 @@ import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
+import { toPercent } from '@gekko/shared/helpers/finance/stats.helper';
 import { Trade } from '@gekko/shared/models/trade.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { debug } from '../logger/logger';
 import { getRetryDelay } from '@gekko/shared/utils/fetch/fetch.utils';
-import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
+import { addPrecise, isFiniteNumber, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
 import { shiftDecimalPoint } from '@gekko/shared/utils/math/round.utils';
 import { wait } from '@gekko/shared/utils/process/process.utils';
 import ccxt, { Order as CCXTOrder, Trade as CCXTTrade, ConstructorArgs, Exchange, MarketInterface, OHLCV } from 'ccxt';
@@ -185,9 +186,10 @@ const getMarketSide = (currency: string, market: MarketInterface): 'base' | 'quo
  *   currency is that share of the cost of the trade (amount × price), a fee paid in the base currency that share of its amount, the
  *   side told by getMarketSide, which reads a Hyperliquid token as the coin ccxt names the market after.
  * - A fee paid in any other currency, such as BNB with Binance's fee discount, is not converted: its rate is unknown.
- * The percentage is worked out in decimal: the decimal point of the rate or of the fee moved two places, the cost of the trade as its
- * amount and price are written (multiplyPrecise), the one division rounded to 15 significant digits (toSignificantDigits). In binary,
- * a rate of 0.0007 came out at 0.06999999999999999 %, and so did a fee of 0.0007 USDC on 0.01 at 100.
+ * The percentage is worked out in decimal: a rate given has its decimal point moved two places; a fee is put as a percentage of the
+ * cost of the trade, multiplied as its amount and price are written (multiplyPrecise), or of its amount, by toPercent, as the reports
+ * work out theirs (the fee moved two places, the one division rounded to 15 significant digits). In binary, a rate of 0.0007 came out
+ * at 0.06999999999999999 %, and so did a fee of 0.0007 USDC on 0.01 at 100.
  */
 const getFeePercent = (trade: ExecutedTrade, market: MarketInterface): number | undefined => {
   const rate = trade.fee?.rate;
@@ -197,10 +199,9 @@ const getFeePercent = (trade: ExecutedTrade, market: MarketInterface): number | 
   const currency = trade.fee?.currency;
   if (!isFiniteNumber(cost) || !currency) return undefined;
 
-  const percentOf = (whole: number) => toSignificantDigits(shiftDecimalPoint(cost, 2) / whole);
   const side = getMarketSide(currency, market);
-  if (side === 'quote') return percentOf(multiplyPrecise(trade.amount, trade.price));
-  if (side === 'base') return percentOf(trade.amount);
+  if (side === 'quote') return toPercent(cost, multiplyPrecise(trade.amount, trade.price));
+  if (side === 'base') return toPercent(cost, trade.amount);
   return undefined;
 };
 
