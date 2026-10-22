@@ -1,6 +1,8 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Watch } from '@gekko/schemas/configuration/configuration.types';
+import { LockSync } from '@gekko/shared/models/fs.types';
+import { DEFAULT_STALE_MS } from '@gekko/core/fs/fs.service';
 import { PortfolioReport } from '../analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '../analyzers/roundTripAnalyzer/roundTrip.types';
 import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
@@ -9,6 +11,7 @@ import * as fs from 'fs';
 import path from 'path';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { PerformanceReporter } from './performanceReporter';
+import { LOCK_WAIT_MS } from './performanceReporter.const';
 
 vi.mock('fs', () => ({
   mkdirSync: vi.fn(),
@@ -152,7 +155,7 @@ const cellOf = (content: string | undefined, column: string) => {
 
 describe('PerformanceReporter', () => {
   const releaseMock = vi.fn();
-  const lockSyncMock = vi.fn(() => releaseMock);
+  const lockSyncMock = vi.fn<LockSync>(() => releaseMock);
   let reporter: PerformanceReporter;
 
   /** A reporter built while the configuration watches `watch` instead of WATCH. */
@@ -568,15 +571,35 @@ describe('PerformanceReporter', () => {
         expect(recorded).toEqual(calls);
       });
 
-      it('should retry the lock 5 times, 25 to 75 ms apart', () => {
+      /** Writes a row, and returns the options of the lock it took: its retries, and the delay between two attempts */
+      const lockOptions = () => {
         useInMemoryFile(`${HEADER}\n`);
-
         reporter.onPerformanceReport(samplePortfolioReport);
+        const [, { retries = 0, retryDelayMs = 0 } = {}] = lockSyncMock.mock.calls[0];
+        return { retries, retryDelayMs };
+      };
 
-        expect(lockSyncMock).toHaveBeenCalledWith(expectedPath, {
-          retries: 5,
-          retryDelayMs: expect.toSatisfy((delay: number) => Number.isInteger(delay) && delay >= 25 && delay <= 75, 'from 25 to 75 ms'),
-        });
+      it('should lock the file the rows are written to', () => {
+        lockOptions();
+
+        expect(lockSyncMock).toHaveBeenCalledWith(expectedPath, expect.anything());
+      });
+
+      it('should draw the delay between two attempts at the lock from 25 to 75 ms', () => {
+        expect(lockOptions().retryDelayMs).toSatisfy((delay: number) => Number.isInteger(delay) && delay >= 25 && delay <= 75);
+      });
+
+      // Long enough for a lock left behind by a run killed while writing to be taken over, which never loses a row then
+      it('should keep trying for the lock for twice the age at which a lock left behind is taken over', () => {
+        const { retries, retryDelayMs } = lockOptions();
+
+        expect(retries * retryDelayMs).toBeGreaterThanOrEqual(2 * DEFAULT_STALE_MS);
+      });
+
+      it('should stop trying for the lock within a delay of LOCK_WAIT_MS', () => {
+        const { retries, retryDelayMs } = lockOptions();
+
+        expect((retries - 1) * retryDelayMs).toBeLessThan(LOCK_WAIT_MS);
       });
 
       it('should not write the header again when another run wrote it while this one waited for the lock', () => {
@@ -594,7 +617,7 @@ describe('PerformanceReporter', () => {
     });
 
     describe('When the file cannot be locked', () => {
-      const lockError = new Error(`Could not acquire lock for ${expectedPath} after 6 attempts`);
+      const lockError = new Error(`Could not acquire the lock of ${expectedPath} after 1201 attempts`);
 
       beforeEach(() => {
         lockSyncMock.mockImplementation(() => {
@@ -640,6 +663,16 @@ describe('PerformanceReporter', () => {
 
         expect(releaseMock).not.toHaveBeenCalled();
       });
+
+      it('should fail the run at its end, naming the row and the file', async () => {
+        useInMemoryFile(`${HEADER}\n`);
+
+        reporter.onPerformanceReport(sampleTradingReport);
+
+        await expect(reporter['processFinalize']()).rejects.toThrow(
+          `[PERFORMANCE REPORTER] The TRADING REPORT row was not written: ${expectedPath} could not be locked (see the error logged above)`,
+        );
+      });
     });
 
     describe('When the first line of the file is not the expected header', () => {
@@ -673,6 +706,16 @@ describe('PerformanceReporter', () => {
         expect(logError).toHaveBeenCalledWith(
           'performance reporter',
           `report not written: the first line of ${expectedPath} is not the expected header (another column layout or an older version of this plugin): move or rename it`,
+        );
+      });
+
+      it('should fail the run at its end, naming the row and the file', async () => {
+        useInMemoryFile(`${OLD_PORTFOLIO_HEADER}\n`);
+
+        reporter.onPerformanceReport(sampleTradingReport);
+
+        await expect(reporter['processFinalize']()).rejects.toThrow(
+          `[PERFORMANCE REPORTER] The TRADING REPORT row was not written: the first line of ${expectedPath} is not the expected header (see the error logged above)`,
         );
       });
     });
@@ -743,6 +786,20 @@ describe('PerformanceReporter', () => {
         expect(releaseMock).toHaveBeenCalled();
       });
 
+      it('should fail the run at its end on a write error, naming the row and the error', async () => {
+        (fs.existsSync as Mock).mockReturnValue(true);
+        (fs.statSync as Mock).mockReturnValue({ size: 100 });
+        (fs.appendFileSync as Mock).mockImplementation(() => {
+          throw new Error('Disk full');
+        });
+
+        reporter.onPerformanceReport(samplePortfolioReport);
+
+        await expect(reporter['processFinalize']()).rejects.toThrow(
+          '[PERFORMANCE REPORTER] The PORTFOLIO PROFIT REPORT row was not written: the write failed (Disk full) (see the error logged above)',
+        );
+      });
+
       describe('When the first line of the file cannot be read', () => {
         beforeEach(() => {
           (fs.existsSync as Mock).mockReturnValue(true);
@@ -776,6 +833,14 @@ describe('PerformanceReporter', () => {
           reporter.onPerformanceReport(samplePortfolioReport);
 
           expect(releaseMock).toHaveBeenCalledOnce();
+        });
+
+        it('should fail the run at its end, naming the row and the error', async () => {
+          reporter.onPerformanceReport(samplePortfolioReport);
+
+          await expect(reporter['processFinalize']()).rejects.toThrow(
+            'The PORTFOLIO PROFIT REPORT row was not written: the write failed (EIO) (see the error logged above)',
+          );
         });
       });
 
@@ -812,8 +877,64 @@ describe('PerformanceReporter', () => {
   });
 
   describe('#processFinalize', () => {
-    it('should not throw', () => {
-      expect(() => reporter['processFinalize']()).not.toThrow();
+    it('should resolve when no report came', async () => {
+      await expect(reporter['processFinalize']()).resolves.toBeUndefined();
+    });
+
+    it('should resolve when every row was written', async () => {
+      useInMemoryFile();
+      reporter.onPerformanceReport(samplePortfolioReport);
+
+      await expect(reporter['processFinalize']()).resolves.toBeUndefined();
+    });
+
+    describe('When rows were not written', () => {
+      /** Delivers the report as the analyzer's emit does to its first listener: in the pass that finalises the plugins */
+      const deliverInThePass = (deliver: () => void) => deliver();
+
+      /** Delivers the report as the analyzer's emit does to its second listener: a microtask later */
+      const deliverAfterAMicrotask = async (deliver: () => void) => {
+        await Promise.resolve();
+        deliver();
+      };
+
+      beforeEach(() => {
+        lockSyncMock.mockImplementation(() => {
+          throw new Error('held');
+        });
+      });
+
+      it('should fail the run with a GekkoError', async () => {
+        useInMemoryFile(`${HEADER}\n`);
+        reporter.onPerformanceReport(sampleTradingReport);
+
+        await expect(reporter['processFinalize']()).rejects.toBeInstanceOf(GekkoError);
+      });
+
+      it('should name every row not written, each with its cause', async () => {
+        useInMemoryFile(`${HEADER}\n`);
+        reporter.onPerformanceReport(samplePortfolioReport);
+        reporter.onPerformanceReport(sampleTradingReport);
+
+        await expect(reporter['processFinalize']()).rejects.toThrow(
+          `[PERFORMANCE REPORTER] The PORTFOLIO PROFIT REPORT row was not written: ${expectedPath} could not be locked; the TRADING REPORT row was not written: ${expectedPath} could not be locked (see the errors logged above)`,
+        );
+      });
+
+      // The reports come from the analyzers' processFinalize, which the stream starts in the same pass as this one: a reporter listed
+      // before its analyzer is finalised before its report reaches it, and the second of two reporters gets the report a microtask later
+      it.each`
+        delivery                                               | deliver
+        ${'in the pass that finalises it'}                     | ${deliverInThePass}
+        ${'a microtask later, as the second of two reporters'} | ${deliverAfterAMicrotask}
+      `('should see a report delivered $delivery', async ({ deliver }) => {
+        useInMemoryFile(`${HEADER}\n`);
+        const finalization = reporter['processFinalize']();
+
+        await deliver(() => reporter.onPerformanceReport(sampleTradingReport));
+
+        await expect(finalization).rejects.toThrow('The TRADING REPORT row was not written');
+      });
     });
   });
 

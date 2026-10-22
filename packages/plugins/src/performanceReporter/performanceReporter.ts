@@ -5,12 +5,14 @@ import type { RunContext } from '@gekko/core/run/runContext.types';
 import { lockSync as defaultLockSync } from '@gekko/core/fs/fs.service';
 import { Fs } from '@gekko/shared/models/fs.types';
 import { error } from '@gekko/core/logger/logger';
+import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { formatDurationUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
-import { formatPercent, formatRatio, toPlainNumber } from '@gekko/shared/utils/string/string.utils';
+import { formatPercent, formatRatio, pluralize, toPlainNumber } from '@gekko/shared/utils/string/string.utils';
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, statSync, writeFileSync } from 'fs';
-import { random } from 'lodash-es';
+import { random, upperFirst } from 'lodash-es';
+import { setImmediate } from 'node:timers/promises';
 import path from 'path';
-import { BYTE_ORDER_MARK, REPORT_TYPES } from './performanceReporter.const';
+import { BYTE_ORDER_MARK, LOCK_RETRY_DELAY_MS, LOCK_WAIT_MS, REPORT_TYPES } from './performanceReporter.const';
 import { generateRowId, portfolioOnly, toCsvCell, tradingOnly } from './performanceReporter.helper';
 import { performanceReporterSchema } from '@gekko/schemas/plugins/performanceReporter.schema';
 import { CsvColumn, PerformanceReport, PerformanceReporterConfig } from './performanceReporter.types';
@@ -19,6 +21,11 @@ export class PerformanceReporter extends Plugin {
   private readonly filePath: string;
   private readonly label?: string;
   private fs: Fs = { lockSync: defaultLockSync };
+  /**
+   * The reports whose row was not written, with why (the file could not be locked, its first line is not the header, the write failed),
+   * each logged at error level as it happened: the run fails at its end with them (see processFinalize)
+   */
+  private readonly unwrittenReports: { id: PerformanceReport['id']; reason: string }[] = [];
 
   // Both analyzers write to the same file by default, so both report types share one header, and the header and the rows
   // are built from this one list: a metric that a report type does not have leaves its column empty.
@@ -109,12 +116,15 @@ export class PerformanceReporter extends Plugin {
     let release: () => void;
     try {
       // The backtests of a parameter sweep can end together and write the same file: one lock covers writing the header,
-      // checking it and appending the row, so that no other run writes in between. The delay between attempts is random: with
-      // the same delay, the runs that miss the lock together would retry together, and only a few would get it each time.
-      release = this.fs.lockSync(this.filePath, { retries: 5, retryDelayMs: random(25, 75) });
+      // checking it and appending the row, so that no other run writes in between. The attempts go on for LOCK_WAIT_MS, at the
+      // delay drawn for this row (see LOCK_RETRY_DELAY_MS).
+      const retryDelayMs = random(LOCK_RETRY_DELAY_MS.min, LOCK_RETRY_DELAY_MS.max);
+      release = this.fs.lockSync(this.filePath, { retries: Math.ceil(LOCK_WAIT_MS / retryDelayMs), retryDelayMs });
     } catch (err) {
-      // Not thrown: an exception in a plugin ends the run with exit code 1. The failure is described, not interpolated, here as in
-      // the two catches below: a template literal calls String(), which throws for a value without a prototype, from the catch itself.
+      // Not thrown: the analyzer that emits the report catches what a listener throws, logs it and lets the run end as it would
+      // have. Recorded instead, for processFinalize to fail the run. The failure is described, not interpolated, here as in the two
+      // catches below: a template literal calls String(), which throws for a value without a prototype, from the catch itself.
+      this.unwrittenReports.push({ id: report.id, reason: `${this.filePath} could not be locked` });
       error('performance reporter', `report lost: ${report.id} not written, ${this.filePath} could not be locked (${describeError(err)})`);
       return;
     }
@@ -124,12 +134,14 @@ export class PerformanceReporter extends Plugin {
         appendFileSync(this.filePath, row, 'utf8');
       } else {
         // A row appended under another header would sit under columns that mean something else.
+        this.unwrittenReports.push({ id: report.id, reason: `the first line of ${this.filePath} is not the expected header` });
         error(
           'performance reporter',
           `report not written: the first line of ${this.filePath} is not the expected header (another column layout or an older version of this plugin): move or rename it`,
         );
       }
     } catch (err) {
+      this.unwrittenReports.push({ id: report.id, reason: `the write failed (${describeError(err)})` });
       error('performance reporter', `write error: ${describeError(err)}`);
     } finally {
       release();
@@ -174,8 +186,22 @@ export class PerformanceReporter extends Plugin {
   protected processOneMinuteBucket(): void {
     /* noop */
   }
-  protected processFinalize(): void {
-    /* noop */
+
+  /**
+   * Fails the run when a row of it was not written, so that the loss shows in the run's exit code, and under Fox in the outcome of the
+   * variant, rather than in an error line alone. The reports come from the analyzers' own processFinalize: the stream starts every
+   * plugin's in one synchronous pass, in config order, and an analyzer emits before it awaits anything, so a reporter listed after its
+   * analyzer has had its report by now, and one listed before it, or the second of two reporters, gets it a microtask later (the emit
+   * awaits each listener). Checked after the next macrotask, which follows every microtask queued by then.
+   */
+  protected async processFinalize(): Promise<void> {
+    await setImmediate();
+    if (!this.unwrittenReports.length) return;
+    const losses = this.unwrittenReports.map(({ id, reason }) => `the ${id} row was not written: ${reason}`);
+    throw new GekkoError(
+      'performance reporter',
+      `${upperFirst(losses.join('; '))} (see the ${pluralize('error', losses.length)} logged above)`,
+    );
   }
 
   public static getStaticConfiguration() {

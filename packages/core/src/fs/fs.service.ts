@@ -8,7 +8,7 @@ import { LockSync } from '@gekko/shared/models/fs.types';
  * gone. Only a run whose machine slept (or whose clock jumped) for longer inside its critical section is taken for one, and
  * what the lock protects, an append, is small.
  */
-const DEFAULT_STALE_MS = 30 * ONE_SECOND;
+export const DEFAULT_STALE_MS = 30 * ONE_SECOND;
 
 const getLockFileName = (targetPath: string): string => `${targetPath}.lock`;
 
