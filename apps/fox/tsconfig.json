@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "include": [
+    "src/**/*.ts",
+    "vitest.config.ts",
+    "../../packages/shared/src/modules/global.d.ts",
+    "../../packages/indicators/src/**/*.types.ts"
+  ]
+}
