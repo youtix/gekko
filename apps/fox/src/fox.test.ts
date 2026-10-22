@@ -3,7 +3,8 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseCommandLine } from './cli/cli.helper';
 import { generateVariants, loadTemplate, validateVariants } from './configuration/variants.helper';
-import { logFailure, logSummary } from './fox.helper';
+import { logFailure } from '@gekko/core/logger/failure.helper';
+import { logSummary } from './fox.helper';
 import type { FoxOptions, Template, Variant, VariantResult } from './fox.types';
 import { runWorkers } from './worker/worker.helper';
 
@@ -11,7 +12,8 @@ vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), war
 vi.mock('@gekko/shared/utils/process/process.utils', () => ({ logVersion: () => 'Gekko version: v2.0.0, Bun version: v1.3.14' }));
 vi.mock('./cli/cli.helper', () => ({ parseCommandLine: vi.fn() }));
 vi.mock('./configuration/variants.helper', () => ({ generateVariants: vi.fn(), loadTemplate: vi.fn(), validateVariants: vi.fn() }));
-vi.mock('./fox.helper', () => ({ logFailure: vi.fn(), logSummary: vi.fn() }));
+vi.mock('@gekko/core/logger/failure.helper', () => ({ logFailure: vi.fn() }));
+vi.mock('./fox.helper', () => ({ logSummary: vi.fn() }));
 vi.mock('./worker/worker.helper', () => ({ runWorkers: vi.fn() }));
 
 const OPTIONS: FoxOptions = { templatePath: 'dema.yml', maxWorkers: 4, overrides: { strategy: { period: [10, 20] } } };
@@ -150,7 +152,7 @@ describe('main', () => {
     });
 
     it('should report the refusal', () => {
-      expect(logFailure).toHaveBeenCalledExactlyOnceWith(refusal);
+      expect(logFailure).toHaveBeenCalledExactlyOnceWith('fox', refusal);
     });
 
     it('should run no variant', () => {
@@ -173,7 +175,7 @@ describe('main', () => {
     });
     await import('./fox');
 
-    expect(logFailure).toHaveBeenCalledExactlyOnceWith(refusal);
+    expect(logFailure).toHaveBeenCalledExactlyOnceWith('fox', refusal);
   });
 
   describe('on an uncaught exception', () => {
@@ -185,7 +187,7 @@ describe('main', () => {
     });
 
     it('should report it', () => {
-      expect(logFailure).toHaveBeenCalledExactlyOnceWith(exception, 'Uncaught exception: ');
+      expect(logFailure).toHaveBeenCalledExactlyOnceWith('fox', exception, 'Uncaught exception: ');
     });
 
     it('should exit with code 1', () => {
@@ -202,7 +204,7 @@ describe('main', () => {
     });
 
     it('should report it', () => {
-      expect(logFailure).toHaveBeenCalledExactlyOnceWith(reason, 'Unhandled rejection: ');
+      expect(logFailure).toHaveBeenCalledExactlyOnceWith('fox', reason, 'Unhandled rejection: ');
     });
 
     it('should set the exit code to 1', () => {

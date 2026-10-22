@@ -10,7 +10,8 @@ import { info } from '@gekko/core/logger/logger';
 import { logVersion } from '@gekko/shared/utils/process/process.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
 import { parseCommandLine } from './cli/cli.helper';
-import { logFailure, logSummary } from './fox.helper';
+import { logFailure } from '@gekko/core/logger/failure.helper';
+import { logSummary } from './fox.helper';
 
 export const main = async () => {
   try {
@@ -32,7 +33,7 @@ export const main = async () => {
       if (logSummary(await runWorkers(variants, maxWorkers))) process.exitCode = 1;
     }
   } catch (e) {
-    logFailure(e);
+    logFailure('fox', e);
     process.exitCode = 1;
   }
   // Explicitly, once every worker is over: whatever a module loaded for the checks left behind cannot keep Fox alive. With the code set
@@ -41,13 +42,13 @@ export const main = async () => {
 };
 
 const onUncaughtException = (e: unknown) => {
-  logFailure(e, 'Uncaught exception: ');
+  logFailure('fox', e, 'Uncaught exception: ');
   process.exit(1);
 };
 
 // Not fatal, as for the executable: the exit code reports it once the variants are over
 const onUnhandledRejection = (reason: unknown) => {
-  logFailure(reason, 'Unhandled rejection: ');
+  logFailure('fox', reason, 'Unhandled rejection: ');
   process.exitCode = 1;
 };
 

@@ -15,11 +15,10 @@
 */
 
 import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
-import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { debug, error, info, warning } from '@gekko/core/logger/logger';
+import { logFailure } from '@gekko/core/logger/failure.helper';
+import { error, info, warning } from '@gekko/core/logger/logger';
 import { logVersion } from '@gekko/shared/utils/process/process.utils';
-import { isNil } from 'lodash-es';
 
 const LOGO = `
   ______   ________  __    __  __    __   ______
@@ -63,7 +62,7 @@ export const main = async () => {
       // have rejected along the way, and exit 1 would get the bot restarted by a restart-on-failure supervisor, its counter reset
       exitCode = 0;
     } else {
-      logFailure(e);
+      logFailure('gekko', e);
       exitCode = 1;
     }
   } finally {
@@ -77,38 +76,6 @@ export const main = async () => {
   if (exitCode !== undefined) process.exit(exitCode);
 };
 
-// "<name>: <message>", then the frames. A stack usually starts with that line, but not always: in Bun, a DOMException's stack
-// (the DataCloneError of structuredClone, for one) is frames only.
-const describeStack = (e: Error) => {
-  const header = String(e);
-  return e.stack?.startsWith(header) ? e.stack : [header, e.stack].filter(Boolean).join('\n');
-};
-
-// An Error in full, any other value as describeError writes it
-const describeValue = (value: unknown) => (value instanceof Error ? describeStack(value) : describeError(value));
-
-// Down to the root cause (inspect() cuts a chain after two causes), stopping at a cause already listed: a chain can loop
-const describeCauses = (failure: unknown) => {
-  const chain = [failure];
-  let link = failure;
-  while (link instanceof Error && !isNil(link.cause) && !chain.includes(link.cause)) {
-    link = link.cause;
-    chain.push(link);
-  }
-  return chain.slice(1).map(cause => `Caused by: ${describeValue(cause)}`);
-};
-
-/**
- * How main() and the process handlers report a failure. A GekkoError is expected and its one-line message explains it: the
- * message at error level, the stack at debug level. Anything else is unexpected: name, message and stack at error level. Causes,
- * whatever the failure, follow in full on the error-level line.
- */
-const logFailure = (failure: unknown, prefix = '') => {
-  const isExpected = failure instanceof GekkoError;
-  error('gekko', [`${prefix}${isExpected ? failure.message : describeValue(failure)}`, ...describeCauses(failure)].join('\n'));
-  if (isExpected) debug('gekko', `${prefix}${describeStack(failure)}`);
-};
-
 /**
  * Closes the storage and logs its failure: when its last insert fails, the one that names the buffered minutes the database did not
  * get, for an import of their range to write them (SQLiteStorage.close). False when the close failed.
@@ -118,13 +85,13 @@ const closeStorageLoggingFailure = () => {
     closeStorage();
     return true;
   } catch (e) {
-    logFailure(e, 'Could not close the storage: ');
+    logFailure('gekko', e, 'Could not close the storage: ');
     return false;
   }
 };
 
 const onUncaughtException = (e: unknown) => {
-  logFailure(e, 'Uncaught exception: ');
+  logFailure('gekko', e, 'Uncaught exception: ');
   try {
     closeStorageLoggingFailure(); // Its failure, which can name minutes the database did not get, was swallowed without a line
   } catch {
@@ -136,7 +103,7 @@ const onUncaughtException = (e: unknown) => {
 // Not fatal: timer-driven tasks (realtime candle fetch, Trader sync, order polling, Telegram sends) float promises that
 // reject on transient network failures, and a network blip must not kill a live bot. The exit code still reports it.
 const onUnhandledRejection = (reason: unknown) => {
-  logFailure(reason, 'Unhandled rejection: ');
+  logFailure('gekko', reason, 'Unhandled rejection: ');
   process.exitCode = 1;
 };
 
