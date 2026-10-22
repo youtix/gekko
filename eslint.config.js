@@ -1,14 +1,16 @@
 import pluginJs from '@eslint/js';
 import importPlugin from 'eslint-plugin-import';
 import globals from 'globals';
+import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import tseslint from 'typescript-eslint';
 
 /**
  * The workspaces and what each may import (CLAUDE.md, Project): the graph is one way, from an app down to @gekko/shared. The
  * e2e suite of apps/gekko reads the schemas and the fixture strategies' types, which its executable does not: its test directory
- * may import every package, its sources the three the executable is composed of. Exported for scripts/tooling/dependencies.test.ts,
- * which holds each workspace's package.json to it.
+ * may import those two beside the three packages the executable is composed of, which its sources import. Exported for
+ * scripts/tooling/dependencies.test.ts, which holds each workspace's package.json to it: a workspace lists the workspaces its zones
+ * let its files import, and no other.
  */
 export const DEPENDENCIES = {
   'packages/shared': [],
@@ -18,26 +20,25 @@ export const DEPENDENCIES = {
   'packages/core': ['packages/shared', 'packages/schemas'],
   'packages/plugins': ['packages/shared', 'packages/schemas', 'packages/indicators', 'packages/strategies', 'packages/core'],
   'apps/gekko/src': ['packages/shared', 'packages/core', 'packages/plugins'],
-  'apps/gekko/test': [
-    'packages/shared',
-    'packages/schemas',
-    'packages/indicators',
-    'packages/strategies',
-    'packages/core',
-    'packages/plugins',
-  ],
+  'apps/gekko/test': ['packages/shared', 'packages/schemas', 'packages/strategies', 'packages/core', 'packages/plugins'],
   'apps/fox': ['packages/shared', 'packages/schemas', 'packages/strategies', 'packages/core', 'packages/plugins'],
 };
-const WORKSPACES = [
-  'packages/shared',
-  'packages/schemas',
-  'packages/indicators',
-  'packages/strategies',
-  'packages/core',
-  'packages/plugins',
-  'apps/gekko',
-  'apps/fox',
-];
+/**
+ * The directories of the workspaces, sorted, as Bun and turbo find them (and scripts/tooling/workspaces.helper.ts): each directory
+ * holding a package.json that a pattern of the root package.json's `workspaces` names, `packages/*` and `apps/*` naming every
+ * directory under theirs. Each is the `from` of a zone for every workspace that may not import it: written by hand, the list let
+ * any workspace import one it left out. Exported for scripts/tooling/dependencies.test.ts.
+ */
+export const WORKSPACES = (JSON.parse(readFileSync(path.join(import.meta.dirname, 'package.json'), 'utf8')).workspaces ?? [])
+  .flatMap(pattern => {
+    if (!pattern.endsWith('/*')) return [pattern];
+    const parent = pattern.slice(0, -'/*'.length);
+    return readdirSync(path.join(import.meta.dirname, parent), { withFileTypes: true })
+      .filter(entry => entry.isDirectory())
+      .map(entry => `${parent}/${entry.name}`);
+  })
+  .filter(directory => existsSync(path.join(import.meta.dirname, directory, 'package.json')))
+  .sort();
 const workspaceOf = target => WORKSPACES.find(workspace => target === workspace || target.startsWith(`${workspace}/`));
 // One zone per workspace and forbidden source: a file of `target` importing a file of `from` is an error naming both
 const boundaryZones = Object.entries(DEPENDENCIES).flatMap(([target, allowed]) =>

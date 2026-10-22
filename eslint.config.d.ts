@@ -8,5 +8,8 @@ import type { Linter } from 'eslint';
  */
 export const DEPENDENCIES: Record<string, readonly string[]>;
 
+/** The directories of the workspaces, sorted, found from the root package.json's `workspaces` as eslint.config.js finds them */
+export const WORKSPACES: readonly string[];
+
 declare const config: Linter.Config[];
 export default config;

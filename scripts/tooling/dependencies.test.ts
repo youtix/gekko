@@ -3,13 +3,16 @@ import { isBuiltin } from 'node:module';
 import path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
-import { DEPENDENCIES } from '../../eslint.config.js';
+import { DEPENDENCIES, WORKSPACES as LINTED_WORKSPACES } from '../../eslint.config.js';
 import { readPackageJson, ROOT, workspaceDirectories } from './workspaces.helper';
 
 // The graph of the workspaces is written twice: each workspace's package.json names, as `workspace:*` dependencies, the workspaces its
 // sources and its tests import, and DEPENDENCIES of eslint.config.js names, for each workspace (apps/gekko's sources and its tests
 // apart, the tests reading more), those its files may import, ESLint refusing an import of any other. The rows hold the two to each
-// other: a workspace lists nothing ESLint refuses, and everything ESLint lets its sources import.
+// other: a workspace lists exactly the workspaces ESLint lets its files import, so that a zone wider than the listing fails as a
+// listing wider than the zone does (apps/gekko's tests were let import the indicators, which the app neither imports nor lists). They
+// also hold the zones to the workspaces Bun finds: eslint.config.js finds the same, each the `from` of the zones of the workspaces
+// that may not import it, and each owns a zone, without which its files could import any workspace.
 const GRAPH: Record<string, readonly string[]> = DEPENDENCIES;
 const WORKSPACES = workspaceDirectories();
 const DIRECTORY_BY_NAME = Object.fromEntries(WORKSPACES.map(directory => [readPackageJson(directory).name, directory]));
@@ -33,9 +36,6 @@ const allowed = (directory: string) =>
         .flatMap(([, imports]) => imports),
     ),
   ].sort();
-
-/** The workspaces ESLint lets the sources of a workspace import: the zone of the workspace, or of its src/ */
-const allowedToSources = (directory: string) => [...(GRAPH[directory] ?? GRAPH[`${directory}/src`] ?? [])].sort();
 
 // The root's own modules, the configurations at the root and the files of scripts/, import packages from the root's node_modules, where
 // Bun's hoisted linker also puts what the workspaces declare: a package the root imported without declaring it resolved there, until an
@@ -78,12 +78,16 @@ describe('dependencies', () => {
     expect(imports.filter(directory => !WORKSPACES.includes(directory))).toEqual([]);
   });
 
-  it.each(WORKSPACES)('should list in %s/package.json only workspaces ESLint lets its files import', workspace => {
-    expect(allowed(workspace)).toEqual(expect.arrayContaining(listed(workspace)));
+  it.each(WORKSPACES)('should list in %s/package.json the workspaces ESLint lets its files import, and no other', workspace => {
+    expect(listed(workspace)).toEqual(allowed(workspace));
   });
 
-  it.each(WORKSPACES)('should list in %s/package.json every workspace ESLint lets its sources import', workspace => {
-    expect(listed(workspace)).toEqual(expect.arrayContaining(allowedToSources(workspace)));
+  it('should find in eslint.config.js the workspaces Bun finds', () => {
+    expect(LINTED_WORKSPACES).toEqual(WORKSPACES);
+  });
+
+  it.each(WORKSPACES)('should give %s a zone in eslint.config.js', workspace => {
+    expect(Object.keys(GRAPH).some(target => workspaceOf(target) === workspace)).toBe(true);
   });
 
   it.each(ROOT_FILES)('should declare in the root package.json every package %s imports', file => {
