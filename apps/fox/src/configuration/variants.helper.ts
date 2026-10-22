@@ -1,4 +1,5 @@
 import { loadConfigurationFile } from '@gekko/core/configuration/configuration.helper';
+import { PluginModeNotSupportedError, PluginsEmitSameEventError, UnknownPluginError } from '@gekko/core/core/pipeline/pipeline.error';
 import type { PluginRegistry } from '@gekko/core/core/pipeline/pipeline.types';
 import { warning } from '@gekko/core/logger/logger';
 import * as pluginRegistry from '@gekko/plugins/index';
@@ -189,38 +190,36 @@ const strategyIssues = (plugins: Configuration['plugins'], strategy: Configurati
 /** The events a plugin entry's plugin emits: none for a name the registry does not hold, which pluginIssues refuses */
 const eventsOf = ({ name }: { name: string }) => (Object.hasOwn(PLUGINS, name) ? PLUGINS[name].getStaticConfiguration().eventsEmitted : []);
 
+/** A refusal of the pipeline as an issue at `path`: its text without the pipeline's tag, which Fox's own replaces */
+const issueOf = ({ untaggedMessage }: GekkoError, path: PropertyKey[]): Issue => ({ message: untaggedMessage, path });
+
 /**
- * A plugin entry checked as the pipeline checks it: its name, which the registry must hold, the modes of its plugin, which must
- * include backtest (checkPluginsModesCompatibility: the CandleWriter, the EventSubscriber and Supervision do not), its options by the
- * schema of its plugin, and the events its plugin emits, which no plugin of an entry before it may emit (checkPluginsDuplicateEvents:
- * the PortfolioAnalyzer and the RoundTripAnalyzer both emit performanceReport).
+ * A plugin entry checked as the pipeline checks it, refused with the pipeline's own errors, at the path of its name: its name, which
+ * the registry must hold (UnknownPluginError), the modes of its plugin, which must include backtest (PluginModeNotSupportedError: the
+ * CandleWriter, the EventSubscriber and Supervision do not), its options by the schema of its plugin, and the events its plugin emits,
+ * which no plugin of an entry before it may emit (PluginsEmitSameEventError, naming the index of that entry: the PortfolioAnalyzer and
+ * the RoundTripAnalyzer both emit performanceReport).
  */
 const pluginIssues = (entry: { name: string }, index: number, plugins: readonly { name: string }[]): Issue[] => {
   const at = ['plugins', index, 'name'];
   // Its own keys only: bundled by `bun build`, the namespace of the registry is a plain object, which inherits 'constructor'
-  if (!Object.hasOwn(PLUGINS, entry.name)) {
-    const names = Object.keys(PLUGINS).sort();
-    return [{ message: `No plugin is named ${showValue(entry.name)}: the plugins are ${listInWords(names)}`, path: at }];
-  }
+  if (!Object.hasOwn(PLUGINS, entry.name)) return [issueOf(new UnknownPluginError(entry.name, Object.keys(PLUGINS)), at)];
   const { schema, modes } = PLUGINS[entry.name].getStaticConfiguration();
-  const issues: Issue[] = modes.includes('backtest')
-    ? []
-    : [{ message: `Plugin ${entry.name} does not support backtest mode, only ${listInWords(modes)}`, path: at }];
+  const issues = modes.includes('backtest') ? [] : [issueOf(new PluginModeNotSupportedError(entry.name, 'backtest', modes), at)];
   issues.push(...prefixIssues(['plugins', index], schema?.safeParse(entry).error?.issues ?? []));
   const emitted = eventsOf(entry);
   const earlier = plugins.slice(0, index).findIndex(other => eventsOf(other).some(event => emitted.includes(event)));
   if (earlier === -1) return issues;
   const shared = emitted.filter(event => eventsOf(plugins[earlier]).includes(event));
-  const emitters = `${plugins[earlier].name} (plugins[${earlier}]) and ${entry.name}`;
-  const message = `Plugins ${emitters} are broadcasting the same ${pluralize('event', shared.length)}: ${listInWords(shared)}. This behavior is unsupported.`;
-  return [...issues, { message, path: at }];
+  const emitters = [`${plugins[earlier].name} (plugins[${earlier}])`, entry.name];
+  return [...issues, issueOf(new PluginsEmitSameEventError(emitters, shared), at)];
 };
 
 /**
  * What would stop the backtest of a variant before it starts: the configuration as the schema checks it (parseConfiguration, which
- * the worker's createRunContext applies again), a mode other than backtest, then the strategy block and each plugin entry as the
- * StrategyManager and the pipeline check them. Each issue at its path from the root of the configuration (`strategy.period`,
- * `plugins[3].fileName`).
+ * the worker's createRunContext applies again, an analyzer's benchmarkAsset among the watched assets included), a mode other than
+ * backtest, then the strategy block and each plugin entry as the StrategyManager and the pipeline check them. Each issue at its path
+ * from the root of the configuration (`strategy.period`, `plugins[3].fileName`, `plugins[2].benchmarkAsset`).
  */
 const issuesOf = (configuration: Template): Issue[] => {
   const result = configurationSchema.safeParse(configuration);
