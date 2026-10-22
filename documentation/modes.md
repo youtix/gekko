@@ -60,7 +60,7 @@ plugins:
 
 | Option                    | Description                                                      | Example Values                                                                           |
 |---------------------------|------------------------------------------------------------------|------------------------------------------------------------------------------------------|
-| `assets`                  | The base assets to import, in upper case                         | `[BTC, ETH, SOL]`                                                                        |
+| `assets`                  | The base assets to import, in upper case, 20 at most             | `[BTC, ETH, SOL]`                                                                        |
 | `currency`                | The quote currency, in upper case                                | `USDT`, `EUR`, `BTC`                                                                     |
 | `tickrate`                | Least delay between two requests of a pair (ms), at least `100`  | `500` (recommended); default `1000`                                                      |
 | `daterange.start`         | First minute of the range, included                              | `2024-01-01` (its midnight UTC), `'2024-01-01T00:00:00Z'`, `'2024-01-01T02:00:00+02:00'` |

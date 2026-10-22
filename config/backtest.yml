@@ -82,6 +82,6 @@ plugins:
       threshold: 1 # in percentage
       dust: 10 # in currency
 
-  # Not the RoundTripAnalyzer, which runs on one pair only: to use it, watch one asset and remove the other's marketData and balance
+  # Or the RoundTripAnalyzer, which follows a round trip on each watched pair and reports each pair's figures: one or the other, not both
   - name: PortfolioAnalyzer
     enableConsoleTable: true

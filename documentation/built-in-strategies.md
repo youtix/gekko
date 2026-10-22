@@ -77,7 +77,7 @@ The strategy trades BTC/USDT only, the first pair watched (watch.assets): it ign
 
 The other pairs are not traded, but their candles are still required every minute. To grid another pair, put its asset first in `watch.assets`, or watch it alone.
 
-**A run on several pairs reports through the PortfolioAnalyzer.** The RoundTripAnalyzer follows a single pair, and Gekko refuses to start with it while several assets are watched: the [PortfolioAnalyzer](./plugins.md#portfolioanalyzer) values the whole portfolio, on one pair or several.
+**Either analyzer reports on a run of several pairs.** The [RoundTripAnalyzer](./plugins.md#roundtripanalyzer) follows the round trips of each pair apart, each one's P&L from its own fills, and reports on every pair together, with each pair's figures beside; the [PortfolioAnalyzer](./plugins.md#portfolioanalyzer) values the whole portfolio at every timeframe candle. Both measure the market return on one asset, the benchmark: BTC when it is watched, otherwise the first asset of `watch.assets`, unless their `benchmarkAsset` option names another watched asset.
 
 ### Position and Orders
 
