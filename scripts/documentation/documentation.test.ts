@@ -1,16 +1,16 @@
-import { describeError } from '@errors/error.helper';
-import { analyzerSchema } from '@plugins/analyzers/analyzer.schema';
-import { candleWriterSchema } from '@plugins/candleWriter/candleWriter.schema';
-import { eventSubscriberSchema } from '@plugins/eventSubscriber/eventSubscriber.schema';
-import type * as plugins from '@plugins/index';
-import { performanceReporterSchema } from '@plugins/performanceReporter/performanceReporter.schema';
-import { supervisionSchema } from '@plugins/supervision/supervision.schema';
-import { traderSchema } from '@plugins/trader/trader.schema';
-import { tradingAdvisorSchema } from '@plugins/tradingAdvisor/tradingAdvisor.schema';
-import { parseConfigurationFile } from '@services/configuration/configuration.helper';
-import { configurationSchema } from '@services/configuration/configuration.schema';
-import * as strategies from '@strategies/index';
-import type { StrategyConstructor } from '@strategies/strategy.types';
+import { describeError } from '@gekko/shared/errors/error.helper';
+import { analyzerSchema } from '@gekko/schemas/plugins/analyzer.schema';
+import { candleWriterSchema } from '@gekko/schemas/plugins/candleWriter.schema';
+import { eventSubscriberSchema } from '@gekko/schemas/plugins/eventSubscriber.schema';
+import type * as plugins from '@gekko/plugins/index';
+import { performanceReporterSchema } from '@gekko/schemas/plugins/performanceReporter.schema';
+import { supervisionSchema } from '@gekko/schemas/plugins/supervision.schema';
+import { traderSchema } from '@gekko/schemas/plugins/trader.schema';
+import { tradingAdvisorSchema } from '@gekko/schemas/plugins/tradingAdvisor.schema';
+import { parseConfigurationFile } from '@gekko/core/configuration/configuration.helper';
+import { configurationSchema } from '@gekko/schemas/configuration/configuration.schema';
+import * as strategies from '@gekko/strategies/index';
+import type { StrategyConstructor } from '@gekko/strategies/strategy.types';
 import { CORE_SCHEMA, load } from 'js-yaml';
 import { isPlainObject, omit } from 'lodash-es';
 import { execFileSync } from 'node:child_process';
@@ -374,19 +374,19 @@ describe('yaml blocks of the guides and configurations of config/', () => {
  * with AddIndicatorFn, and MyParams, the parameters of the strategy the Lifecycle Methods build. A script, so its declarations are
  * global: a snippet's own import or declaration of a name wins.
  */
-const CONTEXT = `type OrderSide = import('@models/order.types').OrderSide;
-type TradingPair = import('@models/utility.types').TradingPair;
+const CONTEXT = `type OrderSide = import('@gekko/shared/models/order.types').OrderSide;
+type TradingPair = import('@gekko/shared/models/utility.types').TradingPair;
 type UUID = import('node:crypto').UUID;
-type AddIndicatorFn = import('@strategies/strategy.types').AddIndicatorFn;
-type IndicatorResults<T = unknown> = import('@strategies/strategy.types').IndicatorResults<T>;
-type InitParams<T> = import('@strategies/strategy.types').InitParams<T>;
-type OnCandleEventParams<T> = import('@strategies/strategy.types').OnCandleEventParams<T>;
-type OnOrderCompletedEventParams<T> = import('@strategies/strategy.types').OnOrderCompletedEventParams<T>;
-type OnOrderCanceledEventParams<T> = import('@strategies/strategy.types').OnOrderCanceledEventParams<T>;
-type OnOrderErroredEventParams<T> = import('@strategies/strategy.types').OnOrderErroredEventParams<T>;
-type Strategy<T> = import('@strategies/strategy.types').Strategy<T>;
-type Tools<T> = import('@strategies/strategy.types').Tools<T>;
-type TrailingStopState = import('@strategies/trailingStopManager.types').TrailingStopState;
+type AddIndicatorFn = import('@gekko/strategies/strategy.types').AddIndicatorFn;
+type IndicatorResults<T = unknown> = import('@gekko/strategies/strategy.types').IndicatorResults<T>;
+type InitParams<T> = import('@gekko/strategies/strategy.types').InitParams<T>;
+type OnCandleEventParams<T> = import('@gekko/strategies/strategy.types').OnCandleEventParams<T>;
+type OnOrderCompletedEventParams<T> = import('@gekko/strategies/strategy.types').OnOrderCompletedEventParams<T>;
+type OnOrderCanceledEventParams<T> = import('@gekko/strategies/strategy.types').OnOrderCanceledEventParams<T>;
+type OnOrderErroredEventParams<T> = import('@gekko/strategies/strategy.types').OnOrderErroredEventParams<T>;
+type Strategy<T> = import('@gekko/strategies/strategy.types').Strategy<T>;
+type Tools<T> = import('@gekko/strategies/strategy.types').Tools<T>;
+type TrailingStopState = import('@gekko/strategies/trailingStopManager.types').TrailingStopState;
 type MyParams = { short: number; long: number };
 declare const z: typeof import('zod').z;
 declare namespace z {

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "globalEnv": ["GEKKO_LOG_LEVEL", "GEKKO_CONFIG_FILE_PATH", "TZ", "CI", "HUSKY"],
+  "tasks": {
+    "type:check": {
+      "dependsOn": ["^type:check"],
+      "outputs": []
+    },
+    "//#type:check:scripts": {
+      "outputs": []
+    },
+    "test": {
+      "outputs": []
+    },
+    "//#test:scripts": {
+      "outputs": []
+    },
+    "test:coverage": {
+      "outputs": []
+    },
+    "//#test:coverage:scripts": {
+      "outputs": []
+    },
+    "test:e2e": {
+      "outputs": []
+    },
+    "bench": {
+      "cache": false
+    },
+    "build:exec": {
+      "cache": false
+    },
+    "dev": {
+      "cache": false,
+      "persistent": true
+    }
+  }
+}

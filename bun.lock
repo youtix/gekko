@@ -4,18 +4,6 @@
   "workspaces": {
     "": {
       "name": "gekko",
-      "dependencies": {
-        "ccxt": "^4.5.39",
-        "date-fns": "^4.1.0",
-        "https-proxy-agent": "^7.0.6",
-        "js-yaml": "^4.1.1",
-        "json5": "^2.2.3",
-        "lodash-es": "^4.17.23",
-        "protobufjs": "^8.0.0",
-        "socks-proxy-agent": "^8.0.5",
-        "winston": "^3.19.0",
-        "zod": "^4.3.6",
-      },
       "devDependencies": {
         "@commitlint/cli": "^20.4.2",
         "@commitlint/config-conventional": "^20.4.2",
@@ -39,8 +27,108 @@
         "lint-staged": "^16.2.7",
         "prettier": "^3.8.1",
         "semantic-release": "^24.2.5",
+        "turbo": "^2.11.10",
         "typescript": "^5.9.3",
         "typescript-eslint": "^8.56.0",
+        "vitest": "^4.0.18",
+      },
+    },
+    "apps/gekko": {
+      "name": "@gekko/cli",
+      "dependencies": {
+        "@gekko/core": "workspace:*",
+        "@gekko/plugins": "workspace:*",
+        "@gekko/shared": "workspace:*",
+        "lodash-es": "^4.17.23",
+      },
+      "devDependencies": {
+        "@gekko/schemas": "workspace:*",
+        "@gekko/strategies": "workspace:*",
+        "ccxt": "^4.5.39",
+        "vitest": "^4.0.18",
+        "winston": "^3.19.0",
+        "zod": "^4.3.6",
+      },
+    },
+    "packages/core": {
+      "name": "@gekko/core",
+      "dependencies": {
+        "@gekko/schemas": "workspace:*",
+        "@gekko/shared": "workspace:*",
+        "ccxt": "^4.5.39",
+        "date-fns": "^4.1.0",
+        "https-proxy-agent": "^7.0.6",
+        "js-yaml": "^4.1.1",
+        "json5": "^2.2.3",
+        "lodash-es": "^4.17.23",
+        "protobufjs": "^8.0.0",
+        "socks-proxy-agent": "^8.0.5",
+        "winston": "^3.19.0",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "vitest": "^4.0.18",
+      },
+    },
+    "packages/indicators": {
+      "name": "@gekko/indicators",
+      "dependencies": {
+        "@gekko/shared": "workspace:*",
+        "lodash-es": "^4.17.23",
+      },
+      "devDependencies": {
+        "vitest": "^4.0.18",
+      },
+    },
+    "packages/plugins": {
+      "name": "@gekko/plugins",
+      "dependencies": {
+        "@gekko/core": "workspace:*",
+        "@gekko/indicators": "workspace:*",
+        "@gekko/schemas": "workspace:*",
+        "@gekko/shared": "workspace:*",
+        "@gekko/strategies": "workspace:*",
+        "date-fns": "^4.1.0",
+        "lodash-es": "^4.17.23",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "vitest": "^4.0.18",
+      },
+    },
+    "packages/schemas": {
+      "name": "@gekko/schemas",
+      "dependencies": {
+        "@gekko/shared": "workspace:*",
+        "lodash-es": "^4.17.23",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "js-yaml": "^4.1.1",
+        "json5": "^2.2.3",
+        "vitest": "^4.0.18",
+      },
+    },
+    "packages/shared": {
+      "name": "@gekko/shared",
+      "dependencies": {
+        "date-fns": "^4.1.0",
+        "lodash-es": "^4.17.23",
+      },
+      "devDependencies": {
+        "vitest": "^4.0.18",
+      },
+    },
+    "packages/strategies": {
+      "name": "@gekko/strategies",
+      "dependencies": {
+        "@gekko/indicators": "workspace:*",
+        "@gekko/schemas": "workspace:*",
+        "@gekko/shared": "workspace:*",
+        "lodash-es": "^4.17.23",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
         "vitest": "^4.0.18",
       },
     },
@@ -167,6 +255,20 @@
     "@eslint/object-schema": ["@eslint/object-schema@3.0.2", "", {}, "sha512-HOy56KJt48Bx8KmJ+XGQNSUMT/6dZee/M54XyUyuvTvPXJmsERRvBchsUVx1UMe1WwIH49XLAczNC7V2INsuUw=="],
 
     "@eslint/plugin-kit": ["@eslint/plugin-kit@0.6.0", "", { "dependencies": { "@eslint/core": "^1.1.0", "levn": "^0.4.1" } }, "sha512-bIZEUzOI1jkhviX2cp5vNyXQc6olzb2ohewQubuYlMXZ2Q/XjBO0x0XhGPvc9fjSIiUN0vw+0hq53BJ4eQSJKQ=="],
+
+    "@gekko/cli": ["@gekko/cli@workspace:apps/gekko"],
+
+    "@gekko/core": ["@gekko/core@workspace:packages/core"],
+
+    "@gekko/indicators": ["@gekko/indicators@workspace:packages/indicators"],
+
+    "@gekko/plugins": ["@gekko/plugins@workspace:packages/plugins"],
+
+    "@gekko/schemas": ["@gekko/schemas@workspace:packages/schemas"],
+
+    "@gekko/shared": ["@gekko/shared@workspace:packages/shared"],
+
+    "@gekko/strategies": ["@gekko/strategies@workspace:packages/strategies"],
 
     "@humanfs/core": ["@humanfs/core@0.19.1", "", {}, "sha512-5DyQ4+1JEUzejeK1JGICcideyfUbGixgS9jNgex5nqkW+cY7WZhxBigmieN5Qnw9ZosSNVC9KQKyb+GUaGyKUA=="],
 
@@ -307,6 +409,18 @@
     "@so-ric/colorspace": ["@so-ric/colorspace@1.1.6", "", { "dependencies": { "color": "^5.0.2", "text-hex": "1.0.x" } }, "sha512-/KiKkpHNOBgkFJwu9sh48LkHSMYGyuTcSFK/qMBdnOAlrRJzRSXAOFB5qwzaVQuDl8wAvHVMkaASQDReTahxuw=="],
 
     "@standard-schema/spec": ["@standard-schema/spec@1.0.0", "", {}, "sha512-m2bOd0f2RT9k8QJx1JN85cZYyH1RqFBdlwtkSlf4tBDYLCiiZnv1fIIwacK6cqwXavOydf0NPToMQgpKq+dVlA=="],
+
+    "@turbo/darwin-64": ["@turbo/darwin-64@2.11.10", "", { "os": "darwin", "cpu": "x64" }, "sha512-By4idRap5+nLnMuRzLB4qkOPRlvNdyY1ne4VJYDyUoUB11H94k7uif9mbe3JT8JSNXs1D68uMcBj6hJ/jMQRvA=="],
+
+    "@turbo/darwin-arm64": ["@turbo/darwin-arm64@2.11.10", "", { "os": "darwin", "cpu": "arm64" }, "sha512-pyEYlVcuexOPa92p0Wlwl9YT1Is5D60lxN3ItWm3g30YLvFaUq86TF4BBWg5ZAc0uMTnrOzCvuCsOBTdzUWnRQ=="],
+
+    "@turbo/linux-64": ["@turbo/linux-64@2.11.10", "", { "os": [ "linux", "android", ], "cpu": "x64" }, "sha512-1tYeR/IDZ5HEdsb0jNq2L2xam5nMQ+g80tlV2BZmv4OFw+pMcUM0mMmUcfc5wXPPNHVNPuDMjh9Y8G8HgXPLZA=="],
+
+    "@turbo/linux-arm64": ["@turbo/linux-arm64@2.11.10", "", { "os": [ "linux", "android", ], "cpu": "arm64" }, "sha512-HuekQxvVGhUd46g1Im/DKdOtglHr4/gguZAvzEpPUgtxNkztSa8lWhQEGQ+EmPQ0n7w19qjThFU+OfEEd0uvlw=="],
+
+    "@turbo/windows-64": ["@turbo/windows-64@2.11.10", "", { "os": "win32", "cpu": "x64" }, "sha512-UJOP3BkbreY3/JlMgJR6ZiimxYIBn+c+B4tnBIxD0E9c3Estmk+XoVNVBNBottZLNRXe3/ScgOU4+/k8tIWysg=="],
+
+    "@turbo/windows-arm64": ["@turbo/windows-arm64@2.11.10", "", { "os": "win32", "cpu": "arm64" }, "sha512-xOkEjF3ws/b/YNlc+bvJHMYBn+vL+QbEISZFVi0qS+ImmhA1X3/gmNmBrjjIG3dg6aeN+n6gQitzSkXQ286qJQ=="],
 
     "@tybys/wasm-util": ["@tybys/wasm-util@0.10.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg=="],
 
@@ -1257,6 +1371,8 @@
     "tsconfig-paths": ["tsconfig-paths@3.15.0", "", { "dependencies": { "@types/json5": "^0.0.29", "json5": "^1.0.2", "minimist": "^1.2.6", "strip-bom": "^3.0.0" } }, "sha512-2Ac2RgzDe/cn48GvOe3M+o82pEFewD3UPbyoUHHdKasHwJKjds4fLXWf/Ux5kATBKN20oaFGu+jbElp1pos0mg=="],
 
     "tslib": ["tslib@2.8.1", "", {}, "sha512-oJFu94HQb+KVduSUQL7wnpmqnfmLsOA/nAh6b6EH0wCEoK0/mPeXU6c3wKDV83MkOuHPRHtSXKKU99IBazS/2w=="],
+
+    "turbo": ["turbo@2.11.10", "", { "optionalDependencies": { "@turbo/darwin-64": "2.11.10", "@turbo/darwin-arm64": "2.11.10", "@turbo/linux-64": "2.11.10", "@turbo/linux-arm64": "2.11.10", "@turbo/windows-64": "2.11.10", "@turbo/windows-arm64": "2.11.10" }, "bin": { "turbo": "bin/turbo" } }, "sha512-3GJYwig8ygEI89oaOZdduJX8/aw6O9eRPYHoIt6T3FZl9hkKjiyIspufJoVgqXihPoJu8M5CSV0DlZvzfohBCw=="],
 
     "type-check": ["type-check@0.4.0", "", { "dependencies": { "prelude-ls": "^1.2.1" } }, "sha512-XleUoc9uwGXqjWwXaUTZAmzMcFZ5858QA2vvx1Ur5xIcixXIP+8LnFDgRplU30us6teqdlskFfu+ae4K79Ooew=="],
 
