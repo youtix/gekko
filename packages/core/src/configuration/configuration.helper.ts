@@ -69,13 +69,3 @@ export const parseConfiguration = (raw: unknown, source: string): ConfigurationM
   if (!result.success) throw new GekkoError('configuration', `Invalid configuration ${source}:\n${z.prettifyError(result.error)}`);
   return result.data;
 };
-
-/** The configuration file at `path`, loaded and checked: what createRunContext builds the context of the executable from */
-export const readConfigurationFile = (path: string) => parseConfiguration(loadConfigurationFile(path), `file ${path}`);
-
-/** The configuration file GEKKO_CONFIG_FILE_PATH names, the executable's; a GekkoError when the variable is unset */
-export const readConfigurationFromEnvironment = () => {
-  const path = process.env['GEKKO_CONFIG_FILE_PATH'];
-  if (!path) throw new GekkoError('configuration', 'Missing GEKKO_CONFIG_FILE_PATH environment variable');
-  return readConfigurationFile(path);
-};

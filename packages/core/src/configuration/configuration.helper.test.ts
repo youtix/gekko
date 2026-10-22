@@ -3,8 +3,8 @@ import { readFileSync } from 'fs';
 import { dump } from 'js-yaml';
 import JSON5 from 'json5';
 import { omit } from 'lodash-es';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { loadConfigurationFile, parseConfiguration, readConfigurationFile, readConfigurationFromEnvironment } from './configuration.helper';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { loadConfigurationFile, parseConfiguration } from './configuration.helper';
 
 vi.mock('fs', () => ({ readFileSync: vi.fn() }));
 
@@ -261,7 +261,10 @@ describe('parseConfiguration', () => {
   });
 });
 
-describe('readConfigurationFile', () => {
+// A file loaded then parsed, as main() and the e2e flows compose the two
+const readConfigurationFile = (path: string) => parseConfiguration(loadConfigurationFile(path), `file ${path}`);
+
+describe('a configuration file, loaded and parsed', () => {
   it('returns the configuration the file holds, as the schema outputs it', () => {
     setFileContent(dump(raw));
     expect(readConfigurationFile('./config/gekko.yml').watch).toEqual(parsedWatch);
@@ -320,38 +323,6 @@ describe('readConfigurationFile', () => {
           message: `[CONFIGURATION] Invalid configuration file config.yml:\n✖ watch.daterange.start '${start}' must be a date that exists, in ISO 8601: a day (2024-01-01, from its midnight UTC), or a day and a time with Z or an offset (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00)\n  → at watch.daterange.start`,
         }),
       );
-    });
-  });
-});
-
-describe('readConfigurationFromEnvironment', () => {
-  const pathVariable = process.env.GEKKO_CONFIG_FILE_PATH;
-
-  afterEach(() => {
-    if (pathVariable === undefined) delete process.env.GEKKO_CONFIG_FILE_PATH;
-    else process.env.GEKKO_CONFIG_FILE_PATH = pathVariable;
-  });
-
-  it('refuses to read a configuration while GEKKO_CONFIG_FILE_PATH is unset', () => {
-    delete process.env.GEKKO_CONFIG_FILE_PATH;
-    expect(() => readConfigurationFromEnvironment()).toThrow(
-      new GekkoError('configuration', 'Missing GEKKO_CONFIG_FILE_PATH environment variable'),
-    );
-  });
-
-  describe('with GEKKO_CONFIG_FILE_PATH set', () => {
-    beforeEach(() => {
-      process.env.GEKKO_CONFIG_FILE_PATH = './config/gekko.json';
-      setFileContent(raw);
-    });
-
-    it('reads the file it names', () => {
-      readConfigurationFromEnvironment();
-      expect(readFileSync).toHaveBeenCalledExactlyOnceWith('./config/gekko.json', 'utf8');
-    });
-
-    it('returns the configuration that file holds, as the schema outputs it', () => {
-      expect(readConfigurationFromEnvironment().watch).toEqual(parsedWatch);
     });
   });
 });

@@ -2,10 +2,10 @@ import type { Configuration as ConfigurationModel } from '@gekko/schemas/configu
 import { find } from 'lodash-es';
 
 /**
- * The configuration of one run, as the schema outputs it (readConfigurationFile or parseConfiguration): a getter per section. Built
+ * The configuration of one run, as the schema outputs it (parseConfiguration): a getter per section. Built
  * by createRunContext and read through the RunContext the plugins and the orders receive; the streams, the exchanges and the storage
- * receive the sections they read instead (see Services). The file helpers (loadConfigurationFile, parseConfiguration,
- * readConfigurationFile) are beside it, in configuration.helper.ts.
+ * receive the sections they read instead (see Services). The file helpers (loadConfigurationFile, parseConfiguration) are
+ * beside it, in configuration.helper.ts.
  */
 export class Configuration {
   constructor(private readonly configuration: ConfigurationModel) {}
