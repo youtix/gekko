@@ -40,7 +40,7 @@ This also installs three git hooks:
 
 ### Where the Code Lives
 
-The repository is a monorepo of Bun workspaces, whose tasks [Turborepo](https://turborepo.com/) runs: six packages under `packages/` and two apps under `apps/`, in layers, each importing only from the layers below it (ESLint refuses an import up the graph, in a test too):
+The repository is a monorepo of Bun workspaces, whose tasks [Turborepo](https://turborepo.com/) runs: six packages under `packages/` and two apps under `apps/`, in layers, each importing only some of the layers below it (ESLint refuses any other import, in a test too):
 
 - `packages/shared` (`@gekko/shared`): the constants, the errors, the types, the generic utilities and the domain helpers. It imports no other package.
 - `packages/schemas` (`@gekko/schemas`) and `packages/indicators` (`@gekko/indicators`): every zod schema, and the indicators.
@@ -48,7 +48,7 @@ The repository is a monorepo of Bun workspaces, whose tasks [Turborepo](https://
 - `packages/plugins` (`@gekko/plugins`): the plugins.
 - `apps/gekko`, the bot, with the end-to-end tests, and `apps/fox`, Fox (see [the Fox guide](./documentation/fox.md)), each compiled to an executable in `dist/`.
 
-A module of another package is imported by its package's name and its path under that package's `src/`, without `.ts` (`import { round } from '@gekko/shared/utils/math/math.utils'`); a module of the same package by a relative path. [CLAUDE.md](./CLAUDE.md) says what each package holds and the conventions the code follows.
+A module of another package is imported by its package's name and its path under that package's `src/`, without `.ts` (`import { round } from '@gekko/shared/utils/math/round.utils'`); a module of the same package by a relative path. [CLAUDE.md](./CLAUDE.md) says what each package holds and the conventions the code follows.
 
 ### Run Tests
 
