@@ -142,8 +142,8 @@ describe('logger', () => {
       ]);
     });
 
-    // Written before the call that logs it returns: a process.exit() right after it, as a worker of Fox makes once it has posted its
-    // outcome, loses none of it, whoever reads the pipe and however slowly
+    // Written before the call that logs it returns when the pipe takes it: a process.exit() right after it, as a worker of Fox makes
+    // once it has posted its outcome, loses none of it (what the pipe does not take at once is written as the process exits)
     it.each`
       logFunction  | level
       ${'debug'}   | ${'debug'}
@@ -154,6 +154,51 @@ describe('logger', () => {
       const logger = await logWith('debug', logFunction, []);
       logger[logFunction as LogFunction]('gekko', 'probe');
       expect(printed()).toEqual([{ level, message: 'probe' }]);
+    });
+  });
+
+  // Fox's threads share stdout: each line written whole under one lock, so that no thread's line lands among the parts of another's
+  describe('write lock', () => {
+    /** The lock checked at each write, and whether it was held then */
+    let lockView: BigInt64Array;
+    let heldAtWrites: boolean[];
+
+    beforeEach(() => {
+      lockView = new BigInt64Array(new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT));
+      heldAtWrites = [];
+      writeSync.mockImplementation((_fd, _bytes, _offset, length) => {
+        heldAtWrites.push(Atomics.load(lockView, 0) !== 0n);
+        return length;
+      });
+    });
+
+    it('shares the same lock of stdout at every call', async () => {
+      const { shareWriteLock } = await loadLogger(undefined);
+      expect(shareWriteLock()).toBe(shareWriteLock());
+    });
+
+    it('writes the lines logged once it shared its lock under that lock', async () => {
+      const logger = await loadLogger(undefined);
+      lockView = new BigInt64Array(logger.shareWriteLock());
+      logger.error('gekko', 'probe');
+      // winston hands its first lines to the transport on a later tick
+      await new Promise(resolve => setImmediate(resolve));
+      expect(heldAtWrites).toEqual([true]);
+    });
+
+    it('writes the lines logged under the lock another thread shares, once given it', async () => {
+      const logger = await loadLogger(undefined);
+      const lock = new SharedArrayBuffer(BigInt64Array.BYTES_PER_ELEMENT);
+      lockView = new BigInt64Array(lock);
+      logger.useWriteLock(lock);
+      logger.error('gekko', 'probe');
+      await new Promise(resolve => setImmediate(resolve));
+      expect(heldAtWrites).toEqual([true]);
+    });
+
+    it('writes the lines logged without a lock while it neither shared nor was given one', async () => {
+      await logWith(undefined, 'error', ['probe']);
+      expect(heldAtWrites).toEqual([false]);
     });
   });
 

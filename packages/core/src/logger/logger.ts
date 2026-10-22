@@ -4,7 +4,7 @@ import { RingBuffer } from '@gekko/shared/helpers/collection/ringBuffer';
 import { isString, upperCase } from 'lodash-es';
 import { createLogger, format, transports } from 'winston';
 import { BufferedLog } from '@gekko/shared/models/log.types';
-import { createSyncWriteStream } from './logger.helper';
+import { LineWriter } from './lineWriter';
 import { LogInput } from './logger.types';
 const { combine, timestamp, json } = format;
 
@@ -50,14 +50,20 @@ const enabledLevels = new Set(LOG_LEVELS.slice(0, LOG_LEVELS.indexOf(logLevel) +
  */
 export const isLevelEnabled = (level: LogLevel) => enabledLevels.has(level);
 
+/**
+ * The lines of this thread, written to stdout in order, none lost to a process.exit(): winston's Console transport handed them to
+ * process.stdout, which Bun queues when a pipe is read slower than the process writes, and the exit dropped what was queued (a worker
+ * of Fox exiting once its outcome is posted lost its last lines, Fox its summary). What the pipe does not take at once waits in a queue,
+ * written as the reader makes room, at the latest as the process exits, the event loop running meanwhile; the threads of Fox, which
+ * share the pipe (shareWriteLock, useWriteLock), write each line whole under a lock before the call that logs it returns (see
+ * LineWriter).
+ */
+const stdout = new LineWriter(STDOUT);
+
 const logger = createLogger({
   level: logLevel,
   format: combine(timestamp(), json()),
-  // Each line is written to stdout before the call that logs it returns (createSyncWriteStream), so that a process.exit() loses none:
-  // winston's Console transport handed its lines to process.stdout, which Bun queues when a pipe is read slower than the process
-  // writes, and the exit dropped what was queued (a worker of Fox exiting once its outcome is posted lost its last lines, Fox its
-  // summary). A reader that stalls stalls the process in turn, as a pipe does under Node.
-  transports: [new transports.Stream({ stream: createSyncWriteStream(STDOUT) })],
+  transports: [new transports.Stream({ stream: stdout })],
 });
 
 if (rejectedLogLevel !== undefined) {
@@ -94,3 +100,13 @@ export const error = (tag: Tag, message: unknown) => {
 
 /** The buffered warnings and errors, oldest first: the same entry objects on every call, so that a reader can find where it left off */
 export const getBufferedLogs = () => logBuffer.toArray();
+
+/**
+ * The lock of stdout, under which the lines of this thread are written from now on, created at the first call, for the workers this
+ * thread starts, which write theirs under it too (useWriteLock): no thread's line lands among the parts of another's that a pipe takes
+ * in several writes (above 4096 bytes). Fox's main thread hands it to each worker.
+ */
+export const shareWriteLock = (): SharedArrayBuffer => stdout.shareLock();
+
+/** Writes the lines of this thread under the lock of stdout another thread shares (shareWriteLock) from now on: a worker of Fox's */
+export const useWriteLock = (lock: SharedArrayBuffer) => stdout.useLock(lock);

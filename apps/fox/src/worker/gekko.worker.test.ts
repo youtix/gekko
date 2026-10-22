@@ -1,19 +1,24 @@
 import { gekkoPipeline } from '@gekko/core/core/pipeline/pipeline';
+import { useWriteLock } from '@gekko/core/logger/logger';
 import { createRunContext } from '@gekko/core/run/runContext.helper';
 import type { RunContext } from '@gekko/core/run/runContext.types';
 import { inspect } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Template, VariantRequest, VariantResult } from '../fox.types';
+import type { Template, VariantResult } from '../fox.types';
+import type { WorkerRequest } from './worker.types';
 
 vi.mock('@gekko/core/core/pipeline/pipeline', () => ({ gekkoPipeline: vi.fn() }));
 vi.mock('@gekko/core/run/runContext.helper', () => ({ createRunContext: vi.fn() }));
+vi.mock('@gekko/core/logger/logger', () => ({ useWriteLock: vi.fn() }));
 // The registry the worker hands the pipeline: the plugins' own modules load bun:sqlite, which vitest, on Node, cannot
 vi.mock('@gekko/plugins/index', () => ({ Trader: 'the Trader class' }));
 
 /** The global scope of a worker, which the worker module gives its message handler */
-type WorkerScope = { onmessage?: (event: { data: VariantRequest }) => void };
+type WorkerScope = { onmessage?: (event: { data: WorkerRequest }) => void };
 
 const CONFIGURATION: Template = { watch: { mode: 'backtest' } };
+/** The lock of stdout Fox's main thread shares, which it posts to the worker with the variant */
+const WRITE_LOCK = new SharedArrayBuffer(8);
 
 describe('gekko.worker', () => {
   let scope: WorkerScope;
@@ -23,7 +28,7 @@ describe('gekko.worker', () => {
 
   /** Posts the variant to the worker, and settles with what it posts back */
   const backtest = async (variant = 3) => {
-    scope.onmessage?.({ data: { variant, configuration: CONFIGURATION } });
+    scope.onmessage?.({ data: { variant, configuration: CONFIGURATION, writeLock: WRITE_LOCK } });
     return posted;
   };
 
@@ -46,6 +51,19 @@ describe('gekko.worker', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  // Each line whole, none cut by another thread's, none left to write as the worker exits, which Fox's terminate() would cut short
+  it('should write its lines under the lock of stdout it is posted', async () => {
+    await backtest();
+
+    expect(useWriteLock).toHaveBeenCalledExactlyOnceWith(WRITE_LOCK);
+  });
+
+  it('should take that lock before it builds the context of the backtest', async () => {
+    await backtest();
+
+    expect(vi.mocked(useWriteLock).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(createRunContext).mock.invocationCallOrder[0]);
   });
 
   describe('when the backtest ends normally', () => {

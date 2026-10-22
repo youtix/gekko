@@ -1,8 +1,9 @@
-import { debug, error, info } from '@gekko/core/logger/logger';
+import { debug, error, info, shareWriteLock } from '@gekko/core/logger/logger';
 import { formatDurationUTC } from '@gekko/shared/utils/date/date.utils';
 import { times } from 'lodash-es';
 import { COMPILED_MODULE_URL_PREFIX, COMPILED_WORKER_MODULE, WORKER_MODULE } from '../fox.const';
-import type { Template, Variant, VariantRequest, VariantResult } from '../fox.types';
+import type { Template, Variant, VariantResult } from '../fox.types';
+import type { WorkerRequest } from './worker.types';
 
 /** A line of the code frame Bun writes above an uncaught error: a numbered line of source (`5 |   throw …`) or the caret under it */
 const CODE_FRAME_LINE = /^\s*(\d+ \|.*|\^)$/;
@@ -45,7 +46,8 @@ export const runWorker = (variant: number, configuration: Template): Promise<Var
     worker.addEventListener('message', ({ data }: MessageEvent<VariantResult>) => settle(data));
     worker.addEventListener('error', ({ message }) => fail(describeWorkerError(message)));
     worker.addEventListener('close', ({ code }) => fail(`its worker ended with code ${code} without reporting an outcome`));
-    const request: VariantRequest = { variant, configuration };
+    // The lock of stdout this thread writes under from now on, under which the worker writes its lines too
+    const request: WorkerRequest = { variant, configuration, writeLock: shareWriteLock() };
     worker.postMessage(request);
   });
 

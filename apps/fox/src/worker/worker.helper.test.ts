@@ -9,7 +9,15 @@ import { COMPILED_WORKER_MODULE } from '../fox.const';
 import type { Template, Variant, VariantResult } from '../fox.types';
 import { describeWorkerError, runWorker, runWorkers, workerModule } from './worker.helper';
 
-vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
+const { WRITE_LOCK } = vi.hoisted(() => ({ WRITE_LOCK: new SharedArrayBuffer(8) }));
+vi.mock('@gekko/core/logger/logger', () => ({
+  debug: vi.fn(),
+  info: vi.fn(),
+  warning: vi.fn(),
+  error: vi.fn(),
+  // The lock of stdout this thread shares with the workers it starts
+  shareWriteLock: vi.fn(() => WRITE_LOCK),
+}));
 
 type Listener = (event: Record<string, unknown>) => void;
 
@@ -123,8 +131,9 @@ describe('runWorker', () => {
     expect(existsSync(fileURLToPath(worker.module))).toBe(true);
   });
 
-  it('should post the variant to the worker', () => {
-    expect(worker.posted).toStrictEqual([{ variant: 3, configuration }]);
+  // The worker writes its lines under the lock of stdout this thread writes under, so that no thread's line lands among another's parts
+  it('should post the variant to the worker, with the lock of stdout this thread shares', () => {
+    expect(worker.posted).toStrictEqual([{ variant: 3, configuration, writeLock: WRITE_LOCK }]);
   });
 
   describe('when the worker posts its result', () => {
