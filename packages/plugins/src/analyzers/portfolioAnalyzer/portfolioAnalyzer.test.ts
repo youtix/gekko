@@ -76,14 +76,17 @@ describe('PortfolioAnalyzer', () => {
   });
 
   describe('Configuration', () => {
+    // The schema defaults the risk-free return and the console table, and the pipeline builds every plugin from its output (see
+    // analyzerSchema): the analyzer takes the options as they come, without a fallback of its own that no run reached
     it.each`
       property                | expected
-      ${'riskFreeReturn'}     | ${5}
-      ${'enableConsoleTable'} | ${false}
+      ${'riskFreeReturn'}     | ${2}
+      ${'enableConsoleTable'} | ${true}
       ${'benchmarkAsset'}     | ${'SOL'}
-    `('should use default config values and fallback - $property = $expected', ({ property, expected }) => {
-      const analyzerObj = new PortfolioAnalyzer({ name: 'PortfolioAnalyzer' } as any, contextWatching(['SOL', 'ETH']));
-      expect((analyzerObj as any)[property]).toBe(expected);
+    `('should take $property $expected from its options, and its benchmark from the assets watched', ({ property, expected }) => {
+      const options = { name: 'PortfolioAnalyzer', riskFreeReturn: 2, enableConsoleTable: true };
+      const analyzerObj = new PortfolioAnalyzer(options, contextWatching(['SOL', 'ETH']));
+      expect(analyzerObj[property as keyof PortfolioAnalyzer]).toBe(expected);
     });
   });
 

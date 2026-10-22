@@ -1,8 +1,12 @@
+import { PERFORMANCE_REPORT_EVENT } from '@gekko/shared/constants/event.const';
+import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
+import { Report } from '@gekko/shared/models/event.types';
 import { Tag } from '@gekko/shared/models/tag.types';
 import { Asset } from '@gekko/shared/models/utility.types';
-import { warning } from '@gekko/core/logger/logger';
-import { formatDurationUTC } from '@gekko/shared/utils/date/date.utils';
+import { error, warning } from '@gekko/core/logger/logger';
+import type { Plugin } from '@gekko/core/plugin/plugin';
+import { formatDurationUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
 import {
   calculateAlpha,
   calculateAnnualizedReturnPct,
@@ -31,6 +35,41 @@ export const pickBenchmarkAsset = (assets: Asset[], configured: Asset | undefine
   if (configured === undefined) return assets.includes(DEFAULT_BENCHMARK_ASSET) ? DEFAULT_BENCHMARK_ASSET : assets[0];
   if (assets.includes(configured)) return configured;
   throw new GekkoError(tag, `benchmarkAsset must be one of the watched assets (${listInWords(assets)}), got ${showValue(configured)}`);
+};
+
+/**
+ * The share of a period of `periodMs` spent exposed, `exposureMs`, in % (see calculateExposurePct): 0 for a period of 0 ms, that of a
+ * run that ends with the bucket that completed the warmup, which has nothing exposed in it and nothing to divide by. The reports and the
+ * breakdown of the RoundTripAnalyzer by pair measure their exposures so.
+ */
+export const calculatePeriodExposurePct = (exposureMs: number, periodMs: number): number =>
+  periodMs > 0 ? calculateExposurePct(exposureMs, periodMs) : 0;
+
+/**
+ * Warns that the start equity of a report was taken late, from the first portfolio received after the warmup completed, at the prices
+ * of `at`, the end of the last bucket processed: unless that bucket is the one that completed the warmup, whose end is `startPricesAt`
+ * and whose closes are the start prices. A portfolio received before the next bucket is valued at the start prices all the same, and
+ * so is the first portfolio of the Trader with the default warmup of 0 candles: the first bucket completes the warmup, and its end is
+ * delivered before that portfolio. Both analyzers warn so.
+ */
+export const warnOfLateStart = (tag: Tag, at: EpochTimeStamp, startPricesAt: EpochTimeStamp): void => {
+  if (at === startPricesAt) return;
+  warning(tag, `No portfolio received during the warmup: start equity taken late, at the prices of ${toISOString(at)}.`);
+};
+
+/**
+ * Emits the report of an analyzer to the listeners of PERFORMANCE_REPORT_EVENT, directly: processFinalize is the final lifecycle hook,
+ * after which nothing deferred is delivered. Awaited, so that the run ends once the listeners are done with the report, and caught: the
+ * analyzer logs the report before it, whatever a listener does with it. Neither awaited nor caught, a listener that failed rejected a
+ * promise nobody held, and a backtest that ended normally exited with code 1. A listener that fails is logged at error level under the
+ * analyzer's tag, and the run ends as it would have. Both analyzers emit their reports so.
+ */
+export const emitPerformanceReport = async <T extends Report>(analyzer: Pick<Plugin, 'emit'>, report: T, tag: Tag): Promise<void> => {
+  try {
+    await analyzer.emit<T>(PERFORMANCE_REPORT_EVENT, report);
+  } catch (err) {
+    error(tag, `A listener failed on the performance report: ${describeError(err)}`);
+  }
 };
 
 /**
@@ -72,8 +111,7 @@ export const calculatePerformanceStatistics = (input: PerformanceStatisticsInput
     annualizedReturnPct,
     marketReturnPct,
     alpha: calculateAlpha(totalReturnPct, marketReturnPct),
-    // A run that ends with the bucket that completed the warmup has a period of 0 ms, and nothing exposed in it
-    exposurePct: periodMs > 0 ? calculateExposurePct(exposureMs, periodMs) : 0,
+    exposurePct: calculatePeriodExposurePct(exposureMs, periodMs),
     // A return that is not a number gives a deviation that is not one either: no volatility could be measured
     volatility: Number.isNaN(volatility) ? 0 : volatility,
     downsideDeviation: calculateDownsideDeviation(returns),

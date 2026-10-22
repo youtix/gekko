@@ -158,10 +158,6 @@ describe('RoundTripAnalyzer', () => {
       expect(analyzer[property as keyof RoundTripAnalyzer]).toBe(expected);
     });
 
-    it('should fall back to the risk-free return of 5 % the schema defaults to when the configuration has none', () => {
-      expect(createAnalyzer({ name: PLUGIN_NAME, enableConsoleTable: false } as any)['riskFreeReturn']).toBe(5);
-    });
-
     it('should track the round trips of every watched pair, in the order of watch.assets', () => {
       expect([...createAnalyzer(CONFIG, ['ETH', 'BTC', 'XRP'])['trackers'].keys()]).toEqual(['ETH/USDT', 'BTC/USDT', 'XRP/USDT']);
     });

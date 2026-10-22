@@ -1,20 +1,19 @@
 import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@gekko/shared/constants/event.const';
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
-import { describeError } from '@gekko/shared/errors/error.helper';
 import { getFirstCandleFromBucket } from '@gekko/shared/helpers/candle/candle.helper';
 import { calculateMarketReturnPct, calculateWinRate, extractTopMAEs } from '@gekko/shared/helpers/finance/stats.helper';
 import { calculatePortfolioTotalValue, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
-import { error, info, warning } from '@gekko/core/logger/logger';
+import { info, warning } from '@gekko/core/logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import { first, isNil, sortBy, sumBy } from 'lodash-es';
 import { Plugin } from '@gekko/core/plugin/plugin';
 import type { RunContext } from '@gekko/core/run/runContext.types';
-import { calculatePerformanceStatistics, pickBenchmarkAsset } from '../analyzer.helper';
+import { calculatePerformanceStatistics, emitPerformanceReport, pickBenchmarkAsset, warnOfLateStart } from '../analyzer.helper';
 import { analyzerSchema } from '@gekko/schemas/plugins/analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
 import { DateRange, Start, TradingReport } from './roundTrip.types';
@@ -86,7 +85,7 @@ export class RoundTripAnalyzer extends Plugin {
     this.latestPortfolio = null;
     this.latestPrices = new Map();
     this.nextRoundTripId = 0;
-    this.riskFreeReturn = riskFreeReturn ?? 5;
+    this.riskFreeReturn = riskFreeReturn;
     this.start = { equity: 0, portfolio: null };
     this.startPrice = null;
     this.trackers = new Map(
@@ -116,13 +115,7 @@ export class RoundTripAnalyzer extends Plugin {
     // The start is taken when the warmup completes (see Start), unless no portfolio had been received by then
     if (!this.warmupCompleted || this.start.portfolio) return;
     this.start = { equity: this.valuePortfolio(portfolio), portfolio };
-    // Received before the next bucket, it is valued at the start prices all the same. So is the first portfolio of the Trader with the
-    // default warmup of 0 candles: the first bucket completes the warmup, and its end is delivered first.
-    if (this.currentTimestamp === this.dates.start) return;
-    warning(
-      'roundtrip analyzer',
-      `No portfolio received during the warmup: start equity taken late, at the prices of ${toISOString(this.currentTimestamp)}.`,
-    );
+    warnOfLateStart('roundtrip analyzer', this.currentTimestamp, this.dates.start);
   }
 
   /**
@@ -278,6 +271,7 @@ export class RoundTripAnalyzer extends Plugin {
     }
 
     const trackers = [...this.trackers.values()];
+    const pairs = trackers.map(tracker => tracker.summarize(this.dates));
     // The round trips closed during the period, every pair together, in the order they closed, which their ids follow
     const roundTrips = sortBy(
       trackers.flatMap(tracker => tracker.closedRoundTrips),
@@ -311,12 +305,13 @@ export class RoundTripAnalyzer extends Plugin {
       benchmarkAsset: this.benchmarkAsset,
       startBalance: this.start.equity,
       finalBalance: this.currentEquity,
-      // Every round trip closed: its P&L is known from its fills, its profit unknown at worst. Rounded once, by the printers: rounded to
-      // 4 decimals here first, 40 wins of 103 (38.83495 %) were written 38.84 %.
-      winRate: calculateWinRate(roundTrips.filter(({ pnl }) => pnl > 0).length, roundTrips.length),
+      // Every round trip closed: its P&L is known from its fills, its profit unknown at worst. The wins of the pairs added up, each
+      // decided by its tracker (see RoundTripTracker.summarize), so that the run's and those of its pairs agree. Rounded once, by the
+      // printers: rounded to 4 decimals here first, 40 wins of 103 (38.83495 %) were written 38.84 %.
+      winRate: calculateWinRate(sumBy(pairs, 'winCount'), sumBy(pairs, 'roundTripCount')),
       topMAEs: extractTopMAEs(roundTrips.map(({ maxAdverseExcursion }) => maxAdverseExcursion)),
-      tradeCount: sumBy(trackers, tracker => tracker.tradeCount),
-      pairs: trackers.map(tracker => tracker.summarize(this.dates)),
+      tradeCount: sumBy(pairs, 'tradeCount'),
+      pairs,
     };
   }
   // --- END INTERNALS ---
@@ -360,15 +355,7 @@ export class RoundTripAnalyzer extends Plugin {
     if (this.enableConsoleTable) logFinalize(report, this.currency);
     else info('roundtrip analyzer', report);
     for (const tracker of this.trackers.values()) tracker.logOpenPosition();
-
-    // Emit directly: processFinalize is the final lifecycle hook. Awaited, so that the run ends once the listeners are done with the
-    // report, and caught: the report is logged above whatever a listener does with it. Neither awaited nor caught, a listener that
-    // failed rejected a promise nobody held, and a backtest that ended normally exited with code 1.
-    try {
-      await this.emit<TradingReport>(PERFORMANCE_REPORT_EVENT, report);
-    } catch (err) {
-      error('roundtrip analyzer', `A listener failed on the performance report: ${describeError(err)}`);
-    }
+    await emitPerformanceReport(this, report, 'roundtrip analyzer');
   }
 
   public static getStaticConfiguration() {

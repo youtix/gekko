@@ -1,5 +1,5 @@
 import { RingBuffer } from '@gekko/shared/helpers/collection/ringBuffer';
-import { calculateExposurePct, calculateWinRate } from '@gekko/shared/helpers/finance/stats.helper';
+import { calculateWinRate, extractTopMAEs } from '@gekko/shared/helpers/finance/stats.helper';
 import { getAssetBalance, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from '@gekko/shared/models/event.types';
@@ -12,6 +12,7 @@ import { formatAmount, formatEveryDecimal, formatSignedPercent } from '@gekko/sh
 import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { DUST_TOLERANCE } from '../analyzer.const';
+import { calculatePeriodExposurePct } from '../analyzer.helper';
 import { DateRange, ExcursionCandle, Fill, OpenRoundTrip, OrderFill, PairTradingSummary, RoundTripTrackerSetup } from './roundTrip.types';
 import { LATE_FILL_CANDLES } from './roundTripAnalyzer.const';
 import {
@@ -158,11 +159,16 @@ export class RoundTripTracker {
     return intervals;
   }
 
-  /** Its round trips over `period`, as the breakdown of the report gives them (see TradingReport.pairs) */
+  /**
+   * Its round trips over `period`, as the breakdown of the report gives them (see TradingReport.pairs). The report adds up the wins, the
+   * round trips and the trades of the pairs rather than counting them again, so that a win, a round trip whose P&L is above 0, is
+   * decided here alone. The exposure of a period of 0 ms is 0, as the report's (see calculatePeriodExposurePct), and the deepest
+   * adverse excursion is the first of those the report lists (see extractTopMAEs).
+   */
   summarize(period: DateRange): PairTradingSummary {
     const { roundTrips } = this;
     const winCount = roundTrips.filter(({ pnl }) => pnl > 0).length;
-    const periodMs = period.end - period.start;
+    const coveredMs = measureCoveredMs(this.exposureIntervals(period.end), period);
     return {
       symbol: this.symbol,
       roundTripCount: roundTrips.length,
@@ -170,9 +176,8 @@ export class RoundTripTracker {
       winRate: calculateWinRate(winCount, roundTrips.length),
       tradeCount: this.trades,
       pnl: roundTrips.reduce((total, { pnl }) => addPrecise(total, pnl), 0),
-      // A run that ends with the bucket that completed the warmup has a period of 0 ms, and nothing exposed in it
-      exposurePct: periodMs > 0 ? calculateExposurePct(measureCoveredMs(this.exposureIntervals(period.end), period), periodMs) : 0,
-      maxAdverseExcursion: roundTrips.reduce((deepest, { maxAdverseExcursion }) => Math.max(deepest, maxAdverseExcursion), 0),
+      exposurePct: calculatePeriodExposurePct(coveredMs, period.end - period.start),
+      maxAdverseExcursion: extractTopMAEs(roundTrips.map(({ maxAdverseExcursion }) => maxAdverseExcursion))[0] ?? 0,
     };
   }
 

@@ -1,12 +1,20 @@
+import { PERFORMANCE_REPORT_EVENT } from '@gekko/shared/constants/event.const';
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { warning } from '@gekko/core/logger/logger';
+import { error, warning } from '@gekko/core/logger/logger';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import { describe, expect, it, vi } from 'vitest';
 import { PerformanceStatisticsInput } from './analyzer.types';
-import { calculatePerformanceStatistics, pickBenchmarkAsset } from './analyzer.helper';
+import {
+  calculatePerformanceStatistics,
+  calculatePeriodExposurePct,
+  emitPerformanceReport,
+  pickBenchmarkAsset,
+  warnOfLateStart,
+} from './analyzer.helper';
+import { EMPTY_TRADING_REPORT } from './roundTripAnalyzer/roundTripAnalyzer.const';
 
-vi.mock('@gekko/core/logger/logger', () => ({ warning: vi.fn() }));
+vi.mock('@gekko/core/logger/logger', () => ({ error: vi.fn(), warning: vi.fn() }));
 
 const HOUR = 60 * ONE_MINUTE;
 const DAY = 24 * HOUR;
@@ -174,6 +182,64 @@ describe('calculatePerformanceStatistics', () => {
       const input = { ...INPUT, periodStartAt: Date.parse(start), periodEndAt: Date.parse(end) };
       expect(calculatePerformanceStatistics(input, 'portfolio analyzer').formattedDuration).toBe(expected);
     });
+  });
+});
+
+describe('calculatePeriodExposurePct', () => {
+  // A run that ends with the bucket that completed the warmup has a period of 0 ms: nothing exposed in it, nothing to divide by
+  it.each`
+    exposureMs      | periodMs | expected | description
+    ${HOUR / 2}     | ${HOUR}  | ${50}    | ${'half the period'}
+    ${30.24 * 1000} | ${DAY}   | ${0.035} | ${'30.24 s of a day, in decimal: 0.034999999999999996 in binary'}
+    ${0}            | ${HOUR}  | ${0}     | ${'nothing exposed'}
+    ${0}            | ${0}     | ${0}     | ${'a period of 0 ms'}
+  `('should give $expected % for $description', ({ exposureMs, periodMs, expected }) => {
+    expect(calculatePeriodExposurePct(exposureMs, periodMs)).toBe(expected);
+  });
+});
+
+describe('warnOfLateStart', () => {
+  // The prices of the bucket that completed the warmup, at its end: the start prices
+  it('should not warn of a start equity taken at the start prices', () => {
+    warnOfLateStart('roundtrip analyzer', START, START);
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it.each`
+    tag
+    ${'roundtrip analyzer'}
+    ${'portfolio analyzer'}
+  `('should warn under the $tag tag of a start equity taken at the prices of a later bucket, naming its end', ({ tag }) => {
+    warnOfLateStart(tag, START + HOUR, START);
+    expect(warning).toHaveBeenCalledExactlyOnceWith(
+      tag,
+      'No portfolio received during the warmup: start equity taken late, at the prices of 2023-01-01T01:00:00.000Z.',
+    );
+  });
+});
+
+describe('emitPerformanceReport', () => {
+  /** An analyzer whose listeners of the report do what `listener` does */
+  const analyzerWith = (listener: () => Promise<void>) => ({ emit: vi.fn(listener) });
+
+  it('should emit the report itself to the listeners of the performance report', async () => {
+    const analyzer = analyzerWith(async () => {});
+    await emitPerformanceReport(analyzer, EMPTY_TRADING_REPORT, 'roundtrip analyzer');
+    expect(analyzer.emit).toHaveBeenCalledExactlyOnceWith(PERFORMANCE_REPORT_EVENT, EMPTY_TRADING_REPORT);
+  });
+
+  it('should log a listener that fails at error level, under the tag of the analyzer', async () => {
+    await emitPerformanceReport(
+      analyzerWith(async () => Promise.reject(new Error('disk full'))),
+      EMPTY_TRADING_REPORT,
+      'portfolio analyzer',
+    );
+    expect(error).toHaveBeenCalledExactlyOnceWith('portfolio analyzer', 'A listener failed on the performance report: disk full');
+  });
+
+  it('should resolve once the listeners are done with the report, whatever they did', async () => {
+    const analyzer = analyzerWith(async () => Promise.reject(new Error('disk full')));
+    await expect(emitPerformanceReport(analyzer, EMPTY_TRADING_REPORT, 'portfolio analyzer')).resolves.toBeUndefined();
   });
 });
 

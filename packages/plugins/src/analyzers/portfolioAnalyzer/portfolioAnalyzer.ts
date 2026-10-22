@@ -1,6 +1,5 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { EQUITY_SNAPSHOT_EVENT, PERFORMANCE_REPORT_EVENT } from '@gekko/shared/constants/event.const';
-import { describeError } from '@gekko/shared/errors/error.helper';
 import {
   CandleBucket,
   EquitySnapshot,
@@ -11,9 +10,8 @@ import {
 } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
-import { error, info, warning } from '@gekko/core/logger/logger';
+import { info, warning } from '@gekko/core/logger/logger';
 import { getFirstCandleFromBucket } from '@gekko/shared/helpers/candle/candle.helper';
-import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '@gekko/shared/helpers/finance/stats.helper';
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { first, isNil, omit } from 'lodash-es';
@@ -22,7 +20,7 @@ import type { RunContext } from '@gekko/core/run/runContext.types';
 import { DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '@gekko/schemas/plugins/analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
-import { calculatePerformanceStatistics, pickBenchmarkAsset } from '../analyzer.helper';
+import { calculatePerformanceStatistics, emitPerformanceReport, pickBenchmarkAsset, warnOfLateStart } from '../analyzer.helper';
 import { EMPTY_PORTFOLIO_REPORT, PLUGIN_NAME } from './portfolioAnalyzer.const';
 import { PortfolioReport } from './portfolioAnalyzer.types';
 import { logPortfolioReport } from './portfolioAnalyzer.helper';
@@ -83,8 +81,8 @@ export class PortfolioAnalyzer extends Plugin {
   constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig, context: RunContext) {
     super(PLUGIN_NAME, context);
 
-    this.riskFreeReturn = riskFreeReturn ?? 5;
-    this.enableConsoleTable = enableConsoleTable ?? false;
+    this.riskFreeReturn = riskFreeReturn;
+    this.enableConsoleTable = enableConsoleTable;
     // An asset that is not watched is refused here, as the plugins are built: no bucket would bring its pair, and the report would
     // measure the market at 0 % after a warning, a figure that passes for a flat market
     this.benchmarkAsset = pickBenchmarkAsset(this.assets, benchmarkAsset, 'portfolio analyzer');
@@ -188,19 +186,14 @@ export class PortfolioAnalyzer extends Plugin {
   }
 
   /**
-   * The start equity, from the first portfolio valued after the warmup completed, at the prices known then (see startEquity). It is
-   * the first point of the equity curve too, which no timeframe candle could mark without a portfolio.
+   * The start equity, from the first portfolio valued after the warmup completed, at the prices known then (see startEquity), with a
+   * warning unless they are the start prices (see warnOfLateStart). It is the first point of the equity curve too, which no timeframe
+   * candle could mark without a portfolio.
    */
   private takeLateStartEquity(totalValue: number): void {
     this.startEquity = totalValue;
     this.recordSnapshot(this.currentTimestamp, totalValue);
-    // Received before the next bucket, it is valued at the start prices all the same. So is the first portfolio of the Trader with the
-    // default warmup of 0 candles: the first bucket completes the warmup, and its end is delivered before that portfolio.
-    if (this.currentTimestamp === this.startPricesAt) return;
-    warning(
-      'portfolio analyzer',
-      `No portfolio received during the warmup: start equity taken late, at the prices of ${toISOString(this.currentTimestamp)}.`,
-    );
+    warnOfLateStart('portfolio analyzer', this.currentTimestamp, this.startPricesAt);
   }
 
   /** Adds a point to the equity curve, and sends it to the live dashboards */
@@ -359,15 +352,7 @@ export class PortfolioAnalyzer extends Plugin {
     // its length, the emitted report keeps the whole curve.
     if (this.enableConsoleTable) logPortfolioReport(report, this.currency);
     else info('portfolio analyzer', { ...omit(report, 'equityCurve'), equityCurveLength: report.equityCurve.length });
-
-    // Emit directly: processFinalize is the final lifecycle hook. Awaited, so that the run ends once the listeners are done with the
-    // report, and caught: the report is logged above whatever a listener does with it. Neither awaited nor caught, a listener that
-    // failed rejected a promise nobody held, and a backtest that ended normally exited with code 1.
-    try {
-      await this.emit<PortfolioReport>(PERFORMANCE_REPORT_EVENT, report);
-    } catch (err) {
-      error('portfolio analyzer', `A listener failed on the performance report: ${describeError(err)}`);
-    }
+    await emitPerformanceReport(this, report, 'portfolio analyzer');
   }
 
   public static getStaticConfiguration() {
