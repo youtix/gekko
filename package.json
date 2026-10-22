@@ -72,13 +72,16 @@
     "eslint-plugin-import": "^2.32.0",
     "globals": "^17.3.0",
     "husky": "^9.1.7",
+    "js-yaml": "^4.1.1",
     "lint-staged": "^16.2.7",
+    "lodash-es": "^4.17.23",
     "prettier": "^3.8.1",
     "semantic-release": "^24.2.5",
     "turbo": "^2.11.10",
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.56.0",
-    "vitest": "^4.0.18"
+    "vitest": "^4.0.18",
+    "zod": "^4.3.6"
   },
   "packageManager": "bun@1.4.4",
   "workspaces": [

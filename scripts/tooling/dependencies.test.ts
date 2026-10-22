@@ -1,6 +1,10 @@
+import { readdirSync, readFileSync } from 'node:fs';
+import { isBuiltin } from 'node:module';
+import path from 'node:path';
+import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
 import { DEPENDENCIES } from '../../eslint.config.js';
-import { readPackageJson, workspaceDirectories } from './workspaces.helper';
+import { readPackageJson, ROOT, workspaceDirectories } from './workspaces.helper';
 
 // The graph of the workspaces is written twice: each workspace's package.json names, as `workspace:*` dependencies, the workspaces its
 // sources and its tests import, and DEPENDENCIES of eslint.config.js names, for each workspace (apps/gekko's sources and its tests
@@ -33,6 +37,38 @@ const allowed = (directory: string) =>
 /** The workspaces ESLint lets the sources of a workspace import: the zone of the workspace, or of its src/ */
 const allowedToSources = (directory: string) => [...(GRAPH[directory] ?? GRAPH[`${directory}/src`] ?? [])].sort();
 
+// The root's own modules, the configurations at the root and the files of scripts/, import packages from the root's node_modules, where
+// Bun's hoisted linker also puts what the workspaces declare: a package the root imported without declaring it resolved there, until an
+// isolated install (`bun install --linker isolated`, or a lockfile written anew, whose `configVersion` 1 selects that linker) left it
+// out, failing the root's suite and its type check
+const SCRIPT_FILE = /\.[cm]?[jt]s$/;
+const ROOT_FILES = [
+  ...readdirSync(ROOT).filter(file => SCRIPT_FILE.test(file)),
+  ...readdirSync(path.join(ROOT, 'scripts'), { recursive: true, encoding: 'utf8' })
+    .filter(file => SCRIPT_FILE.test(file))
+    .map(file => `scripts/${file}`),
+].sort();
+const { dependencies: rootDependencies = {}, devDependencies: rootDevDependencies = {} } = readPackageJson('.');
+const ROOT_DECLARED = Object.keys({ ...rootDependencies, ...rootDevDependencies });
+
+/** The package an import names: its scope and its name (`@eslint/js`), or its name alone (`vitest` of `vitest/config`) */
+const packageOf = (specifier: string) =>
+  specifier
+    .split('/')
+    .slice(0, specifier.startsWith('@') ? 2 : 1)
+    .join('/');
+
+/**
+ * The packages a file imports from node_modules, its imports, re-exports, `import()` and `require()` together: not a relative path, a
+ * builtin of Node or of Bun, nor a workspace, which the paths of tsconfig.base.json resolve
+ */
+const importedPackages = (file: string) =>
+  ts
+    .preProcessFile(readFileSync(path.join(ROOT, file), 'utf8'), true, true)
+    .importedFiles.map(({ fileName }) => fileName)
+    .filter(specifier => !specifier.startsWith('.') && !isBuiltin(specifier) && !/^(bun:|@gekko\/)/.test(specifier))
+    .map(packageOf);
+
 describe('dependencies', () => {
   it.each(Object.keys(GRAPH))('should map %s, a workspace or a directory of one, in eslint.config.js', target => {
     expect(workspaceOf(target)).toBeDefined();
@@ -48,5 +84,9 @@ describe('dependencies', () => {
 
   it.each(WORKSPACES)('should list in %s/package.json every workspace ESLint lets its sources import', workspace => {
     expect(listed(workspace)).toEqual(expect.arrayContaining(allowedToSources(workspace)));
+  });
+
+  it.each(ROOT_FILES)('should declare in the root package.json every package %s imports', file => {
+    expect(importedPackages(file).filter(name => !ROOT_DECLARED.includes(name))).toEqual([]);
   });
 });
