@@ -32,8 +32,12 @@ let run: RealtimeRun | undefined;
 /** The configuration the runs of the file are built from, as useRealtimeConfiguration was given it */
 let readConfiguration: (() => RawConfiguration) | undefined;
 
-/** The context of the next run, once a test asked for it before the run started (realtimeRunContext) */
-let nextContext: RunContext | undefined;
+/**
+ * The context of the next run, once a test asked for it before the run started (realtimeRunContext): the promise of it, which calls that
+ * overlap share. Holding the context itself, set once it was built, two calls that overlapped built one each, and the run went on the
+ * last one set, without the storage the other caller seeded.
+ */
+let nextContext: Promise<RunContext> | undefined;
 
 /**
  * How long, in fake time, endRealtimeRun waits for an aborted run to end: the plugins are finalised then, the last flush of the Telegram
@@ -88,14 +92,28 @@ export const useRealtimeConfiguration = (raw: RawConfiguration | (() => RawConfi
 };
 
 /**
+ * Builds the context of the next run from `configuration`, and forgets it should the schema refuse it, so that the next call reads the
+ * configuration again, which the test may have fixed since: only while it is the next one still, not once endRealtimeRun forgot it and
+ * another call started building the next.
+ */
+const buildNextContext = (configuration: RawConfiguration): Promise<RunContext> => {
+  const building: Promise<RunContext> = createFlowContext(configuration).catch((error: unknown) => {
+    if (nextContext === building) nextContext = undefined;
+    throw error;
+  });
+  return building;
+};
+
+/**
  * The context of the run in progress, or of the next one, built now from the configuration of the file (useRealtimeConfiguration) as it
  * reads at this point, for a scenario that seeds or reads the storage of its run, or reads its exchange: the next run started goes on
- * that context, its services keeping what they built. endRealtimeRun forgets it, so that the next scenario's run gets a context of its own.
+ * that context, its services keeping what they built, and calls that overlap get that one context. endRealtimeRun forgets it, so that
+ * the next scenario's run gets a context of its own.
  */
 export const realtimeRunContext = async (): Promise<RunContext> => {
   if (run) return run.context;
   if (!readConfiguration) throw new Error('No configuration for the realtime runs: call useRealtimeConfiguration() first');
-  nextContext ??= await createFlowContext(readConfiguration());
+  nextContext ??= buildNextContext(readConfiguration());
   return nextContext;
 };
 
@@ -178,6 +196,8 @@ export const runRealtimeUntilEnd = async ({ maxMinutes }: { maxMinutes: number }
  * clock moves until the run is over, up to END_OF_RUN_TIMEOUT, the Telegram bots' last flush included, then the real timers are back
  * (stopFakeClock): the fake timers left are dropped, the polls of the orders still open among them, which the Trader leaves running when
  * it is finalised, as such orders stay on the exchange when Gekko stops. Nothing to abort when the run ended already (a stop, a failure).
+ * A timer that throws as the clock moves fails the test with its error, the real timers back all the same: the hooks that follow, and
+ * the tests after them, would otherwise run on a fake clock nothing moves.
  *
  * Then fails the test when the run did not end, when it ended by itself without a runRealtime… call reporting it (a test that only
  * advanced the clock), when it failed otherwise than with the AbortError as it was ended, or when a plugin failed to finalise:
@@ -188,12 +208,15 @@ export const endRealtimeRun = async () => {
   run = undefined;
   nextContext = undefined;
   const wasRunning = !!ending && !ending.hasEnded;
-  if (ending && wasRunning) {
-    ending.controller.abort();
-    await yieldToEventLoop();
-    if (isFakeClock()) await advanceClock(END_OF_RUN_TIMEOUT, { until: () => ending.hasEnded });
+  try {
+    if (ending && wasRunning) {
+      ending.controller.abort();
+      await yieldToEventLoop();
+      if (isFakeClock()) await advanceClock(END_OF_RUN_TIMEOUT, { until: () => ending.hasEnded });
+    }
+  } finally {
+    stopFakeClock();
   }
-  stopFakeClock();
 
   if (ending && !ending.hasEnded) throw new Error(`The realtime run did not end within ${END_OF_RUN_TIMEOUT / ONE_SECOND} s of its abort`);
   if (ending && !ending.isEndReported) {

@@ -189,6 +189,31 @@ describe('realtimeRun.helper', () => {
       const failure = await rejectionOf(realtimeRunContext());
       expect((failure as Error).message).toStartWith('[CONFIGURATION] Invalid configuration object:\n');
     });
+
+    it('should hand calls that overlap one context, the one the run goes on', async () => {
+      const contexts = await Promise.all([realtimeRunContext(), realtimeRunContext()]);
+      await startRealtimeRun();
+      expect(contexts.map(context => context === pipeline.context)).toEqual([true, true]);
+    });
+
+    it('should build the context again once the test fixed the configuration the schema refused', async () => {
+      configuration = realtimeOf(['btc']);
+      await rejectionOf(realtimeRunContext());
+      configuration = realtimeOf(['ETH']);
+      const context = await realtimeRunContext();
+      expect(context.configuration.getWatch().pairs).toEqual([{ symbol: 'ETH/USDT' }]);
+    });
+
+    it('should keep the context of the next run when the one endRealtimeRun forgot is refused after it', async () => {
+      configuration = realtimeOf(['btc']);
+      const refused = rejectionOf(realtimeRunContext());
+      // Forgets the context being built, as the end of a scenario does, before the schema refuses it
+      const ending = rejectionOf(endRealtimeRun());
+      configuration = realtimeOf(['ETH']);
+      const next = realtimeRunContext();
+      await Promise.all([refused, ending]);
+      expect(await realtimeRunContext()).toBe(await next);
+    });
   });
 
   describe('runRealtimeUntil', () => {
@@ -274,6 +299,14 @@ describe('realtimeRun.helper', () => {
       it('should put the real timers back', async () => {
         await endRealtimeRun();
         expect(isFakeClock()).toBe(false);
+      });
+
+      it('should put the real timers back when a timer throws as the clock moves, and fail with its error', async () => {
+        setTimeout(() => {
+          throw new Error('A timer failed');
+        }, 5 * ONE_SECOND);
+        const failure = await rejectionMessageOf(endRealtimeRun());
+        expect({ failure, isFakeClock: isFakeClock() }).toEqual({ failure: 'A timer failed', isFakeClock: false });
       });
 
       it('should give the next run a context of its own', async () => {
