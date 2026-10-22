@@ -3,6 +3,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { OrderSide, OrderState } from '@gekko/shared/models/order.types';
 import { Trade } from '@gekko/shared/models/trade.types';
+import { TradingPair } from '@gekko/shared/models/utility.types';
 import { debug } from '../logger/logger';
 import { getRetryDelay } from '@gekko/shared/utils/fetch/fetch.utils';
 import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
@@ -157,19 +158,32 @@ export type ExecutedTrade = CCXTTrade & { amount: number; price: number };
 export const isExecutedTrade = (trade: CCXTTrade): trade is ExecutedTrade =>
   isFiniteNumber(trade.amount) && trade.amount > 0 && isFiniteNumber(trade.price) && trade.price > 0;
 
-/** The token of the base of a hyperliquid market (baseName, UBTC for the BTC of BTC/USDC), undefined on a market that names none */
-const getBaseName = (market: MarketInterface) =>
+/**
+ * The token of the base of a hyperliquid market (baseName, UBTC for the BTC of BTC/USDC), undefined on a market that names none, as
+ * Binance's do. ccxt sets it on Hyperliquid's spot markets but leaves it out of its types.
+ */
+export const getBaseName = (market: MarketInterface) =>
   'baseName' in market && typeof market.baseName === 'string' ? market.baseName : undefined;
+
+/**
+ * The side of the market a currency is, its base or its quote, undefined for any other currency (BNB with Binance's fee discount). A
+ * currency is matched with the unified codes of the market, and with the tokens Hyperliquid names its fees by (feeToken, which ccxt does
+ * not unify) while ccxt names the market after the coins it maps the tokens to: the baseName of the market (UBTC for the BTC of
+ * BTC/USDC) and its quoteId (USDT0 for a market quoted in USDT). The one match of the fee rate and of the fee currency of a trade.
+ */
+const getMarketSide = (currency: string, market: MarketInterface): 'base' | 'quote' | undefined => {
+  if (currency === market.quote || currency === market.quoteId) return 'quote';
+  if (currency === market.base || currency === getBaseName(market)) return 'base';
+  return undefined;
+};
 
 /**
  * The fee rate of a ccxt trade in %, the unit of Trade.fee.rate and of the simulated exchange (0.1 for 0.1 %), or undefined when it
  * cannot be known. Never 0 by default: 0 is a trade without fees, and only an unknown rate makes the Trader warn about it.
  * - A rate given by ccxt is a fraction (0.001 for 0.1 %): it is multiplied by 100. ccxt 4.5.39 gives none for binance or hyperliquid.
  * - Otherwise the rate is derived from the cost and the currency of the fee, which both drivers give. A fee paid in the quote
- *   currency is that share of the cost of the trade (amount × price), a fee paid in the base currency that share of its amount.
- *   Hyperliquid names the fee currency by its token (feeToken, which ccxt does not unify), while the market is named after the coins
- *   ccxt maps the tokens to: the token is also matched with the baseName of the market (UBTC for BTC/USDC) and its quoteId (USDT0 for
- *   a market quoted in USDT).
+ *   currency is that share of the cost of the trade (amount × price), a fee paid in the base currency that share of its amount, the
+ *   side told by getMarketSide, which reads a Hyperliquid token as the coin ccxt names the market after.
  * - A fee paid in any other currency, such as BNB with Binance's fee discount, is not converted: its rate is unknown.
  * The percentage is worked out in decimal: the decimal point of the rate or of the fee moved two places, the cost of the trade as its
  * amount and price are written (multiplyPrecise), the one division rounded to 15 significant digits (toSignificantDigits). In binary,
@@ -184,36 +198,43 @@ const getFeePercent = (trade: ExecutedTrade, market: MarketInterface): number | 
   if (!isFiniteNumber(cost) || !currency) return undefined;
 
   const percentOf = (whole: number) => toSignificantDigits(shiftDecimalPoint(cost, 2) / whole);
-  if (currency === market.quote || currency === market.quoteId) return percentOf(multiplyPrecise(trade.amount, trade.price));
-  if (currency === market.base || currency === getBaseName(market)) return percentOf(trade.amount);
+  const side = getMarketSide(currency, market);
+  if (side === 'quote') return percentOf(multiplyPrecise(trade.amount, trade.price));
+  if (side === 'base') return percentOf(trade.amount);
   return undefined;
 };
 
 /**
- * The currency a ccxt trade paid its fee in, as Gekko names it: the base or the quote of the market for a fee taken in one of them,
- * which hyperliquid names by its token (feeToken, UBTC for the BTC of BTC/USDC, USDT0 for a market quoted in USDT: see getFeePercent),
- * a name the summary of the order could not match with the asset of its pair; any other currency as the exchange names it (BNB with
- * Binance's fee discount); undefined when the trade names none.
+ * The currency a ccxt trade paid its fee in, as the run names it: the asset or the currency of the pair, as the symbol configured writes
+ * them, for a fee taken in the base or the quote of the market (see getMarketSide); any other currency as the exchange names it (BNB
+ * with Binance's fee discount); undefined when the trade names none. The names of the configured symbol are those the rest of Gekko
+ * reads, the ones fetchBalance keys the portfolio by and a round trip knows its asset by, which ccxt's need not be: it lists
+ * Hyperliquid's wrapped spot tokens under the coins they wrap and resolves a pair written with the token name (UBTC/USDC, as the guide
+ * has it) to that market (BTC/USDC, base BTC). Named after ccxt's base, the fee Hyperliquid takes in UBTC on a BUY of UBTC/USDC was a
+ * fee in BTC, which a round trip of UBTC counted in its P&L where the smaller amount sold already carried it.
  */
-const getFeeCurrency = (trade: ExecutedTrade, market: MarketInterface): string | undefined => {
+const getFeeCurrency = (trade: ExecutedTrade, market: MarketInterface, symbol: TradingPair): string | undefined => {
   const currency = trade.fee?.currency;
   if (!currency) return undefined;
-  if (currency === market.quote || currency === market.quoteId) return market.quote;
-  if (currency === market.base || currency === getBaseName(market)) return market.base;
+  const [assetName, currencyName] = symbol.split('/');
+  const side = getMarketSide(currency, market);
+  if (side === 'base') return assetName;
+  if (side === 'quote') return currencyName;
   return currency;
 };
 
 /**
- * Maps a ccxt trade of the market given, one that says what it executed (see isExecutedTrade), onto a Gekko trade. Its fee rate is in
- * % (see getFeePercent), the cost of its fee is kept as ccxt gives it, for information, and the currency of its fee is named as Gekko
- * names it (see getFeeCurrency): the asset the summary of the order says the fee was taken in.
+ * Maps a ccxt trade, one that says what it executed (see isExecutedTrade), onto a Gekko trade, given the market of the trade and the
+ * symbol configured for it, which ccxt resolved to that market (UBTC/USDC to BTC/USDC on Hyperliquid). Its fee rate is in % (see
+ * getFeePercent), the cost of its fee is kept as ccxt gives it, for information, and the currency of its fee is named as the run names
+ * the asset and the currency of the pair (see getFeeCurrency): the asset the summary of the order says the fee was taken in.
  */
-export const mapCcxtTradeToTrade = (trade: ExecutedTrade, market: MarketInterface): Trade => ({
+export const mapCcxtTradeToTrade = (trade: ExecutedTrade, market: MarketInterface, symbol: TradingPair): Trade => ({
   id: trade.order ?? '',
   amount: trade.amount,
   price: trade.price,
   timestamp: trade.timestamp ?? Date.now(),
-  fee: { rate: getFeePercent(trade, market), cost: trade.fee?.cost, currency: getFeeCurrency(trade, market) },
+  fee: { rate: getFeePercent(trade, market), cost: trade.fee?.cost, currency: getFeeCurrency(trade, market, symbol) },
 });
 
 /**

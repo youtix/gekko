@@ -430,10 +430,11 @@ describe('CCXTExchange', () => {
       expect(instance.fetchMyTrades).toHaveBeenCalledWith('BTC/USDT', 1000, expect.anything());
     });
 
-    // The mapper derives the fee rate of a trade from the currency of its fee, base or quote of the market
-    it('maps each trade with the market of the symbol', async () => {
+    // The mapper derives the fee rate of a trade from the currency of its fee, base or quote of the market, and names that currency as
+    // the symbol configured writes the asset and the currency of the pair
+    it('maps each trade with the market of the symbol and the symbol itself', async () => {
       await exchange.fetchMyTrades('BTC/USDT', 1000);
-      expect(mapCcxtTradeToTrade).toHaveBeenCalledWith(trade, market);
+      expect(mapCcxtTradeToTrade).toHaveBeenCalledWith(trade, market, 'BTC/USDT');
     });
 
     it.each`
@@ -562,6 +563,38 @@ describe('CCXTExchange', () => {
 
       it('finds the fills of the symbol beyond a full page of fills of other markets', async () => {
         expect(await exchange.fetchMyTrades('BTC/USDC', 1000)).toEqual(fillsOfSymbol);
+      });
+    });
+
+    // ccxt 4.5.39 lists Hyperliquid's wrapped spot token UBTC under the coin it wraps, BTC/USDC (base BTC, baseName UBTC), resolves the
+    // pair written with the token name to that market, and names a fee by the token Hyperliquid took it in (feeToken): the fee of a
+    // BUY in the token received, that of a SELL in USDC. Named after ccxt's base, the fee of a BUY of UBTC/USDC was taken in BTC, which
+    // a round trip of UBTC counted in its P&L where the smaller amount sold already carried it.
+    describe('on hyperliquid, a pair written with the name of a wrapped spot token or of the coin it wraps', () => {
+      const market = { symbol: 'BTC/USDC', base: 'BTC', baseName: 'UBTC', quote: 'USDC', quoteId: 'USDC' };
+      const fill = (order: string, timestamp: number, amount: number, price: number, fee: { cost: number; currency: string }) => ({
+        ...makeTrade(order, timestamp, { order, symbol: 'BTC/USDC', amount, price }),
+        fee,
+      });
+      const buy = fill('buy', 1000, 0.01, 100000, { cost: 0.000007, currency: 'UBTC' });
+      const sell = fill('sell', 2000, 0.009993, 101000, { cost: 0.7065051, currency: 'USDC' });
+
+      beforeEach(async () => {
+        const { mapCcxtTradeToTrade: mapper } = await vi.importActual<typeof import('./exchange.helper')>('./exchange.helper');
+        (mapCcxtTradeToTrade as Mock).mockImplementation(mapper);
+        exchange = new CCXTExchange(hyperliquidConfig, watch);
+        instance = (ccxt as any).hyperliquid.mock.instances.at(-1);
+        instance.market.mockReturnValue(market);
+        instance.fetchMyTrades.mockResolvedValue([buy, sell]);
+      });
+
+      it.each`
+        symbol         | expected
+        ${'UBTC/USDC'} | ${['UBTC', 'USDC']}
+        ${'BTC/USDC'}  | ${['BTC', 'USDC']}
+      `('names the fees of the trades of $symbol after its asset and its currency, $expected', async ({ symbol, expected }) => {
+        const trades = await exchange.fetchMyTrades(symbol, 1000);
+        expect(trades.map(({ fee }) => fee.currency)).toEqual(expected);
       });
     });
   });

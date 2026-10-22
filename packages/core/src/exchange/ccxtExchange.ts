@@ -17,6 +17,7 @@ import { OrderOutcomeUnknown } from './exchange.error';
 import {
   checkMandatoryFeatures,
   createExchange,
+  getBaseName,
   getTradeKey,
   isExecutedTrade,
   mapCcxtOrderToOpenOrder,
@@ -195,10 +196,11 @@ export class CCXTExchange implements Exchange {
    * filters by symbol afterwards, so that a page cut short by the fills of other markets would look like the last one. Its fills are
    * fetched for every market, those of the symbol being kept here.
    */
-  public async fetchMyTrades(symbol: string, from?: EpochTimeStamp) {
+  public async fetchMyTrades(symbol: TradingPair, from?: EpochTimeStamp) {
     // Each page is read under retry; translateErrors translates a failure of the market lookup
     return translateErrors<Trade[]>(async () => {
-      // The fee rate of a trade is derived from the currency its fee was paid in, base or quote of the market (see mapCcxtTradeToTrade)
+      // The market ccxt resolves the symbol to: the fee of a trade is matched with its base or its quote, for its rate, and named after
+      // the asset or the currency of the symbol configured, which may differ (UBTC/USDC for BTC/USDC, see mapCcxtTradeToTrade)
       const market = this.publicClient.market(symbol);
       const limit = LIMITS[this.exchangeName].trades;
       // Hyperliquid: the fills of every market, filtered below (see above)
@@ -232,7 +234,7 @@ export class CCXTExchange implements Exchange {
         isExecutedTrade,
       );
       if (unknown.length) this.warnOfUnknownTrades(symbol, unknown);
-      return executed.map(trade => mapCcxtTradeToTrade(trade, market));
+      return executed.map(trade => mapCcxtTradeToTrade(trade, market, symbol));
     });
   }
 
@@ -280,9 +282,9 @@ export class CCXTExchange implements Exchange {
         const [assetName, currencyName] = symbol.split('/');
         const market = this.publicClient.market(symbol);
         // Defensive: an asset with nothing under the base is read under baseName, the token name, which ccxt sets on Hyperliquid's
-        // markets (not on Binance's) but leaves out of its types. For a balance keyed by token names: from another ccxt version, or
-        // from a private client that has not loaded its currencies, where ccxt learns the wrapped tokens its built-in mapping lacks.
-        const baseName = 'baseName' in market && typeof market.baseName === 'string' ? market.baseName : undefined;
+        // markets (not on Binance's, see getBaseName). For a balance keyed by token names: from another ccxt version, or from a private
+        // client that has not loaded its currencies, where ccxt learns the wrapped tokens its built-in mapping lacks.
+        const baseName = getBaseName(market);
         const asset = balance[market.base] ?? (baseName ? balance[baseName] : undefined);
         const currency = balance[market.quote];
         portfolio.set(assetName, { free: asset?.free ?? 0, used: asset?.used ?? 0, total: asset?.total ?? 0 });

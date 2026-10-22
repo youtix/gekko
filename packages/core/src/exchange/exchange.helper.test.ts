@@ -235,16 +235,17 @@ describe('exchange.helper', () => {
 
   describe('mapCcxtTradeToTrade', () => {
     const timestamp = 1600000000000;
-    // As ccxt 4.5.39 builds them: binance's BTC/USDT, whose fees ccxt names by unified codes; hyperliquid's market of its wrapped
-    // token UBTC, listed as BTC/USDC with the token as baseName, and a market quoted in USDT0, listed in USDT with the token as
-    // quoteId: hyperliquid's fees are named by token (feeToken)
+    // As ccxt 4.5.39 builds them: binance's BTC/USDT, whose fees ccxt names by unified codes; hyperliquid's markets of its wrapped
+    // tokens, UBTC listed as BTC/USDC and UPUMP as PMP/USDC (a coin name ccxt learns from the token list), with the token as baseName,
+    // and a market quoted in USDT0, listed in USDT with the token as quoteId: hyperliquid's fees are named by token (feeToken)
     const binanceMarket: any = { symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT', baseId: 'BTC', quoteId: 'USDT' };
     const hyperliquidMarket: any = { symbol: 'BTC/USDC', base: 'BTC', baseName: 'UBTC', quote: 'USDC', baseId: '10142', quoteId: 'USDC' };
+    const hyperliquidPumpMarket: any = { symbol: 'PMP/USDC', base: 'PMP', baseName: 'UPUMP', quote: 'USDC', quoteId: 'USDC' };
     const hyperliquidUsdt0Market: any = { symbol: 'HYPE/USDT', base: 'HYPE', baseName: 'HYPE', quote: 'USDT', quoteId: 'USDT0' };
 
     it('maps a trade, keeping the cost and the currency of its fee', () => {
       const trade: any = { id: '1', order: 'ord1', amount: 1, price: 60000, timestamp, fee: { cost: 60, currency: 'USDT' } };
-      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket)).toEqual({
+      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket, 'BTC/USDT')).toEqual({
         id: 'ord1',
         amount: 1,
         price: 60000,
@@ -253,49 +254,55 @@ describe('exchange.helper', () => {
       });
     });
 
-    // The currency of a fee is named as Gekko names the base and the quote of the market when it is one of them: hyperliquid names it
-    // by its token, which an order summary could not match with the asset of its pair; any other currency keeps the exchange's name
+    // The currency of a fee taken in the base or the quote of the market is named as the symbol configured writes the asset and the
+    // currency of the pair, the names the portfolio and the round trips read: hyperliquid names a fee by its token, and ccxt resolves a
+    // pair written with the token name (UBTC/USDC) to the market of the coin it wraps (BTC/USDC). Any other currency keeps the
+    // exchange's name. Named after ccxt's base, the fee of a BUY of UBTC/USDC was taken in BTC, which a round trip of UBTC counted.
     it.each`
-      description                                  | market                    | fee                                  | expected
-      ${'the quote of binance'}                    | ${binanceMarket}          | ${{ cost: 60, currency: 'USDT' }}    | ${'USDT'}
-      ${'the base of binance'}                     | ${binanceMarket}          | ${{ cost: 0.001, currency: 'BTC' }}  | ${'BTC'}
-      ${'the token of the base of hyperliquid'}    | ${hyperliquidMarket}      | ${{ cost: 0.001, currency: 'UBTC' }} | ${'BTC'}
-      ${'the quote of hyperliquid'}                | ${hyperliquidMarket}      | ${{ cost: 60, currency: 'USDC' }}    | ${'USDC'}
-      ${'the token of the quote of hyperliquid'}   | ${hyperliquidUsdt0Market} | ${{ cost: 0.04, currency: 'USDT0' }} | ${'USDT'}
-      ${'another currency, BNB with the discount'} | ${binanceMarket}          | ${{ cost: 0.0001, currency: 'BNB' }} | ${'BNB'}
-      ${'no fee'}                                  | ${binanceMarket}          | ${undefined}                         | ${undefined}
-      ${'a fee without currency'}                  | ${binanceMarket}          | ${{ cost: 60 }}                      | ${undefined}
-      ${'a fee whose currency is empty'}           | ${binanceMarket}          | ${{ cost: 60, currency: '' }}        | ${undefined}
-    `('names the currency of a fee taken in $description as $expected', ({ market, fee, expected }) => {
+      description                                                 | market                    | symbol          | fee                                   | expected
+      ${'the quote of binance'}                                   | ${binanceMarket}          | ${'BTC/USDT'}   | ${{ cost: 60, currency: 'USDT' }}     | ${'USDT'}
+      ${'the base of binance'}                                    | ${binanceMarket}          | ${'BTC/USDT'}   | ${{ cost: 0.001, currency: 'BTC' }}   | ${'BTC'}
+      ${'the token of the base of hyperliquid, written so'}       | ${hyperliquidMarket}      | ${'UBTC/USDC'}  | ${{ cost: 0.001, currency: 'UBTC' }}  | ${'UBTC'}
+      ${'the token of the base of hyperliquid, its coin written'} | ${hyperliquidMarket}      | ${'BTC/USDC'}   | ${{ cost: 0.001, currency: 'UBTC' }}  | ${'BTC'}
+      ${'the coin of the base of hyperliquid, its token written'} | ${hyperliquidMarket}      | ${'UBTC/USDC'}  | ${{ cost: 0.001, currency: 'BTC' }}   | ${'UBTC'}
+      ${'a token ccxt names after a coin of its own'}             | ${hyperliquidPumpMarket}  | ${'UPUMP/USDC'} | ${{ cost: 0.001, currency: 'UPUMP' }} | ${'UPUMP'}
+      ${'the quote of hyperliquid'}                               | ${hyperliquidMarket}      | ${'UBTC/USDC'}  | ${{ cost: 60, currency: 'USDC' }}     | ${'USDC'}
+      ${'the token of the quote of hyperliquid'}                  | ${hyperliquidUsdt0Market} | ${'HYPE/USDT'}  | ${{ cost: 0.04, currency: 'USDT0' }}  | ${'USDT'}
+      ${'another currency, BNB with the discount'}                | ${binanceMarket}          | ${'BTC/USDT'}   | ${{ cost: 0.0001, currency: 'BNB' }}  | ${'BNB'}
+      ${'no fee'}                                                 | ${binanceMarket}          | ${'BTC/USDT'}   | ${undefined}                          | ${undefined}
+      ${'a fee without currency'}                                 | ${binanceMarket}          | ${'BTC/USDT'}   | ${{ cost: 60 }}                       | ${undefined}
+      ${'a fee whose currency is empty'}                          | ${binanceMarket}          | ${'BTC/USDT'}   | ${{ cost: 60, currency: '' }}         | ${undefined}
+    `('names the currency of a fee taken in $description, on $symbol, as $expected', ({ market, symbol, fee, expected }) => {
       const trade: any = { id: '1', order: 'ord1', amount: 1, price: 60000, timestamp, fee };
-      expect(utils.mapCcxtTradeToTrade(trade, market).fee.currency).toBe(expected);
+      expect(utils.mapCcxtTradeToTrade(trade, market, symbol).fee.currency).toBe(expected);
     });
 
     it('maps a trade without an order id to an empty id', () => {
       const trade: any = { amount: 1, price: 60000, timestamp };
-      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket)).toMatchObject({ id: '', amount: 1, price: 60000 });
+      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket, 'BTC/USDT')).toMatchObject({ id: '', amount: 1, price: 60000 });
     });
 
     // Trade.fee.rate is in % (0.1 for 0.1 %), and undefined when it cannot be known: never 0, which would be a trade without fees
     it.each`
-      description                                                              | market                    | amount | price    | fee                                                   | expected
-      ${'converts the rate given by ccxt, a fraction, to a percentage'}        | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.001 }}                                    | ${0.1}
-      ${'prefers the rate given by ccxt to the one derived from the cost'}     | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.002, cost: 60, currency: 'USDT' }}        | ${0.2}
-      ${'derives the rate of a fee in the quote from the cost of the trade'}   | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDT' }}                     | ${0.1}
-      ${'derives the rate of a fee in the base from the amount of the trade'}  | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'BTC' }}                   | ${0.1}
-      ${'derives the rate of a fee in the token of the base (baseName)'}       | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'UBTC', rate: undefined }} | ${0.1}
-      ${'derives the rate of a fee in the quote of hyperliquid'}               | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDC', rate: undefined }}    | ${0.1}
-      ${'derives the rate of a fee in the token of the quote (quoteId)'}       | ${hyperliquidUsdt0Market} | ${1}   | ${40}    | ${{ cost: 0.04, currency: 'USDT0', rate: undefined }} | ${0.1}
-      ${'derives a rate of 0 from a fee that cost nothing'}                    | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0, currency: 'USDT' }}                      | ${0}
-      ${'derives the rate when the rate given by ccxt is not finite'}          | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: Number.NaN, cost: 60, currency: 'USDT' }}   | ${0.1}
-      ${'leaves the rate of a fee in another currency (BNB discount) unknown'} | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.0001, currency: 'BNB' }}                  | ${undefined}
-      ${'leaves the rate of a trade without fee unknown'}                      | ${binanceMarket}          | ${1}   | ${60000} | ${undefined}                                          | ${undefined}
-      ${'leaves the rate of a fee with neither cost nor currency unknown'}     | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: undefined, currency: undefined }}           | ${undefined}
-      ${'leaves the rate of a fee without cost unknown'}                       | ${binanceMarket}          | ${1}   | ${60000} | ${{ currency: 'USDT' }}                               | ${undefined}
-      ${'leaves the rate of a fee without currency unknown'}                   | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60 }}                                       | ${undefined}
+      description                                                                  | market                    | amount | price    | fee                                                    | expected
+      ${'converts the rate given by ccxt, a fraction, to a percentage'}            | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.001 }}                                     | ${0.1}
+      ${'prefers the rate given by ccxt to the one derived from the cost'}         | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: 0.002, cost: 60, currency: 'USDT' }}         | ${0.2}
+      ${'derives the rate of a fee in the quote from the cost of the trade'}       | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDT' }}                      | ${0.1}
+      ${'derives the rate of a fee in the base from the amount of the trade'}      | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'BTC' }}                    | ${0.1}
+      ${'derives the rate of a fee in the token of the base (baseName)'}           | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'UBTC', rate: undefined }}  | ${0.1}
+      ${'derives the rate of a fee in a token ccxt names after a coin of its own'} | ${hyperliquidPumpMarket}  | ${1}   | ${60000} | ${{ cost: 0.001, currency: 'UPUMP', rate: undefined }} | ${0.1}
+      ${'derives the rate of a fee in the quote of hyperliquid'}                   | ${hyperliquidMarket}      | ${1}   | ${60000} | ${{ cost: 60, currency: 'USDC', rate: undefined }}     | ${0.1}
+      ${'derives the rate of a fee in the token of the quote (quoteId)'}           | ${hyperliquidUsdt0Market} | ${1}   | ${40}    | ${{ cost: 0.04, currency: 'USDT0', rate: undefined }}  | ${0.1}
+      ${'derives a rate of 0 from a fee that cost nothing'}                        | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0, currency: 'USDT' }}                       | ${0}
+      ${'derives the rate when the rate given by ccxt is not finite'}              | ${binanceMarket}          | ${1}   | ${60000} | ${{ rate: Number.NaN, cost: 60, currency: 'USDT' }}    | ${0.1}
+      ${'leaves the rate of a fee in another currency (BNB discount) unknown'}     | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 0.0001, currency: 'BNB' }}                   | ${undefined}
+      ${'leaves the rate of a trade without fee unknown'}                          | ${binanceMarket}          | ${1}   | ${60000} | ${undefined}                                           | ${undefined}
+      ${'leaves the rate of a fee with neither cost nor currency unknown'}         | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: undefined, currency: undefined }}            | ${undefined}
+      ${'leaves the rate of a fee without cost unknown'}                           | ${binanceMarket}          | ${1}   | ${60000} | ${{ currency: 'USDT' }}                                | ${undefined}
+      ${'leaves the rate of a fee without currency unknown'}                       | ${binanceMarket}          | ${1}   | ${60000} | ${{ cost: 60 }}                                        | ${undefined}
     `('$description', ({ market, amount, price, fee, expected }) => {
       const trade: any = { id: '1', order: 'ord1', amount, price, timestamp, fee };
-      expect(utils.mapCcxtTradeToTrade(trade, market).fee.rate).toBe(expected);
+      expect(utils.mapCcxtTradeToTrade(trade, market, market.symbol).fee.rate).toBe(expected);
     });
 
     // In binary these came out at 0.06999999999999999 % for 0.07 %, 0.09999999999999999 % for 0.1 % and 0.03333333333333333 % for the
@@ -313,7 +320,7 @@ describe('exchange.helper', () => {
       ${'a fee of 0.00084449 UBTC on 1.20642'}              | ${hyperliquidMarket} | ${1.20642} | ${60000}    | ${{ cost: 0.00084449, currency: 'UBTC' }}  | ${0.0699996684405099}
     `('gives the rate of $description as a decimal, $expected %', ({ market, amount, price, fee, expected }) => {
       const trade: any = { id: '1', order: 'ord1', amount, price, timestamp, fee };
-      expect(utils.mapCcxtTradeToTrade(trade, market).fee.rate).toBe(expected);
+      expect(utils.mapCcxtTradeToTrade(trade, market, market.symbol).fee.rate).toBe(expected);
     });
   });
 
