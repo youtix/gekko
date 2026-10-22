@@ -105,6 +105,18 @@ const sampleTradingReport: TradingReport = {
   winRate: 60,
   topMAEs: [],
   tradeCount: 10,
+  pairs: [
+    {
+      symbol: 'BTC/USDT',
+      roundTripCount: 5,
+      winCount: 3,
+      winRate: 60,
+      tradeCount: 10,
+      pnl: 100,
+      exposurePct: 0.5,
+      maxAdverseExcursion: 0,
+    },
+  ],
 };
 
 /** Backs the fs mocks with one file held in memory, for the cases that depend on what was written to it before. */

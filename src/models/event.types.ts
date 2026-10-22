@@ -136,33 +136,52 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
 };
 
 /**
- * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT): from the BUY that opened a position while flat to the SELL that
- * left it flat again, the BUYs and SELLs in between included. One still open when the warmup completed counts from the start of the
- * period: its entry date, price and equity are then those of the start. Its equities are pair equities, in currency: the asset held,
- * valued at a price, plus the currency held (see calculatePairEquity). Its P&L and its profit are unknown, NaN, when no portfolio read
- * valued its entry or its exit: the RoundTripAnalyzer leaves it out of the win rate and the ratios, and the outputs write "unknown".
+ * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT) on one of the watched pairs: from the BUY that opened a position
+ * on its pair while flat to the SELL that left it flat again, the BUYs and SELLs in between included. Its P&L comes from its own fills,
+ * what its SELLs brought in less what its BUYs cost and the fees of all of them, so that an asset held before it, or the fills of
+ * another pair, count in none of it; its profit is that P&L in % of the whole portfolio's value before it opened. One still open when
+ * the warmup completed counts from the start of the period: its entry date, price and equity are then those of the start, and its cost
+ * that of the position it held then, at the start price. Its profit is unknown, NaN, when the Trader had read no portfolio when its BUY
+ * filled: the RoundTripAnalyzer leaves it out of the returns, not of the win rate, and the outputs write "unknown".
  */
 export type RoundTrip = {
-  /** Its number, counted from 0 in the order the round trips of the run close */
+  /** Its number, counted from 0 in the order the round trips of the run close, every pair together */
   id: number;
-  /** Its pair: the one the RoundTripAnalyzer trades on, the only pair of its run (it refuses a run that watches several) */
+  /** Its pair: the RoundTripAnalyzer tracks a round trip on each watched pair */
   symbol: TradingPair;
   /** When the BUY that opened it filled: its execution date, or its cancelation date for a BUY canceled after a partial fill */
   entryAt: number;
   /** The mean price of its BUYs, weighted by their amounts, in currency */
   entryPrice: number;
   /**
-   * The pair equity before the BUY that opened it: after it, at its price, with its fee given back (an unknown fee counting as 0). When
-   * that BUY filled before the Trader had read any portfolio, worked out from the first portfolio an order ended with afterwards (see
-   * PendingEntry); NaN when none came before the round trip closed
+   * The whole portfolio's value in the currency before the BUY that opened it, the base of its profit: the portfolio the Trader read
+   * after that BUY, the asset of its pair valued at the BUY's price and every other watched asset at its latest close, plus the BUY's
+   * fee (an unknown fee counting as 0), which the BUY took from the portfolio. Two fills whose reports share one synchronization of the
+   * Trader, as the BUYs of two pairs on one candle do in a backtest, carry the same portfolio, read after both: the entry equity of each
+   * then includes the other (its fee, and the gap between its price and the last close of its pair). NaN when that BUY's event carried
+   * the empty portfolio of a Trader that had read none yet. The start equity for one rebased at the start of the period (0 when none
+   * was taken by then).
    */
   entryEquity: number;
   /** When the SELL that closed it filled */
   exitAt: number;
   /** The mean price of its SELLs, weighted by their amounts, in currency */
   exitPrice: number;
-  /** The pair equity after the SELL that closed it, at its price, its fee paid; NaN when the Trader had read no portfolio when it filled */
-  exitEquity: number;
+  /**
+   * What its BUYs cost, in currency, fees left out: their amounts times their prices, added up in decimal. For one rebased at the start
+   * of the period, the position it held then, at the start price.
+   */
+  cost: number;
+  /** What its SELLs brought in, in currency, fees left out: their amounts times their prices, added up in decimal */
+  proceeds: number;
+  /**
+   * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, an unknown one (that of the part a
+   * canceled order filled) counting as 0; those of the warmup left out for one rebased at the start of the period. The limit: a BUY fee
+   * that the exchange takes in the asset bought (Binance without BNB) is reported in currency all the same, while the SELL can only sell
+   * what the fee left: such a fee counts twice, here and through the smaller proceeds, and the P&L is understated by it (0.1 % of the
+   * BUY's cost at Binance's regular rate). The order events do not say which asset a fee was taken in.
+   */
+  fees: number;
   /** exitAt less entryAt, in milliseconds */
   duration: number;
   /**
@@ -172,14 +191,13 @@ export type RoundTrip = {
    */
   maxAdverseExcursion: number;
   /**
-   * The return from the entry equity to the exit equity, in % (5 for 5 %), worked out in decimal: 0 for a break-even, equities less than
-   * a booked unit apart (see BOOKED_CURRENCY_UNIT) or within a billionth of each other; NaN when the entry equity is not above 0 or
-   * either equity is unknown
+   * Its P&L in % of its entry equity (5 for 5 %), to 15 significant digits, as the total return of a report is worked out: 0 for a
+   * break-even (see pnl); NaN when the entry equity is unknown or not above 0
    */
   profit: number;
   /**
-   * The exit equity less the entry equity, in currency: net of the fees its orders took from the pair, that of the BUY that opened it
-   * when known (see entryEquity). 0 for a break-even and NaN when unknown, as profit
+   * What it made, in currency: its proceeds less its cost and its fees, worked out in decimal. 0 for a break-even: less than a booked
+   * unit from 0 (see BOOKED_CURRENCY_UNIT), or proceeds equal to the cost and the fees together within a billionth.
    */
   pnl: number;
 };

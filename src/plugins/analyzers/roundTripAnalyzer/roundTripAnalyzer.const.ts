@@ -25,4 +25,5 @@ export const EMPTY_TRADING_REPORT: TradingReport = {
   winRate: null,
   topMAEs: [],
   tradeCount: 0,
+  pairs: [],
 };
