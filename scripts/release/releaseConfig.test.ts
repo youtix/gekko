@@ -60,6 +60,11 @@ describe('release.config.cjs', () => {
     expect(attached).toContain(outfile);
   });
 
+  // The reverse: a file attached that no build:exec writes, which the version plugin refuses before anything is tagged
+  it.each(attached)('should build %s, attached to the release, with the build:exec script of a workspace', outfile => {
+    expect(builds.map(([, built]) => built)).toContain(outfile);
+  });
+
   it('should write the version after the changelog and before the release commit', () => {
     expect(names).toEqual([
       '@semantic-release/commit-analyzer',
