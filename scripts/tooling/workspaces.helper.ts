@@ -41,8 +41,9 @@ const isGlobalDeclarationFile = (file: string) =>
 
 /**
  * The files of the workspaces' sources that declare globals, absolute and sorted: the declaration files (EpochTimeStamp, the empty
- * IndicatorRegistry) and the modules that augment them (each indicator's entry in IndicatorRegistry). Nothing imports them: a program
- * sees them only when its tsconfig includes them, as the one of the whole checkout does.
+ * IndicatorRegistry), which nothing imports, so that a program sees them only when its tsconfig includes them, and the modules that
+ * augment them (each indicator's entry in IndicatorRegistry), which packages/indicators/src/indicator.types.ts imports, so that a
+ * program sees them once it reaches an indicator or the strategies' types.
  */
 export const globalDeclarationFiles = (): string[] =>
   workspaceDirectories()

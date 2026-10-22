@@ -588,7 +588,8 @@ describe('typescript blocks of the guides', () => {
     }
     writeFileSync(path.join(directory, 'context.ts'), CONTEXT);
     // The program sees the global declarations of the workspaces' sources, as the type check of the checkout does (IndicatorRegistry,
-    // EpochTimeStamp): a module only imported by the snippets would leave out the declaration files and the indicators' registry entries
+    // EpochTimeStamp): a program of the snippets alone would leave out the declaration files, which no module imports, and the
+    // indicators' registry entries unless a snippet reaches indicator.types.ts, which imports them
     const globals = globalDeclarationFiles();
     // tsconfig.base.json's compiler options and paths, which resolve `@gekko/<package>/<path>` to the sources of the package
     const tsconfig = {

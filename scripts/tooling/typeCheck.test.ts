@@ -1,4 +1,4 @@
-import { readdirSync } from 'node:fs';
+import { readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import ts from 'typescript';
 import { describe, expect, it } from 'vitest';
@@ -16,7 +16,28 @@ const parse = (tsconfig: string) =>
     },
   });
 
+/** The files a tsconfig names, its includes resolved: those a program starts from */
 const filesOf = (tsconfig: string) => parse(tsconfig)?.fileNames ?? [];
+
+/** The files a type check reads: those its tsconfig names, and every file they import, as tsc builds its program */
+const sourcesOf = (tsconfig: string) => {
+  const { fileNames: rootNames = [], options = {} } = parse(tsconfig) ?? {};
+  return ts
+    .createProgram({ rootNames, options })
+    .getSourceFiles()
+    .map(({ fileName }) => fileName);
+};
+
+// Building a program reads every file it reaches, the declarations of node_modules included: some seconds
+const PROGRAM_TIMEOUT = 60_000;
+
+/** The modules a file imports by a relative path, absolute, with their extension */
+const relativeImportsOf = (file: string) =>
+  ts
+    .preProcessFile(readFileSync(file, 'utf8'))
+    .importedFiles.map(({ fileName }) => fileName)
+    .filter(specifier => specifier.startsWith('.'))
+    .map(specifier => `${path.resolve(path.dirname(file), specifier)}.ts`);
 
 /** A tsconfig as written, without what it extends */
 const rawConfigOf = (tsconfig: string): { extends?: unknown; compilerOptions?: { paths?: Record<string, string[]> } } =>
@@ -29,6 +50,10 @@ const SCRIPTS_SOURCES = readdirSync(path.join(ROOT, 'scripts'), { recursive: tru
   .filter(file => file.endsWith('.ts'))
   .map(file => `scripts/${file}`);
 const BASE_PATHS = rawConfigOf('tsconfig.base.json').compilerOptions?.paths ?? {};
+const INDICATORS_SOURCES = path.join(ROOT, 'packages/indicators/src');
+const INDICATOR_TYPES = path.join(INDICATORS_SOURCES, 'indicator.types.ts');
+/** The modules of the indicators that augment IndicatorRegistry, each with the entry of its indicator */
+const REGISTRY_ENTRIES = globalDeclarationFiles().filter(file => file.startsWith(`${INDICATORS_SOURCES}/`) && !file.endsWith('.d.ts'));
 
 describe('type check', () => {
   describe('tsconfig.json, the whole checkout', () => {
@@ -56,9 +81,25 @@ describe('type check', () => {
     });
 
     // The documentation test imports the strategies and the plugins, whose modules reach the indicators: without the registry entries
-    // each indicator's types declare, and EpochTimeStamp, their code did not type-check in this program
-    it('should read every global declaration of the workspaces', () => {
-      expect(globalDeclarationFiles().filter(file => !SCRIPTS_FILES.includes(file))).toEqual([]);
+    // each indicator's types declare, and EpochTimeStamp, their code did not type-check in this program. The declaration files come
+    // with the include, the registry entries with indicator.types.ts, which imports them: the program's files, not the include's
+    it(
+      'should read every global declaration of the workspaces',
+      () => {
+        const sources = new Set(sourcesOf('tsconfig.scripts.json'));
+        expect(globalDeclarationFiles().filter(file => !sources.has(file))).toEqual([]);
+      },
+      PROGRAM_TIMEOUT,
+    );
+  });
+
+  describe('packages/indicators/src/indicator.types.ts', () => {
+    // Each indicator's IndicatorRegistry entry is a global declaration of its <name>.types.ts, which importing the indicator does not
+    // bring: indicator.types.ts imports every one, where the indicators, the moving averages and the strategies' types lead, so that a
+    // program reaching an indicator sees them all, without its tsconfig including them
+    it('should import every module of the indicators that declares a registry entry', () => {
+      const imported = relativeImportsOf(INDICATOR_TYPES);
+      expect(REGISTRY_ENTRIES.filter(file => !imported.includes(file))).toEqual([]);
     });
   });
 
