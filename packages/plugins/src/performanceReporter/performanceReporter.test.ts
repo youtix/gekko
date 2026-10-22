@@ -1,13 +1,14 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Watch } from '@gekko/schemas/configuration/configuration.types';
-import { LockSync } from '@gekko/shared/models/fs.types';
+import { Lock } from '@gekko/core/fs/fs.types';
 import { DEFAULT_STALE_MS } from '@gekko/core/fs/fs.service';
 import { PortfolioReport } from '../analyzers/portfolioAnalyzer/portfolioAnalyzer.types';
 import { TradingReport } from '../analyzers/roundTripAnalyzer/roundTrip.types';
 import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import * as fs from 'fs';
+import { setImmediate } from 'node:timers/promises';
 import path from 'path';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { PerformanceReporter } from './performanceReporter';
@@ -155,7 +156,7 @@ const cellOf = (content: string | undefined, column: string) => {
 
 describe('PerformanceReporter', () => {
   const releaseMock = vi.fn();
-  const lockSyncMock = vi.fn<LockSync>(() => releaseMock);
+  const lockMock = vi.fn<Lock>(async () => releaseMock);
   let reporter: PerformanceReporter;
 
   /** A reporter built while the configuration watches `watch` instead of WATCH. */
@@ -164,13 +165,13 @@ describe('PerformanceReporter', () => {
       baseConfig,
       createPluginContext({ watch: { ...WATCH, ...watch }, strategy: STRATEGY }),
     );
-    watchingReporter.setFs({ lockSync: lockSyncMock });
+    watchingReporter.setFs({ lock: lockMock });
     return watchingReporter;
   };
 
   beforeEach(() => {
     reporter = new PerformanceReporter(baseConfig, createPluginContext({ watch: WATCH, strategy: STRATEGY }));
-    reporter['setFs']({ lockSync: lockSyncMock });
+    reporter['setFs']({ lock: lockMock });
 
     // Reset individual mocks instead of clearAllMocks() to adhere to rules
     (fs.mkdirSync as Mock).mockReset();
@@ -178,7 +179,7 @@ describe('PerformanceReporter', () => {
     (fs.writeFileSync as Mock).mockReset();
     (fs.appendFileSync as Mock).mockReset();
     (fs.statSync as Mock).mockReset();
-    lockSyncMock.mockClear();
+    lockMock.mockClear();
     releaseMock.mockClear();
 
     // Unless a test says otherwise, a file with content was written by this version.
@@ -216,11 +217,11 @@ describe('PerformanceReporter', () => {
         report
         ${samplePortfolioReport}
         ${sampleTradingReport}
-      `('should write the shared header for $report.id', ({ report }) => {
+      `('should write the shared header for $report.id', async ({ report }) => {
         (fs.existsSync as Mock).mockReturnValue(false);
         (fs.statSync as Mock).mockReturnValue({ size: 0 });
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(fs.writeFileSync).toHaveBeenCalledWith(expectedPath, `${HEADER}\n`, 'utf8');
       });
@@ -231,11 +232,11 @@ describe('PerformanceReporter', () => {
         ${samplePortfolioReport} | ${'Portfolio'}
         ${sampleTradingReport}   | ${'DEMA'}
         ${sampleTradingReport}   | ${'Trading'}
-      `('should append correct parts ($expectedPart) for $report.id', ({ report, expectedPart }) => {
+      `('should append correct parts ($expectedPart) for $report.id', async ({ report, expectedPart }) => {
         (fs.existsSync as Mock).mockReturnValue(false);
         (fs.statSync as Mock).mockReturnValue({ size: 0 });
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         const appendCall = (fs.appendFileSync as Mock).mock.calls[0];
         const writtenLine = appendCall ? (appendCall[1] as string) : '';
@@ -247,11 +248,11 @@ describe('PerformanceReporter', () => {
         report
         ${samplePortfolioReport}
         ${sampleTradingReport}
-      `('should release lock after writing $report.id', ({ report }) => {
+      `('should release lock after writing $report.id', async ({ report }) => {
         (fs.existsSync as Mock).mockReturnValue(false);
         (fs.statSync as Mock).mockReturnValue({ size: 0 });
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(releaseMock).toHaveBeenCalled();
       });
@@ -278,10 +279,10 @@ describe('PerformanceReporter', () => {
         ${sampleTradingReport}   | ${'benchmark asset'}           | ${'BTC'}
         ${samplePortfolioReport} | ${'status'}                    | ${'completed'}
         ${sampleTradingReport}   | ${'status'}                    | ${'completed'}
-      `('should write $value under $column for $report.id', ({ report, column, value }) => {
+      `('should write $value under $column for $report.id', async ({ report, column, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(cellOf(file.content, column)).toBe(value);
       });
@@ -300,10 +301,10 @@ describe('PerformanceReporter', () => {
         ${'a net profit rounded to 8 decimals'}     | ${{ ...sampleTradingReport, netProfit: 0.123456789 }}   | ${'net profit'}    | ${'0.12345679'}
         ${'a final balance that is not a number'}   | ${{ ...sampleTradingReport, finalBalance: NaN }}        | ${'final balance'} | ${''}
         ${'a start price that is missing'}          | ${{ ...samplePortfolioReport, startPrice: undefined }}  | ${'start price'}   | ${''}
-      `('should write $value under $column for $description', ({ report, column, value }) => {
+      `('should write $value under $column for $description', async ({ report, column, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(cellOf(file.content, column)).toBe(value);
       });
@@ -315,10 +316,10 @@ describe('PerformanceReporter', () => {
         ${'up to 8 decimals'}            | ${[33.33333333333333, 9.090909090909099]}          | ${'[33.33333333,9.09090909]'}
         ${'without an exponent'}         | ${[0.000031249995123554724, 1.000000338535756e-8]} | ${'[0.00003125,0.00000001]'}
         ${'an MAE of 0 and a round one'} | ${[4.5, 0]}                                        | ${'[4.5,0]'}
-      `('should write the top MAEs $description under top maes: $value', ({ topMAEs, value }) => {
+      `('should write the top MAEs $description under top maes: $value', async ({ topMAEs, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport({ ...sampleTradingReport, topMAEs });
+        await reporter.onPerformanceReport({ ...sampleTradingReport, topMAEs });
 
         expect(cellOf(file.content, 'top maes')).toBe(value);
       });
@@ -343,10 +344,10 @@ describe('PerformanceReporter', () => {
         ${samplePortfolioReport} | ${{ maxDrawdownPct: 3.125 }}       | ${'max drawdown'}  | ${'3.12%'}
         ${samplePortfolioReport} | ${{ exposurePct: -5.001 }}         | ${'exposure'}      | ${'-5%'}
         ${samplePortfolioReport} | ${{ exposurePct: 3.125 }}          | ${'exposure'}      | ${'3.12%'}
-      `('should write $value under $column for $fields', ({ report, fields, column, value }) => {
+      `('should write $value under $column for $fields', async ({ report, fields, column, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport({ ...report, ...fields });
+        await reporter.onPerformanceReport({ ...report, ...fields });
 
         expect(cellOf(file.content, column)).toBe(value);
       });
@@ -370,10 +371,10 @@ describe('PerformanceReporter', () => {
         ${120 * DAY}      | ${'4 months'}
         ${200 * DAY}      | ${'6 months 19 days'}
         ${400 * DAY}      | ${'1 year 1 month 4 days'}
-      `('should write a longest drawdown of $longestDrawdownMs ms as $value', ({ longestDrawdownMs, value }) => {
+      `('should write a longest drawdown of $longestDrawdownMs ms as $value', async ({ longestDrawdownMs, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport({ ...samplePortfolioReport, longestDrawdownMs });
+        await reporter.onPerformanceReport({ ...samplePortfolioReport, longestDrawdownMs });
 
         expect(cellOf(file.content, 'longest drawdown duration')).toBe(value);
       });
@@ -385,48 +386,48 @@ describe('PerformanceReporter', () => {
         ${'the reason of a portfolio report'}       | ${{ ...samplePortfolioReport, interruption: 'Missing candles' }}                                  | ${'interrupted: Missing candles'}
         ${'the reason of a trading report'}         | ${{ ...sampleTradingReport, interruption: 'Max consecutive order errors reached (5)' }}           | ${'interrupted: Max consecutive order errors reached (5)'}
         ${'a reason holding the separator, quoted'} | ${{ ...sampleTradingReport, interruption: 'Max consecutive order errors reached (5); stopping' }} | ${'"interrupted: Max consecutive order errors reached (5); stopping"'}
-      `('should write $value under status for $description', ({ report, value }) => {
+      `('should write $value under status for $description', async ({ report, value }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(cellOf(file.content, 'status')).toBe(value);
       });
 
-      it('should write a row with as many columns as the header when the reason holds the separator', () => {
+      it('should write a row with as many columns as the header when the reason holds the separator', async () => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport({ ...sampleTradingReport, interruption: 'Max consecutive order errors reached (5); stopping' });
+        await reporter.onPerformanceReport({ ...sampleTradingReport, interruption: 'Max consecutive order errors reached (5); stopping' });
 
         expect(toCells(toLines(file.content)[1])).toHaveLength(HEADER_COLUMN_COUNT);
       });
 
       // An error without a message still stopped the run
-      it('should write the row of a run stopped by an error without a message as interrupted', () => {
+      it('should write the row of a run stopped by an error without a message as interrupted', async () => {
         useInMemoryFile();
 
-        reporter.onPerformanceReport({ ...samplePortfolioReport, interruption: '' });
+        await reporter.onPerformanceReport({ ...samplePortfolioReport, interruption: '' });
 
         expect(fs.appendFileSync).toHaveBeenCalledWith(expectedPath, expect.stringMatching(/;interrupted: \n$/), 'utf8');
       });
     });
 
     describe('When the run watches several pairs', () => {
-      it('should write every watched pair under pair, separated by a space', () => {
+      it('should write every watched pair under pair, separated by a space', async () => {
         const file = useInMemoryFile();
         const portfolioReporter = reporterWatching({ assets: ['BTC', 'ETH'], pairs: [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }] });
 
-        portfolioReporter.onPerformanceReport(samplePortfolioReport);
+        await portfolioReporter.onPerformanceReport(samplePortfolioReport);
 
         expect(cellOf(file.content, 'pair')).toBe('BTC/USDT ETH/USDT');
       });
     });
 
     describe('When the watch has no timeframe', () => {
-      it('should leave the timeframe column empty', () => {
+      it('should leave the timeframe column empty', async () => {
         const file = useInMemoryFile();
 
-        reporterWatching({ timeframe: undefined }).onPerformanceReport(samplePortfolioReport);
+        await reporterWatching({ timeframe: undefined }).onPerformanceReport(samplePortfolioReport);
 
         expect(cellOf(file.content, 'timeframe')).toBe('');
       });
@@ -435,14 +436,14 @@ describe('PerformanceReporter', () => {
     // Fox labels the reporter of each variant with the values that make it: the rows of a sweep of a fee share their strategy block
     describe('When the reporter has a label', () => {
       /** Writes the row of a run whose reporter has `label`, and returns the file. */
-      const writeLabelledRow = (label: string) => {
+      const writeLabelledRow = async (label: string) => {
         const file = useInMemoryFile();
         const labelledReporter = new PerformanceReporter(
           { ...baseConfig, label },
           createPluginContext({ watch: WATCH, strategy: STRATEGY }),
         );
-        labelledReporter.setFs({ lockSync: lockSyncMock });
-        labelledReporter.onPerformanceReport(samplePortfolioReport);
+        labelledReporter.setFs({ lock: lockMock });
+        await labelledReporter.onPerformanceReport(samplePortfolioReport);
         return file;
       };
 
@@ -450,38 +451,38 @@ describe('PerformanceReporter', () => {
         label                                                  | value
         ${'--exchange.marketData.0.marketData.fee.maker 0.01'} | ${'DEMA (--exchange.marketData.0.marketData.fee.maker 0.01)'}
         ${'--strategy.src a;b'}                                | ${'"DEMA (--strategy.src a;b)"'}
-      `('should write $value under id for the label $label', ({ label, value }) => {
-        expect(cellOf(writeLabelledRow(label).content, 'id')).toBe(value);
+      `('should write $value under id for the label $label', async ({ label, value }) => {
+        expect(cellOf((await writeLabelledRow(label)).content, 'id')).toBe(value);
       });
 
-      it('should write a row with as many columns as the header when the label holds the separator', () => {
-        expect(toCells(toLines(writeLabelledRow('--strategy.src a;b').content)[1])).toHaveLength(HEADER_COLUMN_COUNT);
+      it('should write a row with as many columns as the header when the label holds the separator', async () => {
+        expect(toCells(toLines((await writeLabelledRow('--strategy.src a;b')).content)[1])).toHaveLength(HEADER_COLUMN_COUNT);
       });
 
-      it('should write the header an unlabelled run writes', () => {
-        expect(toLines(writeLabelledRow('--strategy.period 14').content)[0]).toBe(HEADER);
+      it('should write the header an unlabelled run writes', async () => {
+        expect(toLines((await writeLabelledRow('--strategy.period 14')).content)[0]).toBe(HEADER);
       });
     });
 
     describe('When a strategy parameter holds the separator', () => {
       /** Writes the row of a run whose strategy block has a ';' in a parameter, and returns the file. */
-      const writeRowWithSeparatorInStrategy = () => {
+      const writeRowWithSeparatorInStrategy = async () => {
         const file = useInMemoryFile();
         const strategy = { name: 'grid', sides: 'buy;sell' };
         const gridReporter = new PerformanceReporter(baseConfig, createPluginContext({ watch: WATCH, strategy }));
-        gridReporter.setFs({ lockSync: lockSyncMock });
-        gridReporter.onPerformanceReport(samplePortfolioReport);
+        gridReporter.setFs({ lock: lockMock });
+        await gridReporter.onPerformanceReport(samplePortfolioReport);
         return file;
       };
 
-      it('should quote the id cell', () => {
-        const file = writeRowWithSeparatorInStrategy();
+      it('should quote the id cell', async () => {
+        const file = await writeRowWithSeparatorInStrategy();
 
         expect(cellOf(file.content, 'id')).toBe('"grid-buy;sell"');
       });
 
-      it('should write a row with as many columns as the header', () => {
-        const file = writeRowWithSeparatorInStrategy();
+      it('should write a row with as many columns as the header', async () => {
+        const file = await writeRowWithSeparatorInStrategy();
 
         expect(toCells(toLines(file.content)[1])).toHaveLength(HEADER_COLUMN_COUNT);
       });
@@ -492,30 +493,30 @@ describe('PerformanceReporter', () => {
         report
         ${samplePortfolioReport}
         ${sampleTradingReport}
-      `('should write the header then the $report.id row', ({ report }) => {
+      `('should write the header then the $report.id row', async ({ report }) => {
         const file = useInMemoryFile('');
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         expect(toLines(file.content)).toEqual([HEADER, expect.stringMatching(/^DEMA;/)]);
       });
     });
 
     describe('When file exists', () => {
-      it('should not write header if file exists and has content', () => {
+      it('should not write header if file exists and has content', async () => {
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
 
-      it('should append report line if file exists and has content', () => {
+      it('should append report line if file exists and has content', async () => {
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(fs.appendFileSync).toHaveBeenCalledTimes(1);
       });
@@ -524,11 +525,11 @@ describe('PerformanceReporter', () => {
         first                    | second
         ${samplePortfolioReport} | ${sampleTradingReport}
         ${sampleTradingReport}   | ${samplePortfolioReport}
-      `('should append a $second.id row with as many columns as the header after a $first.id row', ({ first, second }) => {
+      `('should append a $second.id row with as many columns as the header after a $first.id row', async ({ first, second }) => {
         const file = useInMemoryFile();
 
-        reporter.onPerformanceReport(first);
-        reporter.onPerformanceReport(second);
+        await reporter.onPerformanceReport(first);
+        await reporter.onPerformanceReport(second);
 
         expect(toLines(file.content).map(line => toCells(line).length)).toEqual([
           HEADER_COLUMN_COUNT,
@@ -550,7 +551,7 @@ describe('PerformanceReporter', () => {
             return implementation?.(...args);
           });
         };
-        record(lockSyncMock, 'lock');
+        record(lockMock, 'lock');
         record(fs.writeFileSync as Mock, 'write header');
         record(fs.appendFileSync as Mock, 'append row');
         record(releaseMock, 'release');
@@ -563,54 +564,54 @@ describe('PerformanceReporter', () => {
         ${'an empty file'}                   | ${''}                          | ${['lock', 'write header', 'append row', 'release']}
         ${'a file holding the header'}       | ${`${HEADER}\n`}               | ${['lock', 'append row', 'release']}
         ${'a file of another column layout'} | ${`${OLD_PORTFOLIO_HEADER}\n`} | ${['lock', 'release']}
-      `('should take one lock around the header check and the writes, for $file', ({ content, calls }) => {
+      `('should take one lock around the header check and the writes, for $file', async ({ content, calls }) => {
         const recorded = recordCalls(content);
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(recorded).toEqual(calls);
       });
 
       /** Writes a row, and returns the options of the lock it took: its retries, and the delay between two attempts */
-      const lockOptions = () => {
+      const lockOptions = async () => {
         useInMemoryFile(`${HEADER}\n`);
-        reporter.onPerformanceReport(samplePortfolioReport);
-        const [, { retries = 0, retryDelayMs = 0 } = {}] = lockSyncMock.mock.calls[0];
+        await reporter.onPerformanceReport(samplePortfolioReport);
+        const [, { retries = 0, retryDelayMs = 0 } = {}] = lockMock.mock.calls[0];
         return { retries, retryDelayMs };
       };
 
-      it('should lock the file the rows are written to', () => {
-        lockOptions();
+      it('should lock the file the rows are written to', async () => {
+        await lockOptions();
 
-        expect(lockSyncMock).toHaveBeenCalledWith(expectedPath, expect.anything());
+        expect(lockMock).toHaveBeenCalledWith(expectedPath, expect.anything());
       });
 
-      it('should draw the delay between two attempts at the lock from 25 to 75 ms', () => {
-        expect(lockOptions().retryDelayMs).toSatisfy((delay: number) => Number.isInteger(delay) && delay >= 25 && delay <= 75);
+      it('should draw the delay between two attempts at the lock from 25 to 75 ms', async () => {
+        expect((await lockOptions()).retryDelayMs).toSatisfy((delay: number) => Number.isInteger(delay) && delay >= 25 && delay <= 75);
       });
 
       // Long enough for a lock left behind by a run killed while writing to be taken over, which never loses a row then
-      it('should keep trying for the lock for twice the age at which a lock left behind is taken over', () => {
-        const { retries, retryDelayMs } = lockOptions();
+      it('should keep trying for the lock for twice the age at which a lock left behind is taken over', async () => {
+        const { retries, retryDelayMs } = await lockOptions();
 
         expect(retries * retryDelayMs).toBeGreaterThanOrEqual(2 * DEFAULT_STALE_MS);
       });
 
-      it('should stop trying for the lock within a delay of LOCK_WAIT_MS', () => {
-        const { retries, retryDelayMs } = lockOptions();
+      it('should stop trying for the lock within a delay of LOCK_WAIT_MS', async () => {
+        const { retries, retryDelayMs } = await lockOptions();
 
         expect((retries - 1) * retryDelayMs).toBeLessThan(LOCK_WAIT_MS);
       });
 
-      it('should not write the header again when another run wrote it while this one waited for the lock', () => {
+      it('should not write the header again when another run wrote it while this one waited for the lock', async () => {
         const file = useInMemoryFile();
-        lockSyncMock.mockImplementationOnce(() => {
+        lockMock.mockImplementationOnce(async () => {
           // The run that held the lock wrote the header and its row.
           file.content = `${HEADER}\nRSI;Portfolio\n`;
           return releaseMock;
         });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(toLines(file.content)).toEqual([HEADER, 'RSI;Portfolio', expect.stringMatching(/^DEMA;Portfolio;/)]);
       });
@@ -620,15 +621,13 @@ describe('PerformanceReporter', () => {
       const lockError = new Error(`Could not acquire the lock of ${expectedPath} after 1201 attempts`);
 
       beforeEach(() => {
-        lockSyncMock.mockImplementation(() => {
-          throw lockError;
-        });
+        lockMock.mockRejectedValue(lockError);
       });
 
       it('should log an error naming the report and the file, saying that the report is lost', async () => {
         useInMemoryFile(`${HEADER}\n`);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         const { error: logError } = await import('@gekko/core/logger/logger');
         expect(logError).toHaveBeenCalledWith(
@@ -641,25 +640,25 @@ describe('PerformanceReporter', () => {
         file                           | content
         ${'a new file'}                | ${undefined}
         ${'a file holding the header'} | ${`${HEADER}\n`}
-      `('should leave $file as it was', ({ content }) => {
+      `('should leave $file as it was', async ({ content }) => {
         const file = useInMemoryFile(content);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         expect(file.content).toBe(content);
       });
 
-      it('should not throw', () => {
+      it('should not reject', async () => {
         useInMemoryFile(`${HEADER}\n`);
 
-        expect(() => reporter.onPerformanceReport(sampleTradingReport)).not.toThrow();
+        await expect(reporter.onPerformanceReport(sampleTradingReport)).resolves.toBeUndefined();
       });
 
       // Releasing deletes the lock file, which would be the lock of the run that holds it.
-      it('should not release a lock it does not hold', () => {
+      it('should not release a lock it does not hold', async () => {
         useInMemoryFile(`${HEADER}\n`);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         expect(releaseMock).not.toHaveBeenCalled();
       });
@@ -667,7 +666,7 @@ describe('PerformanceReporter', () => {
       it('should fail the run at its end, naming the row and the file', async () => {
         useInMemoryFile(`${HEADER}\n`);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         await expect(reporter['processFinalize']()).rejects.toThrow(
           `[PERFORMANCE REPORTER] The TRADING REPORT row was not written: ${expectedPath} could not be locked (see the error logged above)`,
@@ -689,10 +688,10 @@ describe('PerformanceReporter', () => {
         ${'the header without its line break'}           | ${HEADER}
         ${'the header ended by a lone carriage return'}  | ${`${HEADER}\rDEMA;Portfolio;100\r`}
         ${'a byte order mark and an old header'}         | ${`\uFEFF${OLD_TRADING_HEADER}\r\nDEMA;Trading;100\r\n`}
-      `('should not append to a file holding $description', ({ content }) => {
+      `('should not append to a file holding $description', async ({ content }) => {
         const file = useInMemoryFile(content);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         expect(file.content).toBe(content);
       });
@@ -700,7 +699,7 @@ describe('PerformanceReporter', () => {
       it('should log an error naming the file and saying what is checked', async () => {
         useInMemoryFile(`${OLD_PORTFOLIO_HEADER}\n`);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         const { error: logError } = await import('@gekko/core/logger/logger');
         expect(logError).toHaveBeenCalledWith(
@@ -712,7 +711,7 @@ describe('PerformanceReporter', () => {
       it('should fail the run at its end, naming the row and the file', async () => {
         useInMemoryFile(`${OLD_PORTFOLIO_HEADER}\n`);
 
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         await expect(reporter['processFinalize']()).rejects.toThrow(
           `[PERFORMANCE REPORTER] The TRADING REPORT row was not written: the first line of ${expectedPath} is not the expected header (see the error logged above)`,
@@ -726,29 +725,29 @@ describe('PerformanceReporter', () => {
         ${'CRLF line endings'}                       | ${`${HEADER}\r\nRSI;Portfolio\r\n`}
         ${'a byte order mark'}                       | ${`\uFEFF${HEADER}\nRSI;Portfolio\n`}
         ${'a byte order mark and CRLF line endings'} | ${`\uFEFF${HEADER}\r\nRSI;Portfolio\r\n`}
-      `('should append the row to a file with $description', ({ content }) => {
+      `('should append the row to a file with $description', async ({ content }) => {
         useInMemoryFile(content);
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(fs.appendFileSync).toHaveBeenCalledWith(expectedPath, expect.stringMatching(/^DEMA;Portfolio;[^\n]*\n$/), 'utf8');
       });
     });
 
     describe('Edge Cases & Errors', () => {
-      it('should ignore empty payloads or invalid objects (if passed as array by mistake handled at types or runtime)', () => {
-        reporter.onPerformanceReport([] as any);
+      it('should ignore empty payloads or invalid objects (if passed as array by mistake handled at types or runtime)', async () => {
+        await reporter.onPerformanceReport([] as any);
         expect(fs.appendFileSync).not.toHaveBeenCalled();
       });
 
-      it('should not write header for empty payload', () => {
-        reporter.onPerformanceReport([] as any);
+      it('should not write header for empty payload', async () => {
+        await reporter.onPerformanceReport([] as any);
         expect(fs.writeFileSync).not.toHaveBeenCalled();
       });
 
-      it('should ignore unknown report types', () => {
+      it('should ignore unknown report types', async () => {
         const unknownReport = { ...samplePortfolioReport, id: 'UNKNOWN' as any };
-        reporter.onPerformanceReport(unknownReport);
+        await reporter.onPerformanceReport(unknownReport);
         expect(fs.appendFileSync).not.toHaveBeenCalled();
       });
 
@@ -767,13 +766,13 @@ describe('PerformanceReporter', () => {
           throw thrown;
         });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         const { error: logError } = await import('@gekko/core/logger/logger');
         expect(logError).toHaveBeenCalledWith('performance reporter', logged);
       });
 
-      it('should release lock even on write error', () => {
+      it('should release lock even on write error', async () => {
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
         const error = new Error('Disk full');
@@ -781,7 +780,7 @@ describe('PerformanceReporter', () => {
           throw error;
         });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         expect(releaseMock).toHaveBeenCalled();
       });
@@ -793,7 +792,7 @@ describe('PerformanceReporter', () => {
           throw new Error('Disk full');
         });
 
-        reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
 
         await expect(reporter['processFinalize']()).rejects.toThrow(
           '[PERFORMANCE REPORTER] The PORTFOLIO PROFIT REPORT row was not written: the write failed (Disk full) (see the error logged above)',
@@ -811,32 +810,32 @@ describe('PerformanceReporter', () => {
         });
 
         it('should log a write error', async () => {
-          reporter.onPerformanceReport(samplePortfolioReport);
+          await reporter.onPerformanceReport(samplePortfolioReport);
 
           const { error: logError } = await import('@gekko/core/logger/logger');
           expect(logError).toHaveBeenCalledWith('performance reporter', 'write error: EIO');
         });
 
-        it('should not append the row', () => {
-          reporter.onPerformanceReport(samplePortfolioReport);
+        it('should not append the row', async () => {
+          await reporter.onPerformanceReport(samplePortfolioReport);
 
           expect(fs.appendFileSync).not.toHaveBeenCalled();
         });
 
-        it('should close the file', () => {
-          reporter.onPerformanceReport(samplePortfolioReport);
+        it('should close the file', async () => {
+          await reporter.onPerformanceReport(samplePortfolioReport);
 
           expect(fs.closeSync).toHaveBeenCalledWith(42);
         });
 
-        it('should release the lock', () => {
-          reporter.onPerformanceReport(samplePortfolioReport);
+        it('should release the lock', async () => {
+          await reporter.onPerformanceReport(samplePortfolioReport);
 
           expect(releaseMock).toHaveBeenCalledOnce();
         });
 
         it('should fail the run at its end, naming the row and the error', async () => {
-          reporter.onPerformanceReport(samplePortfolioReport);
+          await reporter.onPerformanceReport(samplePortfolioReport);
 
           await expect(reporter['processFinalize']()).rejects.toThrow(
             'The PORTFOLIO PROFIT REPORT row was not written: the write failed (EIO) (see the error logged above)',
@@ -844,24 +843,24 @@ describe('PerformanceReporter', () => {
         });
       });
 
-      it('should format winRate as N/A when null', () => {
+      it('should format winRate as N/A when null', async () => {
         const report = { ...sampleTradingReport, winRate: null as any };
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         const appendCall = (fs.appendFileSync as Mock).mock.calls[0];
         const writtenLine = appendCall ? (appendCall[1] as string) : '';
         expect(writtenLine).toContain('N/A');
       });
 
-      it('should handle zero drawdown correctly for portfolio', () => {
+      it('should handle zero drawdown correctly for portfolio', async () => {
         const report = { ...samplePortfolioReport, longestDrawdownMs: 0 };
         (fs.existsSync as Mock).mockReturnValue(true);
         (fs.statSync as Mock).mockReturnValue({ size: 100 });
 
-        reporter.onPerformanceReport(report);
+        await reporter.onPerformanceReport(report);
 
         const appendCall = (fs.appendFileSync as Mock).mock.calls[0];
         const writtenLine = appendCall ? (appendCall[1] as string) : '';
@@ -883,7 +882,7 @@ describe('PerformanceReporter', () => {
 
     it('should resolve when every row was written', async () => {
       useInMemoryFile();
-      reporter.onPerformanceReport(samplePortfolioReport);
+      await reporter.onPerformanceReport(samplePortfolioReport);
 
       await expect(reporter['processFinalize']()).resolves.toBeUndefined();
     });
@@ -899,22 +898,20 @@ describe('PerformanceReporter', () => {
       };
 
       beforeEach(() => {
-        lockSyncMock.mockImplementation(() => {
-          throw new Error('held');
-        });
+        lockMock.mockRejectedValue(new Error('held'));
       });
 
       it('should fail the run with a GekkoError', async () => {
         useInMemoryFile(`${HEADER}\n`);
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         await expect(reporter['processFinalize']()).rejects.toBeInstanceOf(GekkoError);
       });
 
       it('should name every row not written, each with its cause', async () => {
         useInMemoryFile(`${HEADER}\n`);
-        reporter.onPerformanceReport(samplePortfolioReport);
-        reporter.onPerformanceReport(sampleTradingReport);
+        await reporter.onPerformanceReport(samplePortfolioReport);
+        await reporter.onPerformanceReport(sampleTradingReport);
 
         await expect(reporter['processFinalize']()).rejects.toThrow(
           `[PERFORMANCE REPORTER] The PORTFOLIO PROFIT REPORT row was not written: ${expectedPath} could not be locked; the TRADING REPORT row was not written: ${expectedPath} could not be locked (see the errors logged above)`,
@@ -934,6 +931,45 @@ describe('PerformanceReporter', () => {
         await deliver(() => reporter.onPerformanceReport(sampleTradingReport));
 
         await expect(finalization).rejects.toThrow('The TRADING REPORT row was not written');
+      });
+    });
+
+    // The lock of the file is awaited, a minute at most: the run ends once the row is written, or known lost
+    describe('When the lock of the file is settled after the next macrotask', () => {
+      let settleLock: { take: () => void; refuse: (failure: Error) => void };
+
+      /** Delivers the report and starts the finalisation, which is past its macrotask once this resolves, the lock still awaited */
+      const finalizeWhileTheLockIsAwaited = async () => {
+        void reporter.onPerformanceReport(sampleTradingReport);
+        const finalization = reporter['processFinalize']();
+        await setImmediate();
+        await setImmediate();
+        return { finalization };
+      };
+
+      beforeEach(() => {
+        lockMock.mockImplementation(
+          () => new Promise((resolve, reject) => (settleLock = { take: () => resolve(releaseMock), refuse: reject })),
+        );
+      });
+
+      it('should fail the run once the lock is refused', async () => {
+        useInMemoryFile(`${HEADER}\n`);
+        const { finalization } = await finalizeWhileTheLockIsAwaited();
+
+        settleLock.refuse(new Error('held'));
+
+        await expect(finalization).rejects.toThrow('The TRADING REPORT row was not written');
+      });
+
+      it('should end once the row is written', async () => {
+        const file = useInMemoryFile(`${HEADER}\n`);
+        const { finalization } = await finalizeWhileTheLockIsAwaited();
+        const finalized = finalization.then(() => toLines(file.content));
+
+        settleLock.take();
+
+        expect(await finalized).toEqual([HEADER, expect.stringMatching(/^DEMA;Trading;/)]);
       });
     });
   });

@@ -2,8 +2,8 @@ import { describeError } from '@gekko/shared/errors/error.helper';
 import { PERCENT_ROUNDING } from '../analyzers/analyzer.const';
 import { Plugin } from '@gekko/core/plugin/plugin';
 import type { RunContext } from '@gekko/core/run/runContext.types';
-import { lockSync as defaultLockSync } from '@gekko/core/fs/fs.service';
-import { Fs } from '@gekko/shared/models/fs.types';
+import { lock as defaultLock } from '@gekko/core/fs/fs.service';
+import { Fs } from '@gekko/core/fs/fs.types';
 import { error } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { formatDurationUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
@@ -20,12 +20,14 @@ import { CsvColumn, PerformanceReport, PerformanceReporterConfig } from './perfo
 export class PerformanceReporter extends Plugin {
   private readonly filePath: string;
   private readonly label?: string;
-  private fs: Fs = { lockSync: defaultLockSync };
+  private fs: Fs = { lock: defaultLock };
   /**
    * The reports whose row was not written, with why (the file could not be locked, its first line is not the header, the write failed),
    * each logged at error level as it happened: the run fails at its end with them (see processFinalize)
    */
   private readonly unwrittenReports: { id: PerformanceReport['id']; reason: string }[] = [];
+  /** The writes of the rows, each awaiting the lock of the file first, which processFinalize awaits before it checks unwrittenReports */
+  private readonly rowWrites: Promise<void>[] = [];
 
   // Both analyzers write to the same file by default, so both report types share one header, and the header and the rows
   // are built from this one list: a metric that a report type does not have leaves its column empty.
@@ -108,8 +110,19 @@ export class PerformanceReporter extends Plugin {
   }
 
   // Here the payload is not an array because onPerformanceReport use emit function directly.
-  // It is not using the sequentialEmitter because it is emitted in processFinalize() of plugin lifecycle hooks
-  public onPerformanceReport(report: PerformanceReport) {
+  // It is not using the sequentialEmitter because it is emitted in processFinalize() of plugin lifecycle hooks.
+  // The analyzer that emits the report awaits the write of its row.
+  public onPerformanceReport(report: PerformanceReport): Promise<void> {
+    const rowWrite = this.writeRow(report);
+    this.rowWrites.push(rowWrite);
+    return rowWrite;
+  }
+
+  /**
+   * Writes the row of the report under the lock of the file. A row not written is recorded in unwrittenReports: rejects only for a
+   * report the columns cannot write (a malformed one), which the analyzer that emits it logs.
+   */
+  private async writeRow(report: PerformanceReport) {
     if (!Object.hasOwn(REPORT_TYPES, report.id)) return;
 
     const row = `${this.columns.map(({ value }) => toCsvCell(value(report))).join(';')}\n`;
@@ -117,9 +130,9 @@ export class PerformanceReporter extends Plugin {
     try {
       // The backtests of a parameter sweep can end together and write the same file: one lock covers writing the header,
       // checking it and appending the row, so that no other run writes in between. The attempts go on for LOCK_WAIT_MS, at the
-      // delay drawn for this row (see LOCK_RETRY_DELAY_MS).
+      // delay drawn for this row (see LOCK_RETRY_DELAY_MS), each delay awaited: the bot's signal handlers run meanwhile.
       const retryDelayMs = random(LOCK_RETRY_DELAY_MS.min, LOCK_RETRY_DELAY_MS.max);
-      release = this.fs.lockSync(this.filePath, { retries: Math.ceil(LOCK_WAIT_MS / retryDelayMs), retryDelayMs });
+      release = await this.fs.lock(this.filePath, { retries: Math.ceil(LOCK_WAIT_MS / retryDelayMs), retryDelayMs });
     } catch (err) {
       // Not thrown: the analyzer that emits the report catches what a listener throws, logs it and lets the run end as it would
       // have. Recorded instead, for processFinalize to fail the run. The failure is described, not interpolated, here as in the two
@@ -192,10 +205,12 @@ export class PerformanceReporter extends Plugin {
    * variant, rather than in an error line alone. The reports come from the analyzers' own processFinalize: the stream starts every
    * plugin's in one synchronous pass, in config order, and an analyzer emits before it awaits anything, so a reporter listed after its
    * analyzer has had its report by now, and one listed before it, or the second of two reporters, gets it a microtask later (the emit
-   * awaits each listener). Checked after the next macrotask, which follows every microtask queued by then.
+   * awaits each listener). After the next macrotask, which follows every microtask queued by then, the write of every row has started:
+   * checked once they are over, each having waited for the lock of the file as long as it took.
    */
   protected async processFinalize(): Promise<void> {
     await setImmediate();
+    await Promise.allSettled(this.rowWrites);
     if (!this.unwrittenReports.length) return;
     const losses = this.unwrittenReports.map(({ id, reason }) => `the ${id} row was not written: ${reason}`);
     throw new GekkoError(

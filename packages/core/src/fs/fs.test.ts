@@ -1,11 +1,11 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
-import { waitSync } from '@gekko/shared/utils/process/process.utils';
+import { wait } from '@gekko/shared/utils/process/process.utils';
 import { existsSync, mkdtempSync, openSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'fs';
 import { tmpdir } from 'os';
 import path from 'path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { lockSync } from './fs.service';
-import { LockSyncOptions } from '@gekko/shared/models/fs.types';
+import { lock } from './fs.service';
+import { LockOptions } from './fs.types';
 
 // The locks are real files in a temporary directory. openSync is a spy that calls the real function, so that a test can make
 // one attempt meet what another run did just before it.
@@ -15,14 +15,14 @@ vi.mock('fs', async importOriginal => {
 });
 
 vi.mock('@gekko/shared/utils/process/process.utils', () => ({
-  waitSync: vi.fn(),
+  wait: vi.fn(),
 }));
 
 const HOUR = 60 * ONE_MINUTE;
 
 const errnoError = (code: string) => Object.assign(new Error(code), { code });
 
-describe('lockSync', () => {
+describe('lock', () => {
   let dir: string;
   let target: string;
   let lockFile: string;
@@ -37,18 +37,18 @@ describe('lockSync', () => {
 
   const leaveLock = (ageMs: number, owner = 'another run') => leaveFile(lockFile, ageMs, owner);
 
-  /** The outcome of one call, so that a test can expect it whether the call throws or not. */
-  const tryLock = (options?: LockSyncOptions) => {
+  /** The outcome of one call, so that a test can expect it whether the call rejects or not. */
+  const tryLock = async (options?: LockOptions) => {
     try {
-      lockSync(target, options);
+      await lock(target, options);
       return 'acquired';
     } catch {
       return 'refused';
     }
   };
 
-  /** Who holds the lock: lockSync leaves its lock file empty. */
-  const lockOwner = () => readFileSync(lockFile, 'utf8') || 'lockSync';
+  /** Who holds the lock: lock leaves its lock file empty. */
+  const lockOwner = () => readFileSync(lockFile, 'utf8') || 'lock';
 
   /** Runs `instead` in place of the first attempt to take the guard, which `takeTheGuard` makes, as another run acts in between. */
   const onTakingTheGuard = async (instead: (takeTheGuard: () => number) => number) => {
@@ -70,30 +70,30 @@ describe('lockSync', () => {
   });
 
   describe('when the file is not locked', () => {
-    it('should create the lock file', () => {
-      lockSync(target);
+    it('should create the lock file', async () => {
+      await lock(target);
       expect(existsSync(lockFile)).toBe(true);
     });
 
-    it('should acquire the lock without waiting', () => {
-      lockSync(target);
-      expect(waitSync).not.toHaveBeenCalled();
+    it('should acquire the lock without waiting', async () => {
+      await lock(target);
+      expect(wait).not.toHaveBeenCalled();
     });
 
-    it('should remove the lock file on release', () => {
-      const release = lockSync(target);
+    it('should remove the lock file on release', async () => {
+      const release = await lock(target);
       release();
       expect(existsSync(lockFile)).toBe(false);
     });
 
-    it('should ignore a lock file that is already gone on release', () => {
-      const release = lockSync(target);
+    it('should ignore a lock file that is already gone on release', async () => {
+      const release = await lock(target);
       rmSync(lockFile);
       expect(release).not.toThrow();
     });
 
-    it('should throw the error met when the lock file cannot be created', () => {
-      expect(() => lockSync(path.join(dir, 'missing', 'reports.csv'))).toThrow(/ENOENT/);
+    it('should reject with the error met when the lock file cannot be created', async () => {
+      await expect(lock(path.join(dir, 'missing', 'reports.csv'))).rejects.toThrow(/ENOENT/);
     });
   });
 
@@ -102,18 +102,25 @@ describe('lockSync', () => {
       leaveLock(0);
     });
 
-    it('should acquire the lock once the other run has released it', () => {
-      vi.mocked(waitSync).mockImplementationOnce(() => rmSync(lockFile));
-      expect(tryLock({ retries: 1 })).toBe('acquired');
+    it('should acquire the lock once the other run has released it', async () => {
+      vi.mocked(wait).mockImplementationOnce(async () => rmSync(lockFile));
+      expect(await tryLock({ retries: 1 })).toBe('acquired');
     });
 
     it.each`
       retryDelayMs | delay
       ${undefined} | ${50}
       ${20}        | ${20}
-    `('should wait $delay ms between attempts when retryDelayMs is $retryDelayMs', ({ retryDelayMs, delay }) => {
-      tryLock({ retryDelayMs });
-      expect(waitSync).toHaveBeenCalledWith(delay);
+    `('should wait $delay ms between attempts when retryDelayMs is $retryDelayMs', async ({ retryDelayMs, delay }) => {
+      await tryLock({ retryDelayMs });
+      expect(wait).toHaveBeenCalledWith(delay);
+    });
+
+    // Awaited, not waited for with Atomics.wait: the thread runs what falls due meanwhile, the bot's signal handlers among them
+    it('should return to its caller while it waits for the next attempt', async () => {
+      vi.mocked(wait).mockReturnValueOnce(new Promise(() => {}));
+      const outcome = await Promise.race([lock(target).then(() => 'settled'), Promise.resolve('waiting')]);
+      expect(outcome).toBe('waiting');
     });
 
     it.each`
@@ -121,24 +128,28 @@ describe('lockSync', () => {
       ${undefined} | ${4}
       ${1}         | ${2}
       ${2}         | ${3}
-    `('should give up after $attempts attempt(s) when retries is $retries', ({ retries, attempts }) => {
-      tryLock({ retries });
+    `('should give up after $attempts attempt(s) when retries is $retries', async ({ retries, attempts }) => {
+      await tryLock({ retries });
       expect(openSync).toHaveBeenCalledTimes(attempts);
     });
 
-    it('should leave the lock of the other run in place', () => {
-      tryLock();
+    it('should leave the lock of the other run in place', async () => {
+      await tryLock();
       expect(lockOwner()).toBe('another run');
     });
 
-    it('should throw an error naming the lock file once the attempts are exhausted', () => {
-      expect(() => lockSync(target)).toThrow(
+    it('should reject with an error naming the lock file once the attempts are exhausted', async () => {
+      await expect(lock(target)).rejects.toThrow(
         `Could not acquire the lock of ${target} after 4 attempts: ${lockFile} is held by another run, or was left behind by a run that was killed less than 30 s ago; delete it if no other run is writing ${target}`,
       );
     });
 
-    it('should give the age from which a lock is taken over in the error', () => {
-      expect(() => lockSync(target, { staleMs: 10 * ONE_SECOND })).toThrow('killed less than 10 s ago');
+    it('should count a single attempt in the singular', async () => {
+      await expect(lock(target, { retries: 0 })).rejects.toThrow(`Could not acquire the lock of ${target} after 1 attempt: ${lockFile}`);
+    });
+
+    it('should give the age from which a lock is taken over in the error', async () => {
+      await expect(lock(target, { staleMs: 10 * ONE_SECOND })).rejects.toThrow('killed less than 10 s ago');
     });
   });
 
@@ -147,18 +158,18 @@ describe('lockSync', () => {
       age   | staleMs
       ${31} | ${undefined}
       ${11} | ${10 * ONE_SECOND}
-    `('should take over, at the first attempt, a lock $age s old when staleMs is $staleMs', ({ age, staleMs }) => {
+    `('should take over, at the first attempt, a lock $age s old when staleMs is $staleMs', async ({ age, staleMs }) => {
       leaveLock(age * ONE_SECOND);
-      expect(tryLock({ retries: 0, staleMs })).toBe('acquired');
+      expect(await tryLock({ retries: 0, staleMs })).toBe('acquired');
     });
 
     it.each`
       age   | staleMs
       ${29} | ${undefined}
       ${9}  | ${10 * ONE_SECOND}
-    `('should not take over a lock $age s old when staleMs is $staleMs', ({ age, staleMs }) => {
+    `('should not take over a lock $age s old when staleMs is $staleMs', async ({ age, staleMs }) => {
       leaveLock(age * ONE_SECOND);
-      expect(tryLock({ retries: 0, staleMs })).toBe('refused');
+      expect(await tryLock({ retries: 0, staleMs })).toBe('refused');
     });
 
     describe('for longer than staleMs', () => {
@@ -166,33 +177,33 @@ describe('lockSync', () => {
         leaveLock(HOUR, 'killed run');
       });
 
-      it('should acquire the lock without waiting', () => {
-        tryLock();
-        expect(waitSync).not.toHaveBeenCalled();
+      it('should acquire the lock without waiting', async () => {
+        await tryLock();
+        expect(wait).not.toHaveBeenCalled();
       });
 
-      it('should replace the lock by its own', () => {
-        tryLock();
-        expect(lockOwner()).toBe('lockSync');
+      it('should replace the lock by its own', async () => {
+        await tryLock();
+        expect(lockOwner()).toBe('lock');
       });
 
-      it('should leave no other file behind', () => {
-        tryLock();
+      it('should leave no other file behind', async () => {
+        await tryLock();
         expect(readdirSync(dir)).toEqual(['reports.csv.lock']);
       });
 
-      it('should remove its own lock on release', () => {
-        const release = lockSync(target);
+      it('should remove its own lock on release', async () => {
+        const release = await lock(target);
         release();
         expect(readdirSync(dir)).toEqual([]);
       });
 
-      it('should throw an error other than ENOENT met while taking the lock over', async () => {
+      it('should reject with an error other than ENOENT met while taking the lock over', async () => {
         const denied = errnoError('EACCES');
         await onTakingTheGuard(() => {
           throw denied;
         });
-        expect(() => lockSync(target)).toThrow(denied);
+        await expect(lock(target)).rejects.toThrow(denied);
       });
     });
   });
@@ -203,17 +214,17 @@ describe('lockSync', () => {
       leaveFile(guardFile, 0, 'other run');
     });
 
-    it('should leave the guard of the other run in place', () => {
-      tryLock({ retries: 0 });
+    it('should leave the guard of the other run in place', async () => {
+      await tryLock({ retries: 0 });
       expect(existsSync(guardFile)).toBe(true);
     });
 
-    it('should acquire the lock at the next attempt once the other run is done', () => {
-      vi.mocked(waitSync).mockImplementationOnce(() => {
+    it('should acquire the lock at the next attempt once the other run is done', async () => {
+      vi.mocked(wait).mockImplementationOnce(async () => {
         rmSync(guardFile);
         rmSync(lockFile);
       });
-      expect(tryLock({ retries: 1 })).toBe('acquired');
+      expect(await tryLock({ retries: 1 })).toBe('acquired');
     });
   });
 
@@ -232,17 +243,17 @@ describe('lockSync', () => {
         });
       });
 
-      it('should leave the lock of the other run in place', () => {
-        tryLock({ retries: 0 });
+      it('should leave the lock of the other run in place', async () => {
+        await tryLock({ retries: 0 });
         expect(lockOwner()).toBe('other run');
       });
 
-      it('should not acquire the lock', () => {
-        expect(tryLock({ retries: 0 })).toBe('refused');
+      it('should not acquire the lock', async () => {
+        expect(await tryLock({ retries: 0 })).toBe('refused');
       });
 
-      it('should release the guard', () => {
-        tryLock({ retries: 0 });
+      it('should release the guard', async () => {
+        await tryLock({ retries: 0 });
         expect(readdirSync(dir)).toEqual(['reports.csv.lock']);
       });
     });
@@ -253,7 +264,7 @@ describe('lockSync', () => {
         rmSync(lockFile);
         return takeTheGuard();
       });
-      expect(tryLock({ retries: 1 })).toBe('acquired');
+      expect(await tryLock({ retries: 1 })).toBe('acquired');
     });
   });
 
@@ -263,20 +274,20 @@ describe('lockSync', () => {
       leaveFile(guardFile, HOUR, 'killed run');
     });
 
-    it('should acquire the lock at the next attempt', () => {
-      expect(tryLock({ retries: 1 })).toBe('acquired');
+    it('should acquire the lock at the next attempt', async () => {
+      expect(await tryLock({ retries: 1 })).toBe('acquired');
     });
 
-    it('should remove the guard it left behind', () => {
-      tryLock({ retries: 1 });
+    it('should remove the guard it left behind', async () => {
+      await tryLock({ retries: 1 });
       expect(readdirSync(dir)).toEqual(['reports.csv.lock']);
     });
   });
 
-  it('should acquire the lock at the next attempt when it is released between an attempt and the check of its age', () => {
+  it('should acquire the lock at the next attempt when it is released between an attempt and the check of its age', async () => {
     vi.mocked(openSync).mockImplementationOnce(() => {
       throw errnoError('EEXIST');
     });
-    expect(tryLock({ retries: 1 })).toBe('acquired');
+    expect(await tryLock({ retries: 1 })).toBe('acquired');
   });
 });

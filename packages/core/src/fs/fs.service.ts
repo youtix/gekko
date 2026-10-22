@@ -1,7 +1,8 @@
 import { ONE_SECOND } from '@gekko/shared/constants/time.const';
-import { waitSync } from '@gekko/shared/utils/process/process.utils';
+import { wait } from '@gekko/shared/utils/process/process.utils';
+import { pluralize } from '@gekko/shared/utils/string/string.utils';
 import { closeSync, constants, openSync, statSync, unlinkSync } from 'fs';
-import { LockSync } from '@gekko/shared/models/fs.types';
+import { Lock } from './fs.types';
 
 /**
  * The critical sections last milliseconds and the retries a few hundred more: a lock older than this belongs to a run that is
@@ -58,18 +59,30 @@ const removeStaleLock = (lockFile: string, staleMs: number) => {
   }
 };
 
-export const lockSync: LockSync = (targetPath, { retries = 3, retryDelayMs = 50, staleMs = DEFAULT_STALE_MS } = {}) => {
-  const lockFile = getLockFileName(targetPath);
-  let failedAttempts = 0;
+/** One attempt at the lock: true once it is taken, a stale lock taken over first, false while another run holds it */
+const attemptLock = (lockFile: string, staleMs: number) => {
   while (!tryAcquire(lockFile)) {
     // Taking a stale lock over is not a failed attempt: the next one follows at once.
-    if (removeStaleLock(lockFile, staleMs)) continue;
-    if (++failedAttempts > retries) {
+    if (!removeStaleLock(lockFile, staleMs)) return false;
+  }
+  return true;
+};
+
+/**
+ * Takes the lock of `targetPath`, the file `<targetPath>.lock`, and resolves with the function that releases it. While another run
+ * holds it, tries again every `retryDelayMs`, `retries` times at most, then rejects naming the lock file. Each delay is awaited, so that
+ * the thread runs what falls due meanwhile, the bot's signal handlers among them: waited for with Atomics.wait, the attempts of the
+ * PerformanceReporter, a minute of them, held a Ctrl-C until the last one.
+ */
+export const lock: Lock = async (targetPath, { retries = 3, retryDelayMs = 50, staleMs = DEFAULT_STALE_MS } = {}) => {
+  const lockFile = getLockFileName(targetPath);
+  for (let attempts = 1; !attemptLock(lockFile, staleMs); attempts++) {
+    if (attempts > retries) {
       throw new Error(
-        `Could not acquire the lock of ${targetPath} after ${failedAttempts} attempts: ${lockFile} is held by another run, or was left behind by a run that was killed less than ${staleMs / ONE_SECOND} s ago; delete it if no other run is writing ${targetPath}`,
+        `Could not acquire the lock of ${targetPath} after ${attempts} ${pluralize('attempt', attempts)}: ${lockFile} is held by another run, or was left behind by a run that was killed less than ${staleMs / ONE_SECOND} s ago; delete it if no other run is writing ${targetPath}`,
       );
     }
-    waitSync(retryDelayMs);
+    await wait(retryDelayMs);
   }
 
   return () => {
