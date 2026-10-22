@@ -962,8 +962,8 @@ A JavaScript strategy, which Bun loads without type-checking, can leave the thir
 A strategy registers its indicators in `init`, the only hook where `addIndicator` is available, on one of the watched pairs. Gekko builds each indicator there, then feeds it every timeframe candle of its pair, from the first candle of the run, the warmup included, before the hooks of that candle run:
 
 ```typescript
-import { TradingPair } from '@models/utility.types';
-import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '@strategies/strategy.types';
+import { TradingPair } from '@gekko/shared/models/utility.types';
+import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '@gekko/strategies/strategy.types';
 
 type RsiBandsParams = { rsiPeriod: number; bandsPeriod: number };
 
@@ -1065,11 +1065,11 @@ if (close > ema200.results && rsi.results < 30 && volume.obv > volume.ma) {
 
 The moving averages (SMA, EMA, DEMA, TEMA, WMA, SMMA and Wilder Smoothing), ROC, Bollinger Bands and the Stochastic also take numbers you compute, through `update(value: number)`: the Stochastic takes each value as its own high, low and close. That is how indicators build on each other: TRIX feeds its triple EMA to a ROC, OBV its OBV to Bollinger Bands, and Stochastic RSI its RSI to a Stochastic. The result follows the same contract as through `addIndicator`.
 
-Only code that can import Gekko's classes uses it: a strategy in `src/strategies/custom/`, or a new indicator. A strategy loaded through `strategyPath` from outside the repository can import Gekko's types only (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
+Only code that can import Gekko's classes uses it: a strategy in `packages/strategies/src/custom/`, or a new indicator. A strategy loaded through `strategyPath` from outside the repository can import Gekko's types only (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
 
 ```typescript
-import { EMA } from '@indicators/movingAverages/ema/ema.indicator';
-import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '@strategies/strategy.types';
+import { EMA } from '@gekko/indicators/movingAverages/ema/ema.indicator';
+import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '@gekko/strategies/strategy.types';
 
 export class TrixSignal implements Strategy<object> {
   // TRIX has no signal line: a 9-candle EMA of its values, fed once per candle

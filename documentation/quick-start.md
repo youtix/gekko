@@ -19,7 +19,7 @@ cd gekko
 bun install
 
 # Compile Gekko into a standalone executable
-bun run build:exec # This creates `dist/gekko` — a single binary you can run anywhere without Bun installed.
+bun run build:exec # This creates `dist/gekko` — a single binary you can run anywhere without Bun installed — and `dist/fox`, the parameter sweeper of the Fox guide.
 ```
 
 Run every command of this guide from the root of the checkout, the `gekko` directory: the executable reads `.env` and `.env.local` from the directory it runs in, and the paths that `GEKKO_CONFIG_FILE_PATH` and the configurations name (`./config/…`, `./db/…`) are relative to it.
@@ -365,7 +365,7 @@ Gekko executes real trades with real money. Monitor closely and use stop-losses.
 
 ## Next Steps
 
-- Explore the [built-in strategies](./built-in-strategies.md), whose code is in `src/strategies/`
-- Write your own with the [Custom Strategies](./custom-strategies.md) guide: a file of your own anywhere, loaded through the TradingAdvisor's `strategyPath`, or a private strategy kept in your checkout's `src/strategies/custom/`, exported from its `index.ts`
-- Adjust strategy parameters and backtest again, over the range you imported or inside it (import another range first to test on other dates)
+- Explore the [built-in strategies](./built-in-strategies.md), whose code is in `packages/strategies/src/`
+- Write your own with the [Custom Strategies](./custom-strategies.md) guide: a file of your own anywhere, loaded through the TradingAdvisor's `strategyPath`, or a private strategy kept in your checkout's `packages/strategies/src/custom/`, exported from its `index.ts`
+- Adjust strategy parameters and backtest again, over the range you imported or inside it (import another range first to test on other dates), or let [Fox](./fox.md) backtest every combination of the values you list, side by side
 - Set up Telegram monitoring with the EventSubscriber or Supervision plugins, each on a bot of its own (two plugins on one token conflict, with HTTP 409 errors). Supervision starts subscribed to nothing, and runs no check, so sends no alert, until its chat subscribes: send `/subscribe_all` to each bot once Gekko runs, and again after every restart
