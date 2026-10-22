@@ -24,7 +24,7 @@ export class PerformanceReporter extends Plugin {
     { header: 'id', value: () => generateStrategyId(this.strategySettings) },
     { header: 'report type', value: report => REPORT_TYPES[report.id] },
     // Without the pair and the timeframe, runs of the same strategy on other pairs or timeframes could not be told apart.
-    // A PortfolioAnalyzer run can watch several pairs: they share the cell, separated by a space as ';' separates the columns.
+    // A run can watch several pairs, under either analyzer: they share the cell, separated by a space as ';' separates the columns.
     { header: 'pair', value: () => this.pairs.join(' ') },
     // The schema only leaves the timeframe out in importer mode, which this plugin does not run in.
     { header: 'timeframe', value: () => this.timeframe ?? '' },

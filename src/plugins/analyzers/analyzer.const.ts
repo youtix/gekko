@@ -33,7 +33,10 @@ export const PERCENT_ROUNDING = {
  */
 export const DUST_TOLERANCE = 0.01;
 
-/** The benchmark of a report whose configuration names none, when it is watched; else the first asset of watch.assets (see pickBenchmarkAsset) */
+/**
+ * The benchmark of a report whose configuration names none, when it is watched; else the first asset of watch.assets (see
+ * pickBenchmarkAsset)
+ */
 export const DEFAULT_BENCHMARK_ASSET = 'BTC';
 
 /**

@@ -1087,8 +1087,8 @@ describe('EventSubscriber', () => {
     });
 
     // A round trip is written as the console table of the RoundTripAnalyzer writes it: its prices as amounts, its percentages rounded
-    // down to 2 decimals (see PERCENT_ROUNDING), its duration on the UTC calendar. Its P&L and profit are unknown (NaN) when no
-    // portfolio read valued it: written as they came, they read "PnL: NaN" and "Profit: NaN%".
+    // down to 2 decimals (see PERCENT_ROUNDING), its duration on the UTC calendar. Its profit is unknown (NaN) when no portfolio read
+    // valued its entry, its P&L coming from its fills: a profit or a P&L that is not a number reads "unknown".
     describe('the message of a round trip', () => {
       const notifyRoundTrip = async (fields: Partial<RoundTrip>) => {
         plugin['handleCommand']('/sub_roundtrip_complete');

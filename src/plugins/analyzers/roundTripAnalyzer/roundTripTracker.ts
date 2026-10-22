@@ -179,7 +179,7 @@ export class RoundTripTracker {
    * Logs its position still open at the end of the period, if any. It is in the final balance, at the last close, and in the exposure,
    * but in no round trip: the win rate, the ratios and the MAEs leave it out. Its P&L is measured as that of a round trip (see
    * measureRoundTrip), what it still holds valued at the last close as the SELL that would close it would sell it, without the fee of
-   * that SELL; its profit, unknown without an entry equity, leaves the whole line unknown.
+   * that SELL; its profit, unknown without an entry equity, is written so, the P&L kept.
    */
   logOpenPosition(): void {
     const roundTrip = this.openRoundTrip;
@@ -189,7 +189,7 @@ export class RoundTripTracker {
     const { pnl, profit } = measureRoundTrip({ ...roundTrip, proceeds: addPrecise(proceeds, held) }, entryEquity);
     const unrealized = isFiniteNumber(profit)
       ? `unrealized P&L of ${formatAmount(pnl)} ${this.currency} (${formatSignedPercent(profit)})`
-      : 'unrealized P&L unknown, no portfolio having valued its entry';
+      : `unrealized P&L of ${formatAmount(pnl)} ${this.currency} (profit unknown, no portfolio having valued its entry)`;
     info(
       'roundtrip analyzer',
       [

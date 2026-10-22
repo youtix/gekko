@@ -402,7 +402,7 @@ export class EventSubscriber extends Plugin {
     this.notify('roundtrip_complete', payloads, ({ symbol, pnl, profit, duration, entryPrice, exitPrice, maxAdverseExcursion, exitAt }) =>
       [
         `Roundtrip completed for ${symbol}`,
-        // A round trip that no portfolio read valued has neither (see RoundTrip): written as they come, they read NaN
+        // Its P&L comes from its fills, and its profit is NaN when no portfolio read valued its entry (see RoundTrip): read "unknown" then
         `PnL: ${isFiniteNumber(pnl) ? formatAmount(pnl) : 'unknown'}`,
         // Rounded as the console table rounds them (see PERCENT_ROUNDING): rounded half up here, a round trip of 2.345 % read 2.35 %,
         // and 2.34 % on the console

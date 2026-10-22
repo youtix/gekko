@@ -856,7 +856,7 @@ describe('RoundTripTracker', () => {
       lastClose | portfolio   | unrealized
       ${50}     | ${READ}     | ${'unrealized P&L of -30.32 USDT (-3.03%)'}
       ${80.32}  | ${READ}     | ${'unrealized P&L of 0 USDT (0%)'}
-      ${150}    | ${NOT_READ} | ${'unrealized P&L unknown, no portfolio having valued its entry'}
+      ${150}    | ${NOT_READ} | ${'unrealized P&L of 69.68 USDT (profit unknown, no portfolio having valued its entry)'}
     `('should log $unrealized at a last close of $lastClose', ({ lastClose, portfolio, unrealized }) => {
       valuePortfolio.mockReturnValue(999.8);
       holdOne(lastClose, portfolio);
