@@ -1,11 +1,12 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
 import { CandleBucket } from '@gekko/shared/models/event.types';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Plugin } from '../../plugin/plugin';
-import { config } from '../../configuration/configuration';
-import { inject } from '../../injecter/injecter';
 import { warning } from '../../logger/logger';
+import type { RunContext } from '../../run/runContext.types';
+import type { Storage } from '../../storage/storage';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import { startOfMinuteUTC } from '@gekko/shared/utils/date/date.utils';
 import { synchronizeStreams } from '@gekko/shared/helpers/stream/stream.helper';
@@ -16,22 +17,13 @@ import { MultiAssetBacktestStream } from '../stream/backtest/multiAssetBacktest.
 import { MultiAssetHistoricalStream } from '../stream/multiAssetHistorical.stream';
 import { PluginsStream } from '../stream/plugins.stream';
 import { RealtimeStream } from '../stream/realtime/realtime.stream';
+import { RealtimeStreamParams } from '../stream/realtime/realtime.types';
 import { FillCandleGapStream } from '../stream/validation/fillCandleGap.stream';
 import { RejectDuplicateCandleStream } from '../stream/validation/rejectDuplicateCandle.stream';
 import { RejectFutureCandleStream } from '../stream/validation/rejectFutureCandle.stream';
 import { mergeSequentialStreams, streamPipelines } from './pipeline.helper';
 
 // Mocks
-vi.mock('../../configuration/configuration', () => ({
-  config: {
-    getWatch: vi.fn(),
-  },
-}));
-
-vi.mock('../../injecter/injecter', () => ({
-  inject: { exchange: vi.fn() },
-}));
-
 vi.mock('@gekko/shared/helpers/stream/stream.helper', () => ({
   synchronizeStreams: vi.fn(),
 }));
@@ -65,6 +57,15 @@ vi.mock('../stream/plugins.stream', () => ({
 vi.mock('../stream/realtime/realtime.stream', () => ({
   RealtimeStream: vi.fn(),
 }));
+
+/** The run's exchange and storage, which the builders hand to the streams that read them */
+const exchange = { getExchangeName: () => 'binance' } as unknown as Exchange;
+const storage = { getCandles: vi.fn() } as unknown as Storage;
+const strategy = { name: 'DEMA' };
+/** The run's configuration and services: each test sets the watch section the builder reads */
+const configuration = { getWatch: vi.fn(), getStrategy: vi.fn(() => strategy) };
+const services = { exchange: vi.fn(() => exchange), storage: vi.fn(() => storage), closeStorage: vi.fn() };
+const context = { configuration, services } as unknown as RunContext;
 
 // What every mode reads from the watch section: the pair, a past range, the timeframe and the warmup
 const EVERY_MODE_WATCH = {
@@ -221,8 +222,8 @@ describe('pipeline.helper', () => {
 
       // Builds the realtime pipeline and returns the warmup history range it asked for
       const launchRealtime = async (timeframe: Timeframe, candleCount: number, watchedPairs = pairs) => {
-        (config.getWatch as Mock).mockReturnValue({ pairs: watchedPairs, timeframe, warmup: { candleCount, tickrate: 1000 } });
-        await streamPipelines.realtime(mockPlugins);
+        configuration.getWatch.mockReturnValue({ pairs: watchedPairs, timeframe, warmup: { candleCount, tickrate: 1000 } });
+        await streamPipelines.realtime(mockPlugins, context);
         return vi.mocked(MultiAssetHistoricalStream).mock.lastCall![0].daterange;
       };
 
@@ -242,9 +243,9 @@ describe('pipeline.helper', () => {
         vi.useRealTimers();
       });
 
-      it('should build a live stream for each pair, starting with the minute in progress', async () => {
+      it('should build a live stream for each pair on the exchange of the run, starting with the minute in progress', async () => {
         await launchRealtime('1h', 2);
-        expect(vi.mocked(RealtimeStream).mock.calls).toEqual([[symbol, at('2024-03-15T10:20:00.000Z')]]);
+        expect(vi.mocked(RealtimeStream).mock.calls).toEqual([[{ exchange, symbol, startMinute: at('2024-03-15T10:20:00.000Z') }]]);
       });
 
       it('should start the live streams of all the pairs with the same minute when building them crosses a minute boundary', async () => {
@@ -253,7 +254,7 @@ describe('pipeline.helper', () => {
           return this;
         });
         await launchRealtime('1h', 2, [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }]);
-        expect(vi.mocked(RealtimeStream).mock.calls).toEqual([
+        expect(vi.mocked(RealtimeStream).mock.calls.map(([{ symbol, startMinute }]) => [symbol, startMinute])).toEqual([
           ['BTC/USDT', at('2024-03-15T10:20:00.000Z')],
           ['ETH/USDT', at('2024-03-15T10:20:00.000Z')],
         ]);
@@ -264,9 +265,10 @@ describe('pipeline.helper', () => {
         expect(synchronizeStreams).toHaveBeenCalledWith(vi.mocked(RealtimeStream).mock.instances);
       });
 
-      it('should hand the plugins to the plugins stream', async () => {
+      it('should hand the plugins, the watch section and the exchange of the run to the plugins stream', async () => {
         await launchRealtime('1h', 2);
-        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins);
+        const watch = { pairs, timeframe: '1h', warmup: { candleCount: 2, tickrate: 1000 } };
+        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins, watch, exchange);
       });
 
       it('should pipe the source through the future candle filter, the duplicate filter, then the gap filler, into the plugins', async () => {
@@ -340,7 +342,12 @@ describe('pipeline.helper', () => {
         async ({ timeframe, candleCount, clock, start, end }) => {
           vi.setSystemTime(at(clock));
           await launchRealtime(timeframe, candleCount);
-          expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({ daterange: { start: at(start), end: at(end) }, tickrate: 1000, pairs });
+          expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+            exchange,
+            daterange: { start: at(start), end: at(end) },
+            tickrate: 1000,
+            pairs,
+          });
         },
       );
 
@@ -355,7 +362,9 @@ describe('pipeline.helper', () => {
 
         it('should start the live stream with the minute in progress, 01:30Z', async () => {
           await launchRealtime('1h', 1);
-          expect(vi.mocked(RealtimeStream).mock.calls).toEqual([[symbol, at('2026-10-25T01:30:00.000Z')]]);
+          expect(vi.mocked(RealtimeStream).mock.calls.map(([{ symbol, startMinute }]) => [symbol, startMinute])).toEqual([
+            [symbol, at('2026-10-25T01:30:00.000Z')],
+          ]);
         });
 
         it('should end the warmup history with the minute before, 01:29Z', async () => {
@@ -381,7 +390,7 @@ describe('pipeline.helper', () => {
           vi.setSystemTime(at('2024-03-15T10:20:59.999Z'));
           uptime = vi.spyOn(process, 'uptime');
           fetchOHLCV.mockResolvedValue([]);
-          (inject.exchange as Mock).mockReturnValue({ fetchOHLCV });
+          services.exchange.mockReturnValue({ fetchOHLCV } as unknown as Exchange);
         });
 
         afterEach(() => {
@@ -400,8 +409,8 @@ describe('pipeline.helper', () => {
           'should fetch the first live minute $minutesAfterHistory minute(s) after the last history minute when $slowStep crosses a minute boundary',
           async ({ slowStep, minutesAfterHistory }) => {
             if (slowStep === 'the process start-up') uptime.mockReturnValue(120);
-            vi.mocked(RealtimeStream).mockImplementation(function (pair: TradingPair, startMinute: EpochTimeStamp) {
-              const stream = new ActualRealtimeStream(pair, startMinute);
+            vi.mocked(RealtimeStream).mockImplementation(function (params: RealtimeStreamParams) {
+              const stream = new ActualRealtimeStream(params);
               liveStreams.push(stream);
               if (slowStep === 'building the live stream') crossMinuteBoundary();
               return stream;
@@ -427,7 +436,7 @@ describe('pipeline.helper', () => {
 
       // Launches the pipeline of a mode with a plugins stream whose last bucket failed with `failure`, if any
       const launchFailing = (mode: keyof typeof streamPipelines, failure?: Error) => {
-        (config.getWatch as Mock).mockReturnValue({
+        configuration.getWatch.mockReturnValue({
           pairs: [{ symbol: 'BTC/USDT' }],
           timeframe: '1h',
           warmup: { candleCount: 1, tickrate: 1000 },
@@ -438,7 +447,7 @@ describe('pipeline.helper', () => {
           return { failure } as PluginsStream;
         });
         vi.mocked(pipeline).mockRejectedValue(upstreamError);
-        return streamPipelines[mode](mockPlugins);
+        return streamPipelines[mode](mockPlugins, context);
       };
 
       beforeEach(() => {
@@ -465,7 +474,7 @@ describe('pipeline.helper', () => {
       const lastArgument = () => vi.mocked(pipeline).mock.lastCall?.at(-1) as unknown;
 
       beforeEach(() => {
-        (config.getWatch as Mock).mockReturnValue(EVERY_MODE_WATCH);
+        configuration.getWatch.mockReturnValue(EVERY_MODE_WATCH);
         const pendingStream = () => new Readable({ objectMode: true, read() {} });
         vi.mocked(MultiAssetHistoricalStream).mockImplementation(function () {
           return pendingStream() as MultiAssetHistoricalStream;
@@ -474,13 +483,13 @@ describe('pipeline.helper', () => {
       });
 
       it.each(modes)('should hand pipeline() the signal after the streams in %s mode', async mode => {
-        await streamPipelines[mode](mockPlugins, signal);
+        await streamPipelines[mode](mockPlugins, context, signal);
         expect((lastArgument() as { signal?: AbortSignal }).signal).toBe(signal);
       });
 
       // pipeline() reads options without a signal as no options
       it.each(modes)('should hand pipeline() options without a signal after the streams when given none in %s mode', async mode => {
-        await streamPipelines[mode](mockPlugins);
+        await streamPipelines[mode](mockPlugins, context);
         expect(lastArgument()).toStrictEqual({ signal: undefined });
       });
     });
@@ -502,7 +511,7 @@ describe('pipeline.helper', () => {
       // Starts the run, then waits until its plugin is initialised: an abort before would finalise no plugin. `settled` resolves to
       // what the run rejected with.
       const startRun = async () => {
-        const settled = streamPipelines[mode]([plugin], controller.signal).then(
+        const settled = streamPipelines[mode]([plugin], context, controller.signal).then(
           () => 'resolved',
           (rejection: unknown) => rejection,
         );
@@ -518,8 +527,8 @@ describe('pipeline.helper', () => {
           typeof import('../stream/validation/rejectDuplicateCandle.stream')
         >('../stream/validation/rejectDuplicateCandle.stream');
         vi.mocked(pipeline).mockImplementation(actualPipeline);
-        vi.mocked(PluginsStream).mockImplementation(function (plugins: Plugin[]) {
-          return new ActualPluginsStream(plugins);
+        vi.mocked(PluginsStream).mockImplementation(function (...params: ConstructorParameters<typeof PluginsStream>) {
+          return new ActualPluginsStream(...params);
         });
         vi.mocked(RejectDuplicateCandleStream).mockImplementation(function () {
           return new ActualRejectDuplicateCandleStream();
@@ -532,7 +541,7 @@ describe('pipeline.helper', () => {
           return source as MultiAssetBacktestStream;
         });
         vi.mocked(synchronizeStreams).mockReturnValue(new Readable({ objectMode: true, read() {} }));
-        (config.getWatch as Mock).mockReturnValue(EVERY_MODE_WATCH);
+        configuration.getWatch.mockReturnValue(EVERY_MODE_WATCH);
 
         controller = new AbortController();
         initialized = Promise.withResolvers();
@@ -591,11 +600,12 @@ describe('pipeline.helper', () => {
     describe('backtest', () => {
       const daterange = { start: new Date('2023-01-01').getTime(), end: new Date('2023-01-02').getTime() };
       const pairs = [{ symbol: 'BTC/USDT' }];
+      const watch = { mode: 'backtest', daterange, pairs, batchSize: 60 };
 
       // Builds the backtest pipeline for the configured range
       const launchBacktest = async () => {
-        (config.getWatch as Mock).mockReturnValue({ daterange, pairs });
-        await streamPipelines.backtest(mockPlugins);
+        configuration.getWatch.mockReturnValue(watch);
+        await streamPipelines.backtest(mockPlugins, context);
       };
 
       it('should pipe the stored candles straight into the plugins', async () => {
@@ -607,14 +617,14 @@ describe('pipeline.helper', () => {
         ]);
       });
 
-      it('should read the stored candles of the watched pairs over daterange', async () => {
+      it('should read the stored candles of the watched pairs over daterange, in batches, from the storage of the run', async () => {
         await launchBacktest();
-        expect(MultiAssetBacktestStream).toHaveBeenCalledWith({ daterange, pairs });
+        expect(MultiAssetBacktestStream).toHaveBeenCalledWith({ pairs, daterange, batchSize: 60, strategy, storage });
       });
 
-      it('should hand the plugins to the plugins stream', async () => {
+      it('should hand the plugins, the watch section and the exchange of the run to the plugins stream', async () => {
         await launchBacktest();
-        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins);
+        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins, watch, exchange);
       });
 
       it('should warn once that the backtest needs proper testing', async () => {
@@ -625,8 +635,8 @@ describe('pipeline.helper', () => {
       });
 
       it('should throw an error if daterange is not set in config', async () => {
-        (config.getWatch as Mock).mockReturnValue({ daterange: undefined, pairs: [] });
-        await expect(streamPipelines.backtest(mockPlugins)).rejects.toThrow('daterange is not set');
+        configuration.getWatch.mockReturnValue({ daterange: undefined, pairs: [] });
+        await expect(streamPipelines.backtest(mockPlugins, context)).rejects.toThrow('daterange is not set');
       });
     });
 
@@ -639,8 +649,8 @@ describe('pipeline.helper', () => {
 
       // Builds the importer pipeline for the configured range
       const launchImporter = async (end: string, start = pastStart) => {
-        (config.getWatch as Mock).mockReturnValue({ daterange: { start: at(start), end: at(end) }, tickrate, pairs });
-        await streamPipelines.importer(mockPlugins);
+        configuration.getWatch.mockReturnValue({ daterange: { start: at(start), end: at(end) }, tickrate, pairs });
+        await streamPipelines.importer(mockPlugins, context);
       };
 
       beforeEach(() => {
@@ -693,9 +703,10 @@ describe('pipeline.helper', () => {
         ]);
       });
 
-      it('should hand the plugins to the plugins stream', async () => {
+      it('should hand the plugins, the watch section and the exchange of the run to the plugins stream', async () => {
         await launchImporter('2024-03-15T09:00:00.000Z');
-        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins);
+        const watch = { daterange: { start: at(pastStart), end: at('2024-03-15T09:00:00.000Z') }, tickrate, pairs };
+        expect(PluginsStream).toHaveBeenCalledWith(mockPlugins, watch, exchange);
       });
 
       describe.each`
@@ -707,8 +718,9 @@ describe('pipeline.helper', () => {
       `('when daterange.end is $position', ({ end }) => {
         beforeEach(() => launchImporter(end));
 
-        it('should import up to the last closed minute', () => {
+        it('should import up to the last closed minute, from the exchange of the run', () => {
           expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+            exchange,
             daterange: { start: at(pastStart), end: at(lastClosedMinute) },
             tickrate,
             pairs,
@@ -730,8 +742,13 @@ describe('pipeline.helper', () => {
       `('when daterange.end is $position', ({ end }) => {
         beforeEach(() => launchImporter(end));
 
-        it('should import up to daterange.end', () => {
-          expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({ daterange: { start: at(pastStart), end: at(end) }, tickrate, pairs });
+        it('should import up to daterange.end, from the exchange of the run', () => {
+          expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+            exchange,
+            daterange: { start: at(pastStart), end: at(end) },
+            tickrate,
+            pairs,
+          });
         });
 
         it('should not warn', () => {
@@ -757,6 +774,7 @@ describe('pipeline.helper', () => {
         `('should import up to $importedEnd when daterange.end is $position', async ({ end, importedEnd }) => {
           await launchImporter(end);
           expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+            exchange,
             daterange: { start: at(pastStart), end: at(importedEnd) },
             tickrate,
             pairs,
@@ -773,6 +791,7 @@ describe('pipeline.helper', () => {
       it('should hand the history a range starting after its end when daterange.start is in the minute in progress', async () => {
         await launchImporter('2024-03-15T12:00:00.000Z', '2024-03-15T10:20:10.000Z');
         expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
+          exchange,
           daterange: { start: at('2024-03-15T10:20:10.000Z'), end: at(lastClosedMinute) },
           tickrate,
           pairs,
@@ -780,8 +799,8 @@ describe('pipeline.helper', () => {
       });
 
       it('should throw an error if daterange is not set in config', async () => {
-        (config.getWatch as Mock).mockReturnValue({ daterange: undefined, pairs: [] });
-        await expect(streamPipelines.importer(mockPlugins)).rejects.toThrow('daterange is not set');
+        configuration.getWatch.mockReturnValue({ daterange: undefined, pairs: [] });
+        await expect(streamPipelines.importer(mockPlugins, context)).rejects.toThrow('daterange is not set');
       });
     });
   });

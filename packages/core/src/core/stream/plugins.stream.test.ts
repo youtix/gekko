@@ -2,8 +2,8 @@ import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { Plugin } from '../../plugin/plugin';
-import { config } from '../../configuration/configuration';
 import { error, info, warning } from '../../logger/logger';
 import { SequentialEventEmitter } from '../../plugin/sequentialEventEmitter';
 import { noop } from 'lodash-es';
@@ -16,15 +16,6 @@ import { PluginsStream } from './plugins.stream';
 /*                                    MOCKS                                   */
 /* -------------------------------------------------------------------------- */
 
-const { injectMock } = vi.hoisted(() => ({
-  injectMock: {
-    exchange: vi.fn(() => ({ getExchangeName: (): string => 'binance' })),
-  },
-}));
-
-vi.mock('../../injecter/injecter', () => ({ inject: injectMock }));
-// The mode the stream reads as it is built: a backtest, unless a test sets another (see inMode)
-vi.mock('../../configuration/configuration', () => ({ config: { getWatch: vi.fn(() => ({ mode: 'backtest' })) } }));
 vi.mock('../../logger/logger', () => ({
   info: vi.fn(),
   debug: vi.fn(),
@@ -99,9 +90,19 @@ const createHeldWork = () => {
   return { run, started: started.promise, release: () => released.resolve(), finished };
 };
 
+/** An exchange that simulates nothing, as binance's: the stream hands it no bucket */
+const LIVE_EXCHANGE = { getExchangeName: () => 'binance' } as unknown as Exchange;
+
+/** What the pipeline builds a stream with besides its plugins: the mode of the watch section and the run's exchange */
+type StreamSettings = { mode?: Watch['mode']; exchange?: Exchange };
+
+/** The stream of `plugins` as the pipeline builds it: in a backtest, on an exchange that simulates nothing, unless `settings` differ */
+const createStream = (plugins: Plugin[], { mode = 'backtest', exchange = LIVE_EXCHANGE }: StreamSettings = {}) =>
+  new PluginsStream(plugins, { mode }, exchange);
+
 /** Runs the plugins through the public API, as pipeline.helper does, and returns what the pipeline rejected with, if anything. */
-const runPipeline = (source: Iterable<CandleBucket> | AsyncIterable<CandleBucket>, plugins: Plugin[]) =>
-  pipeline(Readable.from(source), new PluginsStream(plugins)).then(
+const runPipeline = (source: Iterable<CandleBucket> | AsyncIterable<CandleBucket>, plugins: Plugin[], settings?: StreamSettings) =>
+  pipeline(Readable.from(source), createStream(plugins, settings)).then(
     () => undefined,
     (reason: unknown) => reason,
   );
@@ -122,9 +123,6 @@ const failToLogFinalizationFailure = (thrown: unknown) =>
 /** Writes a bucket to the stream on its own, outside any pipeline, and resolves once the stream has processed it */
 const writeBucket = (stream: PluginsStream) =>
   new Promise<void>((resolve, reject) => stream.write(BUCKET, failure => (failure ? reject(failure) : resolve())));
-
-/** The streams built from now on run in `mode`, which they read from the configuration as they are built */
-const inMode = (mode: Watch['mode']) => vi.mocked(config.getWatch).mockReturnValue({ mode } as Watch);
 
 /* -------------------------------------------------------------------------- */
 /*                                   TESTS                                    */
@@ -161,7 +159,7 @@ describe('PluginsStream', () => {
       beforeEach(async () => {
         const initGate = createGate();
         plugins = [createPluginStub({ processInitStream: vi.fn(() => initGate.promise) }), createPluginStub()];
-        const stream = new PluginsStream(plugins);
+        const stream = createStream(plugins);
         const errored = new Promise(resolve => stream.once('error', resolve));
         await vi.waitFor(() => expect(plugins[0].processInitStream).toHaveBeenCalled());
 
@@ -193,10 +191,9 @@ describe('PluginsStream', () => {
       it('forwards the bucket to the dummy exchange before the plugins', async () => {
         const callOrder: string[] = [];
         const dummyExchange = { processOneMinuteBucket: vi.fn(() => callOrder.push('exchange')), getExchangeName: () => 'dummy-cex' };
-        injectMock.exchange.mockReturnValue(dummyExchange);
         const plugin = createPluginStub({ processInputStream: vi.fn(async () => callOrder.push('plugin')) });
 
-        await runPipeline([BUCKET], [plugin]);
+        await runPipeline([BUCKET], [plugin], { exchange: dummyExchange as unknown as Exchange });
 
         expect(callOrder).toEqual(['exchange', 'plugin']);
       });
@@ -249,7 +246,7 @@ describe('PluginsStream', () => {
         trader.on('orderCompleted', onOrderCompleted);
         vi.mocked(advisor.processInputStream).mockImplementation(async () => advisor.addDeferredEmit('strategyCreateOrder', { id: 1 }));
 
-        await writeBucket(new PluginsStream([advisor, trader]));
+        await writeBucket(createStream([advisor, trader]));
 
         expect(onOrderCompleted).toHaveBeenCalledOnce();
       });
@@ -341,8 +338,7 @@ describe('PluginsStream', () => {
         ${'backtest'} | ${'after the plugins process the second bucket'}  | ${AFTER_THE_HOOKS}
         ${'importer'} | ${'after the plugins process the second bucket'}  | ${AFTER_THE_HOOKS}
       `('delivers in $mode mode an event queued between two buckets $delivered', async ({ mode, expected }) => {
-        inMode(mode);
-        const stream = new PluginsStream([advisor, trader]);
+        const stream = createStream([advisor, trader], { mode });
 
         await writeTwoBuckets(stream, () => trader.addDeferredEmit('orderCompleted', { id: 1 }));
 
@@ -351,8 +347,7 @@ describe('PluginsStream', () => {
 
       // An order hook ran on a fill the Trader delivered after the turn of the TradingAdvisor: its order is sent before the hooks too
       it('delivers in realtime what the plugins queued since the previous flush in config order, before the hooks', async () => {
-        inMode('realtime');
-        const stream = new PluginsStream([advisor, trader]);
+        const stream = createStream([advisor, trader], { mode: 'realtime' });
 
         await writeTwoBuckets(stream, () => {
           trader.addDeferredEmit('orderCompleted', { id: 1 });
@@ -371,10 +366,8 @@ describe('PluginsStream', () => {
       // The paper exchange consumes the bucket first: an order sent as the events queued are delivered trades at its close, as a live one
       // at the market of the moment
       it('lets the simulated exchange consume a bucket in realtime before what was queued since the previous flush', async () => {
-        inMode('realtime');
         const dummyExchange = { processOneMinuteBucket: vi.fn(() => calls.push('exchange')), getExchangeName: () => 'paper-binance' };
-        injectMock.exchange.mockReturnValue(dummyExchange);
-        const stream = new PluginsStream([advisor, trader]);
+        const stream = createStream([advisor, trader], { mode: 'realtime', exchange: dummyExchange as unknown as Exchange });
 
         await writeTwoBuckets(stream, () => trader.addDeferredEmit('orderCompleted', { id: 1 }));
 
@@ -388,19 +381,17 @@ describe('PluginsStream', () => {
 
       // The analyzers value a portfolio at the prices of the bucket they processed: delivered first, the first read would find none
       it('delivers in realtime what the plugins queued at start-up after they process the first bucket', async () => {
-        inMode('realtime');
         vi.mocked(trader.processInitStream).mockImplementation(async () => trader.addDeferredEmit('portfolioChange', { id: 1 }));
 
-        await writeBucket(new PluginsStream([advisor, trader]));
+        await writeBucket(createStream([advisor, trader], { mode: 'realtime' }));
 
         expect(calls).toEqual(['TradingAdvisor processes the bucket', 'Trader processes the bucket', 'portfolioChange']);
       });
 
       it('does not broadcast in realtime for a plugin with nothing queued', async () => {
-        inMode('realtime');
         const plugin = createPluginStub({ hasDeferredEvents: vi.fn(() => false) });
 
-        await runPipeline([BUCKET, BUCKET], [plugin]);
+        await runPipeline([BUCKET, BUCKET], [plugin], { mode: 'realtime' });
 
         expect(plugin.broadcastDeferredEmit).not.toHaveBeenCalled();
       });
@@ -412,11 +403,10 @@ describe('PluginsStream', () => {
         let streamError: Error;
 
         beforeEach(async () => {
-          inMode('realtime');
           trader.on('orderErrored', () => {
             throw stopError;
           });
-          stream = new PluginsStream([advisor, trader]);
+          stream = createStream([advisor, trader], { mode: 'realtime' });
           await writeBucket(stream);
           trader.addDeferredEmit('orderErrored', { id: 1 });
           const errored = waitForError(stream);
@@ -680,7 +670,7 @@ describe('PluginsStream', () => {
 
       beforeEach(async () => {
         plugin = createPluginStub({ [method]: throwing(stopError) });
-        stream = new PluginsStream([plugin]);
+        stream = createStream([plugin]);
         rejection = await pipeline(Readable.from([BUCKET]), stream).catch((reason: unknown) => reason);
       });
 
@@ -867,7 +857,7 @@ describe('PluginsStream', () => {
             throw new Error('database is locked');
           }),
         });
-        const stream = new PluginsStream([plugin]);
+        const stream = createStream([plugin]);
         const streamError = waitForError(stream);
         stream.end();
         await finalization.started;
@@ -953,7 +943,7 @@ describe('PluginsStream', () => {
       beforeEach(async () => {
         heldWork = createHeldWork();
         plugin = createPluginStub({ [method]: heldWork.run });
-        const stream = new PluginsStream([plugin]);
+        const stream = createStream([plugin]);
         streamError = waitForError(stream);
         stream.write(BUCKET);
         await heldWork.started;
@@ -1011,7 +1001,7 @@ describe('PluginsStream', () => {
           }),
           countUndeliveredPayloads: vi.fn(() => new Map([['orderCompleted', 1]])),
         });
-        stream = new PluginsStream([plugin]);
+        stream = createStream([plugin]);
         streamError = waitForError(stream);
         stream.write(BUCKET);
         await bucketWork.started;
@@ -1096,7 +1086,7 @@ describe('PluginsStream', () => {
           setTimeout(finalizationGate.open, 10);
           throw sourceError;
         }
-        const stream = new PluginsStream(plugins);
+        const stream = createStream(plugins);
         stream.on('error', reason => (reported = reason));
 
         rejection = await pipeline(Readable.from(failingSource()), stream).catch((reason: unknown) => reason);
@@ -1137,7 +1127,7 @@ describe('PluginsStream', () => {
         trader.on('orderCompleted', () => advisor.addDeferredEmit('strategyCreateOrder', { id: 2 }));
         advisor.on('strategyCreateOrder', noop);
         vi.mocked(trader.processInputStream).mockImplementation(async () => trader.addDeferredEmit('orderCompleted', { id: 1 }));
-        const stream = new PluginsStream([advisor, trader]);
+        const stream = createStream([advisor, trader]);
         await writeBucket(stream);
 
         const streamError = waitForError(stream);
@@ -1214,9 +1204,7 @@ describe('PluginsStream', () => {
     });
 
     it('logs no event dropped when destroyed without an error, even with events left queued', async () => {
-      const stream = new PluginsStream([
-        createPluginStub({ countUndeliveredPayloads: vi.fn(() => new Map([['strategyCreateOrder', 1]])) }),
-      ]);
+      const stream = createStream([createPluginStub({ countUndeliveredPayloads: vi.fn(() => new Map([['strategyCreateOrder', 1]])) })]);
 
       stream.destroy();
       await new Promise(resolve => stream.once('close', resolve));

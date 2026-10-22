@@ -1,18 +1,16 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../../../configuration/configuration';
 import { info } from '../../../logger/logger';
+import type { Storage } from '../../../storage/storage';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MissingCandlesError } from './backtest.error';
 import { BacktestStream } from './backtest.stream';
 
-const { storage } = vi.hoisted(() => ({ storage: { getCandles: vi.fn(), getCandleDateranges: vi.fn() } }));
-
-vi.mock('../../../configuration/configuration', () => ({ config: { getWatch: vi.fn(), getStrategy: vi.fn() } }));
-vi.mock('../../../injecter/injecter', () => ({ inject: { storage: vi.fn(() => storage) } }));
 vi.mock('../../../logger/logger', () => ({ debug: vi.fn(), info: vi.fn() }));
+
+const storage = { getCandles: vi.fn(), getCandleDateranges: vi.fn() };
 
 const symbol: TradingPair = 'BTC/USDT';
 const START = Date.UTC(2024, 0, 1);
@@ -27,13 +25,13 @@ const storedCandles = (_symbol: TradingPair, { start, end }: { start: number; en
 // Five minutes, read in batches of two
 const daterange = { start: minute(0), end: minute(4) };
 
-const createStream = () => new BacktestStream({ daterange, symbol });
+/** The stream of BTC/USDT over `daterange`, for a run of DEMA whose watch section sets `batchSize`, or leaves it out */
+const createStream = (batchSize?: number) =>
+  new BacktestStream({ daterange, symbol, batchSize, strategy: { name: 'DEMA' }, storage: storage as unknown as Storage });
 const readAll = async (stream: BacktestStream) => ((await stream.toArray()) as { candle: Candle }[]).map(({ candle }) => candle.start);
 
 describe('BacktestStream', () => {
   beforeEach(() => {
-    vi.mocked(config.getWatch).mockReturnValue({ batchSize: 2 } as ReturnType<typeof config.getWatch>);
-    vi.mocked(config.getStrategy).mockReturnValue({ name: 'DEMA' } as ReturnType<typeof config.getStrategy>);
     storage.getCandles.mockImplementation(storedCandles);
   });
 
@@ -42,7 +40,7 @@ describe('BacktestStream', () => {
     let starts: number[];
 
     beforeEach(async () => {
-      stream = createStream();
+      stream = createStream(2);
       starts = await readAll(stream);
     });
 
@@ -62,7 +60,6 @@ describe('BacktestStream', () => {
   });
 
   it('should read the range in batches of 1440 minutes when no batch size is set', async () => {
-    vi.mocked(config.getWatch).mockReturnValue({} as ReturnType<typeof config.getWatch>);
     await readAll(createStream());
     expect(storage.getCandles).toHaveBeenCalledOnce();
   });
@@ -81,7 +78,7 @@ describe('BacktestStream', () => {
         { daterange_start: minute(0), daterange_end: minute(2) },
         { daterange_start: minute(4), daterange_end: minute(4) },
       ]);
-      stream = createStream();
+      stream = createStream(2);
       starts = [];
       stream.on('data', ({ candle }) => starts.push(candle.start));
       failure = await new Promise(resolve => stream.on('error', resolve));

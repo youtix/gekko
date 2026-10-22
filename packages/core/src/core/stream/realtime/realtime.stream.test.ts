@@ -6,14 +6,13 @@ import {
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Candle } from '@gekko/shared/models/candle.types';
-import { inject } from '../../../injecter/injecter';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { debug, warning } from '../../../logger/logger';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
-import { afterEach, beforeEach, describe, expect, it, Mock, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RealtimeStream } from './realtime.stream';
 
 vi.mock('../../../logger/logger', () => ({ debug: vi.fn(), warning: vi.fn() }));
-vi.mock('../../../injecter/injecter', () => ({ inject: { exchange: vi.fn() } }));
 
 describe('RealtimeStream', () => {
   /** Start of the nth minute after 2024-01-01T00:00Z (the stream starts with minute 0, the one in progress when it is built) */
@@ -25,6 +24,10 @@ describe('RealtimeStream', () => {
 
   const fetchOHLCV = vi.fn();
   const getExchangeName = vi.fn();
+  /** The run's exchange, as the pipeline hands it to the stream: its candles and its name are read */
+  const exchange = { fetchOHLCV, getExchangeName } as unknown as Exchange;
+  /** The live stream of BTC/USDT from `startMinute` on */
+  const createStream = (startMinute: EpochTimeStamp) => new RealtimeStream({ exchange, symbol: 'BTC/USDT', startMinute });
   const onError = vi.fn();
   const onUnhandledRejection = vi.fn();
   let stream: RealtimeStream;
@@ -56,9 +59,8 @@ describe('RealtimeStream', () => {
     vi.setSystemTime(minute(0) + 500); // Just after a minute boundary
     getExchangeName.mockReturnValue('binance');
     fetchOHLCV.mockResolvedValue([]);
-    (inject.exchange as Mock).mockReturnValue({ fetchOHLCV, getExchangeName });
     process.on('unhandledRejection', onUnhandledRejection);
-    stream = new RealtimeStream('BTC/USDT', minute(0));
+    stream = createStream(minute(0));
     stream.on('error', onError);
   });
 
@@ -115,7 +117,7 @@ describe('RealtimeStream', () => {
     beforeEach(() => {
       stream.destroy();
       vi.setSystemTime(minute(0) - 1);
-      lateStream = new RealtimeStream('BTC/USDT', minute(-1));
+      lateStream = createStream(minute(-1));
     });
 
     afterEach(() => {
@@ -156,7 +158,7 @@ describe('RealtimeStream', () => {
       async ({ startMinute, nextMinute }) => {
         stream.destroy();
         vi.setSystemTime(Date.parse(startMinute) + 500);
-        dstStream = new RealtimeStream('BTC/USDT', Date.parse(startMinute));
+        dstStream = createStream(Date.parse(startMinute));
         await vi.advanceTimersByTimeAsync(Date.parse(nextMinute) + REALTIME_GRACE_PERIOD - Date.now());
         expect(fetchOHLCV).toHaveBeenCalledExactlyOnceWith('BTC/USDT', { from: Date.parse(startMinute), limit: 1 });
       },
@@ -170,7 +172,7 @@ describe('RealtimeStream', () => {
     beforeEach(() => {
       stream.destroy();
       vi.setSystemTime(tickTime(2) + 500); // Minutes 0 and 1 have closed, the grace period included
-      lateStream = new RealtimeStream('BTC/USDT', minute(0));
+      lateStream = createStream(minute(0));
     });
 
     afterEach(() => {

@@ -47,6 +47,13 @@ export type GekkoPipelineOptions = {
   signal?: AbortSignal;
 };
 
+/**
+ * What each step of gekkoPipeline receives besides the plugins' entries: the options of gekkoPipeline, with the run's context, which
+ * every step reads its configuration and its services from. During the monorepo wave only, the context may be the transitional one,
+ * built on the `config` and `inject` singletons when gekkoPipeline was given none.
+ */
+export type PipelineStepOptions = GekkoPipelineOptions & { context: RunContext };
+
 export type PipelineContext = {
   name: string;
   plugin?: Plugin;

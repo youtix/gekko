@@ -7,9 +7,9 @@ import {
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import type { PipelineContext, PluginRegistry } from './pipeline.types';
-import { config } from '../../configuration/configuration';
-import * as injecter from '../../injecter/injecter';
 import { warning } from '../../logger/logger';
+import { getCurrentRunContext, setCurrentRunContext } from '../../run/currentRun.helper';
+import type { RunContext } from '../../run/runContext.types';
 import { CandleDateranges } from '../../storage/storage.types';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
 import { SequentialEventEmitter } from '../../plugin/sequentialEventEmitter';
@@ -20,19 +20,9 @@ import * as pipelineModule from './pipeline';
 import { PluginsEmitSameEventError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
 
-vi.mock('../../configuration/configuration', () => ({
-  config: {
-    getWatch: vi.fn(() => ({ mode: 'realtime' })),
-    getPlugins: vi.fn(() => []),
-  },
-}));
-
-vi.mock('../../injecter/injecter', () => ({
-  inject: {
-    exchange: vi.fn(),
-    storage: vi.fn(),
-  },
-}));
+// Transitional, for the monorepo wave: pipeline.ts imports the `inject` singleton for its fallback, whose Services build the SQLite
+// storage, and bun:sqlite cannot load under vitest. Goes with the fallback.
+vi.mock('../../run/services', () => ({ Services: vi.fn() }));
 
 vi.mock('../../logger/logger', () => ({
   debug: vi.fn(),
@@ -46,19 +36,24 @@ vi.mock('./pipeline.helper', () => ({
   },
 }));
 
+/** The run's configuration and services, as createRunContext builds them: each test sets what the step it runs reads */
+const configuration = { getWatch: vi.fn(() => ({ mode: 'realtime' })), getPlugins: vi.fn(() => []) };
+const services = { exchange: vi.fn(), storage: vi.fn(), closeStorage: vi.fn() };
+const context = { configuration, services } as unknown as RunContext;
+
 describe('Pipeline Service', () => {
   describe('launchStream', () => {
-    const context: PipelineContext = [{ name: 'TestPlugin', plugin: {} as any }];
+    const plugins: PipelineContext = [{ name: 'TestPlugin', plugin: {} as any }];
     const { signal } = new AbortController();
 
     it.each`
       mode
       ${'realtime'}
       ${'backtest'}
-    `('should call the stream function of the $mode mode with the plugins and no signal', async ({ mode }) => {
-      vi.mocked(config.getWatch).mockReturnValue({ mode } as any);
-      await pipelineModule.launchStream(context);
-      expect(streamPipelines[mode as 'realtime' | 'backtest']).toHaveBeenCalledWith([expect.anything()], undefined);
+    `('should call the stream function of the $mode mode with the plugins, the context of the run and no signal', async ({ mode }) => {
+      configuration.getWatch.mockReturnValue({ mode });
+      await pipelineModule.launchStream(plugins, { context });
+      expect(streamPipelines[mode as 'realtime' | 'backtest']).toHaveBeenCalledWith([expect.anything()], context, undefined);
     });
 
     it.each`
@@ -66,9 +61,9 @@ describe('Pipeline Service', () => {
       ${'realtime'}
       ${'backtest'}
     `('should hand the stream function of the $mode mode the signal of the options', async ({ mode }) => {
-      vi.mocked(config.getWatch).mockReturnValue({ mode } as any);
-      await pipelineModule.launchStream(context, { signal });
-      expect(vi.mocked(streamPipelines[mode as 'realtime' | 'backtest']).mock.lastCall?.[1]).toBe(signal);
+      configuration.getWatch.mockReturnValue({ mode });
+      await pipelineModule.launchStream(plugins, { context, signal });
+      expect(vi.mocked(streamPipelines[mode as 'realtime' | 'backtest']).mock.lastCall?.[2]).toBe(signal);
     });
   });
 
@@ -76,11 +71,10 @@ describe('Pipeline Service', () => {
     it('should inject services into plugins', async () => {
       const setServiceMock = vi.fn();
       const mockService = { foo: 'bar' };
+      // A service of any name the run's services hold
+      const run = { configuration, services: { myService: () => mockService } } as unknown as RunContext;
 
-      // Setup dynamic injection mock
-      (injecter.inject as any).myService = vi.fn().mockReturnValue(mockService);
-
-      const context: PipelineContext = [
+      const plugins: PipelineContext = [
         {
           name: 'TestPlugin',
           inject: ['myService'],
@@ -90,7 +84,7 @@ describe('Pipeline Service', () => {
         },
       ];
 
-      await pipelineModule.injectServices(context);
+      await pipelineModule.injectServices(plugins, { context: run });
 
       expect(setServiceMock).toHaveBeenCalledWith(mockService);
     });
@@ -102,15 +96,15 @@ describe('Pipeline Service', () => {
         PluginA: { setStorage: vi.fn(), setExchange: vi.fn() },
         PluginB: { setExchange: vi.fn() },
       };
-      const context: PipelineContext = [
+      const pipelineContext: PipelineContext = [
         { name: 'PluginA', inject: ['storage', 'exchange'], plugin: plugins.PluginA as any },
         { name: 'PluginB', inject: ['exchange'], plugin: plugins.PluginB as any },
         { name: 'PluginC', plugin: {} as any },
       ];
 
       beforeEach(() => {
-        vi.mocked(injecter.inject.storage).mockReturnValue(storage as any);
-        vi.mocked(injecter.inject.exchange).mockReturnValue(exchange as any);
+        services.storage.mockReturnValue(storage);
+        services.exchange.mockReturnValue(exchange);
       });
 
       it.each`
@@ -118,13 +112,13 @@ describe('Pipeline Service', () => {
         ${'PluginA'} | ${'setStorage'}  | ${storage}
         ${'PluginA'} | ${'setExchange'} | ${exchange}
         ${'PluginB'} | ${'setExchange'} | ${exchange}
-      `('should call $setter on $pluginName with its service', async ({ pluginName, setter, service }) => {
-        await pipelineModule.injectServices(context);
+      `('should call $setter on $pluginName with the service of the run', async ({ pluginName, setter, service }) => {
+        await pipelineModule.injectServices(pipelineContext, { context });
         expect((plugins as any)[pluginName][setter]).toHaveBeenCalledWith(service);
       });
 
       it('should resolve with the context', async () => {
-        await expect(pipelineModule.injectServices(context)).resolves.toBe(context);
+        await expect(pipelineModule.injectServices(pipelineContext, { context })).resolves.toBe(pipelineContext);
       });
     });
 
@@ -139,10 +133,10 @@ describe('Pipeline Service', () => {
         ${'service factory'} | ${throwFailure} | ${vi.fn()}
         ${'plugin setter'}   | ${vi.fn()}      | ${throwFailure}
       `('should reject with the error thrown by the $thrower', async ({ factory, setter }) => {
-        vi.mocked(injecter.inject.storage).mockImplementation(factory);
-        const context: PipelineContext = [{ name: 'CandleWriter', inject: ['storage'], plugin: { setStorage: setter } as any }];
+        services.storage.mockImplementation(factory);
+        const plugins: PipelineContext = [{ name: 'CandleWriter', inject: ['storage'], plugin: { setStorage: setter } as any }];
 
-        await expect(pipelineModule.injectServices(context)).rejects.toBe(failure);
+        await expect(pipelineModule.injectServices(plugins, { context })).rejects.toBe(failure);
       });
     });
   });
@@ -185,7 +179,10 @@ describe('Pipeline Service', () => {
     const registry: Record<string, unknown> = {};
     const plugins = registry as PluginRegistry;
     class MockPlugin {
-      constructor(public params: any) {}
+      constructor(
+        public params: any,
+        public run: RunContext,
+      ) {}
     }
 
     beforeEach(() => {
@@ -196,28 +193,34 @@ describe('Pipeline Service', () => {
       delete registry.MockPlugin;
     });
 
-    const context: PipelineContext = [{ name: 'MockPlugin', parameters: { name: 'MockPlugin', foo: 'bar' } }];
+    const pipelineContext: PipelineContext = [{ name: 'MockPlugin', parameters: { name: 'MockPlugin', foo: 'bar' } }];
 
     it('should instantiate plugins using the registry', async () => {
-      const result = await pipelineModule.createPlugins(context, { plugins });
+      const result = await pipelineModule.createPlugins(pipelineContext, { plugins, context });
 
       expect(result[0].plugin).toBeInstanceOf(MockPlugin);
     });
 
     it('should construct each plugin with its parsed options', async () => {
-      const result = await pipelineModule.createPlugins(context, { plugins });
+      const result = await pipelineModule.createPlugins(pipelineContext, { plugins, context });
 
       expect((result[0].plugin as any).params).toEqual({ name: 'MockPlugin', foo: 'bar' });
+    });
+
+    it('should construct each plugin with the context of the run', async () => {
+      const result = await pipelineModule.createPlugins(pipelineContext, { plugins, context });
+
+      expect((result[0].plugin as any).run).toBe(context);
     });
   });
 
   describe('preloadMarkets', () => {
-    it('should call loadMarkets on the injected exchange', async () => {
+    it('should call loadMarkets on the exchange of the run', async () => {
       const loadMarketsMock = vi.fn();
       const getExchangeNameMock = vi.fn().mockReturnValue('Binance');
-      vi.mocked(injecter.inject.exchange).mockReturnValue({ loadMarkets: loadMarketsMock, getExchangeName: getExchangeNameMock } as any);
+      services.exchange.mockReturnValue({ loadMarkets: loadMarketsMock, getExchangeName: getExchangeNameMock });
 
-      await pipelineModule.preloadMarkets([] as PipelineContext);
+      await pipelineModule.preloadMarkets([] as PipelineContext, { context });
 
       expect(loadMarketsMock).toHaveBeenCalled();
     });
@@ -327,21 +330,21 @@ describe('Pipeline Service', () => {
     const receiver = { name: 'Receiver', schema: schemaOf('Receiver') };
 
     beforeEach(() => {
-      vi.mocked(config.getPlugins).mockReturnValue([
+      configuration.getPlugins.mockReturnValue([
         { name: 'Sender', threshold: 1 },
         { name: 'Receiver', threshold: 2 },
       ] as any);
     });
 
     it('should set the parameters of each plugin to its own entry, parsed by its schema', async () => {
-      await expect(pipelineModule.validatePluginsSchema([sender, receiver])).resolves.toEqual([
+      await expect(pipelineModule.validatePluginsSchema([sender, receiver], { context })).resolves.toEqual([
         { ...sender, parameters: { name: 'Sender', threshold: 1, parsedBy: 'Sender' } },
         { ...receiver, parameters: { name: 'Receiver', threshold: 2, parsedBy: 'Receiver' } },
       ]);
     });
 
     it('should leave the parameters of a plugin without schema undefined', async () => {
-      await expect(pipelineModule.validatePluginsSchema([{ name: 'Sender' }, receiver])).resolves.toEqual([
+      await expect(pipelineModule.validatePluginsSchema([{ name: 'Sender' }, receiver], { context })).resolves.toEqual([
         { name: 'Sender', parameters: undefined },
         { ...receiver, parameters: { name: 'Receiver', threshold: 2, parsedBy: 'Receiver' } },
       ]);
@@ -354,15 +357,15 @@ describe('Pipeline Service', () => {
       ${'several problems'}            | ${{ name: 'Receiver', threshold: '2', treshold: 3 }} | ${'✖ Unrecognized key: "treshold"\n✖ Invalid input: expected number, received string\n  → at threshold'}
     `('when the entry of a plugin has $problem', ({ receiverEntry, issues }) => {
       beforeEach(() => {
-        vi.mocked(config.getPlugins).mockReturnValue([{ name: 'Sender', threshold: 1 }, receiverEntry]);
+        configuration.getPlugins.mockReturnValue([{ name: 'Sender', threshold: 1 }, receiverEntry] as any);
       });
 
       it('should reject with a GekkoError', async () => {
-        await expect(pipelineModule.validatePluginsSchema([sender, receiver])).rejects.toBeInstanceOf(GekkoError);
+        await expect(pipelineModule.validatePluginsSchema([sender, receiver], { context })).rejects.toBeInstanceOf(GekkoError);
       });
 
       it('should name the plugin and its entry, then give each problem with the path of its option', async () => {
-        await expect(pipelineModule.validatePluginsSchema([sender, receiver])).rejects.toHaveProperty(
+        await expect(pipelineModule.validatePluginsSchema([sender, receiver], { context })).rejects.toHaveProperty(
           'message',
           `[PIPELINE] Invalid options for plugin Receiver (plugins[1]):\n${issues}`,
         );
@@ -371,14 +374,14 @@ describe('Pipeline Service', () => {
 
     describe('when a plugin is configured twice', () => {
       beforeEach(() => {
-        vi.mocked(config.getPlugins).mockReturnValue([
+        configuration.getPlugins.mockReturnValue([
           { name: 'Sender', threshold: 1 },
           { name: 'Sender', threshold: '2' },
         ] as any);
       });
 
       it('should name the invalid entry by its index', async () => {
-        await expect(pipelineModule.validatePluginsSchema([sender, sender])).rejects.toThrow(
+        await expect(pipelineModule.validatePluginsSchema([sender, sender], { context })).rejects.toThrow(
           /^\[PIPELINE\] Invalid options for plugin Sender \(plugins\[1\]\):\n/,
         );
       });
@@ -392,11 +395,10 @@ describe('Pipeline Service', () => {
       ${'realtime'} | ${['backtest']}             | ${true}
       ${'backtest'} | ${['realtime', 'backtest']} | ${false}
     `('currentMode: $currentMode, allowed: $allowedModes => throw: $shouldThrow', async ({ currentMode, allowedModes, shouldThrow }) => {
-      const { config } = await import('../../configuration/configuration');
-      vi.mocked(config.getWatch).mockReturnValue({ mode: currentMode } as any);
+      configuration.getWatch.mockReturnValue({ mode: currentMode });
 
-      const context: PipelineContext = [{ name: 'P', modes: allowedModes }];
-      const promise = pipelineModule.checkPluginsModesCompatibility(context);
+      const plugins: PipelineContext = [{ name: 'P', modes: allowedModes }];
+      const promise = pipelineModule.checkPluginsModesCompatibility(plugins, { context });
 
       if (shouldThrow) {
         await expect(promise).rejects.toThrow(/does not support/);
@@ -457,7 +459,7 @@ describe('Pipeline Service', () => {
       ({ mode: 'backtest', pairs: [{ symbol: 'BTC/USDT' }], daterange: { start: Date.parse(start), end: Date.parse(end) } }) as any;
 
     beforeEach(() => {
-      vi.mocked(injecter.inject.storage).mockReturnValue({ checkInterval, getCandleDateranges } as any);
+      services.storage.mockReturnValue({ checkInterval, getCandleDateranges });
     });
 
     it.each`
@@ -467,9 +469,9 @@ describe('Pipeline Service', () => {
       ${'2025-12-30T00:00:30Z'} | ${'2025-12-31T23:59:00Z'}     | ${'2025-12-30T00:00:00Z'} | ${'2025-12-31T23:59:00Z'}
       ${'2025-12-30T00:00:00Z'} | ${'2025-12-31T23:59:00Z'}     | ${'2025-12-30T00:00:00Z'} | ${'2025-12-31T23:59:00Z'}
     `('should check the candles $checkedStart -> $checkedEnd for $start -> $end', async ({ start, end, checkedStart, checkedEnd }) => {
-      vi.mocked(config.getWatch).mockReturnValue(backtestWatch(start, end));
+      configuration.getWatch.mockReturnValue(backtestWatch(start, end));
 
-      await pipelineModule.checkDateRange([]);
+      await pipelineModule.checkDateRange([], { context });
 
       expect(checkInterval).toHaveBeenCalledWith('BTC/USDT', { start: Date.parse(checkedStart), end: Date.parse(checkedEnd) });
     });
@@ -484,9 +486,9 @@ describe('Pipeline Service', () => {
         ${'2025-10-26T01:30:20Z'} | ${'2025-10-26T01:45:30Z'} | ${'2025-10-26T01:30:00Z'} | ${'2025-10-26T01:45:00Z'}
         ${'2025-10-23T01:30:00Z'} | ${'2025-10-26T01:30:00Z'} | ${'2025-10-23T01:30:00Z'} | ${'2025-10-26T01:30:00Z'}
       `('should check the candles $checkedStart -> $checkedEnd for $start -> $end', async ({ start, end, checkedStart, checkedEnd }) => {
-        vi.mocked(config.getWatch).mockReturnValue(backtestWatch(start, end));
+        configuration.getWatch.mockReturnValue(backtestWatch(start, end));
 
-        await pipelineModule.checkDateRange([]);
+        await pipelineModule.checkDateRange([], { context });
 
         expect(checkInterval).toHaveBeenCalledWith('BTC/USDT', { start: Date.parse(checkedStart), end: Date.parse(checkedEnd) });
       });
@@ -494,13 +496,15 @@ describe('Pipeline Service', () => {
 
     it('should report the checked daterange when candles are missing', async () => {
       checkInterval.mockReturnValue({ missingCandleCount: 1 });
-      vi.mocked(config.getWatch).mockReturnValue(backtestWatch('2025-12-30T00:00:30Z', '2025-12-31T23:59:59Z'));
+      configuration.getWatch.mockReturnValue(backtestWatch('2025-12-30T00:00:30Z', '2025-12-31T23:59:59Z'));
 
-      await expect(pipelineModule.checkDateRange([])).rejects.toThrow('BTC/USDT 2025-12-30T00:00:00.000Z -> 2025-12-31T23:59:00.000Z,');
+      await expect(pipelineModule.checkDateRange([], { context })).rejects.toThrow(
+        'BTC/USDT 2025-12-30T00:00:00.000Z -> 2025-12-31T23:59:00.000Z,',
+      );
     });
 
     describe('with two pairs', () => {
-      const context: PipelineContext = [{ name: 'TradingAdvisor' }];
+      const plugins: PipelineContext = [{ name: 'TradingAdvisor' }];
       const pairs = [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }];
       const daterange = { start: Date.parse('2025-12-30T00:00:00Z'), end: Date.parse('2025-12-31T23:59:00Z') };
 
@@ -510,11 +514,11 @@ describe('Pipeline Service', () => {
         ${'in importer mode'}                     | ${'importer'} | ${daterange}
         ${'in backtest mode without a daterange'} | ${'backtest'} | ${undefined}
       `('should not open the storage $case', async ({ mode, range }) => {
-        vi.mocked(config.getWatch).mockReturnValue({ mode, pairs, daterange: range } as any);
+        configuration.getWatch.mockReturnValue({ mode, pairs, daterange: range } as any);
 
-        await pipelineModule.checkDateRange(context);
+        await pipelineModule.checkDateRange(plugins, { context });
 
-        expect(injecter.inject.storage).not.toHaveBeenCalled();
+        expect(services.storage).not.toHaveBeenCalled();
       });
 
       it.each`
@@ -525,17 +529,17 @@ describe('Pipeline Service', () => {
         ${'when no candle is missing'}            | ${'backtest'} | ${daterange} | ${{ missingCandleCount: 0 }}
         ${'when the storage returns no count'}    | ${'backtest'} | ${daterange} | ${null}
       `('should resolve with the context $case', async ({ mode, range, result }) => {
-        vi.mocked(config.getWatch).mockReturnValue({ mode, pairs, daterange: range } as any);
+        configuration.getWatch.mockReturnValue({ mode, pairs, daterange: range } as any);
         checkInterval.mockReturnValue(result);
 
-        await expect(pipelineModule.checkDateRange(context)).resolves.toBe(context);
+        await expect(pipelineModule.checkDateRange(plugins, { context })).resolves.toBe(plugins);
       });
 
       it('should check the candles of every pair', async () => {
-        vi.mocked(config.getWatch).mockReturnValue({ mode: 'backtest', pairs, daterange } as any);
+        configuration.getWatch.mockReturnValue({ mode: 'backtest', pairs, daterange } as any);
         checkInterval.mockReturnValue({ missingCandleCount: 0 });
 
-        await pipelineModule.checkDateRange(context);
+        await pipelineModule.checkDateRange(plugins, { context });
 
         expect(checkInterval.mock.calls).toEqual([
           ['BTC/USDT', daterange],
@@ -554,17 +558,17 @@ describe('Pipeline Service', () => {
         };
 
         beforeEach(() => {
-          vi.mocked(config.getWatch).mockReturnValue({ mode: 'backtest', pairs, daterange } as any);
+          configuration.getWatch.mockReturnValue({ mode: 'backtest', pairs, daterange } as any);
           checkInterval.mockImplementation((symbol: string) => ({ missingCandleCount: missingCandleCounts[symbol] }));
           getCandleDateranges.mockImplementation((symbol: string) => availableDateranges[symbol]);
         });
 
         it('should reject with a MissingCandlesError', async () => {
-          await expect(pipelineModule.checkDateRange(context)).rejects.toThrow(MissingCandlesError);
+          await expect(pipelineModule.checkDateRange(plugins, { context })).rejects.toThrow(MissingCandlesError);
         });
 
         it('should name that pair, the checked daterange and the date ranges available for that pair', async () => {
-          await expect(pipelineModule.checkDateRange(context)).rejects.toHaveProperty(
+          await expect(pipelineModule.checkDateRange(plugins, { context })).rejects.toHaveProperty(
             'message',
             '[STREAM] Missing candles in database: ETH/USDT 2025-12-30T00:00:00.000Z -> 2025-12-31T23:59:00.000Z, Available date ranges: [2025-12-30T00:00:00.000Z - 2025-12-30T11:59:00.000Z], [2025-12-30T12:03:00.000Z - 2025-12-31T23:59:00.000Z]',
           );
@@ -612,10 +616,10 @@ describe('Pipeline Service', () => {
     let staticConfigurations: Record<string, PipelineContext[number]>;
     const changeReceiver = (change: Partial<PipelineContext[number]>) => () => Object.assign(staticConfigurations.Receiver, change);
     const changeReceiverEntry = (change: object) => () =>
-      vi.mocked(config.getPlugins).mockReturnValue([
+      configuration.getPlugins.mockReturnValue([
         { name: 'Sender', threshold: 1 },
         { name: 'Receiver', threshold: 2, ...change },
-      ]);
+      ] as any);
 
     class StubPlugin extends SequentialEventEmitter {
       readonly services: Record<string, unknown> = {};
@@ -623,6 +627,7 @@ describe('Pipeline Service', () => {
       constructor(
         readonly pluginName: string,
         readonly parameters: unknown,
+        readonly run: RunContext,
       ) {
         super(pluginName);
         journal.push(`createPlugins: ${pluginName}`);
@@ -654,8 +659,8 @@ describe('Pipeline Service', () => {
         return StubPlugin.configurationOf('Sender');
       }
 
-      constructor(parameters: unknown) {
-        super('Sender', parameters);
+      constructor(parameters: unknown, run: RunContext) {
+        super('Sender', parameters, run);
       }
     }
 
@@ -666,8 +671,8 @@ describe('Pipeline Service', () => {
         return StubPlugin.configurationOf('Receiver');
       }
 
-      constructor(parameters: unknown) {
-        super('Receiver', parameters);
+      constructor(parameters: unknown, run: RunContext) {
+        super('Receiver', parameters, run);
       }
 
       onMyEvent(payloads: unknown) {
@@ -695,17 +700,17 @@ describe('Pipeline Service', () => {
       };
       // Registered out of config order
       Object.assign(registry, { Receiver, Sender });
-      vi.mocked(config.getPlugins).mockReturnValue([
+      configuration.getPlugins.mockReturnValue([
         { name: 'Sender', threshold: 1 },
         { name: 'Receiver', threshold: 2 },
       ] as any);
-      vi.mocked(config.getWatch).mockReturnValue({
+      configuration.getWatch.mockReturnValue({
         mode: 'backtest',
         pairs: [{ symbol: 'BTC/USDT' }],
         daterange: { start: Date.parse('2025-12-30T00:00:00Z'), end: Date.parse('2025-12-30T23:59:00Z') },
       } as any);
-      vi.mocked(injecter.inject.storage).mockReturnValue(storage as any);
-      vi.mocked(injecter.inject.exchange).mockReturnValue(exchange as any);
+      services.storage.mockReturnValue(storage);
+      services.exchange.mockReturnValue(exchange);
       exchange.loadMarkets.mockImplementation(async () => {
         journal.push('preloadMarkets');
       });
@@ -720,13 +725,14 @@ describe('Pipeline Service', () => {
     afterEach(() => {
       delete registry.Sender;
       delete registry.Receiver;
+      setCurrentRunContext(undefined);
     });
 
     describe('with valid plugins', () => {
       const launchedPlugins = () => vi.mocked(streamPipelines.backtest).mock.calls[0][0] as unknown as [Sender, Receiver];
 
       beforeEach(async () => {
-        await pipelineModule.gekkoPipeline({ plugins });
+        await pipelineModule.gekkoPipeline({ plugins, context });
       });
 
       it('should run the steps in the documented order', () => {
@@ -754,8 +760,16 @@ describe('Pipeline Service', () => {
         expect(launchedPlugins().map(({ services }) => services)).toEqual([{ exchange }, { storage }]);
       });
 
+      it('should create each plugin with the context of the run', () => {
+        expect(launchedPlugins().map(({ run }) => run)).toEqual([context, context]);
+      });
+
+      it('should launch the stream of the mode with the context of the run', () => {
+        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][1]).toBe(context);
+      });
+
       it('should launch the stream of the mode without a signal', () => {
-        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][1]).toBeUndefined();
+        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][2]).toBeUndefined();
       });
     });
 
@@ -763,7 +777,7 @@ describe('Pipeline Service', () => {
       const { signal } = new AbortController();
 
       beforeEach(async () => {
-        await pipelineModule.gekkoPipeline({ plugins, signal });
+        await pipelineModule.gekkoPipeline({ plugins, context, signal });
       });
 
       it('should run the steps in the documented order', () => {
@@ -771,14 +785,14 @@ describe('Pipeline Service', () => {
       });
 
       it('should hand the signal to the stream of the mode', () => {
-        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][1]).toBe(signal);
+        expect(vi.mocked(streamPipelines.backtest).mock.calls[0][2]).toBe(signal);
       });
     });
 
     describe('when a plugin creates orders that no plugin executes', () => {
       beforeEach(async () => {
         changeReceiver({ eventsEmitted: [STRATEGY_CREATE_ORDER_EVENT] })();
-        await pipelineModule.gekkoPipeline({ plugins });
+        await pipelineModule.gekkoPipeline({ plugins, context });
       });
 
       it('should warn before the markets are loaded, and go on', () => {
@@ -805,7 +819,7 @@ describe('Pipeline Service', () => {
 
       beforeEach(async () => {
         breakIt();
-        pipeline = pipelineModule.gekkoPipeline({ plugins });
+        pipeline = pipelineModule.gekkoPipeline({ plugins, context });
         await pipeline.catch(() => {});
       });
 
@@ -815,6 +829,20 @@ describe('Pipeline Service', () => {
 
       it(`should stop after ${lastStep}`, () => {
         expect(journal).toEqual(documentedOrder.slice(0, documentedOrder.indexOf(lastStep) + 1));
+      });
+    });
+
+    // Transitional, for the monorepo wave: goes with the fallback of gekkoPipeline and the `config` and `inject` singletons
+    describe('transitional: the run in progress', () => {
+      it('should make the context it is given the run in progress, which the singletons read', async () => {
+        await pipelineModule.gekkoPipeline({ plugins, context });
+        expect(getCurrentRunContext()).toBe(context);
+      });
+
+      it('should run the steps on the singletons, which read the run in progress, when given no context', async () => {
+        setCurrentRunContext(context);
+        await pipelineModule.gekkoPipeline({ plugins });
+        expect(journal).toEqual(documentedOrder);
       });
     });
   });

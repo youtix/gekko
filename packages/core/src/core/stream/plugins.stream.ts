@@ -1,19 +1,25 @@
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
 import { describeError, toError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Nullable } from '@gekko/shared/models/utility.types';
 import { Plugin } from '../../plugin/plugin';
-import { config } from '../../configuration/configuration';
 import { isDummyExchange } from '../../exchange/exchange.helper';
-import { DummyExchange } from '@gekko/shared/models/exchange.types';
-import { inject } from '../../injecter/injecter';
+import { DummyExchange, Exchange } from '@gekko/shared/models/exchange.types';
 import { info, error as logError, warning } from '../../logger/logger';
 import { partition } from 'lodash-es';
 import { Writable } from 'node:stream';
 import { collectFailures, describeReason, isRejected } from './plugins.helper';
 import { PluginFailure } from './plugins.types';
 
+/**
+ * The sink of every pipeline: hands each one-minute bucket to the simulated exchange, if the run has one, then to every plugin, then
+ * delivers the events they queued, and finalises the plugins as the run ends. It receives from the pipeline the plugins, in config
+ * order, the watch section, whose mode tells whether what the plugins queued between two buckets is delivered before their hooks (see
+ * deliversQueuedFirst), and the run's exchange (`context.services.exchange()`), which consumes each bucket first when it simulates the
+ * orders (dummy-cex in a backtest, paper-binance in paper trading).
+ */
 export class PluginsStream extends Writable {
   private readonly plugins: Plugin[];
   /** Only these are finalised: all the plugins, unless _construct failed or the stream was destroyed part way */
@@ -54,11 +60,10 @@ export class PluginsStream extends Writable {
    */
   private hasFlushed = false;
 
-  constructor(plugins: Plugin[]) {
+  constructor(plugins: Plugin[], { mode }: Pick<Watch, 'mode'>, exchange: Exchange) {
     super({ objectMode: true });
     this.plugins = plugins;
-    this.deliversQueuedFirst = config.getWatch().mode === 'realtime';
-    const exchange = inject.exchange();
+    this.deliversQueuedFirst = mode === 'realtime';
     if (isDummyExchange(exchange)) this.dummyExchange = exchange;
   }
 

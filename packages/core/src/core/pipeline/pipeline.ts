@@ -5,7 +5,7 @@ import {
   STRATEGY_CREATE_ORDER_EVENT,
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { GekkoPipelineOptions, PipelineContext } from './pipeline.types';
+import { GekkoPipelineOptions, PipelineContext, PipelineStepOptions } from './pipeline.types';
 import { config } from '../../configuration/configuration';
 import { inject } from '../../injecter/injecter';
 import { setCurrentRunContext } from '../../run/currentRun.helper';
@@ -20,17 +20,21 @@ import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import { PluginsEmitSameEventError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
 
-export const launchStream = async (context: PipelineContext, options?: Pick<GekkoPipelineOptions, 'signal'>) => {
+export const launchStream = async (context: PipelineContext, { context: run, signal }: Pick<PipelineStepOptions, 'context' | 'signal'>) => {
   const plugins = compact(map(context, p => p.plugin));
-  await streamPipelines[config.getWatch().mode](plugins, options?.signal);
+  await streamPipelines[run.configuration.getWatch().mode](plugins, run, signal);
   return context;
 };
 
-export const injectServices = async (context: PipelineContext) =>
+/**
+ * Hands each plugin the run's services its static configuration names (`inject`): `setExchange(services.exchange())` for 'exchange',
+ * `setStorage(services.storage())` for 'storage'
+ */
+export const injectServices = async (context: PipelineContext, { context: { services } }: Pick<PipelineStepOptions, 'context'>) =>
   each(context, pipeline => {
     each(pipeline.inject, serviceName => {
       // @ts-expect-error TODO fix complex typescript error
-      pipeline.plugin[toCamelCase('set', serviceName)](inject[serviceName]());
+      pipeline.plugin[toCamelCase('set', serviceName)](services[serviceName]());
     });
   });
 
@@ -53,19 +57,19 @@ export const wirePlugins = async (context: PipelineContext) => {
 
 export const createPlugins = async (
   context: PipelineContext,
-  { plugins, context: run }: Pick<GekkoPipelineOptions, 'plugins' | 'context'>,
+  { plugins, context: run }: Pick<PipelineStepOptions, 'plugins' | 'context'>,
 ) =>
   map(context, pluginCtx => {
     const { name, parameters } = pluginCtx;
     // The output of its own schema, paired with the class by name (see PluginClass), and the run's configuration and services
     const PluginClass = plugins[name];
-    const plugin = new PluginClass(parameters, run as RunContext);
+    const plugin = new PluginClass(parameters, run);
     debug('pipeline', `${name} plugin created !`);
     return { ...pluginCtx, plugin };
   });
 
-export const preloadMarkets = async (context: PipelineContext) => {
-  const exchange = inject.exchange();
+export const preloadMarkets = async (context: PipelineContext, { context: { services } }: Pick<PipelineStepOptions, 'context'>) => {
+  const exchange = services.exchange();
   debug('pipeline', `Preloading Markets data for ${exchange.getExchangeName()}`);
   await exchange.loadMarkets();
   return context;
@@ -130,8 +134,11 @@ export const checkPluginsDependencies = async (context: PipelineContext) => {
   return context;
 };
 
-export const validatePluginsSchema = async (context: PipelineContext) => {
-  const parameters = config.getPlugins();
+export const validatePluginsSchema = async (
+  context: PipelineContext,
+  { context: { configuration } }: Pick<PipelineStepOptions, 'context'>,
+) => {
+  const parameters = configuration.getPlugins();
   return map(context, (plugin, i) => {
     const result = plugin.schema?.safeParse(parameters[i]);
     // Not the ZodError itself: it names neither the plugin nor its entry (a plugin can be configured twice), and its message, the
@@ -142,13 +149,17 @@ export const validatePluginsSchema = async (context: PipelineContext) => {
   });
 };
 
-export const checkPluginsModesCompatibility = async (context: PipelineContext) =>
-  each(context, ({ name, modes }) => {
-    const mode = config.getWatch().mode;
+export const checkPluginsModesCompatibility = async (
+  context: PipelineContext,
+  { context: { configuration } }: Pick<PipelineStepOptions, 'context'>,
+) => {
+  const { mode } = configuration.getWatch();
+  return each(context, ({ name, modes }) => {
     if (!modes?.includes(mode)) throw new GekkoError('pipeline', `Plugin ${name} does not support ${mode} mode.`);
   });
+};
 
-export const getPluginsStaticConfiguration = async (context: PipelineContext, { plugins }: Pick<GekkoPipelineOptions, 'plugins'>) => {
+export const getPluginsStaticConfiguration = async (context: PipelineContext, { plugins }: Pick<PipelineStepOptions, 'plugins'>) => {
   // Bundled by `bun build`, the namespace is a plain object: arbitrary key order, and inherited keys such as 'constructor'
   const pluginNames = Object.keys(plugins).sort();
   return map(context, plugin => {
@@ -163,10 +174,13 @@ export const getPluginsStaticConfiguration = async (context: PipelineContext, { 
   });
 };
 
-export const checkDateRange = async (context: PipelineContext) => {
-  const { pairs, mode, daterange } = config.getWatch();
+export const checkDateRange = async (
+  context: PipelineContext,
+  { context: { configuration, services } }: Pick<PipelineStepOptions, 'context'>,
+) => {
+  const { pairs, mode, daterange } = configuration.getWatch();
   if (mode === 'backtest' && daterange) {
-    const storage = inject.storage();
+    const storage = services.storage();
     // Same minutes as the backtest reader (splitIntervals): checkInterval expects the starts of the first and last candles
     const alignedDaterange = { start: startOfMinuteUTC(daterange.start), end: startOfMinuteUTC(daterange.end) };
     for (const { symbol } of pairs) {
@@ -194,6 +208,9 @@ export const checkDateRange = async (context: PipelineContext) => {
  *
  * `plugins` is the registry the configuration's `plugins[].name` entries pick their class from: the namespace of `@gekko/plugins/index`
  * for the executable. An entry naming no class of it is refused with the list of its names.
+ *
+ * `context` is the run's configuration and services (createRunContext): every step reads them there, each plugin is built with it,
+ * and the streams of the mode receive what they read of it (see streamPipelines).
  */
 export const gekkoPipeline = (options: GekkoPipelineOptions) => {
   // Transitional (the monorepo wave): a caller without a context runs on the configuration GEKKO_CONFIG_FILE_PATH names and the

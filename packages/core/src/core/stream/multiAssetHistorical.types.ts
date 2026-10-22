@@ -1,8 +1,7 @@
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { Interval } from 'date-fns';
+import { HistoricalCandleStreamParams } from './historicalCandle/historicalCandle.types';
 
-export type MultiAssetHistoricalStreamParams = {
+/** What the history of each pair reads (see HistoricalCandleStreamParams), for the watched pairs */
+export type MultiAssetHistoricalStreamParams = Omit<HistoricalCandleStreamParams, 'symbol'> & {
   pairs: { symbol: TradingPair }[];
-  daterange: Interval<EpochTimeStamp, EpochTimeStamp>;
-  tickrate: number;
 };

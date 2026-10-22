@@ -1,8 +1,8 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
 import { Plugin } from '../../plugin/plugin';
-import { config } from '../../configuration/configuration';
 import { warning } from '../../logger/logger';
+import type { RunContext } from '../../run/runContext.types';
 import { getCandleStart } from '@gekko/shared/helpers/candle/candle.helper';
 import { startOfMinuteUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
 import { synchronizeStreams } from '@gekko/shared/helpers/stream/stream.helper';
@@ -16,19 +16,21 @@ import { FillCandleGapStream } from '../stream/validation/fillCandleGap.stream';
 import { RejectDuplicateCandleStream } from '../stream/validation/rejectDuplicateCandle.stream';
 import { RejectFutureCandleStream } from '../stream/validation/rejectFutureCandle.stream';
 
-const buildRealtimePipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
-  const { pairs, timeframe, warmup } = config.getWatch();
+const buildRealtimePipeline = async (plugins: Plugin[], { configuration, services }: RunContext, signal?: AbortSignal) => {
+  const watch = configuration.getWatch();
+  const { pairs, timeframe, warmup } = watch;
+  const exchange = services.exchange();
   // The clock is read once: the live stream of every pair starts with the minute in progress and the warmup history ends with the
   // minute before, so that every pair starts on the same minute and the history meets the live candles without a gap or an overlap,
   // however slow start-up is
   const currentMinute = startOfMinuteUTC(Date.now());
-  const liveStream = synchronizeStreams(pairs.map(p => new RealtimeStream(p.symbol, currentMinute)));
+  const liveStream = synchronizeStreams(pairs.map(({ symbol }) => new RealtimeStream({ exchange, symbol, startMinute: currentMinute })));
   // The warmup history holds `candleCount` whole candles, then the closed minutes of the candle in progress
   const start = getCandleStart(TIMEFRAME_TO_MINUTES[timeframe!], currentMinute, warmup.candleCount); // Timeframe will always defined in thanks to zod super refine
   const end = currentMinute - ONE_MINUTE;
-  const history = new MultiAssetHistoricalStream({ daterange: { start, end }, tickrate: warmup.tickrate, pairs });
+  const history = new MultiAssetHistoricalStream({ exchange, daterange: { start, end }, tickrate: warmup.tickrate, pairs });
 
-  const sink = new PluginsStream(plugins);
+  const sink = new PluginsStream(plugins, watch, exchange);
   await runPipeline(sink, () =>
     pipeline(
       mergeSequentialStreams(history, liveStream),
@@ -47,17 +49,22 @@ const buildRealtimePipeline = async (plugins: Plugin[], signal?: AbortSignal) =>
   );
 };
 
-const buildBacktestPipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
-  const { daterange, pairs } = config.getWatch();
+const buildBacktestPipeline = async (plugins: Plugin[], { configuration, services }: RunContext, signal?: AbortSignal) => {
+  const watch = configuration.getWatch();
+  const { daterange, pairs, batchSize } = watch;
   if (!daterange) throw new Error('daterange is not set');
 
   warning('stream', 'BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!');
-  const sink = new PluginsStream(plugins);
-  await runPipeline(sink, () => pipeline(new MultiAssetBacktestStream({ daterange, pairs }), sink, { signal }));
+  const storage = services.storage();
+  const exchange = services.exchange();
+  const source = new MultiAssetBacktestStream({ pairs, daterange, batchSize, strategy: configuration.getStrategy(), storage });
+  const sink = new PluginsStream(plugins, watch, exchange);
+  await runPipeline(sink, () => pipeline(source, sink, { signal }));
 };
 
-const buildImporterPipeline = async (plugins: Plugin[], signal?: AbortSignal) => {
-  const { daterange, tickrate, pairs } = config.getWatch();
+const buildImporterPipeline = async (plugins: Plugin[], { configuration, services }: RunContext, signal?: AbortSignal) => {
+  const watch = configuration.getWatch();
+  const { daterange, tickrate, pairs } = watch;
   if (!daterange) throw new Error('daterange is not set');
 
   // Closed minutes only: the exchange serves the minute in progress as an unfinished candle, which would stay in the database
@@ -71,14 +78,15 @@ const buildImporterPipeline = async (plugins: Plugin[], signal?: AbortSignal) =>
     );
   const end = isEndClosed ? daterange.end : lastClosedMinute;
 
-  const stream = new MultiAssetHistoricalStream({ daterange: { start: daterange.start, end }, tickrate, pairs });
+  const exchange = services.exchange();
+  const stream = new MultiAssetHistoricalStream({ exchange, daterange: { start: daterange.start, end }, tickrate, pairs });
   // A pair whose history ends early keeps its remaining minutes missing, as when it is imported alone, rather than getting them
   // made up flat to the end of the range
   const gapFiller = new FillCandleGapStream(
     pairs.map(p => p.symbol),
     { hasEndedBefore: (pair, minute) => stream.hasEndedBefore(pair, minute) },
   );
-  const sink = new PluginsStream(plugins);
+  const sink = new PluginsStream(plugins, watch, exchange);
   await runPipeline(sink, () => pipeline(stream, new RejectFutureCandleStream(), gapFiller, sink, { signal }));
 };
 
@@ -96,6 +104,11 @@ const runPipeline = async (sink: PluginsStream, run: () => Promise<void>) => {
   }
 };
 
+/**
+ * The stream pipeline of each mode, `streamPipelines[mode](plugins, context, signal)`, which launchStream runs once the plugins are
+ * built: each reads the run's configuration and services from `context` and hands every stream what it reads of them (the watch
+ * section, the strategy block, the exchange, the storage), never the context itself. Each settles as gekkoPipeline says.
+ */
 export const streamPipelines = {
   realtime: buildRealtimePipeline,
   backtest: buildBacktestPipeline,

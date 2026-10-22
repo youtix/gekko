@@ -10,11 +10,11 @@ import { Candle } from '@gekko/shared/models/candle.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Heart } from '../../heart/heart';
 import { Exchange } from '@gekko/shared/models/exchange.types';
-import { inject } from '../../../injecter/injecter';
 import { debug, warning } from '../../../logger/logger';
 import { startOfMinuteUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
 import { sortBy } from 'lodash-es';
 import { Readable } from 'node:stream';
+import { RealtimeStreamParams } from './realtime.types';
 
 /**
  * Pushes the closed 1-minute candles of one pair, in order, from `startMinute` on (the minutes before it belong to the warmup
@@ -22,9 +22,10 @@ import { Readable } from 'node:stream';
  * pushed yet, so that a minute whose fetch failed or came back empty is asked again on the next tick. It fails with a GekkoError
  * once REALTIME_MAX_TICKS_WITHOUT_CANDLE consecutive ticks have pushed nothing.
  *
- * `startMinute` comes from the pipeline, which reads the clock once for every pair and ends the warmup history the minute before.
- * Read by each stream as it is built, a start-up that crosses a minute boundary would start the pairs on different minutes and make
- * the live minutes overlap the history or leave a gap after it.
+ * It receives from the pipeline the run's exchange (`context.services.exchange()`), which it fetches the candles from, the pair, and
+ * `startMinute`: the pipeline reads the clock once for every pair and ends the warmup history the minute before. Read by each stream
+ * as it is built, a start-up that crosses a minute boundary would start the pairs on different minutes and make the live minutes
+ * overlap the history or leave a gap after it.
  */
 export class RealtimeStream extends Readable {
   private readonly heart: Heart;
@@ -36,10 +37,10 @@ export class RealtimeStream extends Readable {
   /** Set while a fetch is in flight: a tick meanwhile fetches nothing, so that every minute is pushed once and in order */
   private isFetching = false;
 
-  constructor(symbol: TradingPair, startMinute: EpochTimeStamp) {
+  constructor({ exchange, symbol, startMinute }: RealtimeStreamParams) {
     super({ objectMode: true });
     this.symbol = symbol;
-    this.exchange = inject.exchange();
+    this.exchange = exchange;
     this.lastPushedStart = startMinute - ONE_MINUTE;
     this.heart = new Heart(ONE_MINUTE, { gracePeriod: REALTIME_GRACE_PERIOD });
     // The heart does not wait for its listeners: a failure would be an unhandled rejection

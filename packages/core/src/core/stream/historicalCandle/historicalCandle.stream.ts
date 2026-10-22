@@ -6,7 +6,6 @@ import { EMPTY_FIRST_PAGE_RETRIES } from './historicalCandle.const';
 import { HistoricalCandleError } from './historicalCandle.error';
 import { MAX_GAP_FILL_MINUTES } from '../validation/fillCandleGap.const';
 import { Exchange } from '@gekko/shared/models/exchange.types';
-import { inject } from '../../../injecter/injecter';
 import { info, warning } from '../../../logger/logger';
 import { formatDurationUTC, startOfMinuteUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
@@ -20,6 +19,10 @@ import { HistoricalCandleStreamParams } from './historicalCandle.types';
  * inclusive). The stream is pulled: the next page is requested only once the consumer has taken the current one. It fails on a gap
  * in the history longer than the gap filler fills (MAX_GAP_FILL_MINUTES), and warns when the history starts after the range does or
  * ends before it does.
+ *
+ * It receives from the pipeline, through MultiAssetHistoricalStream, the run's exchange (`context.services.exchange()`), which it
+ * fetches the candles from, the pair, the range and the tickrate (`watch.tickrate` for an import, `watch.warmup.tickrate` for the
+ * warmup history of a realtime run).
  */
 export class HistoricalCandleStream extends Readable {
   private readonly symbol: TradingPair;
@@ -43,11 +46,11 @@ export class HistoricalCandleStream extends Readable {
   /** The start of the latest candle of the range received so far, to measure the gap before the next one */
   private lastCandleStart?: EpochTimeStamp;
 
-  constructor({ daterange, tickrate, symbol }: HistoricalCandleStreamParams) {
+  constructor({ exchange, daterange, tickrate, symbol }: HistoricalCandleStreamParams) {
     super({ objectMode: true });
     this.symbol = symbol;
     this.tickrate = tickrate;
-    this.exchange = inject.exchange();
+    this.exchange = exchange;
     this.initialStartDate = startOfMinuteUTC(daterange.start);
     this.endDate = startOfMinuteUTC(daterange.end);
     this.nextFrom = this.initialStartDate;

@@ -1,5 +1,6 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
+import { Exchange } from '@gekko/shared/models/exchange.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { info, warning } from '../../../logger/logger';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
@@ -11,11 +12,11 @@ import { EMPTY_FIRST_PAGE_RETRIES } from './historicalCandle.const';
 import { HistoricalCandleError } from './historicalCandle.error';
 import { HistoricalCandleStream } from './historicalCandle.stream';
 
-const { fetchOHLCV } = vi.hoisted(() => ({ fetchOHLCV: vi.fn() }));
-
 vi.mock('../../../logger/logger', () => ({ info: vi.fn(), warning: vi.fn() }));
-vi.mock('../../../injecter/injecter', () => ({ inject: { exchange: vi.fn(() => ({ fetchOHLCV })) } }));
 
+const fetchOHLCV = vi.fn();
+/** The run's exchange, as the pipeline hands it to the stream: only its candles are read */
+const exchange = { fetchOHLCV } as unknown as Exchange;
 const symbol: TradingPair = 'BTC/USDT';
 const START = Date.UTC(2023, 0, 1);
 const minute = (n: number) => START + n * ONE_MINUTE;
@@ -39,7 +40,7 @@ const serve =
   };
 
 const createStream = (lastMinuteOfRange: number, tickrate = 0) =>
-  new HistoricalCandleStream({ daterange: { start: minute(0), end: minute(lastMinuteOfRange) }, tickrate, symbol });
+  new HistoricalCandleStream({ exchange, daterange: { start: minute(0), end: minute(lastMinuteOfRange) }, tickrate, symbol });
 
 const readAll = async (stream: HistoricalCandleStream) =>
   ((await stream.toArray()) as { candle: Candle }[]).map(({ candle }) => candle.start);
@@ -90,7 +91,8 @@ describe('HistoricalCandleStream', () => {
     useTimeZone(timeZone);
 
     it('should log the length of the minutes of October 2024 as 1 month', () => {
-      new HistoricalCandleStream({ daterange: { start: Date.UTC(2024, 9, 1), end: Date.UTC(2024, 9, 31, 23, 59) }, tickrate: 0, symbol });
+      const daterange = { start: Date.UTC(2024, 9, 1), end: Date.UTC(2024, 9, 31, 23, 59) };
+      new HistoricalCandleStream({ exchange, daterange, tickrate: 0, symbol });
       expect(info).toHaveBeenCalledWith(
         'stream',
         '[BTC/USDT] Fetching historical data from 2024-10-01T00:00:00.000Z to 2024-10-31T23:59:00.000Z (1 month)',
@@ -113,7 +115,7 @@ describe('HistoricalCandleStream', () => {
           .map(candleAt),
       );
       const daterange = { start: Date.UTC(2026, 9, 25, 1, 30, 20), end: Date.UTC(2026, 9, 25, 1, 32, 40) };
-      starts = await readAll(new HistoricalCandleStream({ daterange, tickrate: 0, symbol }));
+      starts = await readAll(new HistoricalCandleStream({ exchange, daterange, tickrate: 0, symbol }));
     });
 
     it.each`
