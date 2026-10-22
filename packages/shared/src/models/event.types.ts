@@ -107,6 +107,12 @@ export type OrderErroredEvent = OrderInitiatedEvent & {
      * nothing of it was open (a STICKY order whose relaunch failed before it was placed). Set by the order, and relayed by the Trader.
      */
     mayBeLive: boolean;
+    /**
+     * The mean price of the fills the exchange reported for a LIMIT or a STICKY order, in currency, weighted by them (see
+     * Trader.getFillPrice), as an order canceled carries it (see OrderCanceledEvent): left out when it reported none with a price, and
+     * for a MARKET order.
+     */
+    fillPrice?: number;
   };
 };
 /**

@@ -3491,6 +3491,47 @@ describe('Trader', () => {
         expect(logger.error).toHaveBeenCalledWith('trader', `[${advice.id}] BUY STICKY order: Invalid API key (status: ERROR)`);
       });
     });
+
+    // The price the fills reported, at which the RoundTripAnalyzer counts the fill of an order ended in error, as it counts a canceled
+    // one's: not the price the strategy asked for, which a STICKY or a MARKET order is only sized by. Not for a MARKET order, whose price
+    // reported can be the bound of its slippage.
+    describe('the price of the fill of an order ended in error after a fill', () => {
+      const errorAfterFills = async (flow: 'creation' | 'cancelation', type: AdviceOrder['type'], averageFillPrice?: number) => {
+        const order = await prepareOrder(flow, buildAdvice({ type, amount: 5, price: 100 }));
+        order.getFilledAmount.mockReturnValue(2);
+        order.getAverageFillPrice.mockReturnValue(averageFillPrice);
+        await order.emitAndSettle(ORDER_ERRORED_EVENT, { reason: 'relaunch failed (2 of 5 already filled)', mayBeLive: false });
+        return getErroredEvent()!.order;
+      };
+
+      it.each`
+        flow             | type        | averageFillPrice | fillPrice
+        ${'creation'}    | ${'STICKY'} | ${95}            | ${95}
+        ${'creation'}    | ${'LIMIT'}  | ${99.5}          | ${99.5}
+        ${'cancelation'} | ${'STICKY'} | ${95}            | ${95}
+        ${'creation'}    | ${'MARKET'} | ${110.25}        | ${undefined}
+        ${'creation'}    | ${'STICKY'} | ${undefined}     | ${undefined}
+      `(
+        'relays a fill price of $fillPrice for a $type order of the $flow flow whose fills were reported at $averageFillPrice',
+        async ({ flow, type, averageFillPrice, fillPrice }) => {
+          const errored = await errorAfterFills(flow, type, averageFillPrice);
+          expect(errored.fillPrice).toBe(fillPrice);
+        },
+      );
+
+      it('leaves the fill price out of the ORDER_ERRORED_EVENT of an order whose fills no answer priced', async () => {
+        const errored = await errorAfterFills('creation', 'STICKY');
+        expect(Object.keys(errored)).not.toContain('fillPrice');
+      });
+
+      // A refusal leaves nothing filled on the exchange: one after a fill is reported as a completion (see the refusal of an order)
+      it('relays no fill price with a refusal', async () => {
+        const order = await prepareOrder('creation', buildAdvice({ type: 'STICKY', amount: 5 }));
+        order.getAverageFillPrice.mockReturnValue(95);
+        await order.emitAndSettle(ORDER_INVALID_EVENT, { reason: 'too small', status: 'rejected', filled: false });
+        expect(Object.keys(getErroredEvent()!.order)).not.toContain('fillPrice');
+      });
+    });
   });
 
   // Whatever way an order ended, the portfolio may have changed: a fill, the release of what it reserved, before an error or a refusal

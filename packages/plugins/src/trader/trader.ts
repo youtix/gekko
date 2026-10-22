@@ -715,9 +715,17 @@ export class Trader extends Plugin {
    * The event carries what the order had filled (`filled`, see Order.getFilledAmount): only a STICKY order's reason told it, in words,
    * and a BUY that errored after a fill lost the trailing stop of the coins it had bought (see StrategyManager.onOrderErrored). It
    * carries `mayBeLive` as the order said it (see Order.orderErrored), false for a refusal: GridBot could only read it from the words of
-   * a creation lost on the network.
+   * a creation lost on the network. And the price of what it filled, when one is known (`fillPrice`, see reportErrored), left out
+   * otherwise, as the cancelation leaves it out.
    */
-  private async relayError(order: RelayedOrder, reason: string, startedAfter: number, filled: number, mayBeLive: boolean) {
+  private async relayError(
+    order: RelayedOrder,
+    reason: string,
+    startedAfter: number,
+    filled: number,
+    mayBeLive: boolean,
+    fillPrice?: number,
+  ) {
     this.orders.delete(order.id);
     try {
       await this.synchronize(startedAfter);
@@ -725,7 +733,7 @@ export class Trader extends Plugin {
       error('trader', `[${order.id}] Impossible to synchronize: ${describeError(err)}`);
     }
     this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, {
-      order: { ...order, reason, orderErrorDate: this.currentTimestamp, filled, mayBeLive },
+      order: { ...order, reason, orderErrorDate: this.currentTimestamp, filled, mayBeLive, ...(!isNil(fillPrice) && { fillPrice }) },
       exchange: this.getExchangeEvent(order.symbol),
     });
   }
@@ -849,7 +857,9 @@ export class Trader extends Plugin {
 
   /**
    * The error, what the order filled before it, whether it may still be live, and the portfolio after it: the order may have executed
-   * before (see relayError). One that may be live is said so: nothing follows it on the exchange any more.
+   * before (see relayError). One that may be live is said so: nothing follows it on the exchange any more. The price of what it filled
+   * goes with it when one is known (see getFillPrice), as with a cancelation: the RoundTripAnalyzer counts that fill at it, the fills of
+   * a STICKY order whose relaunch failed at the prices they had, rather than at the last close.
    */
   private async reportErrored(orderInstance: OrderInstance, order: RelayedOrder, { reason, mayBeLive }: OrderErrorEventPayload) {
     const { id, side, type } = order;
@@ -858,7 +868,8 @@ export class Trader extends Plugin {
       const startedAfter = this.synchronizationCount;
       const live = mayBeLive ? ', it may still be live on the exchange, where Gekko follows it no more' : '';
       error('trader', `[${id}] ${side} ${type} order: ${reason} (status: ERROR)${live}`);
-      await this.relayError(order, reason, startedAfter, orderInstance.getFilledAmount(), mayBeLive);
+      const fillPrice = this.getFillPrice(orderInstance, type);
+      await this.relayError(order, reason, startedAfter, orderInstance.getFilledAmount(), mayBeLive, fillPrice);
     } catch (err) {
       error('trader', `[${id}] Impossible to report the error of the ${side} ${type} order: ${describeError(err)}`);
     }
