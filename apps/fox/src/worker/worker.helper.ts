@@ -2,8 +2,7 @@ import { debug, error, info, shareWriteLock } from '@gekko/core/logger/logger';
 import { formatDurationUTC } from '@gekko/shared/utils/date/date.utils';
 import { times } from 'lodash-es';
 import { COMPILED_MODULE_URL_PREFIX, COMPILED_WORKER_MODULE, WORKER_MODULE } from '../fox.const';
-import type { Template, Variant, VariantResult } from '../fox.types';
-import type { WorkerRequest } from './worker.types';
+import type { Template, Variant, VariantRequest, VariantResult } from '../fox.types';
 
 /** A line of the code frame Bun writes above an uncaught error: a numbered line of source (`5 |   throw …`) or the caret under it */
 const CODE_FRAME_LINE = /^\s*(\d+ \|.*|\^)$/;
@@ -47,7 +46,7 @@ export const runWorker = (variant: number, configuration: Template): Promise<Var
     worker.addEventListener('error', ({ message }) => fail(describeWorkerError(message)));
     worker.addEventListener('close', ({ code }) => fail(`its worker ended with code ${code} without reporting an outcome`));
     // The lock of stdout this thread writes under from now on, under which the worker writes its lines too
-    const request: WorkerRequest = { variant, configuration, writeLock: shareWriteLock() };
+    const request: VariantRequest = { variant, configuration, writeLock: shareWriteLock() };
     worker.postMessage(request);
   });
 
@@ -56,9 +55,9 @@ const formatDuration = (durationMs: number) => formatDurationUTC(0, durationMs) 
 
 /**
  * Backtests the variants, `maxWorkers` at a time, each in a worker of its own: the next one starts as soon as one ends. Logs a line as
- * each starts and as each ends, at info level, a failed one's at error level with its reason, followed at debug level by the stack its
- * worker posted for a failure that is not a GekkoError. Settles once every variant is over, with their results in the order of the
- * variants, failed ones included.
+ * each starts and as each ends, at info level, a failed one's at error level with its reason, followed at debug level by what its
+ * worker posted of a failure whose message does not say where it came from (see VariantResult.stack). Settles once every variant is
+ * over, with their results in the order of the variants, failed ones included.
  */
 export const runWorkers = async (variants: readonly Variant[], maxWorkers: number): Promise<VariantResult[]> => {
   const results: VariantResult[] = [];

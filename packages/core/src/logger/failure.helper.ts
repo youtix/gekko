@@ -38,13 +38,20 @@ const describeLinks = (failure: unknown, listed: unknown[]): string[] => {
 };
 
 /**
+ * A failure as logFailure reports it at error level, without a prefix: a GekkoError's one-line message, anything else in full (an
+ * Error's name, message and stack), followed by what caused it, in full too (see describeLinks). A Fox worker posts it for a failure
+ * whose message does not say where it came from, which Fox's main thread logs at debug level under the variant's line.
+ */
+export const describeFailure = (failure: unknown): string =>
+  [failure instanceof GekkoError ? failure.message : describeValue(failure), ...describeLinks(failure, [failure])].join('\n');
+
+/**
  * How an app reports a failure that stops it, under its tag: the bot's main() and its process handlers, Fox's. A GekkoError is
  * expected and its one-line message explains it: the message at error level, the stack at debug level. Anything else is unexpected:
  * name, message and stack at error level. What caused the failure, whatever it is, follows in full on the error-level line (see
- * describeLinks). `prefix` starts both lines (`Could not close the storage: `, `Uncaught exception: `).
+ * describeFailure). `prefix` starts both lines (`Could not close the storage: `, `Uncaught exception: `).
  */
 export const logFailure = (tag: Tag, failure: unknown, prefix = '') => {
-  const isExpected = failure instanceof GekkoError;
-  error(tag, [`${prefix}${isExpected ? failure.message : describeValue(failure)}`, ...describeLinks(failure, [failure])].join('\n'));
-  if (isExpected) debug(tag, `${prefix}${describeStack(failure)}`);
+  error(tag, `${prefix}${describeFailure(failure)}`);
+  if (failure instanceof GekkoError) debug(tag, `${prefix}${describeStack(failure)}`);
 };

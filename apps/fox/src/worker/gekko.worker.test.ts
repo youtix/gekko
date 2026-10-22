@@ -2,10 +2,8 @@ import { gekkoPipeline } from '@gekko/core/core/pipeline/pipeline';
 import { useWriteLock } from '@gekko/core/logger/logger';
 import { createRunContext } from '@gekko/core/run/runContext.helper';
 import type { RunContext } from '@gekko/core/run/runContext.types';
-import { inspect } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import type { Template, VariantResult } from '../fox.types';
-import type { WorkerRequest } from './worker.types';
+import type { Template, VariantRequest, VariantResult } from '../fox.types';
 
 vi.mock('@gekko/core/core/pipeline/pipeline', () => ({ gekkoPipeline: vi.fn() }));
 vi.mock('@gekko/core/run/runContext.helper', () => ({ createRunContext: vi.fn() }));
@@ -14,7 +12,7 @@ vi.mock('@gekko/core/logger/logger', () => ({ useWriteLock: vi.fn() }));
 vi.mock('@gekko/plugins/index', () => ({ Trader: 'the Trader class' }));
 
 /** The global scope of a worker, which the worker module gives its message handler */
-type WorkerScope = { onmessage?: (event: { data: WorkerRequest }) => void };
+type WorkerScope = { onmessage?: (event: { data: VariantRequest }) => void };
 
 const CONFIGURATION: Template = { watch: { mode: 'backtest' } };
 /** The lock of stdout Fox's main thread shares, which it posts to the worker with the variant */
@@ -156,10 +154,56 @@ describe('gekko.worker', () => {
         variant: 3,
         status: 'failed',
         error: "Cannot read properties of undefined (reading 'close')",
-        stack: inspect(failure),
+        stack: expect.stringMatching(
+          /^TypeError: Cannot read properties of undefined \(reading 'close'\)\n {4}at [\s\S]+\nCaused by: Error: no candle\n {4}at /,
+        ),
         durationMs: 3000,
       });
     });
+  });
+
+  // The pipeline wraps an exception of a strategy's end() in the GekkoError of the TradingAdvisor that failed to finalize: its message
+  // says what failed, its cause where. The worker posted the message alone
+  describe('when the backtest fails with a GekkoError that has a cause', () => {
+    const cause = Object.assign(new TypeError("undefined is not an object (evaluating 'candle.close')"), {
+      stack: "TypeError: undefined is not an object (evaluating 'candle.close')\n    at end (thrower.strategy.ts:13:39)",
+    });
+
+    beforeEach(async () => {
+      const { GekkoError } = await import('@gekko/shared/errors/gekko.error');
+      vi.mocked(gekkoPipeline).mockRejectedValue(
+        new GekkoError('stream', `TradingAdvisor failed to finalize: ${cause.message}`, { cause }),
+      );
+    });
+
+    it('should post its message, then what caused it, with its stack', async () => {
+      expect(await backtest()).toStrictEqual({
+        variant: 3,
+        status: 'failed',
+        error: "TradingAdvisor failed to finalize: undefined is not an object (evaluating 'candle.close')",
+        stack: [
+          "[STREAM] TradingAdvisor failed to finalize: undefined is not an object (evaluating 'candle.close')",
+          "Caused by: TypeError: undefined is not an object (evaluating 'candle.close')",
+          '    at end (thrower.strategy.ts:13:39)',
+        ].join('\n'),
+        durationMs: 3000,
+      });
+    });
+  });
+
+  // util.inspect, which the worker posted, cuts a chain after two causes
+  it('should post every cause of a failure, down to the root', async () => {
+    vi.mocked(gekkoPipeline).mockRejectedValue(
+      new Error('level 1', { cause: new Error('level 2', { cause: new Error('level 3', { cause: new Error('the root cause') }) }) }),
+    );
+
+    expect((await backtest()).stack).toMatch(/\nCaused by: Error: the root cause\n/);
+  });
+
+  it('should post no stack for a failure that is no Error, which its message says all of', async () => {
+    vi.mocked(gekkoPipeline).mockRejectedValue('a text');
+
+    expect(await backtest()).toStrictEqual({ variant: 3, status: 'failed', error: 'a text', durationMs: 3000 });
   });
 
   it('should post a failure when the storage cannot be closed', async () => {

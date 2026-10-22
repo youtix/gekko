@@ -1,6 +1,6 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { describe, expect, it, vi } from 'vitest';
-import { logFailure } from './failure.helper';
+import { describeFailure, logFailure } from './failure.helper';
 import { debug, error } from './logger';
 
 vi.mock('./logger', () => ({ debug: vi.fn(), error: vi.fn() }));
@@ -102,5 +102,27 @@ describe('logFailure', () => {
 
       expect(String(vi.mocked(error).mock.calls[0][1]).split('\n')).toStrictEqual(lines);
     });
+  });
+});
+
+// What a Fox worker posts of a failure, for Fox to log under the variant's line: what the bot's main() logs of it
+describe('describeFailure', () => {
+  it.each`
+    description                            | failure
+    ${'a GekkoError, its message alone'}   | ${new GekkoError('core', 'the run failed')}
+    ${'an Error, in full'}                 | ${thrownAt(new TypeError('x is undefined'), 'onTimeframeCandle (my.strategy.ts:5:20)')}
+    ${'a GekkoError and its cause'}        | ${new GekkoError('stream', 'TradingAdvisor failed to finalize: x', { cause: thrownAt(new TypeError('x'), 'end (s.ts:13:39)') })}
+    ${'a value that is not an Error'}      | ${'a plain text'}
+    ${'a chain of five, down to its root'} | ${new Error('level 1', { cause: new Error('level 2', { cause: new Error('level 3', { cause: new Error('level 4', { cause: 'root' }) }) }) })}
+  `('should write $description as logFailure logs it at error level', ({ failure }) => {
+    logFailure('gekko', failure);
+
+    expect(describeFailure(failure)).toBe(vi.mocked(error).mock.calls[0][1]);
+  });
+
+  it('should write every link of a chain, where util.inspect cuts it after two causes', () => {
+    const chain = new Error('level 1', { cause: new Error('level 2', { cause: new Error('level 3', { cause: new Error('root') }) }) });
+
+    expect(describeFailure(chain)).toMatch(/\nCaused by: Error: root\n/);
   });
 });

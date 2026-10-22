@@ -29,8 +29,11 @@ export type Variant = {
   configuration: Template;
 };
 
-/** What the main thread posts to a worker: the variant to backtest */
-export type VariantRequest = Pick<Variant, 'variant' | 'configuration'>;
+/**
+ * What the main thread posts to a worker: the variant to backtest, and the lock of stdout the main thread shares (shareWriteLock),
+ * under which the worker writes its lines (useWriteLock), so that no thread's line lands among the parts of another's
+ */
+export type VariantRequest = Pick<Variant, 'variant' | 'configuration'> & { writeLock: SharedArrayBuffer };
 
 /** What a worker posts back once the backtest of its variant is over, and what runWorker makes of a worker that failed to post it */
 export type VariantResult = {
@@ -38,7 +41,11 @@ export type VariantResult = {
   status: 'done' | 'failed';
   /** Why it failed, as describeError writes it */
   error?: string;
-  /** The stack and causes of a failure that is not a GekkoError, whose message alone does not say where it came from */
+  /**
+   * What its message does not say, as the bot's main() logs the failure (describeFailure): the stack of a failure that is not a
+   * GekkoError (an exception in a strategy's hook) and the causes of any, down to the root, the errors of an AggregateError included (a
+   * strategy's exception in end(), which the pipeline wraps). Left out for a GekkoError without a cause, whose message says it all.
+   */
   stack?: string;
   /** From the start of the backtest to its end */
   durationMs: number;
