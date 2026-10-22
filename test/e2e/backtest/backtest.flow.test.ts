@@ -1,6 +1,7 @@
 import { ONE_MINUTE } from '@constants/time.const';
 import type { RoundTrip } from '@models/event.types';
 import type { DebugBacktestParams } from '@strategies/debug/debugBacktest.types';
+import type { DebugPositionBookParams } from '@strategies/debug/debugPositionBook.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { isObjectLike, range } from 'lodash-es';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
@@ -24,50 +25,72 @@ const MARKETS = {
   ETH: { price: 2000, amountMax: 10000 },
 };
 
-/** What a scenario backtests: the assets, against USDT, from a balance of 300000 USDT; DebugBacktest trading 1 unit on its calendar */
+/**
+ * What a scenario backtests: the assets, against USDT, from a balance of `usdt` USDT, 300000 unless given; DebugBacktest trading 1 unit
+ * of every pair on its calendar, or DebugPositionBook playing its steps, each on the pairs it names, through a position book as the
+ * signal strategies trade
+ */
 type Backtest = {
   assets: (keyof typeof MARKETS)[];
   /** The minutes read, from the one `first` minutes after 00:00 to the one `last` minutes after it, both included */
   minutes: { first: number; last: number };
   analyzer: 'RoundTripAnalyzer' | 'PortfolioAnalyzer';
-  /** DebugBacktest counts its candles from 0, the first after the warmup: from 00:00 on 1m without one, n is the candle of the minute n */
-  calendar: DebugBacktestParams;
   timeframe?: '1m' | '5m';
   candleCount?: number;
   batchSize?: number;
   /** Binance's regular fee by default: 0.1 % for a maker (a LIMIT order) and for a taker (a MARKET order) */
   fee?: { maker: number; taker: number };
-};
+  usdt?: number;
+} & (
+  | {
+      /**
+       * DebugBacktest counts its candles from 0, the first after the warmup: from 00:00 on 1m without one, n is the candle of the
+       * minute n
+       */
+      calendar: DebugBacktestParams;
+    }
+  | {
+      /** DebugPositionBook counts its candles as DebugBacktest does: a BUY step takes the share of the currency the book gives it */
+      steps: DebugPositionBookParams['steps'];
+    }
+);
 
 /** The configuration of a scenario, as its file would hold it */
-const configurationOf = (backtest: Backtest): RawConfiguration => ({
-  watch: {
-    mode: 'backtest',
-    assets: backtest.assets,
-    currency: 'USDT',
-    timeframe: backtest.timeframe ?? '1m',
-    warmup: { candleCount: backtest.candleCount ?? 0 },
-    // To the last millisecond of the last minute: a backtest reads each minute its range touches
-    daterange: rawDaterange({ start: minute(backtest.minutes.first), end: minute(backtest.minutes.last + 1) - 1 }),
-    batchSize: backtest.batchSize,
-  },
-  exchange: {
-    name: 'dummy-cex',
-    simulationBalance: [...backtest.assets.map(assetName => ({ assetName, balance: 0 })), { assetName: 'USDT', balance: 300000 }],
-    initialTicker: backtest.assets.map(asset => ({
-      symbol: `${asset}/USDT`,
-      ticker: { bid: MARKETS[asset].price, ask: MARKETS[asset].price },
-    })),
-    marketData: backtest.assets.map(asset => rawMarket(`${asset}/USDT`, { amountMax: MARKETS[asset].amountMax, fee: backtest.fee })),
-  },
-  storage: { type: 'sqlite', database: ':memory:' },
-  plugins: [
-    { name: 'TradingAdvisor', strategyName: 'DebugBacktest' },
-    { name: 'Trader' },
-    { name: backtest.analyzer, enableConsoleTable: false },
-  ],
-  strategy: { name: 'DebugBacktest', ...backtest.calendar },
-});
+const configurationOf = (backtest: Backtest): RawConfiguration => {
+  const strategy =
+    'steps' in backtest ? { name: 'DebugPositionBook', steps: backtest.steps } : { name: 'DebugBacktest', ...backtest.calendar };
+  return {
+    watch: {
+      mode: 'backtest',
+      assets: backtest.assets,
+      currency: 'USDT',
+      timeframe: backtest.timeframe ?? '1m',
+      warmup: { candleCount: backtest.candleCount ?? 0 },
+      // To the last millisecond of the last minute: a backtest reads each minute its range touches
+      daterange: rawDaterange({ start: minute(backtest.minutes.first), end: minute(backtest.minutes.last + 1) - 1 }),
+      batchSize: backtest.batchSize,
+    },
+    exchange: {
+      name: 'dummy-cex',
+      simulationBalance: [
+        ...backtest.assets.map(assetName => ({ assetName, balance: 0 })),
+        { assetName: 'USDT', balance: backtest.usdt ?? 300000 },
+      ],
+      initialTicker: backtest.assets.map(asset => ({
+        symbol: `${asset}/USDT`,
+        ticker: { bid: MARKETS[asset].price, ask: MARKETS[asset].price },
+      })),
+      marketData: backtest.assets.map(asset => rawMarket(`${asset}/USDT`, { amountMax: MARKETS[asset].amountMax, fee: backtest.fee })),
+    },
+    storage: { type: 'sqlite', database: ':memory:' },
+    plugins: [
+      { name: 'TradingAdvisor', strategyName: strategy.name },
+      { name: 'Trader' },
+      { name: backtest.analyzer, enableConsoleTable: false },
+    ],
+    strategy,
+  };
+};
 
 // --------------------------------------------------------------------------
 // HELPERS
@@ -145,15 +168,32 @@ describe('E2E: Backtest Flow', () => {
         sortinoRatio: -0.7720460640138034,
         startPrice: 10000,
         endPrice: 9000,
+        // BTC, watched: the asset the market return is measured on
+        benchmarkAsset: 'BTC',
+        // The value of the portfolio, BTC at its close: USDT alone at both ends
         startBalance: 300000,
         finalBalance: 299960,
         winRate: 50,
         topMAEs: [19.090909090909093, 0],
         tradeCount: 4,
+        // Its one pair: both round trips, their P&L added up, 1980 - 2020, and the exposure and the deepest MAE of the report
+        pairs: [
+          {
+            symbol: 'BTC/USDT',
+            roundTripCount: 2,
+            winCount: 1,
+            winRate: 50,
+            tradeCount: 4,
+            pnl: -40,
+            exposurePct: 62.5,
+            maxAdverseExcursion: 19.090909090909093,
+          },
+        ],
       },
       roundTrips: [
-        // The pair equity before the BUY, 290991 + 9000 + its fee 9, to the one after the SELL, 301980: 1980, 0.66 % of 300000. The
-        // lows it reads, of the candles closing after its BUY, 00:02 and 00:03, never fall below 9000.
+        // Its own fills: 1 BTC bought at 9000 and sold at 11000, less the fees of both, 9 and 11: 1980, 0.66 % of the 300000 the
+        // portfolio was worth before the BUY, the 290991 USDT left after it, 1 BTC at its price and its fee. The lows it reads, of the
+        // candles closing after its BUY, 00:02 and 00:03, never fall below 9000.
         {
           id: 0,
           symbol: 'BTC/USDT',
@@ -162,14 +202,16 @@ describe('E2E: Backtest Flow', () => {
           entryEquity: 300000,
           exitAt: minute(4),
           exitPrice: 11000,
-          exitEquity: 301980,
+          cost: 9000,
+          proceeds: 11000,
+          fees: 20,
           pnl: 1980,
           profit: 0.66,
           maxAdverseExcursion: 0,
           duration: 2 * ONE_MINUTE,
         },
-        // From 290969 + 11000 + 11 to 299960: -2020, -2020 / 301980 × 100. Its adverse excursion is the low of 00:08, 8900:
-        // (11000 - 8900) / 11000 × 100.
+        // Bought at 11000 and sold at 9000, less the fees 11 and 9: -2020, of the 301980 the portfolio was worth before the BUY,
+        // 290969 + 11000 + 11: -2020 / 301980 × 100. Its adverse excursion is the low of 00:08, 8900: (11000 - 8900) / 11000 × 100.
         {
           id: 1,
           symbol: 'BTC/USDT',
@@ -178,7 +220,9 @@ describe('E2E: Backtest Flow', () => {
           entryEquity: 301980,
           exitAt: minute(9),
           exitPrice: 9000,
-          exitEquity: 299960,
+          cost: 11000,
+          proceeds: 9000,
+          fees: 20,
           pnl: -2020,
           profit: -0.668918471421948,
           maxAdverseExcursion: 19.090909090909093,
@@ -405,14 +449,28 @@ describe('E2E: Backtest Flow', () => {
         sortinoRatio: 0,
         startPrice: 10190,
         endPrice: 10340,
+        benchmarkAsset: 'BTC',
         startBalance: 300000,
         finalBalance: 300079.42,
         winRate: 100,
         topMAEs: [0.390625],
         tradeCount: 2,
+        pairs: [
+          {
+            symbol: 'BTC/USDT',
+            roundTripCount: 1,
+            winCount: 1,
+            winRate: 100,
+            tradeCount: 2,
+            pnl: 79.42,
+            exposurePct: 66.6666666666667,
+            maxAdverseExcursion: 0.390625,
+          },
+        ],
       },
-      // The adverse excursion reads the one-minute candles that close after the BUY filled, 00:25 to 00:34: the lowest low is the first,
-      // 10200, (10240 - 10200) / 10240 × 100
+      // Bought at 10240 and sold at 10340, less the fees 10.24 and 10.34: 79.42, of the 300000 the portfolio was worth before the BUY,
+      // 289749.76 USDT left after it, 1 BTC at 10240 and its fee. The adverse excursion reads the one-minute candles that close after the
+      // BUY filled, 00:25 to 00:34: the lowest low is the first, 10200, (10240 - 10200) / 10240 × 100.
       roundTrips: [
         {
           id: 0,
@@ -422,11 +480,161 @@ describe('E2E: Backtest Flow', () => {
           entryEquity: 300000,
           exitAt: minute(35),
           exitPrice: 10340,
-          exitEquity: 300079.42,
+          cost: 10240,
+          proceeds: 10340,
+          fees: 20.58,
           pnl: 79.42,
           profit: 0.0264733333333333,
           maxAdverseExcursion: 0.390625,
           duration: 10 * ONE_MINUTE,
+        },
+      ],
+    });
+  });
+
+  it('Scenario E: overlapping round trips on BTC and ETH, ETH in and out first: numbered as they close, exposed for their union, 50 %', async () => {
+    // BTC opens every minute at 10000 and closes there too, but at 9500 on 00:05 and 9800 on 00:08, its high and low 100 off its close;
+    // ETH at 2000, but at 2100 on 00:02 and 2200 on 00:03, 10 off. The 9 candles of each are all read.
+    const { failure, orderCalls } = await runBacktest(
+      configurationOf({
+        assets: ['BTC', 'ETH'],
+        minutes: { first: 0, last: 8 },
+        analyzer: 'RoundTripAnalyzer',
+        usdt: 400000,
+        steps: [
+          { candle: 1, side: 'BUY', symbols: ['ETH/USDT'] },
+          { candle: 2, side: 'BUY', symbols: ['BTC/USDT'] },
+          { candle: 3, side: 'SELL', symbols: ['ETH/USDT'] },
+          { candle: 5, side: 'SELL', symbols: ['BTC/USDT'] },
+        ],
+      }),
+      {
+        'BTC/USDT': candlesClosingAt({ 5: 9500, 8: 9800 }),
+        'ETH/USDT': candlesClosingAt({ 2: 2100, 3: 2200 }, { open: 2000, spread: 10, volume: 100 }),
+      },
+    );
+
+    // DebugPositionBook plays each step on its pair through the book, as the signal strategies trade: the ETH BUY of 00:01 takes 50 % of
+    // the currency, BTC flat beside it, the BTC BUY of 00:02 goes all-in, ETH long by then, and each SELL sells all of its asset. Each
+    // MARKET order fills at the close of its candle, dated at its end, for a fee of 0.1 %, and is heard with the bucket it fills in.
+    expect({ failure, orderCalls, report: loggedReport('TRADING REPORT'), roundTrips: loggedRoundTrips() }).toEqual({
+      failure: undefined,
+      orderCalls: [
+        // 50 % of the 400000 USDT read, of which 95 % at 2000: 190000 / 2000. It costs 95 × 2000 × 1.001 = 190190: 209810 USDT are left.
+        filledMarketOrder(minute(2), 'ETH/USDT', 'BUY', 95, 1),
+        // The 209810 USDT read after the ETH fill, of which 95 % at 10000: 199319.5 / 10000. It costs 199319.5 × 1.001 = 199518.8195:
+        // 10291.1805 USDT are left.
+        filledMarketOrder(minute(3), 'BTC/USDT', 'BUY', 19.93195, 2),
+        // All of each asset. The ETH SELL brings in 95 × 2200 × 0.999 = 208791 (219082.1805 USDT), the BTC SELL 19.93195 × 9500 × 0.999
+        // = 189164.171475 (408246.351975 USDT).
+        filledMarketOrder(minute(4), 'ETH/USDT', 'SELL', 95, 3),
+        filledMarketOrder(minute(6), 'BTC/USDT', 'SELL', 19.93195, 4),
+      ],
+      report: {
+        id: 'TRADING REPORT',
+        // From the close of the candle that completed the warmup, 00:00's, to that of the last candle read, 00:08's
+        periodStartAt: minute(1),
+        periodEndAt: minute(9),
+        formattedDuration: '8 minutes',
+        // The P&L of the two round trips, 18601 - 10354.648025: the 408246.351975 USDT held at the end less the 400000 of the start
+        netProfit: 8246.351975,
+        // Over a day, the horizon of a period shorter than one, 1/366 of the year 2024: 8246.351975 × 366
+        annualizedNetProfit: 3018164.82285,
+        // 8246.351975 / 400000 × 100
+        totalReturnPct: 2.06158799375,
+        // 2.06158799375 × 366
+        annualizedReturnPct: 754.5412057125,
+        // The benchmark, BTC, watched: from its close of 00:00, 10000, to that of 00:08, 9800
+        marketReturnPct: -2,
+        // 2.06158799375 - (-2)
+        alpha: 4.06158799375,
+        // In a round trip from 00:02, the ETH BUY's fill, to 00:06, the BTC SELL's: 4 of the 8 minutes. Added up, the two round trips
+        // would count 00:03 to 00:04 twice: 5 minutes, 62.5 %.
+        exposurePct: 50,
+        // The population standard deviation of the two profits, half their difference: (4.65025 + 2.529781345435) / 2
+        volatility: 3.5900156727174997,
+        // The root mean square of the one loss over both profits: 2.529781345435 / √2
+        downsideDeviation: 1.7888255442763163,
+        // (annualizedReturnPct - 5, the risk-free return) / (the deviation × √(2 returns × 366 a year)): 749.5412057125 over
+        // 3.5900156727174997 × √732, then over 1.7888255442763163 × √732
+        sharpeRatio: 7.716913423670418,
+        sortinoRatio: 15.487167110635523,
+        startPrice: 10000,
+        endPrice: 9800,
+        benchmarkAsset: 'BTC',
+        // The value of the whole portfolio, each asset at its close: USDT alone at both ends
+        startBalance: 400000,
+        finalBalance: 408246.351975,
+        // ETH's round trip won, BTC's lost
+        winRate: 50,
+        topMAEs: [6, 0],
+        tradeCount: 4,
+        // One entry per pair, in the order of watch.assets, whatever the order of their round trips: BTC in a round trip from 00:03 to
+        // 00:06, 3 of the 8 minutes, ETH from 00:02 to 00:04, 2 of them
+        pairs: [
+          {
+            symbol: 'BTC/USDT',
+            roundTripCount: 1,
+            winCount: 0,
+            winRate: 0,
+            tradeCount: 2,
+            pnl: -10354.648025,
+            exposurePct: 37.5,
+            maxAdverseExcursion: 6,
+          },
+          {
+            symbol: 'ETH/USDT',
+            roundTripCount: 1,
+            winCount: 1,
+            winRate: 100,
+            tradeCount: 2,
+            pnl: 18601,
+            exposurePct: 25,
+            maxAdverseExcursion: 0,
+          },
+        ],
+      },
+      roundTrips: [
+        // ETH's, closed first: numbered 0, though BTC comes first in watch.assets. 95 bought at 2000, 190000, and sold at 2200, 209000,
+        // less the fees, 190 and 209: 18601, 4.65025 % of the 400000 the portfolio was worth before the BUY, the 209810 USDT left after
+        // it, 95 ETH at its price and its fee. The lows it reads, of the candles closing after its BUY, 00:02 and 00:03, never fall below
+        // 2000.
+        {
+          id: 0,
+          symbol: 'ETH/USDT',
+          entryAt: minute(2),
+          entryPrice: 2000,
+          entryEquity: 400000,
+          exitAt: minute(4),
+          exitPrice: 2200,
+          cost: 190000,
+          proceeds: 209000,
+          fees: 399,
+          pnl: 18601,
+          profit: 4.65025,
+          maxAdverseExcursion: 0,
+          duration: 2 * ONE_MINUTE,
+        },
+        // 19.93195 BTC bought at 10000, 199319.5, and sold at 9500, 189353.525, less the fees 199.3195 and 189.353525: -10354.648025,
+        // from its own fills alone, the 208791 USDT the ETH SELL brought in while BTC was held left out. -10354.648025 / 409310 × 100, of
+        // the 409310 the portfolio was worth before the BUY, ETH at its last close, 2100: the 10291.1805 USDT left after it, 19.93195 BTC
+        // at its price, 199319.5, 95 ETH at 2100, 199500, and its fee. Its adverse excursion is the low of 00:05, 9400: (10000 - 9400) /
+        // 10000 × 100.
+        {
+          id: 1,
+          symbol: 'BTC/USDT',
+          entryAt: minute(3),
+          entryPrice: 10000,
+          entryEquity: 409310,
+          exitAt: minute(6),
+          exitPrice: 9500,
+          cost: 199319.5,
+          proceeds: 189353.525,
+          fees: 388.673025,
+          pnl: -10354.648025,
+          profit: -2.529781345435,
+          maxAdverseExcursion: 6,
+          duration: 3 * ONE_MINUTE,
         },
       ],
     });

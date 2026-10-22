@@ -48,29 +48,28 @@ const BREAKER_STOP = '[STRATEGY] Max consecutive order errors reached (5)';
 let directory: string;
 
 /**
- * A backtest of BTC on 1m candles, of the minutes 00:00 to 00:08, from an account holding `usdt`, reported by `analyzer` and written
- * by the PerformanceReporter to `file`, in the temporary directory of the suite
+ * A backtest of BTC, or of each of `assets`, against USDT, on 1m candles, of the minutes 00:00 to 00:08, from an account holding `usdt`,
+ * reported by `analyzer` and written by the PerformanceReporter to `file`, in the temporary directory of the suite: DebugBacktest trades
+ * 1 unit of every pair on its calendar
  */
 const backtestOf = (
   usdt: number,
   analyzer: { name: 'RoundTripAnalyzer' | 'PortfolioAnalyzer'; enableConsoleTable?: boolean },
   calendar: { buyCandleIndex: number | number[]; sellCandleIndex: number | number[] },
   file: string,
+  assets: ('BTC' | 'ETH')[] = ['BTC'],
 ): RawConfiguration => ({
   watch: {
     mode: 'backtest',
-    assets: ['BTC'],
+    assets,
     currency: 'USDT',
     timeframe: '1m',
     daterange: rawDaterange({ start: minute(0), end: minute(9) - 1 }),
   },
   exchange: {
     name: 'dummy-cex',
-    simulationBalance: [
-      { assetName: 'BTC', balance: 0 },
-      { assetName: 'USDT', balance: usdt },
-    ],
-    marketData: [rawMarket('BTC/USDT')],
+    simulationBalance: [...assets.map(assetName => ({ assetName, balance: 0 })), { assetName: 'USDT', balance: usdt }],
+    marketData: assets.map(asset => rawMarket(`${asset}/USDT`)),
   },
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [
@@ -113,8 +112,9 @@ describe('E2E: Backtest reports', () => {
       failure: undefined,
       rows: [
         CSV_HEADER,
-        // The id of the run, its strategy block's values; the columns of the PortfolioAnalyzer left empty
-        'DebugBacktest-1-3;Trading;BTC/USDT;1m;1980;0.66%;724680 (241.56%);100%;0%;0.66%;0.00;0.00;;;2;2024-01-01T00:01:00.000Z;2024-01-01T00:09:00.000Z;8 minutes;25%;300000;301980;10000;10000;0.00;0.00;;;[0];completed',
+        // The id of the run, its strategy block's values; the columns of the PortfolioAnalyzer left empty, but the benchmark asset, which
+        // the market return is measured on: BTC, watched
+        'DebugBacktest-1-3;Trading;BTC/USDT;1m;1980;0.66%;724680 (241.56%);100%;0%;0.66%;0.00;0.00;;;2;2024-01-01T00:01:00.000Z;2024-01-01T00:09:00.000Z;8 minutes;25%;300000;301980;10000;10000;0.00;0.00;;BTC;[0];completed',
         '',
       ],
     });
@@ -224,6 +224,8 @@ describe('E2E: Backtest reports', () => {
               exposurePct: '0% of time exposed',
               startPrice: '10,000 USDT',
               endPrice: '10,000 USDT',
+              // The asset of those prices, the one the market return is measured on: BTC, watched, on one pair too
+              benchmark: 'BTC',
               netProfit: '0 USDT',
               totalReturnPct: '0%',
               marketReturnPct: '0%',
@@ -244,7 +246,125 @@ describe('E2E: Backtest reports', () => {
         ],
         rows: [
           CSV_HEADER,
-          `DebugBacktest-0-1-2-3-4-5-6;Trading;BTC/USDT;1m;0;0%;0 (0%);N/A;0%;0%;0.00;0.00;;;0;2024-01-01T00:01:00.000Z;2024-01-01T00:05:00.000Z;4 minutes;0%;1000;1000;10000;10000;0.00;0.00;;;[];interrupted: ${BREAKER_STOP}`,
+          `DebugBacktest-0-1-2-3-4-5-6;Trading;BTC/USDT;1m;0;0%;0 (0%);N/A;0%;0%;0.00;0.00;;;0;2024-01-01T00:01:00.000Z;2024-01-01T00:05:00.000Z;4 minutes;0%;1000;1000;10000;10000;0.00;0.00;;BTC;[];interrupted: ${BREAKER_STOP}`,
+          '',
+        ],
+      });
+    });
+
+    it('prints a table per round trip naming its pair, the table of the report, then a table of the pairs, when several are watched', async () => {
+      // A BUY of 1 BTC and of 1 ETH with the candle of 00:01, a SELL of each with that of 00:03: BTC closes at 9000, then 11000, its
+      // high and low 100 off; ETH at 2200, then 1800, 10 off. Both open every minute at their usual price, 10000 and 2000.
+      const { failure } = await runBacktest(
+        backtestOf(
+          300000,
+          { name: 'RoundTripAnalyzer', enableConsoleTable: true },
+          { buyCandleIndex: 1, sellCandleIndex: 3 },
+          'pairs.csv',
+          ['BTC', 'ETH'],
+        ),
+        {
+          'BTC/USDT': candlesClosingAt({ 1: 9000, 3: 11000 }),
+          'ETH/USDT': candlesClosingAt({ 1: 2200, 3: 1800 }, { open: 2000, spread: 10, volume: 100 }),
+        },
+      );
+
+      // Each order fills at the close of its candle, dated at its end, for a fee of 0.1 %: the BUYs cost 9009 and 2202.2, the SELLs
+      // bring in 10989 and 1798.2, and the account ends with 301576 USDT. Each round trip is printed as it closes, BTC's first, its SELL
+      // sent first, both from 00:02 to 00:04.
+      expect({ failure, printed, rows: readRows('pairs.csv') }).toEqual({
+        failure: undefined,
+        printed: [
+          // 11000 - 9000, less the fees 9 and 11: 1980, 0.66 % of the 299997.8 the portfolio was worth before its BUY, as the balance
+          // read after both BUYs shows it, the 2.2 of the ETH BUY's fee paid. The lows of 00:02 and 00:03 never fall below 9000.
+          [
+            'table',
+            {
+              pair: 'BTC/USDT',
+              entryDateUTC: '2024-01-01T00:02:00.000Z',
+              exitDateUTC: '2024-01-01T00:04:00.000Z',
+              exposedDuration: '2 minutes',
+              'P&L': '1,980 USDT',
+              profit: '0.66%',
+              MAE: '0%',
+            },
+          ],
+          // 1800 - 2200, less the fees 2.2 and 1.8: -404, -0.1346… % of 299991, the 9 of the BTC BUY's fee paid, rounded down. The low
+          // of 00:03, 1790, is 410 below its entry: 410 / 2200 × 100, 18.6363… %.
+          [
+            'table',
+            {
+              pair: 'ETH/USDT',
+              entryDateUTC: '2024-01-01T00:02:00.000Z',
+              exitDateUTC: '2024-01-01T00:04:00.000Z',
+              exposedDuration: '2 minutes',
+              'P&L': '-404 USDT',
+              profit: '-0.14%',
+              MAE: '18.63%',
+            },
+          ],
+          [
+            'table',
+            {
+              label: 'PROFIT REPORT',
+              periodStartAt: '2024-01-01T00:01:00.000Z',
+              periodEndAt: '2024-01-01T00:09:00.000Z',
+              duration: '8 minutes',
+              // Both round trips run from 00:02 to 00:04: 2 of the 8 minutes, counted once
+              exposurePct: '25% of time exposed',
+              // The benchmark, BTC, watched, closes 00:00 and 00:08 at 10000: the table names it, its prices being those of one pair
+              startPrice: '10,000 USDT',
+              endPrice: '10,000 USDT',
+              benchmark: 'BTC',
+              // 1980 - 404, 0.525333… % of 300000
+              netProfit: '1,576 USDT',
+              totalReturnPct: '0.52%',
+              marketReturnPct: '0%',
+              alpha: '0.52%',
+              // Over a day of 2024: 1576 × 366, 0.525333… % × 366
+              annualizedNetProfit: '576,816 USDT (192.27%)',
+              tradeCount: 4,
+              startBalance: '300,000 USDT',
+              finalBalance: '301,576 USDT',
+              // 187.272, the annualized return less the risk-free 5, over each deviation × √(2 returns × 366 a year): the volatility half
+              // the difference of the two profits, (0.66 + 0.1347) / 2, the downside deviation the loss over √2
+              sharpeRatio: '17.42',
+              sortinoRatio: '72.69',
+              volatility: '0.40',
+              downsideDeviation: '0.10',
+              winRate: '50%',
+              topMAEs: '18.63%, 0%',
+            },
+          ],
+          // Each pair, in the order of watch.assets
+          [
+            'table',
+            {
+              'BTC/USDT': {
+                roundTrips: 1,
+                wins: 1,
+                winRate: '100%',
+                tradeCount: 2,
+                'P&L': '1,980 USDT',
+                exposurePct: '25%',
+                deepestMAE: '0%',
+              },
+              'ETH/USDT': {
+                roundTrips: 1,
+                wins: 0,
+                winRate: '0%',
+                tradeCount: 2,
+                'P&L': '-404 USDT',
+                exposurePct: '25%',
+                deepestMAE: '18.63%',
+              },
+            },
+          ],
+        ],
+        rows: [
+          CSV_HEADER,
+          // One row for the run, its pairs in one cell, the MAEs written as amounts are, to 8 decimals
+          'DebugBacktest-1-3;Trading;BTC/USDT ETH/USDT;1m;1576;0.52%;576816 (192.27%);50%;0%;0.52%;17.42;72.69;;;4;2024-01-01T00:01:00.000Z;2024-01-01T00:09:00.000Z;8 minutes;25%;300000;301576;10000;10000;0.40;0.10;;BTC;[18.63636364,0];completed',
           '',
         ],
       });
