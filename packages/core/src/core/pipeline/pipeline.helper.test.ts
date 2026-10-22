@@ -4,7 +4,7 @@ import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Exchange } from '@gekko/shared/models/exchange.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Plugin } from '../../plugin/plugin';
-import { warning } from '../../logger/logger';
+import { info, warning } from '../../logger/logger';
 import type { RunContext } from '../../run/runContext.types';
 import type { Storage } from '../../storage/storage';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
@@ -619,7 +619,21 @@ describe('pipeline.helper', () => {
 
       it('should read the stored candles of the watched pairs over daterange, in batches, from the storage of the run', async () => {
         await launchBacktest();
-        expect(MultiAssetBacktestStream).toHaveBeenCalledWith({ pairs, daterange, batchSize: 60, strategy, storage });
+        expect(MultiAssetBacktestStream).toHaveBeenCalledWith({ pairs, daterange, batchSize: 60, storage });
+      });
+
+      // Once for the run, where each pair's stream logged a line of its own naming the same strategy, "using undefined strategy" when
+      // the configuration had no strategy block
+      it.each`
+        scenario                             | watchedPairs                                        | strategyBlock | line
+        ${'a pair and its strategy'}         | ${pairs}                                            | ${strategy}   | ${'Launching backtest of BTC/USDT from 2023-01-01T00:00:00.000Z -> to 2023-01-02T00:00:00.000Z using DEMA strategy'}
+        ${'two pairs and their strategy'}    | ${[{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }]} | ${strategy}   | ${'Launching backtest of BTC/USDT and ETH/USDT from 2023-01-01T00:00:00.000Z -> to 2023-01-02T00:00:00.000Z using DEMA strategy'}
+        ${'a pair without a strategy block'} | ${pairs}                                            | ${undefined}  | ${'Launching backtest of BTC/USDT from 2023-01-01T00:00:00.000Z -> to 2023-01-02T00:00:00.000Z'}
+      `('should log the start of the backtest in one line, for $scenario', async ({ watchedPairs, strategyBlock, line }) => {
+        configuration.getStrategy.mockReturnValue(strategyBlock);
+        configuration.getWatch.mockReturnValue({ ...watch, pairs: watchedPairs });
+        await streamPipelines.backtest(mockPlugins, context);
+        expect(vi.mocked(info).mock.calls).toEqual([['stream', line]]);
       });
 
       it('should hand the plugins, the watch section and the exchange of the run to the plugins stream', async () => {

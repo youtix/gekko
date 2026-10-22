@@ -1,10 +1,11 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
 import { Plugin } from '../../plugin/plugin';
-import { warning } from '../../logger/logger';
+import { info, warning } from '../../logger/logger';
 import type { RunContext } from '../../run/runContext.types';
 import { getCandleStart } from '@gekko/shared/helpers/candle/candle.helper';
 import { startOfMinuteUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
+import { listInWords } from '@gekko/shared/utils/string/string.utils';
 import { synchronizeStreams } from '@gekko/shared/helpers/stream/stream.helper';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -55,9 +56,19 @@ const buildBacktestPipeline = async (plugins: Plugin[], { configuration, service
   if (!daterange) throw new Error('daterange is not set');
 
   warning('stream', 'BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!');
+  // One line for the run: the pairs, the range and, when the configuration has a strategy block, the strategy it labels the run with
+  const strategy = configuration.getStrategy();
+  info(
+    'stream',
+    [
+      `Launching backtest of ${listInWords(pairs.map(({ symbol }) => symbol))}`,
+      `from ${toISOString(daterange.start)} -> to ${toISOString(daterange.end)}`,
+      ...(strategy ? [`using ${strategy.name} strategy`] : []),
+    ].join(' '),
+  );
   const storage = services.storage();
   const exchange = services.exchange();
-  const source = new MultiAssetBacktestStream({ pairs, daterange, batchSize, strategy: configuration.getStrategy(), storage });
+  const source = new MultiAssetBacktestStream({ pairs, daterange, batchSize, storage });
   const sink = new PluginsStream(plugins, watch, exchange);
   await runPipeline(sink, () => pipeline(source, sink, { signal }));
 };
@@ -107,7 +118,7 @@ const runPipeline = async (sink: PluginsStream, run: () => Promise<void>) => {
 /**
  * The stream pipeline of each mode, `streamPipelines[mode](plugins, context, signal)`, which launchStream runs once the plugins are
  * built: each reads the run's configuration and services from `context` and hands every stream what it reads of them (the watch
- * section, the strategy block, the exchange, the storage), never the context itself. Each settles as gekkoPipeline says.
+ * section, the exchange, the storage), never the context itself. Each settles as gekkoPipeline says.
  */
 export const streamPipelines = {
   realtime: buildRealtimePipeline,

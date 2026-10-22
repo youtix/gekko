@@ -1,5 +1,5 @@
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { debug, info } from '../../../logger/logger';
+import { debug } from '../../../logger/logger';
 import type { Storage } from '../../../storage/storage';
 import { splitIntervals, toISOString } from '@gekko/shared/utils/date/date.utils';
 import { differenceInMinutes, Interval } from 'date-fns';
@@ -9,8 +9,8 @@ import { BacktestStreamParams } from './backtest.types';
 
 /**
  * Reads the stored 1-minute candles of one pair, one batch of `watch.batchSize` minutes per read. It receives from the pipeline, through
- * MultiAssetBacktestStream, the run's storage (`context.services.storage()`), which it reads the candles from, the pair, the range,
- * `watch.batchSize` and the strategy block, whose name its start-up line gives.
+ * MultiAssetBacktestStream, the run's storage (`context.services.storage()`), which it reads the candles from, the pair, the range and
+ * `watch.batchSize`. The pipeline logs the start of the backtest, in one line for all the pairs (see buildBacktestPipeline).
  */
 export class BacktestStream extends Readable {
   private storage: Storage;
@@ -18,21 +18,12 @@ export class BacktestStream extends Readable {
   private iteration: number;
   private symbol: TradingPair;
 
-  constructor({ daterange, symbol, batchSize, strategy, storage }: BacktestStreamParams) {
+  constructor({ daterange, symbol, batchSize, storage }: BacktestStreamParams) {
     super({ objectMode: true });
     this.storage = storage;
     this.dateranges = splitIntervals(daterange.start, daterange.end, batchSize ?? 1440);
     this.iteration = 0;
     this.symbol = symbol;
-
-    info(
-      'stream',
-      [
-        `Launching backtest on ${symbol}`,
-        `from ${toISOString(daterange.start)} -> to ${toISOString(daterange.end)}`,
-        `using ${strategy?.name} strategy`,
-      ].join(' '),
-    );
   }
 
   public _read(_size: number): void {

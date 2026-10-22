@@ -4,10 +4,10 @@ import { MultiAssetBacktestStreamParams } from './backtest.types';
 
 /**
  * The stored candles of every pair, as synchronised `CandleBucket`s. It hands the backtest of each watched pair what it receives from
- * the pipeline: the range, `watch.batchSize`, the strategy block and the run's storage.
+ * the pipeline: the range, `watch.batchSize` and the run's storage.
  */
 export class MultiAssetBacktestStream extends MultiAssetStream {
-  constructor({ pairs, daterange, batchSize, strategy, storage }: MultiAssetBacktestStreamParams) {
-    super(pairs, symbol => new BacktestStream({ daterange, batchSize, strategy, storage, symbol }));
+  constructor({ pairs, daterange, batchSize, storage }: MultiAssetBacktestStreamParams) {
+    super(pairs, symbol => new BacktestStream({ daterange, batchSize, storage, symbol }));
   }
 }

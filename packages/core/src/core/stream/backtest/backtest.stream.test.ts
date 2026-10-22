@@ -1,14 +1,13 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { info } from '../../../logger/logger';
 import type { Storage } from '../../../storage/storage';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import { MissingCandlesError } from './backtest.error';
 import { BacktestStream } from './backtest.stream';
 
-vi.mock('../../../logger/logger', () => ({ debug: vi.fn(), info: vi.fn() }));
+vi.mock('../../../logger/logger', () => ({ debug: vi.fn() }));
 
 const storage = { getCandles: vi.fn(), getCandleDateranges: vi.fn() };
 
@@ -25,9 +24,8 @@ const storedCandles = (_symbol: TradingPair, { start, end }: { start: number; en
 // Five minutes, read in batches of two
 const daterange = { start: minute(0), end: minute(4) };
 
-/** The stream of BTC/USDT over `daterange`, for a run of DEMA whose watch section sets `batchSize`, or leaves it out */
-const createStream = (batchSize?: number) =>
-  new BacktestStream({ daterange, symbol, batchSize, strategy: { name: 'DEMA' }, storage: storage as unknown as Storage });
+/** The stream of BTC/USDT over `daterange`, for a run whose watch section sets `batchSize`, or leaves it out */
+const createStream = (batchSize?: number) => new BacktestStream({ daterange, symbol, batchSize, storage: storage as unknown as Storage });
 const readAll = async (stream: BacktestStream) => ((await stream.toArray()) as { candle: Candle }[]).map(({ candle }) => candle.start);
 
 describe('BacktestStream', () => {
@@ -49,7 +47,6 @@ describe('BacktestStream', () => {
       ${'push every candle of the range, in order'} | ${() => starts}                                                        | ${[0, 1, 2, 3, 4].map(minute)}
       ${'read the database batch by batch'}         | ${() => storage.getCandles.mock.calls.map(([, interval]) => interval)} | ${[{ start: minute(0), end: minute(2) - 1 }, { start: minute(2), end: minute(4) - 1 }, { start: minute(4), end: minute(5) - 1 }]}
       ${'end the stream'}                           | ${() => stream.readableEnded}                                          | ${true}
-      ${'log the pair, the range and the strategy'} | ${() => vi.mocked(info).mock.lastCall}                                 | ${['stream', `Launching backtest on BTC/USDT from ${toISOString(minute(0))} -> to ${toISOString(minute(4))} using DEMA strategy`]}
     `('should $description', ({ actual, expected }) => {
       expect(actual()).toEqual(expected);
     });

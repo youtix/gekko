@@ -1,4 +1,4 @@
-import type { Configuration as ConfigurationModel, Watch } from '@gekko/schemas/configuration/configuration.types';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { Interval } from 'date-fns';
 import type { Storage } from '../../../storage/storage';
@@ -11,8 +11,6 @@ export interface BacktestStreamParams {
   symbol: TradingPair;
   /** `watch.batchSize`: the minutes read per batch, a day when it is left out */
   batchSize: Watch['batchSize'];
-  /** The strategy block, whose name the start-up line gives */
-  strategy: ConfigurationModel['strategy'];
   /** The run's storage (`context.services.storage()`), which the candles are read from */
   storage: Storage;
 }

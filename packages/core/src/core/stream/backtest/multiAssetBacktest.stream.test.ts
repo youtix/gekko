@@ -17,7 +17,6 @@ vi.mock('./backtest.stream', () => ({
 const pairs: { symbol: TradingPair }[] = [{ symbol: 'BTC/USDT' }, { symbol: 'ETH/USDT' }];
 const daterange = { start: Date.UTC(2024, 0, 1), end: Date.UTC(2024, 0, 2) };
 const batchSize = 60;
-const strategy = { name: 'DEMA' };
 const storage = { getCandles: vi.fn() } as unknown as Storage;
 
 describe('MultiAssetBacktestStream', () => {
@@ -25,13 +24,13 @@ describe('MultiAssetBacktestStream', () => {
 
   beforeEach(() => {
     vi.mocked(synchronizeStreams).mockReturnValue(new PassThrough({ objectMode: true }));
-    stream = new MultiAssetBacktestStream({ pairs, daterange, batchSize, strategy, storage });
+    stream = new MultiAssetBacktestStream({ pairs, daterange, batchSize, storage });
   });
 
   it.each`
-    description                                                                                                 | actual                                        | expected
-    ${'build one backtest stream per pair, with the range, the batch size, the strategy block and the storage'} | ${() => vi.mocked(BacktestStream).mock.calls} | ${pairs.map(({ symbol }) => [{ daterange, batchSize, strategy, storage, symbol }])}
-    ${'be a MultiAssetStream'}                                                                                  | ${() => stream instanceof MultiAssetStream}   | ${true}
+    description                                                                             | actual                                        | expected
+    ${'build one backtest stream per pair, with the range, the batch size and the storage'} | ${() => vi.mocked(BacktestStream).mock.calls} | ${pairs.map(({ symbol }) => [{ daterange, batchSize, storage, symbol }])}
+    ${'be a MultiAssetStream'}                                                              | ${() => stream instanceof MultiAssetStream}   | ${true}
   `('should $description', ({ actual, expected }) => {
     expect(actual()).toEqual(expected);
   });
