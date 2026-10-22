@@ -38,12 +38,12 @@ export const priceCanceledFill = (
 
 /**
  * The P&L and the profit of a round trip, from its own fills: what its SELLs brought in, less what its BUYs cost and the fees of all of
- * them, in decimal (see RoundTrip.pnl), so that an asset held before it, or the fills of another pair, count in none of it; the profit
- * is that P&L in % of its entry equity, to 15 significant digits, as the total return of a report is worked out (see
- * calculateTotalReturnPct). Measured from the pair equity before its BUY to the pair equity after its SELL, a round trip on a pair whose
- * asset the account already held made what the price did to the whole holding: 1,009.79 for a BUY of 1 BTC at 100 sold at 110, 100 BTC
- * held, where its fills made 9.79; and on several pairs, those equities would count the fills of the other pairs, which share the
- * currency.
+ * them (but a BUY fee taken in the asset bought, which the smaller amount sold carries: see RoundTrip.fees), in decimal (see
+ * RoundTrip.pnl), so that an asset held before it, or the fills of another pair, count in none of it; the profit is that P&L in % of its
+ * entry equity, to 15 significant digits, as the total return of a report is worked out (see calculateTotalReturnPct). Measured from the
+ * pair equity before its BUY to the pair equity after its SELL, a round trip on a pair whose asset the account already held made what the
+ * price did to the whole holding: 1,009.79 for a BUY of 1 BTC at 100 sold at 110, 100 BTC held, where its fills made 9.79; and on several
+ * pairs, those equities would count the fills of the other pairs, which share the currency.
  *
  * A P&L less than BOOKED_CURRENCY_UNIT from 0, or proceeds equal to the cost and the fees together within compareWithTolerance, once past
  * what the decimal helpers keep exact, is a break-even: P&L 0 and profit 0, no win. The profit is unknown (NaN) without an entry equity

@@ -10,6 +10,7 @@ import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { addPrecise, isFiniteNumber, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
 import { formatAmount, formatEveryDecimal, formatSignedPercent } from '@gekko/shared/utils/string/string.utils';
 import { isNil } from 'lodash-es';
+import { UUID } from 'node:crypto';
 import { DUST_TOLERANCE } from '../analyzer.const';
 import { DateRange, ExcursionCandle, Fill, OpenRoundTrip, OrderFill, PairTradingSummary, RoundTripTrackerSetup } from './roundTrip.types';
 import { LATE_FILL_CANDLES } from './roundTripAnalyzer.const';
@@ -128,8 +129,8 @@ export class RoundTripTracker {
    * Counts the fill of an order of its pair that completed, with the portfolio the Trader read after it (see registerTrade); returns the
    * round trip it closed, if any
    */
-  registerCompleted({ id, side, price, amount, fee, orderExecutionDate }: OrderCompletedEvent['order'], portfolio: Portfolio) {
-    return this.registerTrade({ id, side, date: orderExecutionDate, price, amount, fee }, portfolio);
+  registerCompleted({ id, side, price, amount, fee, feeAsset, orderExecutionDate }: OrderCompletedEvent['order'], portfolio: Portfolio) {
+    return this.registerTrade({ id, side, date: orderExecutionDate, price, amount, fee, feeAsset }, portfolio);
   }
 
   /**
@@ -214,7 +215,7 @@ export class RoundTripTracker {
    * the fill carries, which the Trader read after it: what the account holds once a SELL filled (see registerSell), and the base of the
    * profit of a round trip a BUY opens (see registerBuy).
    */
-  private registerRoundtripPart({ id, side, date, price, amount, fee }: OrderFill, portfolio: Portfolio): RoundTrip | undefined {
+  private registerRoundtripPart({ id, side, date, price, amount, fee, feeAsset }: OrderFill, portfolio: Portfolio): RoundTrip | undefined {
     // The Trader sets the price and the amount of every fill it reports, estimating those of an order whose trades it cannot read: what
     // is skipped here is a fill priced at the last close before any bucket (0), or a price the event type leaves optional
     if (isNil(price) || !(price > 0) || !(amount > 0)) {
@@ -222,9 +223,10 @@ export class RoundTripTracker {
       return;
     }
 
-    // An unknown fee counts as 0, as the Trader reports it when the exchange gives no fee rate: the P&L is then too high by the fee the
-    // order paid. A fee that is not a number would make the round trip NaN.
-    const fill: Fill = { id, date, price, amount, fee: Number.isFinite(fee) ? fee : 0 };
+    // An unknown fee counts as 0, as the Trader reports it when the exchange gives no fee rate, for a fee taken in a third asset (BNB)
+    // too, which no rate converts: the P&L is then too high by the fee the order paid. A fee that is not a number would make the round
+    // trip NaN.
+    const fill: Fill = { id, date, price, amount, fee: Number.isFinite(fee) ? fee : 0, feeAsset };
     if (side === 'BUY') {
       this.registerBuy(fill, portfolio);
       return;
@@ -241,14 +243,16 @@ export class RoundTripTracker {
   }
 
   /**
-   * A BUY opens a round trip while flat, and adds to the position of the open one otherwise (scale-in): its amount, its cost and its fee.
-   * The round trip it opens enters with the whole portfolio's value before it: the portfolio the Trader read after it, its pair valued at
-   * its price, plus its fee, which the BUY took from the portfolio (see RoundTrip.entryEquity). Unknown (NaN) when the Trader had read no
+   * A BUY opens a round trip while flat, and adds to the position of the open one otherwise (scale-in): its amount, its cost and its fee,
+   * but a fee taken in the asset of the pair, which the SELLs carry (see countBuyFee). The round trip it opens enters with the whole
+   * portfolio's value before it: the portfolio the Trader read after it, its pair valued at its price, plus its fee, whatever the asset
+   * it was taken in, which the BUY took from the portfolio (see RoundTrip.entryEquity). Unknown (NaN) when the Trader had read no
    * portfolio yet: valued, its empty one made the entry equity the fee alone, 0.1 for a BUY of 1 BTC at 100, and its round trip, sold at
    * 110, +9,790 %.
    */
-  private registerBuy({ id, date, price, amount, fee }: Fill, portfolio: Portfolio): void {
+  private registerBuy({ id, date, price, amount, fee, feeAsset }: Fill, portfolio: Portfolio): void {
     const cost = multiplyPrecise(amount, price);
+    const countedFee = this.countBuyFee(id, fee, feeAsset);
     const roundTrip = this.openRoundTrip;
     if (!roundTrip) {
       const opened: OpenRoundTrip = {
@@ -260,7 +264,7 @@ export class RoundTripTracker {
         sold: 0,
         cost,
         proceeds: 0,
-        fees: fee,
+        fees: countedFee,
         exitPrice: 0,
         maxAdverseExcursion: 0,
         excursionDeepenings: [],
@@ -273,7 +277,20 @@ export class RoundTripTracker {
     roundTrip.entryPrice = addToMeanPrice(roundTrip.entryPrice, roundTrip.bought, price, amount);
     roundTrip.bought = addPrecise(roundTrip.bought, amount);
     roundTrip.cost = addPrecise(roundTrip.cost, cost);
-    roundTrip.fees = addPrecise(roundTrip.fees, fee);
+    roundTrip.fees = addPrecise(roundTrip.fees, countedFee);
+  }
+
+  /**
+   * What of the fee of a BUY counts in the fees of its round trip: the fee, in currency as the Trader reports it, unless the exchange took
+   * it in the asset of the pair, out of the amount bought, as Binance does unless the fees are paid in BNB. The SELLs then sell that much
+   * less, and the smaller proceeds carry it already: added here too, it counted twice, and the P&L was understated by it (see
+   * RoundTrip.fees). The entry equity counts it all the same, whatever the asset: the BUY took it from the portfolio.
+   */
+  private countBuyFee(id: UUID, fee: number, feeAsset: Asset | undefined): number {
+    if (feeAsset !== this.asset) return fee;
+    const taken = `its fee of ${formatEveryDecimal(fee)} ${this.currency} was taken in ${this.asset}, out of the amount bought`;
+    debug('roundtrip analyzer', `BUY order ${id}: ${taken}: left out of the fees, its SELLs selling that much less.`);
+    return 0;
   }
 
   /**

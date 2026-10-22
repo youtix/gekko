@@ -146,11 +146,12 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
 /**
  * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT) on one of the watched pairs: from the BUY that opened a position
  * on its pair while flat to the SELL that left it flat again, the BUYs and SELLs in between included. Its P&L comes from its own fills,
- * what its SELLs brought in less what its BUYs cost and the fees of all of them, so that an asset held before it, or the fills of
- * another pair, count in none of it; its profit is that P&L in % of the whole portfolio's value before it opened. One still open when
- * the warmup completed counts from the start of the period: its entry date, price and equity are then those of the start, and its cost
- * that of the position it held then, at the start price. Its profit is unknown, NaN, when the Trader had read no portfolio when its BUY
- * filled: the RoundTripAnalyzer leaves it out of the returns, not of the win rate, and the outputs write "unknown".
+ * what its SELLs brought in less what its BUYs cost and the fees of all of them (but a BUY fee taken in the asset bought, which the
+ * smaller amount sold carries: see fees), so that an asset held before it, or the fills of another pair, count in none of it; its
+ * profit is that P&L in % of the whole portfolio's value before it opened. One still open when the warmup completed counts from the
+ * start of the period: its entry date, price and equity are then those of the start, and its cost that of the position it held then,
+ * at the start price. Its profit is unknown, NaN, when the Trader had read no portfolio when its BUY filled: the RoundTripAnalyzer
+ * leaves it out of the returns, not of the win rate, and the outputs write "unknown".
  */
 export type RoundTrip = {
   /** Its number, counted from 0 in the order the round trips of the run close, every pair together */
@@ -164,11 +165,11 @@ export type RoundTrip = {
   /**
    * The whole portfolio's value in the currency before the BUY that opened it, the base of its profit: the portfolio the Trader read
    * after that BUY, the asset of its pair valued at the BUY's price and every other watched asset at its latest close, plus the BUY's
-   * fee (an unknown fee counting as 0), which the BUY took from the portfolio. Two fills whose reports share one synchronization of the
-   * Trader, as the BUYs of two pairs on one candle do in a backtest, carry the same portfolio, read after both: the entry equity of each
-   * then includes the other (its fee, and the gap between its price and the last close of its pair). NaN when that BUY's event carried
-   * the empty portfolio of a Trader that had read none yet. The start equity for one rebased at the start of the period (0 when none
-   * was taken by then).
+   * fee, whatever the asset it was taken in (an unknown fee counting as 0), which the BUY took from the portfolio. Two fills whose
+   * reports share one synchronization of the Trader, as the BUYs of two pairs on one candle do in a backtest, carry the same portfolio,
+   * read after both: the entry equity of each then includes the other (its fee, and the gap between its price and the last close of its
+   * pair). NaN when that BUY's event carried the empty portfolio of a Trader that had read none yet. The start equity for one rebased at
+   * the start of the period (0 when none was taken by then).
    */
   entryEquity: number;
   /** When the SELL that closed it filled */
@@ -183,11 +184,12 @@ export type RoundTrip = {
   /** What its SELLs brought in, in currency, fees left out: their amounts times their prices, added up in decimal */
   proceeds: number;
   /**
-   * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, an unknown one (that of the part a
-   * canceled order filled) counting as 0; those of the warmup left out for one rebased at the start of the period. The limit: a BUY fee
-   * that the exchange takes in the asset bought (Binance without BNB) is reported in currency all the same, while the SELL can only sell
-   * what the fee left: such a fee counts twice, here and through the smaller proceeds, and the P&L is understated by it (0.1 % of the
-   * BUY's cost at Binance's regular rate). The order events do not say which asset a fee was taken in.
+   * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, but the fee of a BUY that the exchange
+   * took in the asset of the pair, out of the amount bought (`feeAsset` on the order event: Binance does so unless the fees are paid in
+   * BNB): the SELLs sell that much less, and the smaller proceeds carry it already, so that added here too it counted twice, and the
+   * P&L was understated by it. An unknown fee counts as 0: that of the part a canceled order filled, and one the Trader does not
+   * convert, taken in a third asset (BNB), which it reports as 0 with its rate unknown, the P&L then overstated by it. Those of the
+   * warmup are left out for one rebased at the start of the period.
    */
   fees: number;
   /** exitAt less entryAt, in milliseconds */

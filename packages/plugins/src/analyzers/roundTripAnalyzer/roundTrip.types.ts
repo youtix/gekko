@@ -98,7 +98,10 @@ export type OpenRoundTrip = {
   cost: number;
   /** What its SELLs have brought in so far, in currency, in decimal: their amounts times their prices, fees left out */
   proceeds: number;
-  /** The fees of its BUYs and SELLs so far, in currency, in decimal, an unknown one counting as 0 (see RoundTrip.fees) */
+  /**
+   * The fees of its BUYs and SELLs so far, in currency, in decimal: an unknown one counts as 0, and a BUY fee taken in the asset of the
+   * pair is left out (see RoundTrip.fees)
+   */
   fees: number;
   /** Mean price of its SELLs so far, weighted by their amounts (0 before the first one) */
   exitPrice: number;
@@ -143,6 +146,11 @@ export type OrderFill = {
   amount: number;
   /** Its fee in currency: a completed order's, 0 when the exchange gives no fee rate; NaN for a canceled one, whose fee is unknown */
   fee: number;
+  /**
+   * The asset the exchange took its fee in, as the event of a completed order names it (see OrderCompletedEvent); undefined when the
+   * event names none, and for a canceled order
+   */
+  feeAsset?: Asset;
 };
 
 /** An order fill with a valid price and amount (see RoundTripTracker.registerRoundtripPart) */
@@ -153,6 +161,11 @@ export type Fill = {
   amount: number;
   /** Its fee in currency, 0 when unknown */
   fee: number;
+  /**
+   * The asset the fee was taken in, undefined when unknown: the fee of a BUY taken in the asset of the pair is left out of the fees of
+   * its round trip (see RoundTripTracker.countBuyFee)
+   */
+  feeAsset?: Asset;
 };
 
 export type DateRange = {
