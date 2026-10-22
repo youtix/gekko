@@ -5,6 +5,7 @@ import type { OrderSide, OrderState } from '@models/order.types';
 import type { BalanceDetail } from '@models/portfolio.types';
 import type { Asset, TradingPair } from '@models/utility.types';
 import type { DummyCentralizedExchange } from '@services/exchange/dummy/dummyCentralizedExchange';
+import type { MarketData } from '@services/exchange/exchange.types';
 import type { SQLiteStorage } from '@services/storage/sqlite.storage';
 import { mock } from 'bun:test';
 import { mapValues, range } from 'lodash-es';
@@ -222,7 +223,8 @@ type Fee = { maker: number; taker: number };
 /**
  * The market of a pair as dummy-cex takes it: prices to the cent, amounts to the millionth, and Binance's regular fee of 0.1 %. No
  * minimum cost unless `costMin` sets one, which the simulated exchange refuses an order below, nor minimum amount unless `amountMin` sets
- * one; `amountDecimals` sets another amount step, which the simulated exchange truncates an amount to.
+ * one; `amountDecimals` sets another amount step, which the simulated exchange truncates an amount to. No range of a market order either
+ * unless `market` gives one, Binance's MARKET_LOT_SIZE, which narrows the amount range for a MARKET order (see getMarketOrderLimits).
  */
 export const rawMarket = (
   symbol: TradingPair,
@@ -233,13 +235,23 @@ export const rawMarket = (
     priceMin = 0,
     costMin = 0,
     fee = { maker: 0.001, taker: 0.001 },
-  }: { amountMax?: number; amountMin?: number; amountDecimals?: number; priceMin?: number; costMin?: number; fee?: Fee } = {},
+    market,
+  }: {
+    amountMax?: number;
+    amountMin?: number;
+    amountDecimals?: number;
+    priceMin?: number;
+    costMin?: number;
+    fee?: Fee;
+    market?: MarketData['market'];
+  } = {},
 ) => ({
   symbol,
   marketData: {
     price: { min: priceMin, max: 1000000 },
     amount: { min: amountMin, max: amountMax },
     cost: { min: costMin, max: 1000000 },
+    ...(market && { market }),
     precision: { price: 2, amount: amountDecimals },
     fee,
   },

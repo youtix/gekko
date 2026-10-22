@@ -1,5 +1,6 @@
 import type { Candle } from '@models/candle.types';
 import type { TradingPair } from '@models/utility.types';
+import type { MarketData } from '@services/exchange/exchange.types';
 import type { DebugBacktestParams } from '@strategies/debug/debugBacktest.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { range } from 'lodash-es';
@@ -25,13 +26,15 @@ type Asset = 'BTC' | 'ETH';
 
 /**
  * What a scenario sizes: the balances it starts from, the most of an asset one order takes and the fees of its market (1000 and Binance's
- * 0.1 % unless given), the least an order costs and the least amount it holds on every market, the decimals of their amounts (6 unless
- * given), the last minute read (00:08 unless given), and the orders: the calendar of DebugBacktest with the sizing of its orders, the
- * same on every pair, or the steps of OrderSteps, each order of its own pair, candle and sizing
+ * 0.1 % unless given), the amounts one MARKET order of it takes (Binance's MARKET_LOT_SIZE, no range unless given), the least an order
+ * costs and the least amount it holds on every market, the decimals of their amounts (6 unless given), the last minute read (00:08 unless
+ * given), and the orders: the calendar of DebugBacktest with the sizing of its orders, the same on every pair, or the steps of OrderSteps,
+ * each order of its own pair, candle and sizing
  */
 type Sizing = {
   balances: { BTC: number; ETH?: number; USDT: number };
   amountMax?: Partial<Record<Asset, number>>;
+  market?: Partial<Record<Asset, MarketData['market']>>;
   fees?: Partial<Record<Asset, { maker: number; taker: number }>>;
   costMin?: number;
   amountMin?: number;
@@ -44,10 +47,17 @@ const ORDER_STEPS_PATH = fileURLToPath(new URL('./orderSteps.strategy.ts', impor
 
 /** A backtest of the minutes from 00:00 on 1m candles, of BTC alone or of BTC then ETH when the scenario holds an ETH balance */
 const backtestOf = (sizing: Sizing): RawConfiguration => {
-  const { balances, amountMax = {}, fees = {}, costMin, amountMin, amountDecimals, lastMinute = 8 } = sizing;
+  const { balances, amountMax = {}, market = {}, fees = {}, costMin, amountMin, amountDecimals, lastMinute = 8 } = sizing;
   const assets = Object.keys(balances).filter(asset => asset !== 'USDT') as Asset[];
   const marketOf = (asset: Asset) =>
-    rawMarket(`${asset}/USDT`, { amountMax: amountMax[asset], fee: fees[asset], costMin, amountMin, amountDecimals });
+    rawMarket(`${asset}/USDT`, {
+      amountMax: amountMax[asset],
+      market: market[asset],
+      fee: fees[asset],
+      costMin,
+      amountMin,
+      amountDecimals,
+    });
   // The strategy that places the orders: OrderSteps, loaded from its file, on its steps, or DebugBacktest on its calendar
   const { advisor, strategy } =
     'steps' in sizing
@@ -547,6 +557,46 @@ describe('E2E: Backtest order sizing', () => {
         unreservedRead(minute(2), { BTC: 19, ETH: 20, USDT: 69770 }),
         // Nothing filled: the 30 ETH would have cost 60060
         unreservedRead(minute(4), { BTC: 19, ETH: 20, USDT: 69770 }),
+      ],
+    });
+  });
+
+  it('caps an all-in BUY at the most a MARKET order takes, below the maximum of any order, and warns of a SELL under the least it takes, which the market refuses', async () => {
+    // BTC's market takes up to 1000 BTC in one order, without a minimum, and from 0.001 to 5 BTC in a MARKET order: Binance's
+    // MARKET_LOT_SIZE, which paper trading carries from the real market
+    const { failure, orderCalls, balanceReads } = await runBacktest(
+      backtestOf({
+        balances: { BTC: 0, USDT: 300000 },
+        market: { BTC: { min: 0.001, max: 5 } },
+        steps: [
+          { candle: 1, symbol: 'BTC/USDT', side: 'BUY', type: 'MARKET' },
+          { candle: 3, symbol: 'BTC/USDT', side: 'SELL', type: 'MARKET', cost: 6 },
+        ],
+      }),
+      { 'BTC/USDT': CANDLES['BTC/USDT'] },
+    );
+
+    // The Trader and the simulator both hold a MARKET order to that range (see getMarketOrderLimits): the all-in BUY of 00:01 is capped at
+    // the 5 BTC a MARKET order takes at most, then filled for them, and the SELL of 6 USDT of 00:03, 0.0006 BTC, which the amount range
+    // lets through, is under the 0.001 BTC a MARKET order takes at least: warned of, then refused.
+    expect({ failure, warnings: traderWarnings(), orderCalls, balanceReads: balanceReads.slice(3) }).toEqual({
+      failure: undefined,
+      warnings: [
+        // 300000 × 0.95 / 10000
+        '[order 1] All-in BUY MARKET order sized from 300000 USDT: 28.5 BTC, above the maximum amount of a MARKET order on BTC/USDT: 5 BTC sent, the rest of the USDT left unspent',
+        // 6 / 10000
+        '[order 2] SELL MARKET order of 0.0006 BTC (6 USDT at 10000): 0.0006 BTC at 10000 sent, below the minimum amount of 0.001 BTC of a MARKET order on BTC/USDT, which the market refuses',
+      ],
+      orderCalls: [
+        filledMarketOrder(minute(2), 'BTC/USDT', 'BUY', 5, 1),
+        // Refused for the range of a MARKET order, which the refusal names: 0.001 to 5 BTC, where any order takes up to 1000 BTC
+        refusedMarketOrder(minute(4), 'BTC/USDT', 'SELL', 0.0006, outOfRange('amount', 0.0006, [0.001, 5])),
+      ],
+      balanceReads: [
+        // 5 × 10000 × 1.001 = 50050 spent, the rest of the 300000 USDT left for a later order
+        unreservedRead(minute(2), { BTC: 5, USDT: 249950 }),
+        // Nothing filled: the synchronization after the refusal reads the balances the BUY left
+        unreservedRead(minute(4), { BTC: 5, USDT: 249950 }),
       ],
     });
   });
