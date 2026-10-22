@@ -12,6 +12,7 @@ import {
   toSignificantDigits,
 } from '@gekko/shared/utils/math/math.utils';
 import { countDecimals, round } from '@gekko/shared/utils/math/round.utils';
+import { pluralize } from '@gekko/shared/utils/string/string.utils';
 import { getAssetBalance } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { minBy } from 'lodash-es';
 import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION } from './gridBot.const';
@@ -583,11 +584,18 @@ export const resolveSpacing = (
     };
   }
 
-  const breakEven = `the minimum step at which every level of the grid breaks even on the maker fee of ${fee} (fee.maker)`;
+  // Where the context works out no step, the minimum is one tick (see getMinimumStepIn): without a fee every step breaks even, and where
+  // none does, from 501 sell levels at 0.1 % or at a fee of 1 or more, the line says so. Chosen by the fee alone, it called that tick the
+  // minimum step at which every level breaks even, right before checkRoundTripFee warned that every level loses money. A center price
+  // that is not a number above 0 works out no step either, and makes no grid (see validateConfig).
+  const makerFee = `the maker fee of ${fee} (fee.maker)`;
+  const spacedByOneTick = `under the price tick: the grid is spaced by one tick, ${tick}, instead`;
+  const levels = `${sellLevels} sell ${pluralize('level', sellLevels)}`;
+  const noneBreaksEven = fee > 0 && isFinitePositive(centerPrice) ? `; no step breaks even on ${makerFee} with ${levels}` : '';
   const under =
-    fee > 0
-      ? `under ${minimumStep}, ${breakEven}: the grid is spaced by ${minimumStep} instead`
-      : `under the price tick: the grid is spaced by one tick, ${tick}, instead`;
+    context.breakEven !== null
+      ? `under ${minimumStep}, the minimum step at which every level of the grid breaks even on ${makerFee}: the grid is spaced by ${minimumStep} instead`
+      : `${spacedByOneTick}${noneBreaksEven}`;
   return {
     spacing: {
       spacingType: 'fixed',

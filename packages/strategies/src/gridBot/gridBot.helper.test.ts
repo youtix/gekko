@@ -900,6 +900,19 @@ describe('gridBot.helper', () => {
       expect(resolveSpacing(atrSpacedBy(1.5), 60000, marketData, atr)).toStrictEqual(expected);
     });
 
+    // Where no step breaks even, the minimum is one tick too (see getMinimumStep): the warning, chosen by the fee alone, called that tick
+    // the minimum step at which every level breaks even, right before checkRoundTripFee warned that every level loses money
+    const noStepBreaksEven = (fee: number, levels: string) =>
+      `${underTheTick}; no step breaks even on the maker fee of ${fee} (fee.maker) with ${levels}`;
+    it.each`
+      center   | sellLevels | marketData                                           | description                                   | instead
+      ${60000} | ${501}     | ${tenthPercentFeeMarketData}                         | ${'501 sell levels at 0.1 %, 500 × r over 1'} | ${noStepBreaksEven(0.001, '501 sell levels')}
+      ${60000} | ${1}       | ${{ precision: { price: 0.01 }, fee: { maker: 1 } }} | ${'a sell level at a maker fee of 1'}         | ${noStepBreaksEven(1, '1 sell level')}
+      ${0}     | ${5}       | ${tenthPercentFeeMarketData}                         | ${'a center price of 0, which makes no grid'} | ${underTheTick}
+    `('raises a step rounded to 0 to one tick, saying why, for $description', ({ center, sellLevels, marketData, instead }) => {
+      expect(resolveSpacing(atrSpacedBy(1.5, sellLevels), center, marketData, 0.002)).toStrictEqual(raised(0.002, 0, 0.01, instead));
+    });
+
     // Its break-even exactly (see getMinimumStep): raised to 3.31, with a warning that named 3.31 the minimum step at which every level
     // breaks even, while 3.3 did
     it('keeps a step of 3.3 for a sell level around 4123.35 at 0.04 %, its break-even exactly, without a warning', () => {
