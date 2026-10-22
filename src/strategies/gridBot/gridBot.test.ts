@@ -21,6 +21,10 @@ const defaultParams: GridBotStrategyParams = {
   spacingType: 'fixed',
   spacingValue: 5,
   retryOnError: 3,
+  atrPeriod: 14,
+  resetMode: 'none',
+  resetConfirmCandles: 1,
+  resetCooldownCandles: 0,
 };
 
 const marketDataMock: MarketData = {

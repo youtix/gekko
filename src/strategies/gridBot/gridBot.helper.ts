@@ -3,12 +3,22 @@ import { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { MarketData } from '@services/exchange/exchange.types';
 import { checkOrderPrice, toBound } from '@helpers/market/market.helper';
 import { getPriceSignificantDigits, getPriceTick, roundToStep } from '@helpers/market/precision.helper';
-import { addPrecise, isFinitePositive, multiplyPrecise } from '@utils/math/math.utils';
+import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise, toSignificantDigits } from '@utils/math/math.utils';
 import { countDecimals, round } from '@utils/math/round.utils';
 import { getAssetBalance } from '@helpers/portfolio/portfolio.helper';
 import { minBy } from 'lodash-es';
 import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION } from './gridBot.const';
-import { GridBotStrategyParams, GridBounds, GridSize, GridSpacingType, OutOfRangeSide, RebalancePlan } from './gridBot.types';
+import {
+  GridBotStrategyParams,
+  GridBounds,
+  GridLayout,
+  GridResetMode,
+  GridSize,
+  GridSpacing,
+  GridSpacingType,
+  OutOfRangeSide,
+  RebalancePlan,
+} from './gridBot.types';
 
 /** The balances of the traded asset and of its currency, a balance of 0 for either the portfolio lacks (see getAssetBalance) */
 export const getPortfolioContent = (
@@ -201,7 +211,7 @@ export const computeLevelPrice = (
  */
 export const computeGridPrices = (
   centerPrice: number,
-  params: Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels' | 'spacingType' | 'spacingValue'>,
+  params: GridLayout,
   priceDecimals: number,
   priceStep?: number,
   priceSignificantDigits?: number,
@@ -256,12 +266,23 @@ export const getOutOfRangeSide = (
   return null;
 };
 
+/** Whether `resetMode` arms a reset of the grid on `side`: 'both' on either, 'up' above the grid, 'down' below it, 'none' never */
+export const isResetSide = (resetMode: GridResetMode, side: OutOfRangeSide): boolean =>
+  resetMode === 'both' || (resetMode === 'up' && side === 'above') || (resetMode === 'down' && side === 'below');
+
+/**
+ * How a message names a spacing: `spacingValue 1 (percent)`, the parameters as the configuration gives them, or the description the
+ * spacing carries, an atr step naming the step and what it was resolved from (see resolveSpacing)
+ */
+export const describeSpacing = ({ spacingType, spacingValue, description }: GridSpacing): string =>
+  description ?? `spacingValue ${spacingValue} (${spacingType})`;
+
 /**
  * Validate grid configuration against the center price, its lowest BUY included (see checkLowestBuyPrice), the exchange limits and
  * the price tick. The parameters themselves were checked by the schema (gridBot.schema.ts) before the strategy was created.
  * Returns an error message if invalid, null if valid.
  */
-export const validateConfig = (params: GridBotStrategyParams, centerPrice: number, marketData: MarketData): string | null => {
+export const validateConfig = (params: GridLayout, centerPrice: number, marketData: MarketData): string | null => {
   if (centerPrice <= 0) return 'Center price must be positive';
 
   const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
@@ -291,7 +312,7 @@ export const validateConfig = (params: GridBotStrategyParams, centerPrice: numbe
  * Returns an error message when the lowest BUY is at or below 0, null otherwise.
  */
 export const checkLowestBuyPrice = (
-  params: Pick<GridBotStrategyParams, 'buyLevels' | 'spacingType' | 'spacingValue'>,
+  params: Omit<GridLayout, 'sellLevels'>,
   centerPrice: number,
   priceDecimals: number,
   priceStep?: number,
@@ -309,7 +330,7 @@ export const checkLowestBuyPrice = (
     priceSignificantDigits,
   );
   if (lowestBuyPrice > 0) return null;
-  return `Grid configuration would result in non-positive buy prices: the lowest of buyLevels ${buyLevels}, spaced by spacingValue ${spacingValue} (${spacingType}) below the center price ${centerPrice}, would be at ${lowestBuyPrice}`;
+  return `Grid configuration would result in non-positive buy prices: the lowest of buyLevels ${buyLevels}, spaced by ${describeSpacing(params)} below the center price ${centerPrice}, would be at ${lowestBuyPrice}`;
 };
 
 /**
@@ -321,7 +342,7 @@ export const checkLowestBuyPrice = (
  * Returns an error message when two adjacent prices of the grid round to the same tick, null otherwise.
  */
 export const checkPriceTick = (
-  params: Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels' | 'spacingType' | 'spacingValue'>,
+  params: GridLayout,
   centerPrice: number,
   priceDecimals: number,
   priceStep?: number,
@@ -331,7 +352,7 @@ export const checkPriceTick = (
   const collision = prices.findIndex((price, i) => i > 0 && price <= prices[i - 1]);
   if (collision <= 0) return null;
 
-  const spaced = `spaced by spacingValue ${params.spacingValue} (${params.spacingType}) around the center price ${centerPrice}`;
+  const spaced = `spaced by ${describeSpacing(params)} around the center price ${centerPrice}`;
   const step = priceStep ?? getDecimalStep(priceDecimals);
   const tick = getPriceTick(prices[collision], { price: step, priceSignificantDigits }) ?? step;
   const rule = `the market taking ${priceSignificantDigits} significant digits in a price (precision.priceSignificantDigits)`;
@@ -352,7 +373,7 @@ const toPercent = (ratio: number): string => `${Number((ratio * 100).toPrecision
  * checkPriceTick): it is warned of, not refused.
  * Returns a warning message when a level of the grid the parameters configure loses money at each round trip, null otherwise.
  */
-export const checkRoundTripFee = (params: GridBotStrategyParams, centerPrice: number, marketData: MarketData): string | null => {
+export const checkRoundTripFee = (params: GridLayout, centerPrice: number, marketData: MarketData): string | null => {
   const fee = getMakerFee(marketData);
   const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
   const prices = computeGridPrices(centerPrice, params, priceDecimals, priceStep, priceSignificantDigits);
@@ -368,7 +389,81 @@ export const checkRoundTripFee = (params: GridBotStrategyParams, centerPrice: nu
   const paying = `paying the maker fee of ${fee} (fee.maker) on its BUY and on its SELL`;
   const count = `${losing.length} out of ${levels.length} here`;
   const example = `the narrowest selling at ${sellPrice}, ${toPercent(sellPrice / buyPrice - 1)} above its buy at ${buyPrice}`;
-  return `spacingValue ${params.spacingValue} (${params.spacingType}) is under the round-trip fee: ${levelsUnder}, ${paying}, loses money at each round trip, ${count}, ${example}`;
+  return `${describeSpacing(params)} is under the round-trip fee: ${levelsUnder}, ${paying}, loses money at each round trip, ${count}, ${example}`;
+};
+
+/**
+ * The tick of the market at `centerPrice` (see getPriceTick): precision.price, or one unit of the DEFAULT_PRICE_PRECISION-th decimal
+ * on a market that states none (see inferPricePrecision)
+ */
+const getTickAt = (centerPrice: number, marketData: MarketData): number => {
+  const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
+  const step = priceStep ?? getDecimalStep(priceDecimals);
+  return getPriceTick(centerPrice, { price: step, priceSignificantDigits }) ?? step;
+};
+
+/**
+ * The smallest fixed step at which every level of a grid of `sellLevels` sell levels around `centerPrice` breaks even on the maker fee
+ * (see getMakerFee): a level loses money when it sells less than r = 2 × fee / (1 − fee) above its buy (see checkRoundTripFee), and at a
+ * fixed step the highest level, whose buy price is the largest, earns the least for it. That level buys at centerPrice + (sellLevels − 1)
+ * × step, or at centerPrice − step without a sell level, so step ≥ centerPrice × r / (1 − (sellLevels − 1) × r), or centerPrice × r /
+ * (1 + r): 121.09 for 5 sell levels at 60000 on a maker fee of 0.1 % and a tick of 0.01, 119.89 without a sell level. Rounded up to the
+ * tick of the market at the center price, and one tick at least, the step of a market without a fee: a step under a tick rounds two
+ * adjacent prices to one (see checkPriceTick). One tick too for a grid of so many sell levels that no step breaks even ((sellLevels − 1)
+ * × r at 1 or more, 500 levels at 0.1 %), which checkRoundTripFee warns of as for any grid. An atr spacing is raised to it (see
+ * resolveSpacing).
+ */
+export const getMinimumStep = (centerPrice: number, sellLevels: number, marketData: MarketData): number => {
+  const tick = getTickAt(centerPrice, marketData);
+  const fee = getMakerFee(marketData);
+  const ratio = (2 * fee) / (1 - fee);
+  const divisor = sellLevels > 0 ? 1 - (sellLevels - 1) * ratio : 1 + ratio;
+  const breakEven = isFinitePositive(centerPrice) && Number.isFinite(ratio) && divisor > 0 ? (centerPrice * ratio) / divisor : 0;
+  // Rounded up as -(the negated value rounded down): roundToStep has no ceiling (see getMinimumAmount)
+  const roundedUp = -roundToStep(-toSignificantDigits(breakEven), tick, 'down');
+  return Math.max(tick, roundedUp);
+};
+
+/**
+ * The spacing the grid is built with around `centerPrice` (see GridSpacing): the configured one as it is, or for atr spacing the fixed
+ * step of spacingValue × `atr`, the ATR of the pair on the candle the grid is built around, rounded to the tick of the market at the
+ * center price (the nearest, a tie upwards, as the prices are: see roundPrice), and raised to the minimum step when it is under it (see
+ * getMinimumStep), the warning saying so: a lull in the volatility, at a reset above all, would otherwise space the grid under the fee,
+ * or under the tick, and stop the run where the grid is checked. An `atr` that is not a finite number counts as 0. The description
+ * names the step and what it was resolved from, for the messages of the checks (see describeSpacing).
+ */
+export const resolveSpacing = (
+  params: Pick<GridBotStrategyParams, 'sellLevels' | 'spacingType' | 'spacingValue'>,
+  centerPrice: number,
+  marketData: MarketData,
+  atr?: number | null,
+): { spacing: GridSpacing; warning?: string } => {
+  const { sellLevels, spacingType, spacingValue } = params;
+  if (spacingType !== 'atr') return { spacing: { spacingType, spacingValue } };
+
+  const tick = getTickAt(centerPrice, marketData);
+  const atrValue = isFiniteNumber(atr) ? atr : 0;
+  const atrStep = roundToStep(toSignificantDigits(spacingValue * atrValue), tick, 'up');
+  const origin = `spacingValue ${spacingValue} × ATR ${Number(atrValue.toPrecision(6))}`;
+  const minimumStep = getMinimumStep(centerPrice, sellLevels, marketData);
+  if (atrStep >= minimumStep) {
+    return { spacing: { spacingType: 'fixed', spacingValue: atrStep, description: `a step of ${atrStep} (${origin}, atr)` } };
+  }
+
+  const fee = getMakerFee(marketData);
+  const breakEven = `the minimum step at which every level of the grid breaks even on the maker fee of ${fee} (fee.maker)`;
+  const under =
+    fee > 0
+      ? `under ${minimumStep}, ${breakEven}: the grid is spaced by ${minimumStep} instead`
+      : `under the price tick: the grid is spaced by one tick, ${tick}, instead`;
+  return {
+    spacing: {
+      spacingType: 'fixed',
+      spacingValue: minimumStep,
+      description: `a step of ${minimumStep} (the minimum step, ${origin} giving ${atrStep}, atr)`,
+    },
+    warning: `ATR spacing: ${origin} is a step of ${atrStep} on the price tick ${tick}, ${under}`,
+  };
 };
 
 /**
@@ -397,11 +492,7 @@ const getBuyPriceSums = (
  * The grid the free balances fund is sized on these (see deriveLevelQuantity), and the rebalance aims at them (see
  * computeRebalancePlan).
  */
-export const getGridFunding = (
-  centerPrice: number,
-  params: Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels' | 'spacingType' | 'spacingValue'>,
-  marketData: MarketData,
-): { asset: number; currency: number } => {
+export const getGridFunding = (centerPrice: number, params: GridLayout, marketData: MarketData): { asset: number; currency: number } => {
   const { buyLevels, sellLevels, spacingType, spacingValue } = params;
   const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
   const priceAt = (steps: number) =>
@@ -444,7 +535,7 @@ export const computeRebalancePlan = (
   centerPrice: number,
   assetFree: number,
   currencyFree: number,
-  params: Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels' | 'spacingType' | 'spacingValue'>,
+  params: GridLayout,
   marketData: MarketData,
 ): RebalancePlan | null => {
   if (centerPrice <= 0) return null;

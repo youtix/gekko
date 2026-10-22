@@ -6,8 +6,28 @@ import type { gridBotStrategySchema } from './gridBot.schema';
 /** Strategy configuration parameters: the output of GridBot.schema, retryOnError defaulted */
 export type GridBotStrategyParams = z.infer<typeof gridBotStrategySchema>;
 
-/** Spacing type options for grid level distribution */
-export type GridSpacingType = GridBotStrategyParams['spacingType'];
+/** The spacing types the configuration offers, atr included (see gridBotStrategySchema) */
+export type GridSpacingOption = GridBotStrategyParams['spacingType'];
+
+/**
+ * The spacing a grid is built with: the configured one as it is, or the fixed step an atr spacing resolves to around the center price
+ * (see resolveSpacing), which the helpers compute the prices of the grid from. None of them ever sees 'atr'.
+ */
+export interface GridSpacing {
+  spacingType: 'percent' | 'fixed' | 'logarithmic';
+  spacingValue: number;
+  /** How a message names the spacing (see describeSpacing): `spacingValue 1 (percent)` when left out, an atr step's origin otherwise */
+  description?: string;
+}
+
+/** The spacing types a grid is built with (see GridSpacing) */
+export type GridSpacingType = GridSpacing['spacingType'];
+
+/** The levels and the spacing a grid is built with: the strategy parameters, their spacing resolved (see GridSpacing) */
+export type GridLayout = Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels'> & GridSpacing;
+
+/** When the grid is reset around a price out of its range: never, above it, below it or either way (see gridBotStrategySchema) */
+export type GridResetMode = GridBotStrategyParams['resetMode'];
 
 /**
  * State of a single grid level: two adjacent prices of the grid, between which the level trades its quantity back and forth with

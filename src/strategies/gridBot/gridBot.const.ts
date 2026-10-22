@@ -9,3 +9,15 @@ export const DEFAULT_AMOUNT_PRECISION = 8;
  * warns of it when the grid starts
  */
 export const DEFAULT_PRICE_PRECISION = 8;
+
+/** Default atrPeriod: the period of the ATR an atr spacing reads, in timeframe candles, the indicator's own default */
+export const DEFAULT_ATR_PERIOD = 14;
+
+/** Default resetMode: the grid stays in place when the price leaves its range */
+export const DEFAULT_RESET_MODE = 'none';
+
+/** Default resetConfirmCandles: one timeframe candle closing out of the grid on a side resetMode arms resets it */
+export const DEFAULT_RESET_CONFIRM_CANDLES = 1;
+
+/** Default resetCooldownCandles: a reset can follow the one before it at once */
+export const DEFAULT_RESET_COOLDOWN_CANDLES = 0;

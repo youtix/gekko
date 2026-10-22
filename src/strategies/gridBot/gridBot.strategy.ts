@@ -6,6 +6,7 @@ import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import { TradingPair } from '@models/utility.types';
 import type { MarketData, OpenOrder } from '@services/exchange/exchange.types';
 import {
+  IndicatorResults,
   InitParams,
   OnCandleEventParams,
   OnOrderCanceledEventParams,
@@ -15,10 +16,19 @@ import {
   Tools,
 } from '@strategies/strategy.types';
 import { addPrecise, isFiniteNumber } from '@utils/math/math.utils';
+import { pluralize } from '@utils/string/string.utils';
 import type { UUID } from 'node:crypto';
 import { DEFAULT_RETRY_LIMIT } from './gridBot.const';
 import { gridBotStrategySchema } from './gridBot.schema';
-import type { GridBotStrategyParams, GridBounds, LevelState, OutOfRangeSide, RebalancePlan } from './gridBot.types';
+import type {
+  GridBotStrategyParams,
+  GridBounds,
+  GridLayout,
+  GridSpacing,
+  LevelState,
+  OutOfRangeSide,
+  RebalancePlan,
+} from './gridBot.types';
 import {
   checkLowestBuyPrice,
   checkPriceTick,
@@ -34,6 +44,7 @@ import {
   getRebalanceOrderPrice,
   hasOnlyOneSide,
   inferPricePrecision,
+  resolveSpacing,
   roundPrice,
   validateConfig,
 } from './gridBot.helper';
@@ -51,6 +62,10 @@ import {
  * - Spacing between adjacent prices is configurable: fixed (in price units), percent (of the center price, the same between any two
  *   adjacent prices, as fixed spacing) or logarithmic (a ratio between adjacent prices). One under the round-trip fee, two maker fees,
  *   is warned of once
+ * - With atr spacing, the step is spacingValue × the ATR of atrPeriod timeframe candles on the candle the grid is built around, a fixed
+ *   step from then on: rounded to the tick, and raised to the smallest step at which every level breaks even on the maker fee, one tick
+ *   at least, with a warning (see resolveSpacing). The run stops on the first candle after the warmup when the ATR has no value yet:
+ *   warmup.candleCount must be at least atrPeriod + 1
  * - A grid whose lowest BUY would be at or below 0, or whose spacing rounds two adjacent prices to the same tick, stops the run: around
  *   the close it starts on, and again around the price a rebalance ended at, before it is placed again and when the grid is built
  * - Prices are rounded to the tick of the market (precision.price) as they are written, in decimal, a tie upwards, or to the tick at the
@@ -94,6 +109,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private reentryPrices?: Record<OutOfRangeSide, number>;
   /** Quantity per level */
   private quantity = 0;
+  /** The spacing the grid is built with, resolved when it starts (see resolveSpacing): undefined until then */
+  private spacing?: GridSpacing;
+  /** With atr spacing, the ATR of the last timeframe candle: null until the indicator has its period, and without atr spacing */
+  private atr: number | null = null;
   /** Retry limit for order operations */
   private retryLimit = DEFAULT_RETRY_LIMIT;
   /** Failed attempts per level index, refusals and cancels, counted until the level fills */
@@ -124,7 +143,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    * Reads the pair and the parameters, and refuses to start while orders are open on the pair (see refuseOpenOrders): the grid is
    * started by the first candle after the warmup
    */
-  init({ candle, tools, openOrders }: InitParams<GridBotStrategyParams>): void {
+  init({ candle, tools, openOrders, addIndicator }: InitParams<GridBotStrategyParams>): void {
     // The first pair watched: the others used to be ignored without a word, while their candles are still required every minute
     this.pair = pickTradedPair(candle, tools);
     const [base, quote] = this.pair.split('/');
@@ -132,6 +151,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.quote = quote;
     this.reset();
     this.retryLimit = tools.strategyParams.retryOnError;
+    // The step of an atr grid is resolved from the ATR of the pair when the grid is built, and again at each reset
+    if (tools.strategyParams.spacingType === 'atr') addIndicator('ATR', this.pair, { period: tools.strategyParams.atrPeriod });
 
     // The grid lives in memory only. Restarted against an exchange that kept the grid of its previous run, GridBot built a second grid
     // beside it, whose fills never reached it, or, the old grid holding the funds, stopped for an insufficient portfolio, again at
@@ -140,7 +161,13 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     if (open.length) this.refuseOpenOrders(open, tools);
   }
 
-  onEachTimeframeCandle({ candle, tools }: OnCandleEventParams<GridBotStrategyParams>): void {
+  onEachTimeframeCandle({ candle, tools }: OnCandleEventParams<GridBotStrategyParams>, ...indicators: IndicatorResults[]): void {
+    // The ATR of the last candle, read on every candle, the warmup included: a grid built or rebuilt between two candles takes it from
+    // the candle before
+    if (tools.strategyParams.spacingType === 'atr') {
+      const results = indicators[0]?.results;
+      this.atr = isFiniteNumber(results) ? results : null;
+    }
     if (!this.gridBounds || !this.reentryPrices || this.awaitingRebalance) return;
     const close = candle.get(this.pair)!.close;
 
@@ -186,11 +213,22 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
     const centerPrice = roundPrice(close, priceDecimals, priceStep, priceSignificantDigits);
 
-    const validationError = validateConfig(tools.strategyParams, centerPrice, marketData);
+    // An atr grid needs the ATR, which has its first value on its atrPeriod + 1-th candle: started before that candle, the grid would
+    // wait for it in silence, up to atrPeriod candles, two weeks on 1d. Refused instead, naming the warmup that gives it
+    const { spacingType, atrPeriod } = tools.strategyParams;
+    if (spacingType === 'atr' && this.atr === null) {
+      const needed = `with atrPeriod ${atrPeriod} it needs ${atrPeriod + 1} timeframe ${pluralize('candle', atrPeriod + 1)}`;
+      const warmup = `so set watch.warmup.candleCount to ${atrPeriod + 1} or more`;
+      this.stopRun(`The ATR has no value yet on the first candle after the warmup: ${needed}, ${warmup}`, tools);
+    }
+    this.resolveSpacing(centerPrice, marketData, tools);
+    const layout = this.getLayout(tools);
+
+    const validationError = validateConfig(layout, centerPrice, marketData);
     if (validationError) this.stopRun(validationError, tools);
     // A spacing under the round-trip fee makes a grid that loses money at each round trip of a level: a bad grid, not an impossible
     // one, placed all the same, after one warning
-    const feeWarning = checkRoundTripFee(tools.strategyParams, centerPrice, marketData);
+    const feeWarning = checkRoundTripFee(layout, centerPrice, marketData);
     if (feeWarning) tools.log('warn', `GridBot: ${feeWarning}`);
 
     // Always attempt rebalancing first
@@ -291,6 +329,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.gridBounds = undefined;
     this.reentryPrices = undefined;
     this.quantity = 0;
+    this.spacing = undefined;
+    this.atr = null;
     this.retryCount.clear();
     this.untrackedOrders = [];
     this.orderToLevel.clear();
@@ -298,6 +338,22 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.pendingRebalance = undefined;
     this.rebalanceOrderId = undefined;
     this.rebalanceRetryCount = 0;
+  }
+
+  /** The levels and the spacing the grid is built with (see GridLayout): the parameters, their spacing resolved (see resolveSpacing) */
+  private getLayout({ strategyParams }: Tools<GridBotStrategyParams>): GridLayout {
+    const { buyLevels, sellLevels } = strategyParams;
+    return { buyLevels, sellLevels, ...this.spacing! };
+  }
+
+  /**
+   * Resolves the spacing the grid is built with around the center price (see resolveSpacing), once when it starts: an atr step raised
+   * to the minimum step is warned of
+   */
+  private resolveSpacing(centerPrice: number, marketData: MarketData, tools: Tools<GridBotStrategyParams>): void {
+    const { spacing, warning } = resolveSpacing(tools.strategyParams, centerPrice, marketData, this.atr);
+    if (warning) tools.log('warn', `GridBot: ${warning}`);
+    this.spacing = spacing;
   }
 
   /**
@@ -330,10 +386,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     tools: Tools<GridBotStrategyParams>,
     failure?: string,
   ): void {
-    const { strategyParams } = tools;
+    const layout = this.getLayout(tools);
     const { priceDecimals, priceStep, priceSignificantDigits } = this;
     const marketData = tools.marketData.get(this.pair)!;
-    const plan = computeRebalancePlan(centerPrice, asset.free, currency.free, strategyParams, marketData);
+    const plan = computeRebalancePlan(centerPrice, asset.free, currency.free, layout, marketData);
     const leftOut = plan ? this.getRebalanceLeftOut(plan, asset, currency, marketData) : undefined;
     const isPlaced = plan && !leftOut;
 
@@ -344,8 +400,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // start: the lowest BUY, then the prices of the grid the rebalance pays for against the tick. A grid built without a rebalance is
     // checked on the levels it builds (see buildGrid).
     const gridError =
-      checkLowestBuyPrice(strategyParams, centerPrice, priceDecimals, priceStep, priceSignificantDigits) ??
-      (isPlaced ? checkPriceTick(strategyParams, centerPrice, priceDecimals, priceStep, priceSignificantDigits) : null);
+      checkLowestBuyPrice(layout, centerPrice, priceDecimals, priceStep, priceSignificantDigits) ??
+      (isPlaced ? checkPriceTick(layout, centerPrice, priceDecimals, priceStep, priceSignificantDigits) : null);
     if (gridError) {
       if (failure)
         tools.log('warn', `GridBot: ${failure}. Not placed again: the grid is refused around ${centerPrice}, the price it ended at`);
@@ -459,14 +515,15 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
   /** Build the grid around the center price */
   private buildGrid(centerPrice: number, assetFree: number, currencyFree: number, tools: Tools<GridBotStrategyParams>): void {
-    const { buyLevels, sellLevels, spacingType, spacingValue } = tools.strategyParams;
+    const { buyLevels, sellLevels } = tools.strategyParams;
+    const { spacingType, spacingValue } = this.spacing!;
     const { priceDecimals, priceStep, priceSignificantDigits } = this;
 
     // A grid rebalanced first is built around the price the rebalance ended at, which the start did not check. Lower, a fixed grid
     // started with its lowest BUY a few ticks above 0 put it at or below 0: the sizing left that level out, with a warning that the
     // free balances funded no more orders of the market minimum, or stopped the run for an insufficient portfolio when no other level
     // was left. Refused before the sizing, as at the start.
-    const lowestBuyError = checkLowestBuyPrice(tools.strategyParams, centerPrice, priceDecimals, priceStep, priceSignificantDigits);
+    const lowestBuyError = checkLowestBuyPrice(this.getLayout(tools), centerPrice, priceDecimals, priceStep, priceSignificantDigits);
     if (lowestBuyError) this.stopRun(lowestBuyError, tools);
 
     const marketData = tools.marketData.get(this.pair)!;
@@ -490,7 +547,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
     // The start checked the prices of the grid around its own center price, but a grid rebalanced first is built around the price the
     // rebalance ended at, where a percent or logarithmic step, which shrinks with the price, can round two adjacent prices to one tick
-    const levelsBuilt = { buyLevels: size.buyLevels, sellLevels: size.sellLevels, spacingType, spacingValue };
+    const levelsBuilt = { ...this.spacing!, buyLevels: size.buyLevels, sellLevels: size.sellLevels };
     const tickError = checkPriceTick(levelsBuilt, centerPrice, priceDecimals, priceStep, priceSignificantDigits);
     if (tickError) this.stopRun(tickError, tools);
 

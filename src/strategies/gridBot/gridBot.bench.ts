@@ -7,7 +7,7 @@ import { bench } from '@utils/bench/bench.mock';
 import type { UUID } from 'node:crypto';
 import { describe } from 'vitest';
 import { GridBot } from './gridBot.strategy';
-import type { GridBotStrategyParams } from './gridBot.types';
+import type { GridBotStrategyParams, GridLayout } from './gridBot.types';
 import { getGridFunding } from './gridBot.helper';
 
 // The fixtures used to have other shapes than what the StrategyManager hands a strategy, behind `as any`: a bare candle, the market
@@ -23,7 +23,7 @@ const marketData = new Map<TradingPair, MarketData>([
 const bucketAt = (close: number): CandleBucket => new Map([[PAIR, { start: 0, open: close, high: close, low: close, close, volume: 1 }]]);
 
 /** A grid and the balances that fund it with 10 a level around the center price, the split it rebalances to: built without a rebalance */
-const gridOf = (params: GridBotStrategyParams) => {
+const gridOf = (params: GridBotStrategyParams & GridLayout) => {
   const { asset, currency } = getGridFunding(CENTER_PRICE, params, marketData.get(PAIR)!);
   const portfolio: Portfolio = new Map([
     ['BTC', { free: 10 * asset, used: 0, total: 10 * asset }],
@@ -32,9 +32,11 @@ const gridOf = (params: GridBotStrategyParams) => {
   return { params, portfolio };
 };
 
-const fiveByFive = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'fixed', spacingValue: 5, retryOnError: 3 });
-const tenByTen = gridOf({ buyLevels: 10, sellLevels: 10, spacingType: 'fixed', spacingValue: 2, retryOnError: 3 });
-const logarithmic = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'logarithmic', spacingValue: 0.02, retryOnError: 3 });
+/** The options of every grid here: the defaults of the schema */
+const options = { retryOnError: 3, atrPeriod: 14, resetMode: 'none', resetConfirmCandles: 1, resetCooldownCandles: 0 } as const;
+const fiveByFive = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'fixed', spacingValue: 5, ...options });
+const tenByTen = gridOf({ buyLevels: 10, sellLevels: 10, spacingType: 'fixed', spacingValue: 2, ...options });
+const logarithmic = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'logarithmic', spacingValue: 0.02, ...options });
 
 /** The tools GridBot gets, each order it creates kept in `orders` as the event of its fill carries it */
 const toolsFor = (strategyParams: GridBotStrategyParams, orders: OrderCompletedEvent['order'][]): Tools<GridBotStrategyParams> => ({

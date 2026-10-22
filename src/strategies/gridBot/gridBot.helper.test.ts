@@ -5,7 +5,7 @@ import { addPrecise } from '@utils/math/math.utils';
 import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { GridBot } from './gridBot.strategy';
-import { GridBotStrategyParams, GridBounds, GridSpacingType } from './gridBot.types';
+import { GridBounds, GridLayout, GridSpacingType } from './gridBot.types';
 import {
   checkLowestBuyPrice,
   checkPriceTick,
@@ -410,13 +410,15 @@ describe('gridBot.helper', () => {
   describe('schema', () => {
     // The documentation's example, without name
     const block = { buyLevels: 5, sellLevels: 5, spacingType: 'percent', spacingValue: 1, retryOnError: 3 };
+    // The block as the strategy gets it: the defaults of the keys it leaves out
+    const parsed = { ...block, atrPeriod: 14, resetMode: 'none', resetConfirmCandles: 1, resetCooldownCandles: 0 };
 
     it.each`
       scenario                                    | params                         | expected
-      ${'the documentation example'}              | ${block}                       | ${block}
-      ${'a block without retryOnError, set to 3'} | ${omit(block, 'retryOnError')} | ${block}
-      ${'a grid of sell levels only'}             | ${{ ...block, buyLevels: 0 }}  | ${{ ...block, buyLevels: 0 }}
-      ${'a grid of buy levels only'}              | ${{ ...block, sellLevels: 0 }} | ${{ ...block, sellLevels: 0 }}
+      ${'the documentation example'}              | ${block}                       | ${parsed}
+      ${'a block without retryOnError, set to 3'} | ${omit(block, 'retryOnError')} | ${parsed}
+      ${'a grid of sell levels only'}             | ${{ ...block, buyLevels: 0 }}  | ${{ ...parsed, buyLevels: 0 }}
+      ${'a grid of buy levels only'}              | ${{ ...block, sellLevels: 0 }} | ${{ ...parsed, sellLevels: 0 }}
     `('accepts $scenario', ({ params, expected }) => {
       expect(GridBot.schema.parse(params)).toEqual(expected);
     });
@@ -448,13 +450,8 @@ describe('gridBot.helper', () => {
   });
 
   describe('validateConfig', () => {
-    const validParams: GridBotStrategyParams = {
-      buyLevels: 2,
-      sellLevels: 2,
-      spacingType: 'fixed',
-      spacingValue: 5,
-      retryOnError: 3,
-    };
+    // The levels and the spacing the strategy checks, its spacing resolved (see GridLayout)
+    const validParams: GridLayout = { buyLevels: 2, sellLevels: 2, spacingType: 'fixed', spacingValue: 5 };
 
     it('returns null for valid config', () => {
       expect(validateConfig(validParams, 100, {})).toBeNull();
@@ -993,7 +990,7 @@ describe('gridBot.helper', () => {
         center: number;
         assetFree: number;
         currencyFree: number;
-        grid: Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels' | 'spacingType' | 'spacingValue'>;
+        grid: GridLayout;
         marketData: MarketData;
       }
       const grid = (buyLevels: number, sellLevels: number, spacingType: GridSpacingType, spacingValue: number) => ({
