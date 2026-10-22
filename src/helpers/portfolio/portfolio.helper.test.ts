@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
 import type { Asset, TradingPair } from '@models/utility.types';
 import {
-  calculatePairEquity,
   calculatePortfolioTotalValue,
   clonePortfolio,
   createEmptyPortfolio,
@@ -94,35 +93,6 @@ describe('isFetchedPortfolio', () => {
   `('returns $fetched for $description', ({ portfolio, fetched }) => {
     expect(isFetchedPortfolio(portfolio)).toBe(fetched);
   });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// calculatePairEquity
-// ─────────────────────────────────────────────────────────────────────────────
-
-describe('calculatePairEquity', () => {
-  // The last three come out an ulp off in binary: 7.999999999999999; 0.30000000000000004, 0.6000000000000001 and 0.8999999999999999;
-  // 14743.230000000001. The last is a position marked at its buy price, worth the 14743.23 USDT it cost: a round trip sold back at
-  // that price, which ends on 14743.23 USDT, had that ulp for its P&L
-  it.each`
-    portfolio                                                | price       | expected                          | description
-    ${portfolioOf({ BTC: 1, USDT: 100 })}                    | ${50000}    | ${balance(50100, 0, 50100)}       | ${'1 BTC and 100 USDT'}
-    ${withOpenOrders()}                                      | ${1000}     | ${balance(560, 540, 1100)}        | ${'reserves of open orders'}
-    ${portfolioOf({ BTC: 1, USDT: balance(60, 40, 100) })}   | ${1000}     | ${balance(1060, 40, 1100)}        | ${'USDT reserved alone'}
-    ${portfolioOf({ BTC: balance(0.5, 0.5, 1), USDT: 100 })} | ${1000}     | ${balance(600, 500, 1100)}        | ${'BTC reserved alone'}
-    ${portfolioOf({ USDT: 100 })}                            | ${50000}    | ${balance(100, 0, 100)}           | ${'no balance of BTC, as 0'}
-    ${portfolioOf({ BTC: 1 })}                               | ${50000}    | ${balance(50000, 0, 50000)}       | ${'no balance of USDT, as 0'}
-    ${portfolioOf({ BTC: 1, ETH: 10, USDT: 100 })}           | ${1000}     | ${balance(1100, 0, 1100)}         | ${'ETH, of another pair, left out'}
-    ${portfolioOf({ BTC: 0, USDT: 100 })}                    | ${NaN}      | ${balance(NaN, NaN, NaN)}         | ${'no BTC at a price not a number'}
-    ${portfolioOf({ BTC: 0.00007, USDT: 1 })}                | ${100000}   | ${balance(8, 0, 8)}               | ${'0.00007 BTC and 1 USDT'}
-    ${portfolioOf({ BTC: balance(0.1, 0.2, 0.3) })}          | ${3}        | ${balance(0.3, 0.6, 0.9)}         | ${'0.1 BTC free and 0.2 BTC reserved'}
-    ${AFTER_BUY}                                             | ${57595.73} | ${balance(14743.23, 0, 14743.23)} | ${'a position at its buy price'}
-  `(
-    'gives $expected.free free, $expected.used used and $expected.total in total at $price for $description',
-    ({ portfolio, price, expected }) => {
-      expect(calculatePairEquity(portfolio, 'BTC/USDT', price)).toEqual(expected);
-    },
-  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

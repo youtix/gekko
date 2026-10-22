@@ -45,25 +45,6 @@ const addValue = (value: number, amount: number, price: number): number =>
   amount === 0 && Number.isFinite(price) ? value : addPrecise(value, multiplyPrecise(amount, price));
 
 /**
- * The equity of a trading pair in its currency, part by part: the asset at `price` plus the currency, `total` counting what open
- * orders reserve (`used`) with what is `free`. A balance the portfolio lacks counts as 0. In decimal (see addValue).
- */
-export const calculatePairEquity = (portfolio: Portfolio, pair: TradingPair, price: number): BalanceDetail => {
-  const [asset, currency] = pair.split('/');
-  const assetBalance = getAssetBalance(portfolio, asset);
-  const currencyBalance = getAssetBalance(portfolio, currency);
-  const total = addValue(currencyBalance.total, assetBalance.total, price);
-  // With no open order, as on most candles, the free balances are the totals: valued once
-  const isAllFree = assetBalance.free === assetBalance.total && currencyBalance.free === currencyBalance.total;
-
-  return {
-    free: isAllFree ? total : addValue(currencyBalance.free, assetBalance.free, price),
-    used: addValue(currencyBalance.used, assetBalance.used, price),
-    total,
-  };
-};
-
-/**
  * The value of a portfolio in `currency`: its balance of the currency, plus each of `assets` at the price of its pair with the
  * currency, `total` counting what open orders reserve. An asset without a price adds nothing, the currency is counted once even when
  * listed among `assets`, and a balance the portfolio lacks counts as 0. In decimal (see addValue). `pairs`, when given, holds the pair
