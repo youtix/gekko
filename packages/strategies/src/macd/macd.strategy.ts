@@ -14,7 +14,7 @@ import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
 import { isObject } from 'lodash-es';
 import { macdStrategySchema } from '@gekko/schemas/strategies/macd.schema';
-import { MACDStrategyParams, MACDTrend } from './macd.types';
+import { MACDResult, MACDStrategyParams, MACDTrend } from './macd.types';
 
 /** Trades every watched pair, each with its own MACD, its own trend and its own position (see PositionBook) */
 export class MACD implements Strategy<MACDStrategyParams> {
@@ -41,7 +41,7 @@ export class MACD implements Strategy<MACDStrategyParams> {
 
   onTimeframeCandleAfterWarmup(
     params: OnCandleEventParams<MACDStrategyParams>,
-    ...indicators: IndicatorResults<{ macd: number; signal: number; hist: number } | null>[]
+    ...indicators: IndicatorResults<MACDResult | null>[]
   ): void {
     const { strategyParams, log } = params.tools;
     const { macdSrc } = strategyParams;
@@ -89,10 +89,7 @@ export class MACD implements Strategy<MACDStrategyParams> {
     }
   }
 
-  log(
-    { tools }: OnCandleEventParams<MACDStrategyParams>,
-    ...indicators: IndicatorResults<{ macd: number; signal: number; hist: number } | null>[]
-  ): void {
+  log({ tools }: OnCandleEventParams<MACDStrategyParams>, ...indicators: IndicatorResults<MACDResult | null>[]): void {
     const { log } = tools;
     const bySymbol = indicatorsBySymbol(indicators);
 
@@ -118,7 +115,7 @@ export class MACD implements Strategy<MACDStrategyParams> {
     this.book.onOrderErrored(params);
   }
 
-  private isMacd(data: unknown): data is { macd: number; signal: number; hist: number } {
+  private isMacd(data: unknown): data is MACDResult {
     return (
       isObject(data) &&
       'macd' in data &&
