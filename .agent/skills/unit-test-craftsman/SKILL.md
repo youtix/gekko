@@ -19,7 +19,7 @@ The end-to-end tests in `apps/gekko/test/e2e` run on Bun's own test runner (`bun
 - A scenario runs a whole pipeline, so it asserts its figures in one `toEqual` on a composed object rather than in one `it()` per `expect()`.
 - `bun run test` runs vitest only: run an e2e file with `bun test --isolate test/e2e/<path>` from `apps/gekko`, all of them with `bun run test:e2e` from the root.
 - `await expect(promise).rejects` (and `.resolves`) blocks until the promise settles, past every timeout: assert the caught form (`await promise.then(() => undefined, error => error)`) when the run under test may never settle.
-- A realtime flow waits on its run through `runRealtimeUntil`, `runRealtimeFor` or `runRealtimeUntilEnd` (`apps/gekko/test/e2e/helpers/realtimeRun.helper.ts`), never on the pipeline's promise: under fake timers a promise that never settles hangs the test past its timeout.
+- A realtime flow waits on its run through `runRealtimeUntil`, `runRealtimeFor` or `runRealtimeUntilEnd` (`apps/gekko/test/e2e/helpers/realtimeRun.helper.ts`), never on the pipeline's promise, which does not settle while the run goes on: the test then fails with its 30 s timeout, having asserted nothing.
 
 ## Instructions
 

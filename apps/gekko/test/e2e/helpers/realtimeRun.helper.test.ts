@@ -1,11 +1,11 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import type { GekkoPipelineOptions } from '@gekko/core/core/pipeline/pipeline.types';
 import type { RunContext } from '@gekko/core/run/runContext.types';
-import { afterEach, beforeEach, describe, expect, it, jest, mock } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, mock } from 'bun:test';
 import { MockCCXTExchange } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
 import { clearLogs, logStore, MockWinston, type LoggedLine } from '../mocks/winston.mock';
-import { advanceClock, REALTIME_START, startFakeClock } from './clock.helper';
+import { advanceClock, fakeTimerCount, isFakeClock, REALTIME_START, startFakeClock, stopFakeClock } from './clock.helper';
 import { paperExchange, type RawConfiguration } from './configuration.helper';
 import {
   endRealtimeRun,
@@ -95,7 +95,7 @@ describe('realtimeRun.helper', () => {
   afterEach(async () => {
     // The end of a run a test left running, which the tests of endRealtimeRun check themselves
     await rejectionOf(endRealtimeRun());
-    jest.useRealTimers();
+    stopFakeClock();
   });
 
   describe('mockRealtimeModules', () => {
@@ -165,7 +165,7 @@ describe('realtimeRun.helper', () => {
     });
 
     it('should refuse to start a run on the real clock', async () => {
-      jest.useRealTimers();
+      stopFakeClock();
       expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run goes on the fake clock: call startFakeClock() first');
     });
   });
@@ -273,7 +273,7 @@ describe('realtimeRun.helper', () => {
 
       it('should put the real timers back', async () => {
         await endRealtimeRun();
-        expect(jest.isFakeTimers()).toBe(false);
+        expect(isFakeClock()).toBe(false);
       });
 
       it('should give the next run a context of its own', async () => {
@@ -290,8 +290,8 @@ describe('realtimeRun.helper', () => {
         const pollsAtEnd = polls;
         // A fake clock started again, as the next scenario starts it, would fire what it holds
         startFakeClock();
-        const fakeTimersLeft = jest.getTimerCount();
-        jest.useRealTimers();
+        const fakeTimersLeft = fakeTimerCount();
+        stopFakeClock();
         await new Promise(resolve => setTimeout(resolve, 30));
         expect({ fakeTimersLeft, pollsAfterTheEnd: polls - pollsAtEnd }).toEqual({ fakeTimersLeft: 0, pollsAfterTheEnd: 0 });
       });

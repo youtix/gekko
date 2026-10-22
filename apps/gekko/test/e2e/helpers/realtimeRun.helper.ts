@@ -2,11 +2,11 @@ import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { LAST_FLUSH_TIMEOUT } from '@gekko/core/bots/telegram/telegram.const';
 import type { RunContext } from '@gekko/core/run/runContext.types';
-import { jest, mock } from 'bun:test';
+import { mock, setDefaultTimeout } from 'bun:test';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
 import { isTextLine, logStore, MockWinston, type LoggedLine, type TextLine } from '../mocks/winston.mock';
-import { advanceClock, disableTestTimeouts, yieldToEventLoop } from './clock.helper';
+import { advanceClock, isFakeClock, stopFakeClock, yieldToEventLoop } from './clock.helper';
 import { createFlowContext, type RawConfiguration } from './configuration.helper';
 
 /**
@@ -51,6 +51,13 @@ const FINALIZATION_FAILURE = /failed to finalize|finalization errors/i;
 const isFinalizationFailure = (line: LoggedLine): line is TextLine =>
   isTextLine(line) && (line.level === 'warn' || line.level === 'error') && FINALIZATION_FAILURE.test(line.message);
 
+/**
+ * The wall clock a test or a hook of a realtime flow may take, on the real clock, which the fake clock of clock.helper leaves to Bun. A
+ * scenario takes about 50 ms, the first of a file 200 ms, as it imports the pipeline, but up to 10 s, its hooks included, on a machine
+ * whose CPU twelve busy loops took: Bun's default of 5 s would then fail it with a timeout rather than with what it asserts.
+ */
+const REALTIME_TEST_TIMEOUT = 30 * ONE_SECOND;
+
 /** Whether the run ended with the AbortError of its signal, as gekkoPipeline rejects once aborted */
 const isAbortError = (failure: unknown) => failure instanceof Error && failure.name === 'AbortError';
 
@@ -59,16 +66,15 @@ const isAbortError = (failure: unknown) => failure instanceof Error && failure.n
  * the flows read; ccxt, whose mock serves the candles; and the fetcher of the Telegram bots, so that no request leaves the test. Not the
  * clock: the flows run on real minutes, with the real Heart, under the fake timers of startFakeClock. They shrank ONE_MINUTE to 50 ms
  * and mocked the Heart, which made the sources carry literals for the durations that had to stay real, and every scenario race 500 ms of wall
- * clock. Also turns Bun's test timeout off for the tests and hooks of the file (disableTestTimeouts): Bun 1.3.14 checks it against the
- * fake clock, where it never fires on a machine up for days and fires spuriously, after a spin of the event loop, on one booted minutes
- * before. A test that awaits a promise that never settles hangs, so a flow waits on a run through the functions below, whose every wait
- * is bounded in fake time.
+ * clock. Also gives the tests and hooks of the file REALTIME_TEST_TIMEOUT, which Bun counts in real time, the fake clock running or not:
+ * a test that awaits a promise that never settles fails after it. A flow waits on a run through the functions below, whose every wait is
+ * bounded in fake time.
  */
 export const mockRealtimeModules = () => {
   mock.module('winston', () => MockWinston);
   mock.module('ccxt', () => createCcxtModuleMock());
   mock.module('@gekko/core/fetcher/fetcher.service', () => ({ fetcher: new MockFetcherService() }));
-  disableTestTimeouts();
+  setDefaultTimeout(REALTIME_TEST_TIMEOUT);
 };
 
 /**
@@ -107,7 +113,7 @@ const currentRun = async () => {
  */
 export const startRealtimeRun = async () => {
   if (run) throw new Error('A realtime run is in progress already: endRealtimeRun ends it');
-  if (!jest.isFakeTimers()) throw new Error('A realtime run goes on the fake clock: call startFakeClock() first');
+  if (!isFakeClock()) throw new Error('A realtime run goes on the fake clock: call startFakeClock() first');
   const context = await realtimeRunContext();
   nextContext = undefined;
   const { gekkoPipeline } = await import('@gekko/core/core/pipeline/pipeline');
@@ -169,9 +175,9 @@ export const runRealtimeUntilEnd = async ({ maxMinutes }: { maxMinutes: number }
  * and forgets its context, or the one realtimeRunContext built for a run that never started: every stream is destroyed, the bucket in
  * progress is finished, and the plugins are finalised with the AbortError as the failure that stopped the run, which the analyzers report
  * as their interruption and a strategy's end() receives. In production SIGINT and SIGTERM exit without finalising the plugins. The fake
- * clock moves until the run is over, up to END_OF_RUN_TIMEOUT, the Telegram bots' last flush included, then the real timers are back: the
- * fake timers left are dropped, the polls of the orders still open among them, which the Trader leaves running when it is finalised, as
- * such orders stay on the exchange when Gekko stops. Nothing to abort when the run ended already (a stop, a failure).
+ * clock moves until the run is over, up to END_OF_RUN_TIMEOUT, the Telegram bots' last flush included, then the real timers are back
+ * (stopFakeClock): the fake timers left are dropped, the polls of the orders still open among them, which the Trader leaves running when
+ * it is finalised, as such orders stay on the exchange when Gekko stops. Nothing to abort when the run ended already (a stop, a failure).
  *
  * Then fails the test when the run did not end, when it ended by itself without a runRealtime… call reporting it (a test that only
  * advanced the clock), when it failed otherwise than with the AbortError as it was ended, or when a plugin failed to finalise:
@@ -185,9 +191,9 @@ export const endRealtimeRun = async () => {
   if (ending && wasRunning) {
     ending.controller.abort();
     await yieldToEventLoop();
-    if (jest.isFakeTimers()) await advanceClock(END_OF_RUN_TIMEOUT, { until: () => ending.hasEnded });
+    if (isFakeClock()) await advanceClock(END_OF_RUN_TIMEOUT, { until: () => ending.hasEnded });
   }
-  jest.useRealTimers();
+  stopFakeClock();
 
   if (ending && !ending.hasEnded) throw new Error(`The realtime run did not end within ${END_OF_RUN_TIMEOUT / ONE_SECOND} s of its abort`);
   if (ending && !ending.isEndReported) {
