@@ -3,7 +3,14 @@ import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { checkOrderPrice, toBound } from '@gekko/shared/helpers/market/market.helper';
 import { getPriceSignificantDigits, getPriceTick, roundToStep } from '@gekko/shared/helpers/market/precision.helper';
-import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
+import {
+  addPrecise,
+  compareWithTolerance,
+  isFiniteNumber,
+  isFinitePositive,
+  multiplyPrecise,
+  toSignificantDigits,
+} from '@gekko/shared/utils/math/math.utils';
 import { countDecimals, round } from '@gekko/shared/utils/math/round.utils';
 import { getAssetBalance } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { minBy } from 'lodash-es';
@@ -377,11 +384,17 @@ export const checkPriceTick = (
 /**
  * Whether a level that buys at `buyPrice` and sells at `sellPrice` loses money at each round trip on the maker fee `fee` (see
  * getMakerFee), which it pays on both: its SELL brings in less, sellPrice × (1 − fee), than its BUY costs, buyPrice × (1 + fee), on a
- * unit of its quantity. The one test of the warning of a spacing under the fee (see checkRoundTripFee) and of the minimum step, at which
- * no level loses money (see raiseToBreakEven): each wrote it out, the first comparing the two products and the second subtracting them,
- * kept alike by a comment only, and a step resolved by one would be warned of by the other once either changed.
+ * unit of its quantity, beyond the tolerance of compareWithTolerance. Equal in exact arithmetic at a level's break-even, the two come out
+ * apart in binary: compared as they came out, a level spaced by 3.3 above 4123.35 at 0.04 %, whose SELL brings in what its BUY costs,
+ * 4124.99934, read as a loss (4124.999339999999), so that the minimum step was a tick more, 3.31, an atr step of 3.3 was raised to it
+ * with a warning that named 3.31 the minimum, and a fixed spacing of 3.3 was warned of as losing money. The tolerance, a billionth of
+ * the price, is far under the tick of a market (0.01 is 2.4e-6 of 4123.35): a level a tick under its break-even still loses. The one
+ * test of the warning of a spacing under the fee (see checkRoundTripFee) and of the minimum step, at which no level loses money (see
+ * raiseToBreakEven): each wrote it out, the first comparing the two products and the second subtracting them, kept alike by a comment
+ * only, and a step resolved by one would be warned of by the other once either changed.
  */
-const isLosingLevel = (buyPrice: number, sellPrice: number, fee: number): boolean => sellPrice * (1 - fee) < buyPrice * (1 + fee);
+const isLosingLevel = (buyPrice: number, sellPrice: number, fee: number): boolean =>
+  compareWithTolerance(sellPrice * (1 - fee), buyPrice * (1 + fee)) < 0;
 
 /**
  * A ratio as a percentage of four significant digits, for a message: 0.00016655 as 0.01666 %. With three, the round trip of a maker fee
@@ -514,11 +527,11 @@ const getMinimumStepIn = (centerPrice: number, sellLevels: number, context: Brea
  * (see checkPriceTick). One tick too for a grid of so many sell levels that no step breaks even (from 501 sell levels at 0.1 %), which
  * checkRoundTripFee warns of as for any grid. The step is then checked on the prices of the grid as its orders are placed, as
  * checkRoundTripFee checks them, and raised to the next whole number of the tick at the highest price of the grid until every level
- * breaks even there (see raiseToBreakEven): a level exactly at its break-even can read as a loss in binary (3.3 for a sell level around
- * 4123.35 at 0.04 %, raised to 3.31), and on a market whose tick depends on the price, the prices above the next power of ten are rounded
- * to a coarser tick, which the step is then a whole number of (9 for 2 sell levels around 9999 on 5 significant digits, a tick of 1 from
- * 10000 on, where 8.1 lost money). An atr step under it is raised to it, and one at or above it checked on its prices and raised the same
- * way (see resolveSpacing).
+ * breaks even there (see raiseToBreakEven): on a market whose tick depends on the price, the prices above the next power of ten are
+ * rounded to a coarser tick, which the step is then a whole number of (9 for 2 sell levels around 9999 on 5 significant digits, a tick
+ * of 1 from 10000 on, where 8.1 lost money). A level exactly at its break-even breaks even (see isLosingLevel): 3.3 for a sell level
+ * around 4123.35 at 0.04 %. An atr step under the minimum is raised to it, and one at or above it checked on its prices and raised the
+ * same way (see resolveSpacing).
  */
 export const getMinimumStep = (centerPrice: number, sellLevels: number, marketData: MarketData): number =>
   getMinimumStepIn(centerPrice, sellLevels, getBreakEvenContext(centerPrice, sellLevels, marketData));

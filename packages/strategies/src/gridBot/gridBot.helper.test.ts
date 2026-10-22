@@ -62,6 +62,9 @@ const dogeBtcMarketData: MarketData = { amount: { min: 1 }, cost: { min: 0.0001 
 const significantDigitsMarketData: MarketData = { precision: { price: 0.1, priceSignificantDigits: 5 }, fee: { maker: 0.0004 } };
 // A pair around 1 on 5 significant digits, a tick of 0.00001 under 1 and of 0.0001 from 1 on, at a maker fee of 0.04 %
 const aroundOneMarketData: MarketData = { precision: { price: 0.00001, priceSignificantDigits: 5 }, fee: { maker: 0.0004 } };
+// A tick of 0.01 at a maker fee of 0.04 %, on which a level spaced by 3.3 above 4123.35 breaks even exactly: its SELL at 4126.65 brings
+// in 4126.65 × 0.9996 = 4124.99934, what its BUY costs, 4123.35 × 1.0004, though 4124.999339999999 in binary
+const exactBreakEvenMarketData: MarketData = { precision: { price: 0.01 }, fee: { maker: 0.0004 } };
 
 describe('gridBot.helper', () => {
   describe('inferPricePrecision', () => {
@@ -714,6 +717,22 @@ describe('gridBot.helper', () => {
       );
     });
 
+    // Equal in exact arithmetic, the SELL bringing in 4124.99934 as the BUY costs, the two products were compared as binary gave them,
+    // 4124.999339999999 against 4124.99934: the level was warned of as one that sells less than 0.08003 % above its buy, named as
+    // selling 0.08003 % above it. They are compared within compareWithTolerance's tolerance, a level a tick under still losing
+    it.each`
+      spacingValue | description                                   | expected
+      ${3.3}       | ${'its break-even exactly: no warning'}       | ${null}
+      ${3.29}      | ${'a tick under its break-even: the warning'} | ${underFee('3.29 (fixed)', '0.08003 %', 0.0004, '1 out of 1', 'selling at 4126.64, 0.07979 % above its buy at 4123.35')}
+    `(
+      'reads a sell level spaced by $spacingValue above 4123.35 at 0.04 % as the minimum step does, $description',
+      ({ spacingValue, expected }) => {
+        const oneSellLevel: GridLayout = { buyLevels: 0, sellLevels: 1, spacingType: 'fixed', spacingValue };
+
+        expect(checkRoundTripFee(oneSellLevel, 4123.35, exactBreakEvenMarketData)).toBe(expected);
+      },
+    );
+
     // No step breaks even on 501 sell levels at 0.1 %, 500 × 0.2002 % being over 1: an atr step is kept at one tick (see getMinimumStep),
     // and warned of here, the message naming the step and its ATR
     it('warns of an atr step naming its ATR: one tick on 501 sell levels at 0.1 %, at which no step breaks even', () => {
@@ -766,19 +785,23 @@ describe('gridBot.helper', () => {
 
     // Worked out on the prices as they are spaced, the step was taken for the minimum while the orders, each placed at its price rounded
     // to the tick there, lost money: 8.1 around 9999 on 5 significant digits put the highest SELL of 2 at 10015, 8 above its BUY at 10007
-    // (10015.2 and 10007.1 on the tick of 1 from 10000 on), and a level exactly at its break-even reads as losing in binary. Either way
-    // checkRoundTripFee warned of the grid right after its step was said to break even. Raised to whole numbers of the tick at the
-    // highest price of the grid, until no level loses money as checkRoundTripFee reckons it
+    // (10015.2 and 10007.1 on the tick of 1 from 10000 on), which checkRoundTripFee warned of right after its step was said to break even.
+    // Raised to whole numbers of the tick at the highest price of the grid, until no level loses money as checkRoundTripFee reckons it
     it.each`
-      center     | sellLevels | marketData                                                | description                                                                                           | expected
-      ${9999}    | ${2}       | ${significantDigitsMarketData}                            | ${'2 sell levels around 9999, where 8.1 lost: 9, its SELLs at 10008 and 10017'}                       | ${9}
-      ${9999}    | ${5}       | ${significantDigitsMarketData}                            | ${'5 sell levels around 9999, where 8.1 lost on 4 levels: 9'}                                         | ${9}
-      ${9994.4}  | ${1}       | ${significantDigitsMarketData}                            | ${'a sell level around 9994.4, where 8 put its SELL at 10002, 7.6 above its BUY: 9'}                  | ${9}
-      ${9999.4}  | ${1}       | ${significantDigitsMarketData}                            | ${'a sell level around 9999.4, where 8.1 puts its SELL at 10008, up from 10007.5: 8.1 kept'}          | ${8.1}
-      ${0.9999}  | ${5}       | ${aroundOneMarketData}                                    | ${'5 sell levels around 0.9999, where 0.00081 put 4 of 10 levels under the fee: 0.0009'}              | ${0.0009}
-      ${4123.35} | ${1}       | ${{ precision: { price: 0.01 }, fee: { maker: 0.0004 } }} | ${'a sell level around 4123.35, whose break-even of exactly 3.3 binary reads as a loss: a tick more'} | ${3.31}
+      center    | sellLevels | marketData                     | description                                                                                  | expected
+      ${9999}   | ${2}       | ${significantDigitsMarketData} | ${'2 sell levels around 9999, where 8.1 lost: 9, its SELLs at 10008 and 10017'}              | ${9}
+      ${9999}   | ${5}       | ${significantDigitsMarketData} | ${'5 sell levels around 9999, where 8.1 lost on 4 levels: 9'}                                | ${9}
+      ${9994.4} | ${1}       | ${significantDigitsMarketData} | ${'a sell level around 9994.4, where 8 put its SELL at 10002, 7.6 above its BUY: 9'}         | ${9}
+      ${9999.4} | ${1}       | ${significantDigitsMarketData} | ${'a sell level around 9999.4, where 8.1 puts its SELL at 10008, up from 10007.5: 8.1 kept'} | ${8.1}
+      ${0.9999} | ${5}       | ${aroundOneMarketData}         | ${'5 sell levels around 0.9999, where 0.00081 put 4 of 10 levels under the fee: 0.0009'}     | ${0.0009}
     `('is $expected for $description', ({ center, sellLevels, marketData, expected }) => {
       expect(getMinimumStep(center, sellLevels, marketData)).toBe(expected);
+    });
+
+    // Its break-even exactly, which binary read as a loss, so that the step was raised a tick, to 3.31: the products a level compares are
+    // compared within compareWithTolerance's tolerance, as checkRoundTripFee compares them
+    it('is 3.3 for a sell level around 4123.35 at 0.04 %, its break-even exactly', () => {
+      expect(getMinimumStep(4123.35, 1, exactBreakEvenMarketData)).toBe(3.3);
     });
 
     // Beyond the largest number, the prices of its grid are 0 (see roundPrice), and a step raised by a tick no longer grows
@@ -875,6 +898,14 @@ describe('gridBot.helper', () => {
       ${0.002} | ${withoutFee}                | ${'a step rounded to 0 without a fee, under the price tick'} | ${raised(0.002, 0, 0.01, underTheTick)}
     `('raises $description, with a warning', ({ atr, marketData, expected }) => {
       expect(resolveSpacing(atrSpacedBy(1.5), 60000, marketData, atr)).toStrictEqual(expected);
+    });
+
+    // Its break-even exactly (see getMinimumStep): raised to 3.31, with a warning that named 3.31 the minimum step at which every level
+    // breaks even, while 3.3 did
+    it('keeps a step of 3.3 for a sell level around 4123.35 at 0.04 %, its break-even exactly, without a warning', () => {
+      expect(resolveSpacing(atrSpacedBy(1, 1), 4123.35, exactBreakEvenMarketData, 3.3)).toStrictEqual({
+        spacing: { spacingType: 'fixed', spacingValue: 3.3, description: 'a step of 3.3 (spacingValue 1 × ATR 3.3, atr)' },
+      });
     });
 
     // Its prices above 10000 rounded to the tick of 1 there, a step of 8.5 sells the highest of 2 levels 8 above its buy, under the fee
