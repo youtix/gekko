@@ -96,6 +96,34 @@ describe('loadConfigurationFile', () => {
     );
   });
 
+  // Reported raw, the failure was logged as an unexpected one, with its stack, under the bot's tag
+  describe.each`
+    file                    | path                   | failure
+    ${'none at the path'}   | ${'./config/nope.yml'} | ${Object.assign(new Error("ENOENT: no such file or directory, open './config/nope.yml'"), { code: 'ENOENT' })}
+    ${'a directory'}        | ${'./config/dir.yml'}  | ${Object.assign(new Error('EISDIR: illegal operation on a directory, read'), { code: 'EISDIR' })}
+    ${'a file not allowed'} | ${'./config/live.yml'} | ${Object.assign(new Error("EACCES: permission denied, open './config/live.yml'"), { code: 'EACCES' })}
+  `('given $file, which cannot be read', ({ path, failure }) => {
+    beforeEach(() => {
+      vi.mocked(readFileSync).mockImplementation(() => {
+        throw failure;
+      });
+    });
+
+    it('refuses it, naming the file and the reason', () => {
+      expect(() => loadConfigurationFile(path)).toThrow(
+        new GekkoError('configuration', `Cannot read the configuration file ${path}: ${failure.message}`),
+      );
+    });
+
+    it('throws a GekkoError, a refusal logged in one line', () => {
+      expect(() => loadConfigurationFile(path)).toThrow(GekkoError);
+    });
+
+    it('keeps no cause, which the fatal error report would print with its stack', () => {
+      expect(() => loadConfigurationFile(path)).toThrow(expect.not.objectContaining({ cause: expect.anything() }));
+    });
+  });
+
   it.each`
     file                                  | path             | content                         | message
     ${'an empty YAML file'}               | ${'config.yml'}  | ${''}                           | ${'Empty configuration file: config.yml'}

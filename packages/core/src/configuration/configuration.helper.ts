@@ -47,14 +47,27 @@ export const parseConfigurationFile = (path: string, data: string, format: FileF
 };
 
 /**
+ * The text of the configuration file at `path`. A file that cannot be read, none at the path (a typo in GEKKO_CONFIG_FILE_PATH), a
+ * directory or a file the process may not read, is refused in one line naming it and the system's reason, without a cause: reported
+ * raw, the failure was logged with its stack, as an unexpected one, where the other refusals of the file are a line each.
+ */
+const readConfigurationFile = (path: string): string => {
+  try {
+    return readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new GekkoError('configuration', `Cannot read the configuration file ${path}: ${describeError(err)}`);
+  }
+};
+
+/**
  * The content of the configuration file at `path`, as its parser reads it, before the schema checks it: a GekkoError names the file
- * for an extension no parser reads (.json, .json5, .yml or .yaml), a file that does not parse (see parseConfigurationFile) or an empty
- * one.
+ * for an extension no parser reads (.json, .json5, .yml or .yaml), a file that cannot be read (see readConfigurationFile), a file that
+ * does not parse (see parseConfigurationFile) or an empty one.
  */
 export const loadConfigurationFile = (path: string): unknown => {
   const format = FORMAT_BY_EXTENSION.get(extname(path).toLowerCase());
   if (!format) throw new GekkoError('configuration', `Unsupported file extension: ${path} (expected .json, .json5, .yml or .yaml)`);
-  const content = parseConfigurationFile(path, readFileSync(path, 'utf8'), format);
+  const content = parseConfigurationFile(path, readConfigurationFile(path), format);
   if (isNil(content)) throw new GekkoError('configuration', `Empty configuration file: ${path}`);
   return content;
 };

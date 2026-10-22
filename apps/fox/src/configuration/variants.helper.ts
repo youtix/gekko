@@ -5,7 +5,6 @@ import { warning } from '@gekko/core/logger/logger';
 import * as pluginRegistry from '@gekko/plugins/index';
 import { configurationSchema } from '@gekko/schemas/configuration/configuration.schema';
 import type { Configuration } from '@gekko/schemas/configuration/configuration.types';
-import { describeError } from '@gekko/shared/errors/error.helper';
 import { PERFORMANCE_REPORT_EVENT } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { showValue } from '@gekko/shared/utils/object/object.utils';
@@ -33,17 +32,11 @@ const STRATEGIES: Record<string, StrategyConstructor> = strategyRegistry;
 
 /**
  * The template at `path`, read as Gekko reads a configuration file (loadConfigurationFile: .yml, .yaml, .json or .json5). The loader's
- * refusals are its own (an extension it does not read, a file that does not parse, an empty one); a file it cannot read (none at the
- * path) and a file that holds no mapping of sections are refused here.
+ * refusals pass on as they are (an extension it does not read, a file it cannot read, a file that does not parse, an empty one); a file
+ * that holds no mapping of sections is refused here.
  */
 export const loadTemplate = (path: string): Template => {
-  let content: unknown;
-  try {
-    content = loadConfigurationFile(path);
-  } catch (err) {
-    if (err instanceof GekkoError) throw err;
-    throw new GekkoError('fox', `Cannot read the template ${path}: ${describeError(err)}`, { cause: err });
-  }
+  const content = loadConfigurationFile(path);
   if (!isPlainObject(content))
     throw new GekkoError(
       'fox',

@@ -110,26 +110,6 @@ describe('loadTemplate', () => {
     expect(() => loadTemplate('dema.yml')).toThrow(refusal);
   });
 
-  describe('when the file cannot be read', () => {
-    const failure = new Error("ENOENT: no such file or directory, open 'dema.yml'");
-
-    beforeEach(() => {
-      vi.mocked(loadConfigurationFile).mockImplementation(() => {
-        throw failure;
-      });
-    });
-
-    it('should refuse it, naming the file', () => {
-      expect(() => loadTemplate('dema.yml')).toThrow(
-        "[FOX] Cannot read the template dema.yml: ENOENT: no such file or directory, open 'dema.yml'",
-      );
-    });
-
-    it('should keep the failure as the cause', () => {
-      expect(() => loadTemplate('dema.yml')).toThrow(expect.objectContaining({ cause: failure }));
-    });
-  });
-
   it.each`
     description   | content           | message
     ${'a list'}   | ${['BTC', 'ETH']} | ${"[FOX] Invalid template dema.yml: a configuration is a mapping of its sections (watch, exchange, plugins…), got [ 'BTC', 'ETH' ]"}
