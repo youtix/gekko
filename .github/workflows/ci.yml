@@ -98,6 +98,19 @@ jobs:
       - name: Build
         run: bun run build:exec
 
+      # Both executables run once: Fox's help, then each on a template whose database the runner does not have, which the storage
+      # refuses once the configuration, the registries and the pipeline have loaded. A module the executable fails to load (a
+      # configuration helper, a registry, the compiled worker of Fox) fails before that line, with another message
+      - name: Run the executables
+        run: |
+          ./dist/fox --help > /dev/null
+          ./dist/fox --template-path apps/fox/templates/dema.yml > fox.log 2>&1 || true
+          cat fox.log
+          grep -q 'Cannot open the database' fox.log
+          GEKKO_CONFIG_FILE_PATH=apps/fox/templates/dema.yml ./dist/gekko > gekko.log 2>&1 || true
+          cat gekko.log
+          grep -q 'Cannot open the database' gekko.log
+
   release:
     needs: build
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
