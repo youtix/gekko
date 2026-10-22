@@ -1,3 +1,6 @@
+// The defaults of GridBot's schema (see gridBot.schema.ts). The decimals the strategy falls back on for a market that states no amount
+// step or no price tick are in @gekko/strategies/gridBot/gridBot.const.
+
 /** Default retryOnError: the retries of a failed order before GridBot gives up on it */
 export const DEFAULT_RETRY_LIMIT = 3;
 

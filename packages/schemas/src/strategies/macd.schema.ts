@@ -1,15 +1,14 @@
 import { z } from 'zod';
 
-// The fields of the MACD indicator's result, one of which the strategy compares with its thresholds
-type MACDOutputKey = keyof NonNullable<IndicatorRegistry['MACD']['output']>;
-
 // Unchecked, macdSrc: histogram read a field the MACD does not have, and the strategy never traded
 export const macdStrategySchema = z
   .strictObject({
     short: z.int().positive(),
     long: z.int().positive(),
     signal: z.int().positive(),
-    macdSrc: z.enum(['macd', 'signal', 'hist'] as const satisfies readonly MACDOutputKey[]),
+    // The field of the MACD indicator's result that the strategy compares with its thresholds. The compiler checks the names where the
+    // strategy reads the result with it: the MACD's types, declared by @gekko/indicators, are out of reach of this package.
+    macdSrc: z.enum(['macd', 'signal', 'hist']),
     thresholds: z.strictObject({
       up: z.number(),
       down: z.number(),

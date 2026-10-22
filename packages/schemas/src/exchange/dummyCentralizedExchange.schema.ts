@@ -109,7 +109,7 @@ const marketDataSchema = z
   )
   .superRefine(refuseRepeatedKeys('marketData', 'symbol'))
   .default([])
-  .transform(marketConstraints => new Map<TradingPair, MarketData>(marketConstraints?.map(mc => [mc.symbol, mc.marketData]) ?? []));
+  .transform(marketConstraints => new Map<TradingPair, MarketData>(marketConstraints.map(mc => [mc.symbol, mc.marketData])));
 
 const initialTickerSchema = z
   .array(

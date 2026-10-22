@@ -76,6 +76,8 @@ export const gridBotStrategySchema = z
      */
     resetCooldownCandles: z.int().min(0).default(DEFAULT_RESET_COOLDOWN_CANDLES),
   })
-  .refine(({ buyLevels, sellLevels }) => buyLevels + sellLevels > 0, {
+  // Each count compared with 0, rather than their sum: zod still runs the refinement after a failed bound, and a negative count, already
+  // reported, made -1 buy levels and 1 sell level read as no level at all
+  .refine(({ buyLevels, sellLevels }) => buyLevels !== 0 || sellLevels !== 0, {
     message: 'buyLevels and sellLevels cannot both be 0: the grid needs at least one level',
   });
