@@ -995,12 +995,93 @@ describe('GridBot', () => {
 
         expect(feeWarnings()).toEqual([]);
       });
+
+      // Checked on the levels built, the spacing is warned of where the grid is built: after its rebalance, around the price it ended at
+      it('warns once, as the grid is built after its rebalance, not as the rebalance is placed', () => {
+        startStrategy(100, oneTick, unbalancedPortfolio);
+        const asPlaced = feeWarnings().length;
+        strategy.onOrderCompleted({
+          order: { id: issuedOrders[0].id } as any,
+          exchange: { price: 100, portfolio: balancedOneTick },
+          tools,
+        });
+
+        expect({ asPlaced, asBuilt: feeWarnings().length }).toEqual({ asPlaced: 0, asBuilt: 1 });
+      });
     });
 
     it('warns of nothing on a market that states no fee, even for a spacing of one tick', () => {
       startStrategy(100, oneTick);
 
       expect(feeWarnings()).toEqual([]);
+    });
+
+    // Checked around the price the grid was placed at only, a grid rebalanced first was built around the price the rebalance ended at
+    // without a word: there, the top level of an atr grid on its minimum step, which an upward breakout's BUY rebalance moves higher, lost
+    // money at each round trip, 0.1998 % above its buy where 0.2002 % breaks even
+    describe('once rebalanced at a price higher than the one the grid was placed at, on a maker fee of 0.1 %', () => {
+      // 4 buy and 4 sell levels spaced by 1 × the ATR: an ATR of 50 at 62420.34, a step of 50, is raised to the minimum step there,
+      // 125.73, at which the highest level of 4 breaks even around 62420.34, and loses around 62545.18, where the minimum is 125.98
+      const atrGrid = { buyLevels: 4, sellLevels: 4, spacingType: 'atr', spacingValue: 1 } as const;
+      const allInUsdt: Portfolio = new Map<string, BalanceDetail>([
+        ['BTC', { free: 0, used: 0, total: 0 }],
+        ['USDT', { free: 60000, used: 0, total: 60000 }],
+      ]);
+      // What the BUY rebalance left: 0.4 BTC for the 4 SELLs and 25000 USDT for the BUYs, 0.1 a level
+      const rebalanced: Portfolio = new Map<string, BalanceDetail>([
+        ['BTC', { free: 0.4, used: 0, total: 0.4 }],
+        ['USDT', { free: 25000, used: 0, total: 25000 }],
+      ]);
+
+      beforeEach(() => {
+        tools.marketData = new Map([
+          ['BTC/USDT', { amount: { min: 0.00001 }, precision: { price: 0.01, amount: 0.00001 }, fee: { maker: 0.001 } }],
+        ]);
+      });
+
+      /** The grid placed at 62420.34 on the ATR of 50, its BUY rebalance filled at `price` */
+      const rebalancedAt = (price: number, params: Partial<GridBotStrategyParams> = atrGrid) => {
+        initStrategy(62420.34, params, allInUsdt);
+        candleWithAtr(62420.34, 50, allInUsdt);
+        afterWarmup(62420.34, allInUsdt);
+        strategy.onOrderCompleted({ order: { id: issuedOrders[0].id } as any, exchange: { price, portfolio: rebalanced }, tools });
+      };
+
+      it.each`
+        params                                                        | spacing
+        ${atrGrid}                                                    | ${'a step of 125.73 (the minimum step, spacingValue 1 × ATR 50 giving 50, atr)'}
+        ${{ ...atrGrid, spacingType: 'fixed', spacingValue: 125.73 }} | ${'spacingValue 125.73 (fixed)'}
+      `('warns, once the rebalance has filled at 62545.18, of the level it leaves under the fee: $spacing', ({ params, spacing }) => {
+        rebalancedAt(62545.18, params);
+
+        expect(feeWarnings()).toEqual([
+          [
+            'warn',
+            `GridBot: ${spacing} is under the round-trip fee: a level that sells less than 0.2002 % above its buy, paying the maker fee of 0.001 (fee.maker) on its BUY and on its SELL, loses money at each round trip, 1 out of 8 here, the narrowest selling at 63048.1, 0.1998 % above its buy at 62922.37`,
+          ],
+        ]);
+      });
+
+      it('builds the grid all the same, around 62545.18, 125.73 apart', () => {
+        rebalancedAt(62545.18);
+
+        expect(amountsSentAfter(1)).toEqual([
+          'BUY 62042.26 x0.1',
+          'BUY 62167.99 x0.1',
+          'BUY 62293.72 x0.1',
+          'BUY 62419.45 x0.1',
+          'SELL 62670.91 x0.1',
+          'SELL 62796.64 x0.1',
+          'SELL 62922.37 x0.1',
+          'SELL 63048.1 x0.1',
+        ]);
+      });
+
+      it('warns of nothing once the rebalance has filled at the price the grid was placed at, 62420.34', () => {
+        rebalancedAt(62420.34);
+
+        expect(feeWarnings()).toEqual([]);
+      });
     });
   });
 

@@ -64,7 +64,7 @@ import {
  * - Sell levels are placed above the center price
  * - Spacing between adjacent prices is configurable: fixed (in price units), percent (of the center price, the same between any two
  *   adjacent prices, as fixed spacing) or logarithmic (a ratio between adjacent prices). One under the round-trip fee, two maker fees,
- *   is warned of when the grid starts or is reset
+ *   is warned of each time a grid is built, at the start and at each reset, on the levels built around the price they are built at
  * - With atr spacing, the step is spacingValue × the ATR of atrPeriod timeframe candles on the candle the grid is built around, a fixed
  *   step from then on, until a reset resolves it again from the ATR of the last candle: rounded to the tick, and raised to the smallest
  *   step at which every level breaks even on the maker fee, one tick at least, with a warning (see resolveSpacing). On a market whose
@@ -382,19 +382,15 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
   /**
    * Places the grid around the center price, when it starts and at each reset (see rebuild): its spacing resolved there (see
-   * resolveSpacing), the grid checked there (see validateConfig), then a rebalance first if the free balances need one (see prepareGrid)
+   * resolveSpacing), the grid checked there (see validateConfig), then a rebalance first if the free balances need one (see prepareGrid).
+   * A spacing under the round-trip fee is warned of where the grid is built, on the levels built (see buildGrid).
    */
   private placeGridAround(centerPrice: number, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
     const marketData = tools.marketData.get(this.pair)!;
     this.resolveSpacing(centerPrice, marketData, tools);
-    const layout = this.getLayout(tools);
 
-    const validationError = validateConfig(layout, centerPrice, marketData);
+    const validationError = validateConfig(this.getLayout(tools), centerPrice, marketData);
     if (validationError) this.stopRun(validationError, tools);
-    // A spacing under the round-trip fee makes a grid that loses money at each round trip of a level: a bad grid, not an impossible
-    // one, placed all the same, after one warning
-    const feeWarning = checkRoundTripFee(layout, centerPrice, marketData);
-    if (feeWarning) tools.log('warn', `GridBot: ${feeWarning}`);
 
     // Always attempt rebalancing first
     this.prepareGrid(centerPrice, portfolio, tools);
@@ -724,6 +720,13 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const levelsBuilt = { ...this.spacing!, buyLevels: size.buyLevels, sellLevels: size.sellLevels };
     const tickError = checkPriceTick(levelsBuilt, centerPrice, priceDecimals, priceStep, priceSignificantDigits);
     if (tickError) this.stopRun(tickError, tools);
+
+    // A spacing under the round-trip fee makes levels that lose money at each round trip: a bad grid, not an impossible one, built all
+    // the same, after one warning. Checked on the levels built, around the price they are built at, whatever path builds them: checked
+    // around the price the grid was placed at only, a grid rebalanced first was built around the price the rebalance ended at without a
+    // word, where the top level of an atr grid on its minimum step, which an upward breakout's BUY rebalance moves higher, lost money
+    const feeWarning = checkRoundTripFee(levelsBuilt, centerPrice, marketData);
+    if (feeWarning) tools.log('warn', `GridBot: ${feeWarning}`);
 
     // Bounds of the levels built
     const bounds = computeGridBounds(
