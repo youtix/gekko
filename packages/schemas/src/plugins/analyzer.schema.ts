@@ -7,8 +7,10 @@ export const analyzerSchema = z.strictObject({
   riskFreeReturn: z.number().nonnegative().default(5),
   enableConsoleTable: z.boolean().default(false),
   /**
-   * The asset whose price gives the market return of the report: one of watch.assets, which the analyzer checks as it is built (a
-   * GekkoError naming the watched assets stops the run otherwise). Left out, BTC when it is watched, else the first asset of watch.assets.
+   * The asset whose price gives the market return of the report: one of watch.assets. This schema only checks how it is written:
+   * configurationSchema refuses one that is not watched, at plugins[i].benchmarkAsset, as the loader reads the file and as Fox checks its
+   * variants, and the analyzer checks it again as it is built (a GekkoError naming the watched assets), for an entry no configuration
+   * was parsed with. Left out, BTC when it is watched, else the first asset of watch.assets.
    */
   benchmarkAsset: assetSchema.optional(),
 });
