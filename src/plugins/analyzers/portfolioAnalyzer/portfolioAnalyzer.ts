@@ -18,10 +18,10 @@ import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { first, isNil, omit } from 'lodash-es';
 import { Plugin } from '../../plugin';
-import { DEFAULT_BENCHMARK_ASSET, DUST_TOLERANCE } from '../analyzer.const';
+import { DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
-import { calculatePerformanceStatistics } from '../analyzer.helper';
+import { calculatePerformanceStatistics, pickBenchmarkAsset } from '../analyzer.helper';
 import { EMPTY_PORTFOLIO_REPORT, PLUGIN_NAME } from './portfolioAnalyzer.const';
 import { PortfolioReport } from './portfolioAnalyzer.types';
 import { logPortfolioReport } from './portfolioAnalyzer.helper';
@@ -30,6 +30,10 @@ export class PortfolioAnalyzer extends Plugin {
   // Configuration
   private readonly riskFreeReturn: number;
   private readonly enableConsoleTable: boolean;
+  /**
+   * The asset whose closes give the market return of the report, and its start and end prices: the benchmarkAsset option, which must be
+   * a watched asset, else BTC when it is watched, else the first asset of watch.assets (see pickBenchmarkAsset)
+   */
   private readonly benchmarkAsset: Asset;
   private readonly benchmarkPair: TradingPair;
 
@@ -75,12 +79,14 @@ export class PortfolioAnalyzer extends Plugin {
   private portfolioChangeCount: number = 0;
   private currentTimestamp: EpochTimeStamp = 0;
 
-  constructor({ riskFreeReturn, enableConsoleTable }: AnalyzerConfig) {
+  constructor({ riskFreeReturn, enableConsoleTable, benchmarkAsset }: AnalyzerConfig) {
     super(PLUGIN_NAME);
 
     this.riskFreeReturn = riskFreeReturn ?? 5;
     this.enableConsoleTable = enableConsoleTable ?? false;
-    this.benchmarkAsset = this.assets.includes(DEFAULT_BENCHMARK_ASSET) ? DEFAULT_BENCHMARK_ASSET : this.assets[0];
+    // An asset that is not watched is refused here, as the plugins are built: no bucket would bring its pair, and the report would
+    // measure the market at 0 % after a warning, a figure that passes for a flat market
+    this.benchmarkAsset = pickBenchmarkAsset(this.assets, benchmarkAsset, 'portfolio analyzer');
     this.benchmarkPair = `${this.benchmarkAsset}/${this.currency}`;
   }
 
@@ -125,7 +131,7 @@ export class PortfolioAnalyzer extends Plugin {
     }
     this.warmupCompleted = true;
 
-    // Initialize benchmark tracking BTC if available, otherwise use first asset
+    // The benchmark starts from its close in the bucket that completed the warmup (see benchmarkAsset)
     const benchmarkCandle = timeframeBucket.get(this.benchmarkPair);
 
     if (benchmarkCandle) {

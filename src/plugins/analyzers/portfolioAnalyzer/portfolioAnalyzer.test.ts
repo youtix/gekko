@@ -3,6 +3,7 @@ import { ONE_MINUTE } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { CandleBucket } from '@models/event.types';
 import { Portfolio } from '@models/portfolio.types';
+import { Asset } from '@models/utility.types';
 import { config } from '@services/configuration/configuration';
 import { error, info, warning } from '@services/logger';
 import { calculatePortfolioTotalValue, createEmptyPortfolio } from '@helpers/portfolio/portfolio.helper';
@@ -93,6 +94,80 @@ describe('PortfolioAnalyzer', () => {
 
       const analyzerObj = new PortfolioAnalyzer({ name: 'PortfolioAnalyzer' } as any);
       expect((analyzerObj as any)[property]).toBe(expected);
+    });
+  });
+
+  describe('Benchmark', () => {
+    // Each asset moves its own way from the close that completes the warmup to the last one: the figures of a report tell which asset
+    // it measured the market against
+    const CLOSES: Record<Asset, { start: number; end: number }> = {
+      BTC: { start: 100, end: 200 },
+      ETH: { start: 10, end: 15 },
+      SOL: { start: 20, end: 25 },
+    };
+    /** The bucket of a minute, the candle of each watched asset's pair closing at the price given */
+    const bucketOf = (minute: number, assets: Asset[], priceOf: (asset: Asset) => number) => {
+      const bucket = new Map() as CandleBucket;
+      for (const asset of assets) {
+        const price = priceOf(asset);
+        bucket.set(`${asset}/USDT`, { start: minute * ONE_MINUTE, open: price, high: price, low: price, close: price, volume: 1 });
+      }
+      return bucket;
+    };
+    /** An analyzer built while the configuration watches these assets on USDT, with that benchmarkAsset option */
+    const analyzerWatching = (assets: Asset[], benchmarkAsset?: Asset) => {
+      vi.mocked(config.getWatch).mockReturnValue({
+        assets,
+        currency: 'USDT',
+        timeframe: '1m',
+        mode: 'backtest',
+        warmup: { candleCount: 0 },
+        pairs: assets.map(asset => ({ symbol: `${asset}/USDT` })),
+      } as any);
+      return new PortfolioAnalyzer({ enableConsoleTable: false, name: 'PortfolioAnalyzer', riskFreeReturn: 5, benchmarkAsset });
+    };
+    /**
+     * The report of a run holding 1000 USDT, its events in the order the pipeline delivers them (see PluginsStream): the bucket of minute
+     * 1 completes the warmup at the start closes, the bucket of minute 2 closes the next timeframe candle at the end closes
+     */
+    const reportOf = (assets: Asset[], benchmarkAsset?: Asset): PortfolioReport => {
+      const benchmarked = analyzerWatching(assets, benchmarkAsset);
+      const emit: MockInstance = vi.spyOn(benchmarked as any, 'emit').mockImplementation(() => {});
+      const firstBucket = bucketOf(1, assets, asset => CLOSES[asset].start);
+      (benchmarked as any).processOneMinuteBucket(firstBucket);
+      benchmarked.onStrategyWarmupCompleted([firstBucket]);
+      benchmarked.onTimeframeCandle([firstBucket]);
+      benchmarked.onPortfolioChange([holding(0, 0, 1000)]);
+      const lastBucket = bucketOf(2, assets, asset => CLOSES[asset].end);
+      (benchmarked as any).processOneMinuteBucket(lastBucket);
+      benchmarked.onTimeframeCandle([lastBucket]);
+      (benchmarked as any).processFinalize();
+      return emit.mock.lastCall![1];
+    };
+
+    it.each`
+      scenario                                 | assets            | benchmarkAsset | field                | expected | description
+      ${'BTC and ETH are watched, no option'}  | ${['BTC', 'ETH']} | ${undefined}   | ${'benchmarkAsset'}  | ${'BTC'} | ${'BTC, watched'}
+      ${'BTC and ETH are watched, no option'}  | ${['BTC', 'ETH']} | ${undefined}   | ${'marketReturnPct'} | ${100}   | ${'BTC from 100 to 200'}
+      ${'ETH and SOL are watched, no option'}  | ${['ETH', 'SOL']} | ${undefined}   | ${'benchmarkAsset'}  | ${'ETH'} | ${'the first asset, BTC not being watched'}
+      ${'ETH and SOL are watched, no option'}  | ${['ETH', 'SOL']} | ${undefined}   | ${'marketReturnPct'} | ${50}    | ${'ETH from 10 to 15'}
+      ${'BTC and ETH are watched, option ETH'} | ${['BTC', 'ETH']} | ${'ETH'}       | ${'benchmarkAsset'}  | ${'ETH'} | ${'the asset of the option'}
+      ${'BTC and ETH are watched, option ETH'} | ${['BTC', 'ETH']} | ${'ETH'}       | ${'startPrice'}      | ${10}    | ${'the close of ETH ending the warmup'}
+      ${'BTC and ETH are watched, option ETH'} | ${['BTC', 'ETH']} | ${'ETH'}       | ${'endPrice'}        | ${15}    | ${'the last close of ETH'}
+      ${'BTC and ETH are watched, option ETH'} | ${['BTC', 'ETH']} | ${'ETH'}       | ${'marketReturnPct'} | ${50}    | ${'ETH from 10 to 15, while BTC doubled'}
+    `('should report $field $expected when $scenario: $description', ({ assets, benchmarkAsset, field, expected }) => {
+      expect(reportOf(assets, benchmarkAsset)[field as keyof PortfolioReport]).toBe(expected);
+    });
+
+    // As the plugins are built, before any candle: main() reports it in one line, and the run exits with code 1
+    const REFUSAL = '[PORTFOLIO ANALYZER] benchmarkAsset must be one of the watched assets (BTC and ETH), got "SOL"';
+
+    it(`should refuse a benchmarkAsset that is not watched: ${REFUSAL}`, () => {
+      expect(() => analyzerWatching(['BTC', 'ETH'], 'SOL')).toThrowError(expect.objectContaining({ message: REFUSAL }));
+    });
+
+    it('should refuse it with a GekkoError', () => {
+      expect(() => analyzerWatching(['BTC', 'ETH'], 'SOL')).toThrowError(GekkoError);
     });
   });
 

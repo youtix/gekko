@@ -73,7 +73,9 @@ export class PerformanceReporter extends Plugin {
       // York), 120 days read "3 months 30 days 1 hour" (see formatDurationUTC)
       value: portfolioOnly(({ longestDrawdownMs }) => (longestDrawdownMs > 0 ? formatDurationUTC(0, longestDrawdownMs) : '0')),
     },
-    { header: 'benchmark asset', value: portfolioOnly(({ benchmarkAsset }) => benchmarkAsset) },
+    // Both reports name the asset they measure the market against (see Report.benchmarkAsset): the cell of a trading row was left empty,
+    // though the RoundTripAnalyzer measured it against its pair. The header is unchanged, so a file written before still takes the rows.
+    { header: 'benchmark asset', value: report => report.benchmarkAsset },
     // A JSON array of numbers written as the amounts are (see toPlainNumber): JSON.stringify wrote every digit of the binary value,
     // 33.33333333333333, and an exponent below 1e-6, 1.000000338535756e-8
     { header: 'top maes', value: tradingOnly(({ topMAEs }) => `[${topMAEs.map(toPlainNumber).join(',')}]`) },

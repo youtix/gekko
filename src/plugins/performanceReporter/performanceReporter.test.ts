@@ -263,7 +263,7 @@ describe('PerformanceReporter', () => {
         ${sampleTradingReport}   | ${'max drawdown'}              | ${''}
         ${sampleTradingReport}   | ${'total changes'}             | ${''}
         ${sampleTradingReport}   | ${'longest drawdown duration'} | ${''}
-        ${sampleTradingReport}   | ${'benchmark asset'}           | ${''}
+        ${sampleTradingReport}   | ${'benchmark asset'}           | ${'BTC'}
         ${samplePortfolioReport} | ${'status'}                    | ${'completed'}
         ${sampleTradingReport}   | ${'status'}                    | ${'completed'}
       `('should write $value under $column for $report.id', ({ report, column, value }) => {

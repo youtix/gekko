@@ -16,5 +16,5 @@ export const EMPTY_PORTFOLIO_REPORT: PortfolioReport = {
   startEquity: 0,
   endEquity: 0,
   portfolioChangeCount: 0,
-  benchmarkAsset: '', // Will be populated dynamically if possible, or empty string on fail
+  benchmarkAsset: '', // An empty report measures nothing, against no benchmark (see Report.benchmarkAsset)
 };
