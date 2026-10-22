@@ -109,6 +109,16 @@ const checkVariantCount = (choices: readonly Choice[]) => {
 };
 
 /**
+ * Gives a PerformanceReporter entry of a labelled variant the variant's label, after the entry's own when it has one:
+ * `baseline --strategy.period 14`. Kept alone, the entry's label named every row of a sweep alike, a sweep of a fee writing rows that
+ * nothing told apart. A label that is not a text, or an empty one, is left as it is, for the reporter's schema to refuse as Gekko would.
+ */
+const labelReporter = (entry: Record<string, unknown>, label: string) => {
+  if (entry.label === undefined) entry.label = label;
+  else if (typeof entry.label === 'string' && entry.label) entry.label = `${entry.label} ${label}`;
+};
+
+/**
  * The variants of `template`, one for each combination of the values of the overrides: the cartesian product of their lists and ranges,
  * the first option's values changing last (variant 1 takes the first value of every option, variant 2 the second value of the last
  * option), numbered from 1. Each is a deep copy of the template with its values merged over it (lodash's merge, so that a key set
@@ -118,7 +128,7 @@ const checkVariantCount = (choices: readonly Choice[]) => {
  *
  * A labelled variant's PerformanceReporter entries take its label, which the reporter writes after the id of its row (the values of
  * the strategy block): without it, the rows of variants that differ outside that block (a fee, a balance) could not be told apart. An
- * entry with a label of its own keeps it.
+ * entry with a label of its own, in the template or set by an option, keeps it before the variant's (see labelReporter).
  */
 export const generateVariants = (template: Template, overrides: Overrides): Variant[] => {
   const choices = choicesOf(overrides);
@@ -138,7 +148,7 @@ export const generateVariants = (template: Template, overrides: Overrides): Vari
       cloneDeep(template),
       choices.reduce((variant, { path }, position) => setWith(variant, path, values[position], Object), {}),
     );
-    if (label) for (const entry of reportersOf(configuration)) if (entry.label === undefined) entry.label = label;
+    if (label) for (const entry of reportersOf(configuration)) labelReporter(entry, label);
     return { variant: index + 1, label, configuration };
   });
 };

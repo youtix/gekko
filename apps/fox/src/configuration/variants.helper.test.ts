@@ -199,20 +199,23 @@ describe('generateVariants', () => {
       generateVariants(source, overrides).map(({ configuration }) => configuration.plugins);
 
     it.each`
-      description                                    | overrides                                                                | expected
-      ${'each variant its label'}                    | ${{ strategy: { period: [10, 20] } }}                                    | ${[[{ name: 'A' }, { ...REPORTER, label: '--strategy.period 10' }], [{ name: 'A' }, { ...REPORTER, label: '--strategy.period 20' }]]}
-      ${'no label to a single variant'}              | ${{ strategy: { period: 14 } }}                                          | ${[[{ name: 'A' }, REPORTER]]}
-      ${'the label of its own an override gives it'} | ${{ strategy: { period: [10, 20] }, plugins: { 1: { label: 'mine' } } }} | ${[[{ name: 'A' }, { ...REPORTER, label: 'mine' }], [{ name: 'A' }, { ...REPORTER, label: 'mine' }]]}
+      description                                                        | overrides                                                                          | expected
+      ${'each variant its label'}                                        | ${{ strategy: { period: [10, 20] } }}                                              | ${[[{ name: 'A' }, { ...REPORTER, label: '--strategy.period 10' }], [{ name: 'A' }, { ...REPORTER, label: '--strategy.period 20' }]]}
+      ${'no label to a single variant'}                                  | ${{ strategy: { period: 14 } }}                                                    | ${[[{ name: 'A' }, REPORTER]]}
+      ${'each variant its label after the one an override gives'}        | ${{ strategy: { period: [10, 20] }, plugins: { 1: { label: 'mine' } } }}           | ${[[{ name: 'A' }, { ...REPORTER, label: 'mine --strategy.period 10' }], [{ name: 'A' }, { ...REPORTER, label: 'mine --strategy.period 20' }]]}
+      ${'a single variant the label an override gives, alone, a re-run'} | ${{ strategy: { period: 14 }, plugins: { 1: { label: '--strategy.period 14' } } }} | ${[[{ name: 'A' }, { ...REPORTER, label: '--strategy.period 14' }]]}
     `('should give $description', ({ overrides, expected }) => {
       expect(pluginsOfVariants(overrides)).toStrictEqual(expected);
     });
 
     it.each`
-      description                                     | plugins                                           | expected
-      ${'the label of its own the template gives it'} | ${[{ ...REPORTER, label: 'baseline' }]}           | ${[{ ...REPORTER, label: 'baseline' }]}
-      ${'every PerformanceReporter its label'}        | ${[REPORTER, { ...REPORTER, fileName: 'b.csv' }]} | ${[{ ...REPORTER, label: '--strategy.period 10' }, { ...REPORTER, fileName: 'b.csv', label: '--strategy.period 10' }]}
-      ${'an entry that is not an object as it is'}    | ${['PerformanceReporter']}                        | ${['PerformanceReporter']}
-      ${'plugins that are not a list as they are'}    | ${'PerformanceReporter'}                          | ${'PerformanceReporter'}
+      description                                                           | plugins                                           | expected
+      ${"the label of its own the template gives it, before the variant's"} | ${[{ ...REPORTER, label: 'baseline' }]}           | ${[{ ...REPORTER, label: 'baseline --strategy.period 10' }]}
+      ${'every PerformanceReporter its label'}                              | ${[REPORTER, { ...REPORTER, fileName: 'b.csv' }]} | ${[{ ...REPORTER, label: '--strategy.period 10' }, { ...REPORTER, fileName: 'b.csv', label: '--strategy.period 10' }]}
+      ${'a label that is not a text as it is, for the schema to refuse'}    | ${[{ ...REPORTER, label: 12 }]}                   | ${[{ ...REPORTER, label: 12 }]}
+      ${'an empty label as it is, for the schema to refuse'}                | ${[{ ...REPORTER, label: '' }]}                   | ${[{ ...REPORTER, label: '' }]}
+      ${'an entry that is not an object as it is'}                          | ${['PerformanceReporter']}                        | ${['PerformanceReporter']}
+      ${'plugins that are not a list as they are'}                          | ${'PerformanceReporter'}                          | ${'PerformanceReporter'}
     `('should keep $description', ({ plugins, expected }) => {
       expect(pluginsOfVariants({ strategy: { period: [10, 20] } }, { ...template, plugins })[0]).toStrictEqual(expected);
     });
