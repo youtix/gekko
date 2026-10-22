@@ -1,10 +1,17 @@
 import { LogLevel } from '@gekko/shared/models/logLevel.types';
-import { range } from 'lodash-es';
+import { pick, range } from 'lodash-es';
+import { EOL } from 'node:os';
 import { afterEach, beforeEach, describe, expect, it, vi, type MockInstance } from 'vitest';
-import { Logger, transports } from 'winston';
+import { Logger } from 'winston';
+
+// The logger writes its lines to stdout with writeSync, which records them instead (see beforeEach): every copy of the logger the
+// tests import writes through this one mock
+const { writeSync } = vi.hoisted(() => ({ writeSync: vi.fn<(fd: number, bytes: Uint8Array, offset: number, length: number) => number>() }));
+vi.mock('node:fs', async importOriginal => ({ ...(await importOriginal<typeof import('node:fs')>()), writeSync }));
 
 type PrintedLine = { level: string; message: string };
-type ConsoleTransport = { log: (line: PrintedLine, next: () => void) => void };
+/** A write of the logger: its descriptor and the text it was given */
+type Write = { fd: number; text: string };
 /** A line as the logger hands it to winston, which formats it before its level filter drops it */
 type HandedLine = { level: string; message: string; _tag: string };
 type WinstonLogger = { log: (line: HandedLine) => void };
@@ -16,22 +23,24 @@ const notice = (value: string) =>
   `Invalid GEKKO_LOG_LEVEL '${value}', falling back to 'error'. Valid levels: error, warn, info, http, verbose, debug, silly.`;
 
 describe('logger', () => {
-  let printed: PrintedLine[];
+  let writes: Write[];
 
   beforeEach(() => {
-    printed = [];
-    // Records what winston's level filter lets through to the console transport, instead of printing it
-    vi.spyOn(transports.Console.prototype as ConsoleTransport, 'log').mockImplementation((line, next) => {
-      printed.push({ level: line.level, message: line.message });
-      next();
+    writes = [];
+    // Takes every byte it is given, as a pipe with room does
+    writeSync.mockImplementation((fd, bytes, offset, length) => {
+      writes.push({ fd, text: Buffer.from(bytes.subarray(offset, offset + length)).toString() });
+      return length;
     });
   });
 
   afterEach(() => {
-    vi.mocked(transports.Console.prototype.log).mockRestore();
     vi.unstubAllEnvs();
     vi.useRealTimers();
   });
+
+  /** What winston's level filter lets through, as the lines written to stdout give it: the level and the message of each */
+  const printed = (): PrintedLine[] => writes.filter(({ fd }) => fd === 1).map(({ text }) => pick(JSON.parse(text), ['level', 'message']));
 
   // GEKKO_LOG_LEVEL is read when the module loads: every test imports a fresh copy
   const loadLogger = (logLevel: string | undefined) => {
@@ -55,7 +64,7 @@ describe('logger', () => {
   const logWith = async (logLevel: string | undefined, logFunction: LogFunction, messages: unknown[]) => {
     const logger = await loadLogger(logLevel);
     messages.forEach(message => logger[logFunction]('gekko', message));
-    // Lets winston hand the lines to the spy rather than to the console once the spy is restored
+    // winston hands its first lines to the transport on a later tick
     await new Promise(resolve => setImmediate(resolve));
     return logger;
   };
@@ -78,7 +87,11 @@ describe('logger', () => {
     ${'trace'}   | ${['error']}
   `('prints the $levels probes when GEKKO_LOG_LEVEL is $logLevel', async ({ logLevel, levels }) => {
     await logProbes(logLevel);
-    expect(printed.filter(isProbe).map(({ level }) => level)).toEqual(levels);
+    expect(
+      printed()
+        .filter(isProbe)
+        .map(({ level }) => level),
+    ).toEqual(levels);
   });
 
   it.each`
@@ -90,7 +103,7 @@ describe('logger', () => {
     ${' info '}
   `('prints no fallback notice when GEKKO_LOG_LEVEL is $logLevel', async ({ logLevel }) => {
     await logProbes(logLevel);
-    expect(printed.filter(line => !isProbe(line))).toEqual([]);
+    expect(printed().filter(line => !isProbe(line))).toEqual([]);
   });
 
   it.each`
@@ -99,7 +112,7 @@ describe('logger', () => {
     ${' Loud '}
   `('prints the fallback notice once, at error level, when GEKKO_LOG_LEVEL is $logLevel', async ({ logLevel }) => {
     await logProbes(logLevel);
-    expect(printed.filter(line => !isProbe(line))).toEqual([{ level: 'error', message: notice(logLevel) }]);
+    expect(printed().filter(line => !isProbe(line))).toEqual([{ level: 'error', message: notice(logLevel) }]);
   });
 
   // The levels winston prints, as the probes above show: a caller can skip a message below them, which winston formats only to drop it
@@ -118,6 +131,30 @@ describe('logger', () => {
   `('enables the $levels levels when GEKKO_LOG_LEVEL is $logLevel', async ({ logLevel, levels }) => {
     const { isLevelEnabled } = await loadLogger(logLevel);
     expect(LOG_LEVELS.filter(level => isLevelEnabled(level))).toEqual(levels);
+  });
+
+  describe('stdout', () => {
+    it('gets each line as JSON ending with a newline, written to descriptor 1', async () => {
+      vi.useFakeTimers({ now: 1000, toFake: ['Date'] });
+      await logWith(undefined, 'error', ['probe']);
+      expect(writes).toEqual([
+        { fd: 1, text: `{"_tag":"GEKKO","level":"error","message":"probe","timestamp":"1970-01-01T00:00:01.000Z"}${EOL}` },
+      ]);
+    });
+
+    // Written before the call that logs it returns: a process.exit() right after it, as a worker of Fox makes once it has posted its
+    // outcome, loses none of it, whoever reads the pipe and however slowly
+    it.each`
+      logFunction  | level
+      ${'debug'}   | ${'debug'}
+      ${'info'}    | ${'info'}
+      ${'warning'} | ${'warn'}
+      ${'error'}   | ${'error'}
+    `('gets the $level line of $logFunction before the call returns', async ({ logFunction, level }) => {
+      const logger = await logWith('debug', logFunction, []);
+      logger[logFunction as LogFunction]('gekko', 'probe');
+      expect(printed()).toEqual([{ level, message: 'probe' }]);
+    });
   });
 
   describe('debug', () => {

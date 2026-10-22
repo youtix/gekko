@@ -76,6 +76,7 @@ export const MockWinstonLogger = {
   child: () => MockWinstonLogger,
 };
 
+/** The transport the logger builds its winston logger with, a Stream over stdout, which the mock's logger never writes to */
 export const MockWinstonTransport = class {
   constructor() {}
 };
@@ -89,6 +90,6 @@ export const MockWinstonFormat = {
 
 export const MockWinston = {
   createLogger: () => MockWinstonLogger,
-  transports: { Console: MockWinstonTransport },
+  transports: { Stream: MockWinstonTransport },
   format: MockWinstonFormat,
 };

@@ -4,8 +4,12 @@ import { RingBuffer } from '@gekko/shared/helpers/collection/ringBuffer';
 import { isString, upperCase } from 'lodash-es';
 import { createLogger, format, transports } from 'winston';
 import { BufferedLog } from '@gekko/shared/models/log.types';
+import { createSyncWriteStream } from './logger.helper';
 import { LogInput } from './logger.types';
 const { combine, timestamp, json } = format;
+
+/** The standard output's descriptor, which every line is written to, whatever its level */
+const STDOUT = 1;
 
 /**
  * The levels kept in the buffer: the ones the log monitoring of Supervision, which the buffer is for, forwards to Telegram, whatever
@@ -49,7 +53,11 @@ export const isLevelEnabled = (level: LogLevel) => enabledLevels.has(level);
 const logger = createLogger({
   level: logLevel,
   format: combine(timestamp(), json()),
-  transports: [new transports.Console()],
+  // Each line is written to stdout before the call that logs it returns (createSyncWriteStream), so that a process.exit() loses none:
+  // winston's Console transport handed its lines to process.stdout, which Bun queues when a pipe is read slower than the process
+  // writes, and the exit dropped what was queued (a worker of Fox exiting once its outcome is posted lost its last lines, Fox its
+  // summary). A reader that stalls stalls the process in turn, as a pipe does under Node.
+  transports: [new transports.Stream({ stream: createSyncWriteStream(STDOUT) })],
 });
 
 if (rejectedLogLevel !== undefined) {
