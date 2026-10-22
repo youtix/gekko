@@ -280,18 +280,176 @@ describe('clock.helper', () => {
       expect({ fired, refreshed: refreshed === handle }).toEqual({ fired: firedAt, refreshed: true });
     });
 
-    it('should give the handle back from ref and unref, and tell by hasRef which of them was called last, as Bun does', () => {
+    it('should give the handle back from ref and unref, as Bun does', () => {
       startFakeClock();
       const handle = setTimeout(() => undefined, ONE_SECOND);
-      const unref = handle.unref();
-      const afterUnref = handle.hasRef();
-      const ref = handle.ref();
-      expect({ unref: unref === handle, afterUnref, ref: ref === handle, afterRef: handle.hasRef() }).toEqual({
-        unref: true,
-        afterUnref: false,
-        ref: true,
-        afterRef: true,
-      });
+      expect({ unref: handle.unref() === handle, ref: handle.ref() === handle }).toEqual({ unref: true, ref: true });
+    });
+
+    // Each row read on Bun 1.4.4's real timers: hasRef is true while the timer is armed, its callback running included, and ref rather
+    // than unref was called last on it
+    it.each<[string, boolean, () => Promise<boolean>]>([
+      ['a timeout not fired yet', true, async () => setTimeout(() => undefined, 500).hasRef()],
+      [
+        "a timeout unref'd",
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          return handle.unref().hasRef();
+        },
+      ],
+      [
+        "a timeout unref'd then ref'd",
+        true,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          handle.unref();
+          return handle.ref().hasRef();
+        },
+      ],
+      [
+        'a timeout inside its callback',
+        true,
+        async () => {
+          let inside = false;
+          setTimeout(function (this: ReturnType<typeof setTimeout>) {
+            inside = this.hasRef();
+          }, 500);
+          await advanceClock(ONE_SECOND);
+          return inside;
+        },
+      ],
+      [
+        'a timeout once it fired',
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          await advanceClock(ONE_SECOND);
+          return handle.hasRef();
+        },
+      ],
+      [
+        "a timeout ref'd once it fired",
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          await advanceClock(ONE_SECOND);
+          return handle.ref().hasRef();
+        },
+      ],
+      [
+        'a timeout refreshed once it fired',
+        true,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          await advanceClock(ONE_SECOND);
+          return handle.refresh().hasRef();
+        },
+      ],
+      [
+        "a timeout unref'd, refreshed once it fired",
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500).unref();
+          await advanceClock(ONE_SECOND);
+          return handle.refresh().hasRef();
+        },
+      ],
+      [
+        'a timeout refreshed once it fired, once it fired again',
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          await advanceClock(ONE_SECOND);
+          handle.refresh();
+          await advanceClock(ONE_SECOND);
+          return handle.hasRef();
+        },
+      ],
+      [
+        'a timeout refreshed inside its callback',
+        true,
+        async () => {
+          let fired = 0;
+          let inside = false;
+          setTimeout(function (this: ReturnType<typeof setTimeout>) {
+            if (++fired === 1) inside = this.refresh().hasRef();
+          }, 400);
+          await advanceClock(ONE_SECOND);
+          return inside && fired === 2;
+        },
+      ],
+      [
+        'a timeout cleared inside its callback',
+        false,
+        async () => {
+          let inside = true;
+          setTimeout(function (this: ReturnType<typeof setTimeout>) {
+            clearTimeout(this);
+            inside = this.hasRef();
+          }, 500);
+          await advanceClock(ONE_SECOND);
+          return inside;
+        },
+      ],
+      [
+        'a timeout cleared',
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          clearTimeout(handle);
+          return handle.hasRef();
+        },
+      ],
+      [
+        "a timeout cleared by its number, then ref'd",
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          clearTimeout(Number(handle));
+          return handle.ref().hasRef();
+        },
+      ],
+      [
+        'an interval once it fired',
+        true,
+        async () => {
+          const handle = setInterval(() => undefined, 400);
+          await advanceClock(ONE_SECOND);
+          return handle.hasRef();
+        },
+      ],
+      [
+        "an interval unref'd once it fired",
+        false,
+        async () => {
+          const handle = setInterval(() => undefined, 400).unref();
+          await advanceClock(ONE_SECOND);
+          return handle.hasRef();
+        },
+      ],
+      [
+        'an interval cleared once it fired',
+        false,
+        async () => {
+          const handle = setInterval(() => undefined, 400);
+          await advanceClock(ONE_SECOND);
+          clearInterval(handle);
+          return handle.hasRef();
+        },
+      ],
+      [
+        'a timeout of a fake clock stopped since, its timers dropped',
+        false,
+        async () => {
+          const handle = setTimeout(() => undefined, 500);
+          stopFakeClock();
+          return handle.hasRef();
+        },
+      ],
+    ])('should give %s a hasRef of %p, as Bun does', async (_timer, hasRef, read) => {
+      startFakeClock();
+      expect(await read()).toBe(hasRef);
     });
 
     it('should not clear a timer of a later fake clock through the handle of a timer of an earlier one', async () => {

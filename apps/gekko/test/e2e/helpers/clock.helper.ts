@@ -23,8 +23,8 @@ const MAX_TIMER_DELAY = 2 ** 31 - 1;
 
 /**
  * A timer armed on the fake clock: due at `due`, armed `order`th among those due then, again every `delay` for an interval, its callback
- * called with its handle as `this`, as Bun calls a timer's. Cleared (clearTimeout, clearInterval, its handle's close), it is armed no
- * more, its handle's refresh included.
+ * called with its handle as `this`, as Bun calls a timer's. A timeout leaves the clock once its callback has returned, unless the callback
+ * refreshed it. Cleared (clearTimeout, clearInterval, its handle's close), it is armed no more, its handle's refresh included.
  */
 type FakeTimer = {
   id: number;
@@ -90,8 +90,20 @@ const disarm = (handle: unknown) => {
 };
 
 /**
- * A handle as setTimeout gives one: clearTimeout and clearInterval take it, or its number. As Bun's, hasRef says whether ref or unref was
- * called last, and refresh arms its timer again from the fake now, also once it fired, but not once it was cleared.
+ * Whether the timer of a fake handle is armed on the fake clock that runs: from setTimeout or setInterval on, until it is cleared, a
+ * timeout until its callback has returned, unless refresh armed it again. Not a timer of a clock stopped since, whose timers were dropped.
+ */
+const isArmed = (handle: object) => {
+  const fake = fakeHandles.get(handle);
+  return fake !== undefined && fake.owner === clock && fake.owner.timers.has(fake.timer.id);
+};
+
+/**
+ * A handle as setTimeout gives one: clearTimeout and clearInterval take it, or its number. As Bun's, hasRef says whether its timer is
+ * armed and ref rather than unref was called last: false once a timeout has fired, a timer was cleared or its clock stopped, whatever ref
+ * says, and true inside its callback, or once refresh armed it again, unless unref was called last. refresh arms its timer again from the
+ * fake now, also once it fired, but not once it was cleared. The fake hasRef said only which of ref and unref was called last, true for a
+ * timeout that had fired or a timer cleared: code that told a live timer by it would have taken a dead one for live under the flows alone.
  */
 const handleOf = (id: number) => {
   let isReferenced = true;
@@ -104,7 +116,7 @@ const handleOf = (id: number) => {
       isReferenced = false;
       return handle;
     },
-    hasRef: () => isReferenced,
+    hasRef: () => isReferenced && isArmed(handle),
     refresh: () => {
       const fake = fakeHandles.get(handle);
       if (fake && !fake.timer.isCleared) schedule(fake.owner, fake.timer, fake.owner.now + fake.timer.delay);
@@ -156,9 +168,10 @@ const nextTimer = (current: FakeClock, until: number) => {
 /**
  * Moves the fake clock by `ms` at once, firing on its way the timers due by then, each with Date at its instant: an interval again every
  * period, a timer a callback arms if it is due by then too. An interval is armed again once its callback has returned, as Bun arms it: a
- * timer the callback armed for the instant of its next run fires first. Their process.nextTick and promise callbacks run once the advance
- * is over, as for any synchronous code: advanceClock lets the event loop run after it. A callback that throws ends the advance with its
- * error, the clock at its instant. A callback that stops the fake clock ends it too, Date left real.
+ * timer the callback armed for the instant of its next run fires first. A timeout leaves the clock once its callback has returned, armed
+ * while it runs as Bun's is (hasRef), unless the callback refreshed it, which armed it again. Their process.nextTick and promise callbacks
+ * run once the advance is over, as for any synchronous code: advanceClock lets the event loop run after it. A callback that throws ends
+ * the advance with its error, the clock at its instant. A callback that stops the fake clock ends it too, Date left real.
  */
 const advanceFakeClock = (current: FakeClock, ms: number) => {
   const until = current.now + ms;
@@ -166,11 +179,14 @@ const advanceFakeClock = (current: FakeClock, ms: number) => {
     current.now = timer.due;
     setSystemTime(new Date(timer.due));
     const nextRun = timer.due + timer.delay;
-    if (!timer.repeats) current.timers.delete(timer.id);
+    const { order } = timer;
     try {
       timer.callback.apply(timer.handle, timer.args);
     } finally {
-      if (timer.repeats && !timer.isCleared) schedule(current, timer, nextRun);
+      if (!timer.repeats) {
+        // Unless its callback refreshed it, which armed it again
+        if (timer.order === order) current.timers.delete(timer.id);
+      } else if (!timer.isCleared) schedule(current, timer, nextRun);
     }
   }
   if (clock !== current) return;
@@ -228,7 +244,7 @@ export const guardFakeClockStart = (guard: (() => void) | undefined) => {
 /** Whether the fake clock runs: startFakeClock started it, and stopFakeClock has not stopped it since */
 export const isFakeClock = () => clock !== undefined;
 
-/** The timers armed on the fake clock and not fired, nor cleared, yet: none when it does not run */
+/** The timers armed on the fake clock, not fired nor cleared yet, a timeout until its callback has returned: none when it does not run */
 export const fakeTimerCount = () => clock?.timers.size ?? 0;
 
 /**
