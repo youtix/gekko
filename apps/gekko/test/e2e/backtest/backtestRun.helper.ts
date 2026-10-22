@@ -21,22 +21,28 @@ const START = Date.parse('2024-01-01T00:00:00Z');
 /** The start of the minute `n` minutes after START */
 export const minute = (n: number) => START + n * ONE_MINUTE;
 
-/** The candle of the minute `n` minutes after START, opening at `open`, its high and its low `spread` above and below its close */
+/**
+ * The candle of the minute `n` minutes after START, opening at `open`, its high and its low `spread` above and below its close, stretched
+ * to its open when it opens further from its close: a market trades its open, which lies within its high and low. The open was left
+ * outside them, which no exchange serves, so that a scenario reading the opens (a trailing stop tests the open, the low, the high, then
+ * the close) would have run on prices no market makes.
+ */
 export const candleAt = (
   n: number,
   { open, close, spread, volume }: { open: number; close: number; spread: number; volume: number },
 ): Candle => ({
   start: minute(n),
   open,
-  high: close + spread,
-  low: close - spread,
+  high: Math.max(open, close + spread),
+  low: Math.min(open, close - spread),
   close,
   volume,
 });
 
 /**
  * The candles of 00:00 to 00:08, opening every minute at `open` and closing there, but at the prices `closes` lists by minute, each high
- * and low `spread` off its close: those of BTC at 10000, 100 either side, unless the options give others
+ * and low `spread` off its close, stretched to the open (see candleAt): those of BTC at 10000, 100 either side, unless the options give
+ * others
  */
 export const candlesClosingAt = (
   closes: Record<number, number> = {},
