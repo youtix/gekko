@@ -1,9 +1,33 @@
 import { ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { afterEach, describe, expect, it } from 'bun:test';
-import { advanceClock, fakeTimerCount, isFakeClock, minuteOf, REALTIME_START, startFakeClock, stopFakeClock } from './clock.helper';
+import {
+  advanceClock,
+  fakeTimerCount,
+  guardFakeClockStart,
+  isFakeClock,
+  minuteOf,
+  REALTIME_START,
+  startFakeClock,
+  stopFakeClock,
+} from './clock.helper';
 
 /** Waits `ms` on the real clock, once the fake clock is stopped */
 const realWait = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
+/** The message of what startFakeClock threw, undefined when it started the clock */
+const startFailureOf = (now?: number) => {
+  try {
+    startFakeClock(now);
+    return undefined;
+  } catch (error) {
+    return (error as Error).message;
+  }
+};
+
+/** A guard that refuses every start of the fake clock */
+const refuseEveryStart = () => {
+  throw new Error('A run goes on this clock');
+};
 
 describe('clock.helper', () => {
   afterEach(() => stopFakeClock());
@@ -107,6 +131,44 @@ describe('clock.helper', () => {
     });
 
     it('should start afresh when the fake clock runs already, its timers dropped', async () => {
+      startFakeClock();
+      let fired = false;
+      setTimeout(() => (fired = true), ONE_SECOND);
+      startFakeClock(REALTIME_START + 60_000);
+      await advanceClock(2 * ONE_SECOND);
+      expect({ fired, at: Date.now() - REALTIME_START }).toEqual({ fired: false, at: 62_000 });
+    });
+  });
+
+  describe('guardFakeClockStart', () => {
+    afterEach(() => guardFakeClockStart(undefined));
+
+    it('should refuse to start the fake clock with the error of the guard, the clock that runs kept with its timers', async () => {
+      startFakeClock();
+      let fired = false;
+      setTimeout(() => (fired = true), ONE_SECOND);
+      guardFakeClockStart(refuseEveryStart);
+      const failure = startFailureOf(REALTIME_START + 60_000);
+      await advanceClock(2 * ONE_SECOND);
+      expect({ failure, fired, at: Date.now() - REALTIME_START }).toEqual({ failure: 'A run goes on this clock', fired: true, at: 2_000 });
+    });
+
+    it('should refuse to start the fake clock with the error of the guard when none runs, Date left real', () => {
+      guardFakeClockStart(refuseEveryStart);
+      const failure = startFailureOf();
+      expect({ failure, isFakeClock: isFakeClock(), isDateReal: Date.now() > Date.parse('2026-01-01T00:00:00Z') }).toEqual({
+        failure: 'A run goes on this clock',
+        isFakeClock: false,
+        isDateReal: true,
+      });
+    });
+
+    it.each<[string, (() => void) | undefined]>([
+      ['a guard that returns', () => undefined],
+      ['no guard, the one set removed', undefined],
+    ])('should start the fake clock afresh under %s, its timers dropped', async (_guard, guard) => {
+      guardFakeClockStart(refuseEveryStart);
+      guardFakeClockStart(guard);
       startFakeClock();
       let fired = false;
       setTimeout(() => (fired = true), ONE_SECOND);

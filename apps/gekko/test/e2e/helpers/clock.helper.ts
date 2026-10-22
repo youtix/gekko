@@ -51,6 +51,9 @@ let lastTimerId = 0;
 /** The clock and the timer of each handle setTimeout and setInterval gave on a fake clock, which clearTimeout tells from real ones */
 const fakeHandles = new WeakMap<object, { owner: FakeClock; timer: FakeTimer }>();
 
+/** What startFakeClock calls first, which throws to refuse the start (see guardFakeClockStart) */
+let startGuard: (() => void) | undefined;
+
 /**
  * The start of the minute holding `timestamp`. Worked out here rather than with startOfMinuteUTC, which the importer's clamp of
  * daterange.end uses: the scenarios that check the clamp must not share its floor.
@@ -198,13 +201,28 @@ export const stopFakeClock = () => {
  * from 0 at each call (fixed in Bun 1.4.0): a fake session longer than the machine's uptime, which one booted minutes before has (a CI
  * runner), made them look overdue, and Bun spun on them, no JS run, until their real deadline: tests timed out after 30 s, others took
  * seconds to minutes. Bun's own clock is left real here, so that a test's timeout counts real time, the fake clock running or not.
+ *
+ * Refused when the guard set by guardFakeClockStart throws: realtimeRun.helper's refuses while a realtime run is in progress.
  */
 export const startFakeClock = (now = REALTIME_START) => {
+  startGuard?.();
   stopFakeClock();
   const real = { setTimeout, clearTimeout, setInterval, clearInterval };
   clock = { now, timers: new Map(), armed: 0, real };
   setSystemTime(new Date(now));
   Object.assign(globalThis, { setTimeout: arm(false), setInterval: arm(true), clearTimeout: disarm, clearInterval: disarm });
+};
+
+/**
+ * Sets what startFakeClock calls before it starts a clock: a function that throws to refuse the start, or undefined to remove it. A start
+ * drops the timers of the fake clock that runs. realtimeRun.helper, which knows its run where this helper cannot (it imports this one),
+ * sets a guard that refuses while a realtime run is in progress, as when an enclosing beforeEach starts the clock after a nested beforeAll
+ * started a run (Bun runs the beforeAll first): the start would drop the run's Heart and the polls of its orders without a word, and the
+ * runRealtime… functions would move an empty clock from then on, a test that nothing happens in a span passing whatever the run did. A
+ * clock that runs without a run on it starts afresh.
+ */
+export const guardFakeClockStart = (guard: (() => void) | undefined) => {
+  startGuard = guard;
 };
 
 /** Whether the fake clock runs: startFakeClock started it, and stopFakeClock has not stopped it since */

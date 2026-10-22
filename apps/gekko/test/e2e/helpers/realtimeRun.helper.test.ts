@@ -76,6 +76,19 @@ const rejectionOf = (promise: Promise<unknown>) =>
 /** The message of what a promise rejected with, undefined when it resolved */
 const rejectionMessageOf = async (promise: Promise<unknown>) => ((await rejectionOf(promise)) as Error | undefined)?.message;
 
+/** The message of what startFakeClock threw, undefined when it started the clock */
+const clockStartFailure = () => {
+  try {
+    startFakeClock();
+    return undefined;
+  } catch (error) {
+    return (error as Error).message;
+  }
+};
+
+/** Why startFakeClock refuses to start while a run is in progress */
+const RUN_IN_PROGRESS = 'A realtime run is in progress on the fake clock, whose timers a new start would drop: endRealtimeRun ends it';
+
 describe('realtimeRun.helper', () => {
   beforeEach(() => {
     clearLogs();
@@ -167,6 +180,33 @@ describe('realtimeRun.helper', () => {
     it('should refuse to start a run on the real clock', async () => {
       stopFakeClock();
       expect(await rejectionMessageOf(startRealtimeRun())).toBe('A realtime run goes on the fake clock: call startFakeClock() first');
+    });
+  });
+
+  describe('startFakeClock, guarded by the helper', () => {
+    beforeEach(() => startFakeClock());
+
+    it.each<[string, () => Promise<unknown>, string | undefined]>([
+      ['should refuse to start the fake clock while a run is in progress', () => startRealtimeRun(), RUN_IN_PROGRESS],
+      [
+        'should refuse to start the fake clock while a run that ended by itself is not ended by endRealtimeRun',
+        () => {
+          pipeline.stopsAt = REALTIME_START + 90 * ONE_SECOND;
+          return runRealtimeUntilEnd({ maxMinutes: 5 });
+        },
+        RUN_IN_PROGRESS,
+      ],
+      ['should start the fake clock once endRealtimeRun has ended the run', () => startRealtimeRun().then(endRealtimeRun), undefined],
+    ])('%s', async (_title, setUp, failure) => {
+      await setUp();
+      expect(clockStartFailure()).toBe(failure);
+    });
+
+    it('should keep the timers of the run when it refuses to start the fake clock', async () => {
+      pipeline.stopsAt = REALTIME_START + 90 * ONE_SECOND;
+      await runRealtimeFor({ minutes: 1 });
+      clockStartFailure();
+      expect(await runRealtimeUntilEnd({ maxMinutes: 5 })).toBe(pipeline.stop);
     });
   });
 

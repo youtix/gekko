@@ -6,7 +6,7 @@ import { mock, setDefaultTimeout } from 'bun:test';
 import { createCcxtModuleMock } from '../mocks/ccxt.mock';
 import { MockFetcherService } from '../mocks/fetcher.mock';
 import { isTextLine, logStore, MockWinston, type LoggedLine, type TextLine } from '../mocks/winston.mock';
-import { advanceClock, isFakeClock, stopFakeClock, yieldToEventLoop } from './clock.helper';
+import { advanceClock, guardFakeClockStart, isFakeClock, stopFakeClock, yieldToEventLoop } from './clock.helper';
 import { createFlowContext, type RawConfiguration } from './configuration.helper';
 
 /**
@@ -28,6 +28,14 @@ type RealtimeRun = {
 };
 
 let run: RealtimeRun | undefined;
+
+/**
+ * Refuses startFakeClock while a run is in progress, ended by itself or not until endRealtimeRun ends it, as startRealtimeRun refuses a
+ * second run: the start would drop the run's timers, its Heart and the polls of its orders, without a word (see guardFakeClockStart).
+ */
+guardFakeClockStart(() => {
+  if (run) throw new Error('A realtime run is in progress on the fake clock, whose timers a new start would drop: endRealtimeRun ends it');
+});
 
 /** The configuration the runs of the file are built from, as useRealtimeConfiguration was given it */
 let readConfiguration: (() => RawConfiguration) | undefined;
