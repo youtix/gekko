@@ -14,28 +14,23 @@ export type PluginContextSections = {
   watch?: Partial<Section<'getWatch'>>;
   strategy?: Section<'getStrategy'>;
   exchange?: Partial<Section<'getExchange'>>;
-  plugins?: Section<'getPlugins'>;
-  storage?: Section<'getStorage'>;
-  showLogo?: Section<'showLogo'>;
 };
 
 /**
- * The context of a run, as a literal, for a plugin under test (createRunContextMock, given its getters by section): each getter of its
- * configuration a vi.fn() that returns the section given (undefined for one left out, the watch included: a plugin reads it as it is
- * built), each service a vi.fn() that returns nothing unless `services` gives it, the exchange the orders of a Trader reach, say.
- * Built in beforeEach or in the test: the getters keep the implementation given here through mockReset.
+ * The context of a run, as a literal, for a plugin under test (createRunContextMock, given its getters by section): the getters of the
+ * watch, the strategy block and the exchange section, those a plugin reads, each a vi.fn() that returns the section given (undefined
+ * for one left out, the watch included: a plugin reads it as it is built), each other getter and each service a vi.fn() that returns
+ * nothing unless `services` gives it, the exchange the orders of a Trader reach, say. Built in beforeEach or in the test: the getters
+ * keep the implementation given here through mockReset.
  */
 export const createPluginContext = (
-  { watch, strategy, exchange, plugins = [], storage, showLogo = false }: PluginContextSections = {},
+  { watch, strategy, exchange }: PluginContextSections = {},
   services: Partial<ServiceProvider> = {},
 ): RunContext =>
   createRunContextMock({
     configuration: {
-      showLogo: vi.fn(() => showLogo),
-      getPlugins: vi.fn(() => plugins),
       getStrategy: vi.fn(() => strategy),
       getWatch: vi.fn(() => watch as Section<'getWatch'>),
-      getStorage: vi.fn(() => storage),
       getExchange: vi.fn(() => exchange as Section<'getExchange'>),
     },
     services,

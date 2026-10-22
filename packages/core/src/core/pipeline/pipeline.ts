@@ -211,8 +211,8 @@ export const checkDateRange = async (
  * `context` is the run's configuration and services (createRunContext): every step reads them there, each plugin is built with it,
  * and the streams of the mode receive what they read of it (see streamPipelines).
  */
-export const gekkoPipeline = (options: GekkoPipelineOptions) => {
-  return [
+export const gekkoPipeline = async (options: GekkoPipelineOptions): Promise<void> => {
+  await [
     checkDateRange,
     getPluginsStaticConfiguration,
     checkPluginsModesCompatibility,

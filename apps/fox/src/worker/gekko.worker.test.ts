@@ -32,7 +32,7 @@ describe('gekko.worker', () => {
       services: { closeStorage: vi.fn(), exchange: vi.fn(), storage: vi.fn() },
     };
     vi.mocked(createRunContext).mockReturnValue(context);
-    vi.mocked(gekkoPipeline).mockResolvedValue([]);
+    vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
     vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValue(4000);
     vi.spyOn(process, 'exit').mockImplementation(() => undefined as never);
     scope = {};

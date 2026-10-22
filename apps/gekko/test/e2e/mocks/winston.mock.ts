@@ -2,7 +2,7 @@ import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { Tag } from '@gekko/shared/models/tag.types';
 
 /**
- * A line as the logger hands it to winston (`src/services/logger.ts`): its level, its message as it was logged, an object included (the
+ * A line as the logger hands it to winston (`packages/core/src/logger/logger.ts`): its level, its message as it was logged, an object included (the
  * analyzers log their reports and round trips whole), and its tag upper-cased under `_tag` ('TRADING ADVISOR'). The mock typed a `tag`,
  * which reads undefined, and a string message, on which a flow could call a string method that a logged object does not have.
  */

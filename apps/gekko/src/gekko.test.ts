@@ -89,7 +89,7 @@ describe('main', () => {
 
   describe('when it starts', () => {
     beforeEach(async () => {
-      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
       await import('./gekko');
     });
 
@@ -108,7 +108,7 @@ describe('main', () => {
 
   describe('when the pipeline ends normally', () => {
     beforeEach(async () => {
-      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
       await import('./gekko');
     });
 
@@ -126,7 +126,7 @@ describe('main', () => {
 
     beforeEach(async () => {
       closeFailure = await unwrittenMinutesError();
-      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
       vi.mocked(context.services.closeStorage).mockImplementation(() => {
         throw closeFailure;
       });
@@ -160,7 +160,7 @@ describe('main', () => {
   describe('when no storage is configured', () => {
     beforeEach(() => {
       // Importer mode without CandleWriter: the services' storage() would throw, as the real one does
-      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
       vi.mocked(context.services.storage).mockImplementation(() => {
         throw new Error('[CONFIGURATION] Missing or unknown storage.');
       });
@@ -478,7 +478,7 @@ describe('main', () => {
       ${'SIGINT'}
       ${'SIGTERM'}
     `('registers a $event handler before the pipeline starts', async ({ event }) => {
-      vi.mocked(gekkoPipeline).mockResolvedValue([]);
+      vi.mocked(gekkoPipeline).mockResolvedValue(undefined);
       await import('./gekko');
 
       const { calls, invocationCallOrder } = vi.mocked(process.on).mock;
