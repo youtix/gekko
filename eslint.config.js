@@ -1,6 +1,7 @@
 import pluginJs from '@eslint/js';
 import importPlugin from 'eslint-plugin-import';
 import globals from 'globals';
+import path from 'node:path';
 import tseslint from 'typescript-eslint';
 
 /**
@@ -68,7 +69,9 @@ export default [
       'import/no-cycle': 'error',
       // The dependency graph of the workspaces, one way (see DEPENDENCIES): a package of a lower layer importing a higher one, a
       // helper of @gekko/shared importing a plugin or the core among them, is an error whatever the import brings
-      'import/no-restricted-paths': ['error', { zones: boundaryZones }],
+      // basePath: the zones are resolved against the working directory otherwise, so that a run from a workspace directory (an
+      // agent's or an editor's `eslint <file>`) checked no boundary; with it, every run checks them wherever it starts from
+      'import/no-restricted-paths': ['error', { basePath: import.meta.dirname, zones: boundaryZones }],
       'import/no-unresolved': 'error',
       // import/no-unused-modules is left out: without options it checks nothing, and its unusedExports option crashes under ESLint 10,
       // which eslint-plugin-import 2.32 does not support. A dead export is found with TypeScript's find-references instead.
@@ -85,7 +88,7 @@ export default [
     settings: {
       // The root tsconfig.json declares the paths of the workspace packages (@gekko/<pkg>/* → packages/<pkg>/src/*), which every
       // workspace's tsconfig extends: one project resolves every import of the checkout
-      'import/resolver': { typescript: { bun: true, project: './tsconfig.json' } },
+      'import/resolver': { typescript: { bun: true, project: path.join(import.meta.dirname, 'tsconfig.json') } },
       // Each entry is a regular expression tested against the absolute path of a module: an unanchored 'dist' matched a checkout under
       // ~/distrib/ or /srv/dist/, where import/no-cycle and the other rules that read a module's exports then reported nothing
       'import/ignore': ['/node_modules/'],
