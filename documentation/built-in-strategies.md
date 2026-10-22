@@ -589,7 +589,7 @@ Each of these stops is an error (exit code 1). The TradingAdvisor's `maxConsecut
 
 On a live exchange, a grid order you cancel by hand is placed again for what is left of it, its level giving up at the `retryOnError + 1`-th cancel. After a candle crossed both sides of a price, the BUY and the SELL left at that price can be expired in turn by the exchange's self-trade prevention: each expiry counts as a cancel, and both levels give up after `retryOnError + 1` of them.
 
-During a [reset](#grid-reset), the orders the reset cancels are neither placed again nor followed by their opposite: each level is released as its order ends, filled, canceled or refused, and the new grid replaces it. An order whose outcome is unknown is still left untracked, with the stops of the last case above.
+During a [reset](#grid-reset), the orders the reset cancels are neither placed again nor followed by their opposite: each level is released as its order ends, filled, canceled or refused, and the new grid replaces it. An order whose outcome is unknown is still left untracked, and no new grid is built over it: the run stops once the orders the reset canceled have ended (see [Grid Reset](#grid-reset)).
 
 #### Range Monitoring
 
@@ -642,11 +642,13 @@ GridBot: The Trader could not read the balances after the cancels of reset 1, it
 
 A restart builds the grid on the balances as the exchange has them (see [Restarting](#restarting)).
 
-**Orders of unknown outcome.** A grid order that errors during the reset while it may still be live on the exchange is no longer followed, as in [Order Management](#order-management): the run stops at once when it was the last order open, or once more than `retryOnError` orders are in that case. A new grid would trade beside such an order, so when the grid would be rebuilt, any order of unknown outcome of the run, left during the reset or before it, stops the run instead (exit code 1):
+**Orders of unknown outcome.** A grid order that errors during the reset while it may still be live on the exchange is no longer followed, as in [Order Management](#order-management). A new grid would trade beside such an order, so when the grid would be rebuilt, any order of unknown outcome of the run, left during the reset or before it, stops the run instead (exit code 1):
 
 ```
 GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange
 ```
+
+One left during the reset is warned of as it errors, while other orders of the reset are still open: `GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: it is not placed again, and the grid of reset 1 is not built over it, the run stopping once the other orders the reset canceled have ended. Check it there. Last error: …`. When it was the last order open, the stop above comes at once, followed by `. Last error: …`, and once more than `retryOnError` orders are in that case, the run stops at once as in [Order Management](#order-management). Several orders are named in one list (`BUY 2.5 at 95 and SELL 2.5 at 105 may be live on the exchange without GridBot tracking them: …`).
 
 An order of unknown outcome left before the reset makes that stop certain, so the line that starts the reset says so in place of the new grid, its open orders canceled all the same: `GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 3 open orders are canceled, then the run stops: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it`, and the stop above follows once they have ended, at once when none is open (`…: reset 1, no order is open, and the run stops: …`).
 

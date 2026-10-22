@@ -17,7 +17,7 @@ import {
   Tools,
 } from '../strategy.types';
 import { addPrecise, isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
-import { formatEveryDecimal, pluralize } from '@gekko/shared/utils/string/string.utils';
+import { formatEveryDecimal, listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import type { UUID } from 'node:crypto';
 import { DEFAULT_RETRY_LIMIT } from '@gekko/schemas/strategies/gridBot.const';
 import { gridBotStrategySchema } from '@gekko/schemas/strategies/gridBot.schema';
@@ -350,7 +350,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const level = this.levels[levelIndex];
 
     // Ended in error during a reset: not placed again, the new grid replacing every level. One that may be live is left untracked
-    // all the same (see leaveUntracked), which stops the run at the latest where the new grid would be built over it (see rebuild)
+    // all the same (see leaveUntracked), which stops the run where the new grid would be built over it (see rebuild), at once when it
+    // was the last order open
     if (this.awaitingReset) {
       if (order.mayBeLive) this.leaveUntracked(level, order.reason, tools);
       return this.rebuildOnceEnded(exchange, tools);
@@ -451,8 +452,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       return this.rebuild(close, portfolio, tools);
     }
 
-    const canceled = `its ${open.length} open ${pluralize('order', open.length)} ${open.length === 1 ? 'is' : 'are'} canceled`;
-    const ended = `once ${open.length === 1 ? 'it has' : 'they have'} ended`;
+    const canceled = `its ${open.length} open ${pluralize('order', open.length)} ${pluralize('is', open.length, 'are')} canceled`;
+    const ended = `once ${pluralize('it has', open.length, 'they have')} ended`;
     const next = stop ? `, then ${stop}` : ` and a new grid is built around the price ${ended}`;
     tools.log('info', `GridBot: ${closed}, ${canceled}${next}`);
     for (const { orderId } of open) tools.cancelOrder(orderId!);
@@ -487,10 +488,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    * trade beside it, on funds it may hold.
    */
   private rebuild(price: number, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
-    if (this.untrackedOrders.length) {
-      const { untracked, them } = this.describeUntracked();
-      this.stopRun(`${untracked}: the grid of reset ${this.resetCount} is not built over ${them}. Check ${them} on the exchange`, tools);
-    }
+    if (this.untrackedOrders.length) this.stopRun(this.describeResetStop(), tools);
 
     // No grid is in place until the new one is built (see buildGrid), which sets its levels, bounds, quantity and their state from
     // nothing, as at the start, the rebalance state being idle already. Nothing reads the old grid's meanwhile: none of its orders is
@@ -518,7 +516,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       return `the grid stays in place for the ${left} (resetCooldownCandles ${resetCooldownCandles}), ${waiting}`;
     }
     const candles = `${resetConfirmCandles} consecutive timeframe ${pluralize('candle', resetConfirmCandles)}`;
-    const close = resetConfirmCandles === 1 ? 'closes' : 'close';
+    const close = pluralize('closes', resetConfirmCandles, 'close');
     return `the grid is reset once ${candles} ${close} ${side} it (resetConfirmCandles), ${waiting} until then`;
   }
 
@@ -884,7 +882,9 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   /**
    * Leaves a level without an order for good once its order ended with an unknown outcome: it may be live on the exchange, where
    * nothing tracks it any more, and placed again it could trade twice. The rest of the grid trades on. The run stops once more
-   * orders than retryOnError ended so, many orders the bot may have lost track of, or once no level holds an order.
+   * orders than retryOnError ended so, many orders the bot may have lost track of, or once no level holds an order. During a reset,
+   * which cancels every other order and builds no grid over this one (see rebuild), the run stops once the last order the reset
+   * canceled has ended, as the warning says, at once with the stop of the rebuild when it was the last one open.
    */
   private leaveUntracked(level: LevelState, reason: string, tools: Tools<GridBotStrategyParams>): void {
     const order = `${level.side} ${formatEveryDecimal(level.amount)} at ${formatEveryDecimal(this.priceOf(level))}`;
@@ -894,20 +894,27 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const check = `Check ${them} on the exchange. Last error: ${reason}`;
     if (count > this.retryLimit)
       this.stopRun(`${untracked}: ${count} orders, more than retryOnError (${this.retryLimit}). ${check}`, tools);
+
+    const lost = `GridBot: ${order} may be live on the exchange without GridBot tracking it: it is not placed again`;
+    const checkIt = `Check it there. Last error: ${reason}`;
+    // Said of a grid that trades on, the lines of an order lost during a reset read that the rest of the grid traded on, while its
+    // orders were being canceled, and once none was left, blamed the grid rather than the reset that builds none over the order
+    if (this.awaitingReset) {
+      if (!this.orderToLevel.size) this.stopRun(`${this.describeResetStop()}. Last error: ${reason}`, tools);
+      const notBuilt = `the grid of reset ${this.resetCount} is not built over it`;
+      const stops = 'the run stopping once the other orders the reset canceled have ended';
+      return tools.log('warn', `${lost}, and ${notBuilt}, ${stops}. ${checkIt}`);
+    }
     if (this.levels.every(({ orderId }) => !orderId))
       this.stopRun(`${untracked}, and no level of the grid holds an order any more. ${check}`, tools);
 
-    const left = 'it is not placed again, its level is left without an order, the rest of the grid trades on';
-    tools.log(
-      'warn',
-      `GridBot: ${order} may be live on the exchange without GridBot tracking it: ${left}. Check it there. Last error: ${reason}`,
-    );
+    tools.log('warn', `${lost}, its level is left without an order, the rest of the grid trades on. ${checkIt}`);
   }
 
-  /** The orders that may be live on the exchange untracked (see leaveUntracked), as the messages name them, and `it` or `them` */
+  /** The orders that may be live on the exchange untracked (see leaveUntracked), listed in words, and `it` or `them` */
   private describeUntracked(): { untracked: string; them: string } {
-    const them = this.untrackedOrders.length > 1 ? 'them' : 'it';
-    return { untracked: `${this.untrackedOrders.join(', ')} may be live on the exchange without GridBot tracking ${them}`, them };
+    const them = pluralize('it', this.untrackedOrders.length, 'them');
+    return { untracked: `${listInWords(this.untrackedOrders)} may be live on the exchange without GridBot tracking ${them}`, them };
   }
 
   /** The stop a reset comes to over the orders that may be live untracked (see rebuild), as the line that starts it says it */
@@ -916,12 +923,18 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     return `the run stops: ${untracked}, and no grid is built over ${them}`;
   }
 
+  /** The stop of the rebuild of a reset over the orders that may be live untracked (see rebuild) */
+  private describeResetStop(): string {
+    const { untracked, them } = this.describeUntracked();
+    return `${untracked}: the grid of reset ${this.resetCount} is not built over ${them}. Check ${them} on the exchange`;
+  }
+
   /**
    * Stops the run on the orders open on the pair at start-up (see init), naming each one, as the exchange lists them, for the user to
    * find it there and cancel it: its type, side, the amount it has left to execute, its price and its id
    */
   private refuseOpenOrders(orders: OpenOrder[], tools: Tools<GridBotStrategyParams>): never {
-    const count = orders.length === 1 ? '1 order is' : `${orders.length} orders are`;
+    const count = `${orders.length} ${pluralize('order', orders.length)} ${pluralize('is', orders.length, 'are')}`;
     const list = orders.map(({ id, side, type, price, remaining }) => {
       const at = isFiniteNumber(price) ? formatEveryDecimal(price) : 'market';
       return `${type} ${side} ${formatEveryDecimal(remaining)} at ${at} (id ${id})`;

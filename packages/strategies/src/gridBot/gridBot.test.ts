@@ -1589,7 +1589,7 @@ describe('GridBot', () => {
       };
 
       expect(loseFour).toThrow(
-        `GridBot: BUY 1.66 at 95, BUY 1.66 at 90, BUY 1.66 at 85, SELL 1.66 at 105 may be live on the exchange without GridBot tracking them: 4 orders, more than retryOnError (3). Check them on the exchange. Last error: ${lostOnTheNetwork}`,
+        `GridBot: BUY 1.66 at 95, BUY 1.66 at 90, BUY 1.66 at 85 and SELL 1.66 at 105 may be live on the exchange without GridBot tracking them: 4 orders, more than retryOnError (3). Check them on the exchange. Last error: ${lostOnTheNetwork}`,
       );
     });
 
@@ -1976,7 +1976,7 @@ describe('GridBot', () => {
         params                                              | portfolio              | lostOrders                      | closes        | description                                           | expected
         ${{ resetMode: 'up', resetConfirmCandles: 2 }}      | ${balancedPortfolio}   | ${[[95, 'BUY']]}                | ${[111, 112]} | ${'its BUY 95 lost, 3 orders open'}                   | ${'GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 3 open orders are canceled, then the run stops: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it'}
         ${{ resetMode: 'up', buyLevels: 2, sellLevels: 0 }} | ${unbalancedPortfolio} | ${[[95, 'BUY']]}                | ${[101]}      | ${'the BUY 95 of a buy-only grid lost, 1 order open'} | ${'GridBot: Price 101 closed above grid range [90, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 1 open order is canceled, then the run stops: BUY 5.4 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it'}
-        ${upOnce}                                           | ${balancedPortfolio}   | ${[[95, 'BUY'], [105, 'SELL']]} | ${[111]}      | ${'its BUY 95 and its SELL 105 lost, 2 orders open'}  | ${'GridBot: Price 111 closed above grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 2 open orders are canceled, then the run stops: BUY 2.5 at 95, SELL 2.5 at 105 may be live on the exchange without GridBot tracking them, and no grid is built over them'}
+        ${upOnce}                                           | ${balancedPortfolio}   | ${[[95, 'BUY'], [105, 'SELL']]} | ${[111]}      | ${'its BUY 95 and its SELL 105 lost, 2 orders open'}  | ${'GridBot: Price 111 closed above grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 2 open orders are canceled, then the run stops: BUY 2.5 at 95 and SELL 2.5 at 105 may be live on the exchange without GridBot tracking them, and no grid is built over them'}
       `(
         'says at info that the run stops once the orders are canceled, over orders lost before: $description',
         ({ params, portfolio, lostOrders, closes, expected }) => {
@@ -2378,14 +2378,15 @@ describe('GridBot', () => {
 
     // An order whose outcome is unknown may be live on the exchange: a new grid placed beside it could trade with funds it holds
     describe('with an order that may be live on the exchange, untracked', () => {
-      it('warns of one lost during the reset as of any other: its level left without an order', () => {
+      // Warned of as in a grid that trades on, it read that the rest of the grid traded on, while the reset was canceling it
+      it('warns of one lost during the reset that the grid of the reset is not built over it, the run stopping once the others end', () => {
         startStrategy(100, upOnce);
         closeAt([111]);
         settle('errored', 95, 'BUY', lost);
 
         expect(log).toHaveBeenCalledWith(
           'warn',
-          `GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: it is not placed again, its level is left without an order, the rest of the grid trades on. Check it there. Last error: ${lostOnTheNetwork}`,
+          `GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: it is not placed again, and the grid of reset 1 is not built over it, the run stopping once the other orders the reset canceled have ended. Check it there. Last error: ${lostOnTheNetwork}`,
         );
       });
 
@@ -2408,15 +2409,28 @@ describe('GridBot', () => {
         expect(sentAfter(4)).toEqual([]);
       });
 
-      it('stops the run at once when the order lost was the last one open', () => {
+      // With the stop of the grid, which no level held an order of any more, rather than the stop of the reset, which builds no grid over
+      // the order
+      it('stops the run at once when the order lost was the last one open, with the stop of the rebuild and its last error', () => {
         startStrategy(100, upOnce);
         closeAt([111]);
         [90, 95].forEach(price => settle('canceled', price, 'BUY'));
         settle('canceled', 105, 'SELL');
 
         expect(() => settle('errored', 110, 'SELL', lost)).toThrow(
-          `GridBot: SELL 2.5 at 110 may be live on the exchange without GridBot tracking it, and no level of the grid holds an order any more. Check it on the exchange. Last error: ${lostOnTheNetwork}`,
+          `GridBot: SELL 2.5 at 110 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange. Last error: ${lostOnTheNetwork}`,
         );
+      });
+
+      it('warns of nothing before that stop', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        [90, 95].forEach(price => settle('canceled', price, 'BUY'));
+        settle('canceled', 105, 'SELL');
+
+        expect(linesOf(() => settle('errored', 110, 'SELL', lost))).toEqual([
+          `error GridBot: SELL 2.5 at 110 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange. Last error: ${lostOnTheNetwork}`,
+        ]);
       });
 
       it('cancels the orders still open, not one lost before the reset: 3 of the 4', () => {
@@ -2444,7 +2458,7 @@ describe('GridBot', () => {
         settle('errored', 105, 'SELL', lost);
 
         expect(() => cancelOpen()).toThrow(
-          'GridBot: BUY 2.5 at 95, SELL 2.5 at 105 may be live on the exchange without GridBot tracking them: the grid of reset 1 is not built over them. Check them on the exchange',
+          'GridBot: BUY 2.5 at 95 and SELL 2.5 at 105 may be live on the exchange without GridBot tracking them: the grid of reset 1 is not built over them. Check them on the exchange',
         );
       });
     });
