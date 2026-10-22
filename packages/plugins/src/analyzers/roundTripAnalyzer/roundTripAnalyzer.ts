@@ -3,14 +3,21 @@ import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { getFirstCandleFromBucket } from '@gekko/shared/helpers/candle/candle.helper';
 import { calculateMarketReturnPct, calculateWinRate, extractTopMAEs } from '@gekko/shared/helpers/finance/stats.helper';
 import { calculatePortfolioTotalValue, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
-import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import {
+  CandleBucket,
+  OrderCanceledEvent,
+  OrderCompletedEvent,
+  OrderErroredEvent,
+  OrderInitiatedEvent,
+  RoundTrip,
+} from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
 import { info, warning } from '@gekko/core/logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
-import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
+import { isFiniteNumber, isFinitePositive } from '@gekko/shared/utils/math/math.utils';
 import { listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
-import { first, isNil, sortBy, sumBy } from 'lodash-es';
+import { first, sortBy, sumBy } from 'lodash-es';
 import { Plugin } from '@gekko/core/plugin/plugin';
 import type { RunContext } from '@gekko/core/run/runContext.types';
 import { calculatePerformanceStatistics, emitPerformanceReport, pickBenchmarkAsset, warnOfLateStart } from '../analyzer.helper';
@@ -24,7 +31,7 @@ import { RoundTripTracker } from './roundTripTracker';
 /**
  * Measures a strategy round trip by round trip, on every watched pair: a round trip goes from the BUY that opens a position on a pair
  * while flat to the SELL that leaves it flat again, and its P&L comes from its own fills (see RoundTrip). Each pair has a
- * RoundTripTracker of its own, which follows its round trips: the analyzer hands it the candles and the fills of its pair, numbers the
+ * RoundTripTracker of its own, which follows its round trips: the analyzer hands it the candles and the orders of its pair, numbers the
  * round trips it closes across the pairs, logs and emits them. The analyzer holds what the pairs share: the portfolio, which they value
  * together in the currency they share, the last close of every pair, the period, the benchmark, and the report, run-wide, with a
  * breakdown by pair (see TradingReport).
@@ -151,9 +158,18 @@ export class RoundTripAnalyzer extends Plugin {
     this.markToMarket();
   }
 
+  /**
+   * Hands the tracker of its pair each order the Trader initiated: a SELL is pending until its end is heard, the balance an event
+   * carries meanwhile telling nothing of what a round trip still holds (see RoundTripTracker.registerInitiated). An order of a pair
+   * this run does not watch, which no order of the strategy can name, is left to its end to say.
+   */
+  public onOrderInitiated(events: OrderInitiatedEvent[]): void {
+    for (const { order } of events) this.trackers.get(order.symbol)?.registerInitiated(order);
+  }
+
   public onOrderCompleted(events: OrderCompletedEvent[]): void {
     for (const { order, exchange } of events) {
-      const closed = this.findTracker(order)?.registerCompleted(order, exchange.portfolio);
+      const closed = this.findTracker(order)?.registerCompleted(order, exchange);
       if (closed) this.handleCompletedRoundtrip(closed);
       // The portfolio after the fill is the latest, whether the fill counts in a round trip or not (see latestPortfolio)
       this.refreshLatestPortfolio(exchange.portfolio);
@@ -161,30 +177,30 @@ export class RoundTripAnalyzer extends Plugin {
   }
 
   /**
-   * A BUY or a SELL canceled after a partial fill counts for the part it filled, on the tracker of its pair (see
-   * RoundTripTracker.registerCanceled). A cancelation with no fill counts for nothing, but its portfolio is the latest all the same (see
-   * latestPortfolio).
+   * A BUY or a SELL canceled after a partial fill counts for the part it filled, on the tracker of its pair, and a SELL canceled without
+   * a fill holds its round trip to the balance after it (see RoundTripTracker.registerCanceled). Its portfolio is the latest all the
+   * same (see latestPortfolio).
    */
   public onOrderCanceled(events: OrderCanceledEvent[]): void {
     for (const { order, exchange } of events) {
-      const { filled } = order;
-      // No fill reported (undefined) counts for nothing, as 0 does
-      if (!isNil(filled) && filled > 0) {
-        const closed = this.findTracker(order)?.registerCanceled(order, filled, exchange.portfolio);
-        if (closed) this.handleCompletedRoundtrip(closed);
-      }
+      const closed = this.findEndedTracker(order, order.filled)?.registerCanceled(order, exchange);
+      if (closed) this.handleCompletedRoundtrip(closed);
       this.refreshLatestPortfolio(exchange.portfolio);
     }
   }
 
   /**
-   * An order that ended in error only refreshes the latest portfolio (see latestPortfolio). It may have filled in part before, as its
-   * event says (`order.filled`, what the exchange reported, more having maybe executed when the order may still be live), but that
-   * part counts in no round trip: what the account still holds catches the part a SELL sold (see RoundTripTracker.registerSell), not the
-   * part a BUY bought.
+   * An order that ended in error counts as a canceled one does: for the part it filled before, as far as the exchange reported it
+   * (`order.filled`), at the price of its fills when the Trader relays one, and a SELL that reported no fill holds its round trip to the
+   * balance after it, which shows what an order whose outcome is unknown sold all the same (see RoundTripTracker.registerErrored). Its
+   * portfolio is the latest all the same (see latestPortfolio).
    */
   public onOrderErrored(events: OrderErroredEvent[]): void {
-    for (const { exchange } of events) this.refreshLatestPortfolio(exchange.portfolio);
+    for (const { order, exchange } of events) {
+      const closed = this.findEndedTracker(order, order.filled)?.registerErrored(order, exchange);
+      if (closed) this.handleCompletedRoundtrip(closed);
+      this.refreshLatestPortfolio(exchange.portfolio);
+    }
   }
   // --- END LISTENERS ---
 
@@ -201,6 +217,14 @@ export class RoundTripAnalyzer extends Plugin {
       warning('roundtrip analyzer', `${side} order ${id} on ${symbol}, a pair this run does not watch (${watched}): skipped.`);
     }
     return tracker;
+  }
+
+  /**
+   * The tracker of the pair of an order that ended without completing, canceled or in error: one that filled counts on it, and is said
+   * and skipped on a pair this run does not watch (see findTracker); one that filled nothing counts for nothing there, unsaid
+   */
+  private findEndedTracker(order: Pick<OrderInitiatedEvent['order'], 'id' | 'side' | 'symbol'>, filled: number | undefined) {
+    return isFinitePositive(filled) ? this.findTracker(order) : this.trackers.get(order.symbol);
   }
 
   /** Takes the portfolio an order event carries as the latest (see latestPortfolio), unless the Trader had fetched none yet */

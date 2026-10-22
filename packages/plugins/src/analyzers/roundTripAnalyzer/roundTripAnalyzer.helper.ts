@@ -1,33 +1,31 @@
 import { BOOKED_CURRENCY_UNIT } from '@gekko/shared/constants/order.const';
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
+import { toPercent } from '@gekko/shared/helpers/finance/stats.helper';
 import { OrderCanceledEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import { getWeightedAverage } from '@gekko/core/core/order/order.helper';
 import { info } from '@gekko/core/logger/logger';
 import { formatDurationUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
-import {
-  addPrecise,
-  compareWithTolerance,
-  isFiniteNumber,
-  isFinitePositive,
-  toSignificantDigits,
-} from '@gekko/shared/utils/math/math.utils';
-import { shiftDecimalPoint } from '@gekko/shared/utils/math/round.utils';
+import { addPrecise, compareWithTolerance, isFiniteNumber, isFinitePositive } from '@gekko/shared/utils/math/math.utils';
 import { formatAmount, formatPercent, formatRatio } from '@gekko/shared/utils/string/string.utils';
 import { PERCENT_ROUNDING } from '../analyzer.const';
 import { DateRange, ExcursionCandle, OpenRoundTrip, TradingReport } from './roundTrip.types';
 import { LATE_FILL_CANDLES } from './roundTripAnalyzer.const';
 
-/** A mean price weighted by amounts, once one more price is added with its amount */
+/**
+ * A mean price weighted by amounts, once one more price is added with its amount: worked out in decimal (see getWeightedAverage), as
+ * the cost and the proceeds it goes with are. In binary, BUYs of 1 at 0.1 and 1 at 0.2 entered at 0.15000000000000002.
+ */
 export const addToMeanPrice = (meanPrice: number, amount: number, price: number, addedAmount: number) =>
-  (meanPrice * amount + price * addedAmount) / (amount + addedAmount);
+  getWeightedAverage([meanPrice, price], [amount, addedAmount]);
 
 /**
- * The price the part a canceled order filled counts at, and where it comes from: the mean price of its fills, which the Trader relays
- * as the exchange reported them (see OrderCanceledEvent); without it, the price of a LIMIT order, a limit it reached or beat, else the
- * last close of its pair. Not the price of a MARKET or a STICKY order, which fills at the market: that is the price the strategy sized
- * it from (a BUY by cost or allocation, a SELL by cost), and the round trip took it for the price of the fill, its cost and its P&L off
- * by the amount filled times the gap.
+ * The price the part an order that did not complete filled counts at, canceled or ended in error, and where it comes from: the mean
+ * price of its fills, which the Trader relays as the exchange reported them (see OrderCanceledEvent and OrderErroredEvent); without it,
+ * the price of a LIMIT order, a limit it reached or beat, else the last close of its pair. Not the price of a MARKET or a STICKY order,
+ * which fills at the market: that is the price the strategy sized it from (a BUY by cost or allocation, a SELL by cost), and the round
+ * trip took it for the price of the fill, its cost and its P&L off by the amount filled times the gap.
  */
-export const priceCanceledFill = (
+export const priceUncompletedFill = (
   { type, price, fillPrice }: Pick<OrderCanceledEvent['order'], 'type' | 'price' | 'fillPrice'>,
   lastClose: number,
 ) => {
@@ -37,13 +35,14 @@ export const priceCanceledFill = (
 };
 
 /**
- * The P&L and the profit of a round trip, from its own fills: what its SELLs brought in, less what its BUYs cost and the fees of all of
- * them (but a BUY fee taken in the asset bought, which the smaller amount sold carries: see RoundTrip.fees), in decimal (see
- * RoundTrip.pnl), so that an asset held before it, or the fills of another pair, count in none of it; the profit is that P&L in % of its
- * entry equity, to 15 significant digits, as the total return of a report is worked out (see calculateTotalReturnPct). Measured from the
- * pair equity before its BUY to the pair equity after its SELL, a round trip on a pair whose asset the account already held made what the
- * price did to the whole holding: 1,009.79 for a BUY of 1 BTC at 100 sold at 110, 100 BTC held, where its fills made 9.79; and on several
- * pairs, those equities would count the fills of the other pairs, which share the currency.
+ * The P&L and the profit of a round trip, from its own fills: what its SELLs brought in for the position it held, less what its BUYs
+ * cost and the fees of all of them (but a BUY fee taken in the asset bought, which the smaller position carries: see RoundTrip.fees),
+ * in decimal (see RoundTrip.pnl), so that an asset held before it, or the fills of another pair, count in none of it: a SELL counts for
+ * no more than the position of its round trip (see RoundTripTracker.registerSell); the profit is that P&L in % of its entry equity, to
+ * 15 significant digits, as every percentage of a report is worked out (see toPercent). Measured from the pair equity before its BUY to
+ * the pair equity after its SELL, a round trip on a pair whose asset the account already held made what the price did to the whole
+ * holding: 1,009.79 for a BUY of 1 BTC at 100 sold at 110, 100 BTC held, where its fills made 9.79; and on several pairs, those equities
+ * would count the fills of the other pairs, which share the currency.
  *
  * A P&L less than BOOKED_CURRENCY_UNIT from 0, or proceeds equal to the cost and the fees together within compareWithTolerance, once past
  * what the decimal helpers keep exact, is a break-even: P&L 0 and profit 0, no win. The profit is unknown (NaN) without an entry equity
@@ -57,9 +56,9 @@ export const measureRoundTrip = (
   const change = addPrecise(proceeds, -spent);
   const pnl = Math.abs(change) < BOOKED_CURRENCY_UNIT || compareWithTolerance(proceeds, spent) === 0 ? 0 : change;
   if (!(entryEquity > 0)) return { pnl, profit: NaN };
-  // The P&L moved two places in decimal, divided once and rid of the noise of that division, as calculateTotalReturnPct works out the
-  // change of two equities: through it, the P&L added to the entry equity and taken off again lost its digits past the 15th
-  return { pnl, profit: pnl === 0 ? 0 : toSignificantDigits(shiftDecimalPoint(pnl, 2) / entryEquity) };
+  // The P&L itself, as calculateTotalReturnPct works out the change of two equities: through it, the P&L added to the entry equity and
+  // taken off again lost its digits past the 15th
+  return { pnl, profit: toPercent(pnl, entryEquity) };
 };
 
 /**

@@ -110,7 +110,7 @@ export type OrderErroredEvent = OrderInitiatedEvent & {
     /**
      * The mean price of the fills the exchange reported for a LIMIT or a STICKY order, in currency, weighted by them (see
      * Trader.getFillPrice), as an order canceled carries it (see OrderCanceledEvent): left out when it reported none with a price, and
-     * for a MARKET order.
+     * for a MARKET order. The RoundTripAnalyzer counts `filled` at it, as it counts the fill of an order canceled.
      */
     fillPrice?: number;
   };
@@ -153,11 +153,15 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
  * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT) on one of the watched pairs: from the BUY that opened a position
  * on its pair while flat to the SELL that left it flat again, the BUYs and SELLs in between included. Its P&L comes from its own fills,
  * what its SELLs brought in less what its BUYs cost and the fees of all of them (but a BUY fee taken in the asset bought, which the
- * smaller amount sold carries: see fees), so that an asset held before it, or the fills of another pair, count in none of it; its
- * profit is that P&L in % of the whole portfolio's value before it opened. One still open when the warmup completed counts from the
- * start of the period: its entry date, price and equity are then those of the start, and its cost that of the position it held then,
- * at the start price. Its profit is unknown, NaN, when the Trader had read no portfolio when its BUY filled: the RoundTripAnalyzer
- * leaves it out of the returns, not of the win rate, and the outputs write "unknown".
+ * smaller amount it holds carries: see fees). A SELL counts for no more than the round trip still holds, its position: what its BUYs
+ * bought, less the part of their fees taken in the asset, less what its SELLs sold, the proceeds and the fee of a SELL that sold more
+ * counted for that part alone, so that an asset held before it, or the fills of another pair, count in none of it. A fill no event
+ * reported, which the balance read after an order shows gone from its position (an order ended in error, a sale made outside Gekko),
+ * counts as sold at the last close of its pair, without a fee, with a warning. Its profit is that P&L in % of the whole portfolio's
+ * value before it opened. One still open when the warmup completed counts from the start of the period: its entry date, price and
+ * equity are then those of the start, and its cost that of the position it held then, at the start price. Its profit is unknown, NaN,
+ * when the Trader had read no portfolio when its BUY filled: the RoundTripAnalyzer leaves it out of the returns, not of the win rate,
+ * and the outputs write "unknown".
  */
 export type RoundTrip = {
   /** Its number, counted from 0 in the order the round trips of the run close, every pair together */
@@ -192,10 +196,12 @@ export type RoundTrip = {
   /**
    * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, but the fee of a BUY that the exchange
    * took in the asset of the pair, out of the amount bought (`feeAsset` on the order event: Binance does so unless the fees are paid in
-   * BNB): the SELLs sell that much less, and the smaller proceeds carry it already, so that added here too it counted twice, and the
-   * P&L was understated by it. An unknown fee counts as 0: that of the part a canceled order filled, and one the Trader does not
-   * convert, taken in a third asset (BNB), which it reports as 0 with its rate unknown, the P&L then overstated by it. Those of the
-   * warmup are left out for one rebased at the start of the period.
+   * BNB): the round trip holds that much less of the asset, its fee over the price of the BUY, which its SELLs count at most, and the
+   * smaller proceeds carry it already, so that added here too it counted twice, and the P&L was understated by it. A SELL that sold
+   * more than the round trip held counts the share of its fee of the part it held. An unknown fee counts as 0: that of the part a
+   * canceled order, or one ended in error, filled, that of a fill no event reported, and one the Trader does not convert, taken in a
+   * third asset (BNB), which it reports as 0 with its rate unknown, the P&L then overstated by it. Those of the warmup are left out for
+   * one rebased at the start of the period.
    */
   fees: number;
   /** exitAt less entryAt, in milliseconds */

@@ -1,5 +1,5 @@
 import { Candle } from '@gekko/shared/models/candle.types';
-import { Report } from '@gekko/shared/models/event.types';
+import { ExchangeEvent, Report } from '@gekko/shared/models/event.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
@@ -29,8 +29,8 @@ export interface TradingReport extends Report {
   /** The 10 largest maximum adverse excursions (MAE) of the round trips closed during the period, every pair together, largest first */
   topMAEs: number[];
   /**
-   * Total number of trades executed during the period, every pair together: the orders completed, and the canceled ones that filled in
-   * part
+   * Total number of trades executed during the period, every pair together: the orders completed, and those canceled or ended in error
+   * after a fill
    */
   tradeCount: number;
   /**
@@ -90,13 +90,26 @@ export type OpenRoundTrip = {
    * carried the empty portfolio of a Trader that had read none yet
    */
   entryEquity: number;
-  /** Amount of asset its BUYs bought, added up in decimal */
+  /** Amount of asset its BUYs bought, added up in decimal: the weight of its entry price, and what its dust is measured against */
   bought: number;
-  /** Amount of asset its SELLs have sold so far, added up in decimal */
+  /**
+   * Amount of asset its SELLs have sold so far, as it counted them (see position), a fill no event reported included, added up in
+   * decimal: the weight of its exit price
+   */
   sold: number;
+  /**
+   * The amount of the asset it holds: what its BUYs bought, less the part of their fees the exchange took in the asset (see
+   * RoundTripTracker.assetTakenByFee), less what its SELLs have sold, in decimal. A SELL counts for no more than it: what a SELL sells
+   * beyond is an asset held before the round trip (see RoundTripTracker.registerSell). Its value at the last close is the unrealized
+   * P&L of a round trip still open at the end (see RoundTripTracker.logOpenPosition).
+   */
+  position: number;
   /** What its BUYs cost, in currency, in decimal: their amounts times their prices, fees left out (see RoundTrip.cost) */
   cost: number;
-  /** What its SELLs have brought in so far, in currency, in decimal: their amounts times their prices, fees left out */
+  /**
+   * What its SELLs have brought in so far, in currency, in decimal: the amounts it counted of them (see position) times their prices,
+   * a fill no event reported at the last close, fees left out
+   */
   proceeds: number;
   /**
    * The fees of its BUYs and SELLs so far, in currency, in decimal: an unknown one counts as 0, and a BUY fee taken in the asset of the
@@ -132,26 +145,38 @@ export type ExcursionDeepening = {
 /** What the adverse excursion reads of a one-minute candle: its start, which dates its close a minute later, and its low */
 export type ExcursionCandle = Pick<Candle, 'start' | 'low'>;
 
-/** What an order filled, as the Trader reports it: a completed order, or the part of a canceled one that filled */
+/**
+ * What an order filled, as the Trader reports it: a completed order, or the part of one canceled or ended in error that filled (see
+ * RoundTripTracker.registerUncompleted)
+ */
 export type OrderFill = {
   id: UUID;
   side: OrderSide;
-  /** When it filled: the execution date of a completed order, the cancelation date of a canceled one */
+  /** When it filled: the execution date of a completed order, the date of the end of one that did not complete */
   date: EpochTimeStamp;
   /**
-   * The price it filled at: that of a completed order, which the Trader always sets (optional in the event type only); for a canceled
-   * one, the mean price of its fills, else an estimate (see priceCanceledFill)
+   * The price it filled at: that of a completed order, which the Trader always sets (optional in the event type only); for one that did
+   * not complete, the mean price of its fills, else an estimate (see priceUncompletedFill)
    */
   price?: number;
   amount: number;
-  /** Its fee in currency: a completed order's, 0 when the exchange gives no fee rate; NaN for a canceled one, whose fee is unknown */
+  /**
+   * Its fee in currency: a completed order's, 0 when the exchange gives no fee rate; NaN for one that did not complete, whose fee is
+   * unknown
+   */
   fee: number;
   /**
    * The asset the exchange took its fee in, as the event of a completed order names it (see OrderCompletedEvent); undefined when the
-   * event names none, and for a canceled order
+   * event names none, and for an order that did not complete
    */
   feeAsset?: Asset;
 };
+
+/**
+ * What the event of an order says of the account after it: the balances the Trader read, and when it read them (see ExchangeEvent).
+ * The RoundTripTracker reads what the account holds of the asset of its pair from them (see RoundTripTracker.heldAfter).
+ */
+export type BalanceRead = Pick<ExchangeEvent, 'portfolio' | 'portfolioReadAt'>;
 
 /** An order fill with a valid price and amount (see RoundTripTracker.registerRoundtripPart) */
 export type Fill = {
@@ -163,7 +188,7 @@ export type Fill = {
   fee: number;
   /**
    * The asset the fee was taken in, undefined when unknown: the fee of a BUY taken in the asset of the pair is left out of the fees of
-   * its round trip (see RoundTripTracker.countBuyFee)
+   * its round trip, and the part of the amount bought it took out of its position (see RoundTripTracker.countBuyFee)
    */
   feeAsset?: Asset;
 };

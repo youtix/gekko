@@ -1,10 +1,11 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
-import { OrderCanceledEvent, OrderCompletedEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset } from '@gekko/shared/models/utility.types';
 import { debug, info, warning } from '@gekko/core/logger/logger';
+import { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { OpenRoundTrip } from './roundTrip.types';
 import { LATE_FILL_CANDLES } from './roundTripAnalyzer.const';
@@ -18,8 +19,13 @@ const holding = (btc: number): Portfolio =>
     ['BTC', { free: btc, used: 0, total: btc }],
     ['USDT', { free: 1000, used: 0, total: 1000 }],
   ]);
-/** The portfolio the orders below carry unless a test gives another: the account holds no BTC after them */
+/** The portfolio the SELLs below carry unless a test gives another: the account holds no BTC after them */
 const READ = holding(0);
+/**
+ * The portfolio the BUYs below carry unless a test gives another: the account holds more BTC after them than any round trip here holds,
+ * as it does after a BUY, whose coins are in it (see RoundTripTracker.registerBuy)
+ */
+const BOUGHT = holding(100);
 /** The empty portfolio the Trader starts with, which the end of an order carries until one of its synchronizations succeeds */
 const NOT_READ: Portfolio = new Map();
 
@@ -38,14 +44,15 @@ const completed = (side: OrderSide, minute: number, price: number | undefined, a
     orderExecutionDate: minute * ONE_MINUTE,
   }) as OrderCompletedEvent['order'];
 /**
- * An order of 10 BTC/USDT canceled at the given minute, with the price the strategy asked for, if any: a LIMIT order unless the test
- * gives another type, and the mean price of its fills when the test gives one, as the Trader relays it
+ * An order of 10 BTC/USDT canceled at the given minute after filling 4 of it, unless the test gives another fill, with the price the
+ * strategy asked for, if any: a LIMIT order unless the test gives another type, and the mean price of its fills when the test gives
+ * one, as the Trader relays it
  */
 const canceled = (
   side: OrderSide,
   minute: number,
   price?: number,
-  { type = 'LIMIT', fillPrice }: { type?: OrderType; fillPrice?: number } = {},
+  { type = 'LIMIT', fillPrice, filled = 4 }: { type?: OrderType; fillPrice?: number; filled?: number } = {},
 ) =>
   ({
     id: `${side}-${minute}`,
@@ -54,10 +61,36 @@ const canceled = (
     type,
     price,
     amount: 10,
+    filled,
+    remaining: 10 - filled,
     fillPrice,
     orderCreationDate: minute * ONE_MINUTE,
     orderCancelationDate: minute * ONE_MINUTE,
   }) as OrderCanceledEvent['order'];
+/**
+ * An order of 10 BTC/USDT that ended in error at the given minute after filling `filled` of it, the price of its fills given or not, as
+ * the Trader relays them: a STICKY order whose relaunch failed unless the test gives another type
+ */
+const errored = (
+  side: OrderSide,
+  minute: number,
+  filled: number,
+  { type = 'STICKY', price, fillPrice }: { type?: OrderType; price?: number; fillPrice?: number } = {},
+) =>
+  ({
+    id: `${side}-${minute}`,
+    symbol: 'BTC/USDT',
+    side,
+    type,
+    price,
+    amount: 10,
+    reason: 'relaunch failed',
+    orderCreationDate: minute * ONE_MINUTE,
+    orderErrorDate: minute * ONE_MINUTE,
+    filled,
+    mayBeLive: false,
+    fillPrice,
+  }) as OrderErroredEvent['order'];
 /** The one-minute candle of BTC/USDT of a minute, flat at its close but for its low */
 const candleAt = (minute: number, close: number, low = close): Candle => ({
   start: minute * ONE_MINUTE,
@@ -74,10 +107,10 @@ describe('RoundTripTracker', () => {
   let nextId: number;
   let tracker: RoundTripTracker;
 
-  const buy = (minute: number, price: number | undefined, amount: number, fee?: number, portfolio = READ) =>
-    tracker.registerCompleted(completed('BUY', minute, price, amount, fee), portfolio);
+  const buy = (minute: number, price: number | undefined, amount: number, fee?: number, portfolio = BOUGHT) =>
+    tracker.registerCompleted(completed('BUY', minute, price, amount, fee), { portfolio });
   const sell = (minute: number, price: number | undefined, amount: number, fee?: number, portfolio = READ) =>
-    tracker.registerCompleted(completed('SELL', minute, price, amount, fee), portfolio);
+    tracker.registerCompleted(completed('SELL', minute, price, amount, fee), { portfolio });
   /** A BUY or a SELL whose fee the exchange took in `feeAsset`, as its event names it */
   const paidIn = (
     feeAsset: Asset | undefined,
@@ -87,7 +120,7 @@ describe('RoundTripTracker', () => {
     amount: number,
     fee: number,
     portfolio = READ,
-  ) => tracker.registerCompleted({ ...completed(side, minute, price, amount, fee), feeAsset }, portfolio);
+  ) => tracker.registerCompleted({ ...completed(side, minute, price, amount, fee), feeAsset }, { portfolio });
   const openRoundTrip = () => tracker['openRoundTrip'];
 
   beforeEach(() => {
@@ -132,6 +165,7 @@ describe('RoundTripTracker', () => {
           entryEquity: 1000,
           bought: 2,
           sold: 0,
+          position: 2,
           cost: 200,
           proceeds: 0,
           fees: 0.1,
@@ -195,6 +229,7 @@ describe('RoundTripTracker', () => {
         ${'entryPrice'}          | ${120}        | ${'the mean price of both BUYs, weighted by their amounts'}
         ${'entryEquity'}         | ${1000}       | ${'the portfolio before the first BUY, whatever the second one changed'}
         ${'bought'}              | ${3}          | ${'the amount of both BUYs'}
+        ${'position'}            | ${3}          | ${'the amount of both BUYs, their fees taken in currency'}
         ${'cost'}                | ${360}        | ${'1 at 100 and 2 at 130'}
         ${'fees'}                | ${0.3}        | ${'the fees of both BUYs, in decimal: 0.30000000000000004 in binary'}
         ${'maxAdverseExcursion'} | ${5}          | ${'the adverse excursion so far'}
@@ -223,22 +258,47 @@ describe('RoundTripTracker', () => {
           expect(openRoundTrip()?.entryEquity).toBe(1000);
         });
 
-        it('should log at debug that the fee is left out', () => {
+        it('should log at debug that the fee is left out, and what it took of the amount bought', () => {
           expect(debug).toHaveBeenCalledExactlyOnceWith(
             'roundtrip analyzer',
-            'BUY order BUY-1: its fee of 0.1 USDT was taken in BTC, out of the amount bought: left out of the fees, its SELLs selling that much less.',
+            'BUY order BUY-1: its fee of 0.1 USDT was taken in BTC, 0.001 BTC out of the amount bought: left out of the fees, its round trip holding that much less.',
           );
         });
 
-        it('should leave the fee of a scale-in BUY out too', () => {
-          paidIn('BTC', 'BUY', 2, 110, 1, 0.11);
-          expect(openRoundTrip()?.fees).toBe(0);
+        it('should hold what the BUY bought less what its fee took, 0.999 BTC', () => {
+          expect(openRoundTrip()?.position).toBe(0.999);
+        });
+
+        describe('then a scale-in BUY whose fee the exchange took in the asset too', () => {
+          beforeEach(() => {
+            paidIn('BTC', 'BUY', 2, 110, 1, 0.11, holding(1.998));
+          });
+
+          it.each`
+            field         | expected | description
+            ${'fees'}     | ${0}     | ${'both fees left out'}
+            ${'bought'}   | ${2}     | ${'the amounts of both BUYs'}
+            ${'position'} | ${1.998} | ${'0.999 of each, 0.001 BTC taken by each fee'}
+          `('should hold the round trip with $field $expected: $description', ({ field, expected }) => {
+            expect(openRoundTrip()?.[field as keyof OpenRoundTrip]).toBe(expected);
+          });
         });
 
         // The round trip of the live-trader flow: the 0.999 BTC left sold at 110 for a fee of 0.10989 USDT, 0.1 % of 109.89
         it('should make the P&L the account made once the SELL of what the fee left closes it', () => {
           paidIn('USDT', 'SELL', 2, 110, 0.999, 0.10989);
           expect(tracker.closedRoundTrips[0]).toEqual(expect.objectContaining({ fees: 0.10989, pnl: 9.78011, profit: 0.978011 }));
+        });
+
+        // A trailing stop sells the amount its BUY reported, 1, and so does a SELL of the amount bought: with 0.5 BTC held besides, the
+        // exchange sells 1 of the 1.499 BTC free. Counted whole, its proceeds took the fee's worth of the other coins, 0.11 USDT, and the
+        // fee left out of the fees counted nowhere: a P&L of 9.89 where the account made 9.78 (+9.89 USDT, -0.001 BTC at 110).
+        it('should count a SELL of the amount the BUY reported for the 0.999 BTC the round trip holds, with that share of its fee', () => {
+          paidIn('USDT', 'SELL', 2, 110, 1, 0.11, holding(0.499));
+          expect(tracker.closedRoundTrips[0]).toEqual(
+            // 0.999 at 110, the fee of 0.11 for 0.999 of the 1 sold, and 109.89 - 100 - 0.10989
+            expect.objectContaining({ proceeds: 109.89, fees: 0.10989, pnl: 9.78011, exitPrice: 110 }),
+          );
         });
       });
 
@@ -272,13 +332,15 @@ describe('RoundTripTracker', () => {
 
     describe('invalid fills', () => {
       it.each`
-        price        | amount | description
-        ${undefined} | ${1}   | ${'missing price'}
-        ${NaN}       | ${1}   | ${'NaN price'}
-        ${0}         | ${1}   | ${'zero price'}
-        ${-1}        | ${1}   | ${'negative price'}
-        ${100}       | ${NaN} | ${'NaN amount'}
-        ${100}       | ${0}   | ${'zero amount'}
+        price        | amount      | description
+        ${undefined} | ${1}        | ${'missing price'}
+        ${NaN}       | ${1}        | ${'NaN price'}
+        ${0}         | ${1}        | ${'zero price'}
+        ${-1}        | ${1}        | ${'negative price'}
+        ${100}       | ${NaN}      | ${'NaN amount'}
+        ${100}       | ${0}        | ${'zero amount'}
+        ${Infinity}  | ${1}        | ${'infinite price'}
+        ${100}       | ${Infinity} | ${'infinite amount'}
       `('should warn that an order with a $description is skipped', ({ price, amount }) => {
         buy(1, price, amount);
         expect(warning).toHaveBeenCalledExactlyOnceWith(
@@ -296,7 +358,7 @@ describe('RoundTripTracker', () => {
       `('should leave the round trip untouched when a $side has price $price and amount $amount', ({ side, price, amount }) => {
         buy(1, 100, 1);
         const before = structuredClone(openRoundTrip());
-        tracker.registerCompleted(completed(side, 2, price, amount), READ);
+        tracker.registerCompleted(completed(side, 2, price, amount), { portfolio: READ });
         expect(openRoundTrip()).toEqual(before);
       });
     });
@@ -461,6 +523,34 @@ describe('RoundTripTracker', () => {
       });
     });
 
+    // An all-in SELL, as the PositionTracker of the signal strategies sends it, sells all the account holds of the asset: here 1 BTC held
+    // before the round trip besides the 0.095 it bought. Counted whole, the sale of that holding was the profit of the round trip, at no
+    // cost: a P&L of 11,082.005 where its own fills made 93.005.
+    describe('SELL of more than the round trip holds', () => {
+      let closed: RoundTrip | undefined;
+      beforeEach(() => {
+        buy(1, 10000, 0.095, 0.95, holding(1.095));
+        closed = sell(3, 11000, 1.095, 12.045);
+      });
+
+      it.each`
+        field          | expected  | description
+        ${'proceeds'}  | ${1045}   | ${'the 0.095 it held at 11000: the 1 BTC held before, sold with it, counts in none of it'}
+        ${'fees'}      | ${1.995}  | ${'the fee of the BUY, 0.95, and the share of the fee of the SELL of the 0.095 it held, 1.045'}
+        ${'pnl'}       | ${93.005} | ${'1045 - 950 - 1.995'}
+        ${'exitPrice'} | ${11000}  | ${'the price of the SELL'}
+      `('should close the round trip with $field $expected: $description', ({ field, expected }) => {
+        expect(closed?.[field as keyof RoundTrip]).toBe(expected);
+      });
+
+      it('should say at debug what it left out of the round trip', () => {
+        expect(debug).toHaveBeenCalledExactlyOnceWith(
+          'roundtrip analyzer',
+          'SELL order SELL-3: 1 of the 1.095 BTC it sold were held before, its round trip on BTC/USDT holding 0.095: left out of it, with their share of the fee.',
+        );
+      });
+    });
+
     describe('break-even and unknown profit', () => {
       it.each`
         sellPrice | sellFee | field       | expected | description
@@ -584,7 +674,7 @@ describe('RoundTripTracker', () => {
     `('BUY canceled after filling 4 of 10, $order', ({ event, price, source }) => {
       let closed: RoundTrip | undefined;
       beforeEach(() => {
-        closed = tracker.registerCanceled(event, 4, READ);
+        closed = tracker.registerCanceled(event, { portfolio: READ });
       });
 
       it(`should open a round trip with the part filled, at ${price}, dated at the cancelation, its fee unknown and counted as 0`, () => {
@@ -595,6 +685,7 @@ describe('RoundTripTracker', () => {
           entryEquity: 999.9,
           bought: 4,
           sold: 0,
+          position: 4,
           cost: 4 * price,
           proceeds: 0,
           fees: 0,
@@ -634,7 +725,7 @@ describe('RoundTripTracker', () => {
       let closed: RoundTrip | undefined;
       beforeEach(() => {
         buy(1, 100, 4);
-        closed = tracker.registerCanceled(event, 4, READ);
+        closed = tracker.registerCanceled(event, { portfolio: READ });
       });
 
       it('should end the round trip and return it', () => {
@@ -651,8 +742,224 @@ describe('RoundTripTracker', () => {
     });
 
     it('should skip a SELL canceled after a partial fill while flat, before any trade', () => {
-      tracker.registerCanceled(canceled('SELL', 2, 100), 4, READ);
+      tracker.registerCanceled(canceled('SELL', 2, 100), { portfolio: READ });
       expect(tracker.tradeCount).toBe(0);
+    });
+  });
+
+  describe('registerErrored', () => {
+    // The last close is 90
+    beforeEach(() => {
+      tracker.readCandle(candleAt(1, 90), false);
+    });
+
+    // A STICKY BUY whose relaunch failed after it had filled 4 of 10: left out, its coins were in no round trip, and their SELL, coming
+    // while flat, was skipped
+    describe('BUY ended in error after filling 4 of 10, its fills at 95', () => {
+      let closed: RoundTrip | undefined;
+      beforeEach(() => {
+        closed = tracker.registerErrored(errored('BUY', 2, 4, { fillPrice: 95 }), { portfolio: holding(4) });
+      });
+
+      it('should open a round trip with the part filled, at the price of its fills, dated at the error, its fee unknown and counted as 0', () => {
+        expect(openRoundTrip()).toEqual(
+          expect.objectContaining({ entryAt: 2 * ONE_MINUTE, entryPrice: 95, bought: 4, position: 4, cost: 380, fees: 0 }),
+        );
+      });
+
+      it('should count the fill as a trade', () => {
+        expect(tracker.tradeCount).toBe(1);
+      });
+
+      it('should return no round trip', () => {
+        expect(closed).toBeUndefined();
+      });
+
+      it('should log the fill at debug, at 95 (the prices of its fills)', () => {
+        expect(debug).toHaveBeenCalledWith(
+          'roundtrip analyzer',
+          'BUY order BUY-2 ended in error after a fill: its 4 filled count at 95 (the prices of its fills, as the exchange reported them), fee unknown.',
+        );
+      });
+    });
+
+    it.each`
+      order                                           | event                                                  | price
+      ${'a LIMIT order at 100, no fill price'}        | ${errored('BUY', 2, 4, { type: 'LIMIT', price: 100 })} | ${100}
+      ${'a STICKY order sized at 100, no fill price'} | ${errored('BUY', 2, 4, { price: 100 })}                | ${90}
+    `('should price the fill of $order at $price', ({ event, price }) => {
+      tracker.registerErrored(event, { portfolio: holding(4) });
+      expect(openRoundTrip()?.entryPrice).toBe(price);
+    });
+
+    // DEMA's STICKY SELL of 1 sold 0.6 at 110, then its relaunch failed: the strategy, long on the 0.4 left, sells them at 108. Left out,
+    // the balance ended the round trip at that SELL with its 43.2 alone, a loss of 56.8 where the account made 9.2.
+    it('should count the fill of a SELL ended in error, which the SELL of the rest then ends with the proceeds of both', () => {
+      buy(1, 100, 1);
+      tracker.registerErrored(errored('SELL', 2, 0.6, { fillPrice: 110 }), { portfolio: holding(0.4) });
+      sell(3, 108, 0.4);
+      // 0.6 at 110 and 0.4 at 108, less 100
+      expect(tracker.closedRoundTrips).toEqual([expect.objectContaining({ proceeds: 109.2, pnl: 9.2, exitAt: 3 * ONE_MINUTE })]);
+    });
+
+    it('should count nothing of a BUY ended in error without a fill', () => {
+      tracker.registerErrored(errored('BUY', 2, 0), { portfolio: READ });
+      expect({ tradeCount: tracker.tradeCount, openRoundTrip: openRoundTrip() }).toEqual({ tradeCount: 0, openRoundTrip: null });
+    });
+  });
+
+  describe('registerInitiated', () => {
+    /** A SELL of BTC/USDT completed at minute 3 at 110, with its own id: two SELLs of one minute */
+    const sellAs = (id: string, amount: number, portfolio: Portfolio) =>
+      tracker.registerCompleted({ ...completed('SELL', 3, 110, amount), id: id as UUID }, { portfolio });
+
+    // Two SELLs of one candle share the read after both: taken for the account after the first, it ended the round trip with the
+    // proceeds of the first alone, a loss of 45 where the account made 10, and the second was skipped as sold while flat
+    describe('when two SELLs of 0.5 of a round trip of 1 BTC end with one read of the balance, after both', () => {
+      beforeEach(() => {
+        buy(1, 100, 1);
+        tracker.registerInitiated({ id: 'SELL-a' as UUID, side: 'SELL' });
+        tracker.registerInitiated({ id: 'SELL-b' as UUID, side: 'SELL' });
+        sellAs('SELL-a', 0.5, READ);
+      });
+
+      it('should keep the round trip open once the first ends, the other still to be heard', () => {
+        expect(openRoundTrip()?.position).toBe(0.5);
+      });
+
+      it('should close it with the proceeds of both once the second ends', () => {
+        sellAs('SELL-b', 0.5, READ);
+        // 1 at 110, less 100
+        expect(tracker.closedRoundTrips).toEqual([expect.objectContaining({ proceeds: 110, pnl: 10 })]);
+      });
+
+      it('should warn of nothing: no fill went unreported', () => {
+        sellAs('SELL-b', 0.5, READ);
+        expect(warning).not.toHaveBeenCalled();
+      });
+    });
+
+    // The fill of a BUY adds to what the account holds: it hides no SELL
+    it('should not hold the balance back for a BUY initiated', () => {
+      buy(1, 100, 1);
+      tracker.registerInitiated({ id: 'BUY-5' as UUID, side: 'BUY' });
+      sell(3, 110, 0.5);
+      expect(tracker.closedRoundTrips).toHaveLength(1);
+    });
+
+    it.each`
+      end                | deliver
+      ${'completes'}     | ${() => sell(3, 110, 0.2, 0, holding(0.8))}
+      ${'is canceled'}   | ${() => tracker.registerCanceled(canceled('SELL', 3, 110, { filled: 0 }), { portfolio: holding(1) })}
+      ${'ends in error'} | ${() => tracker.registerErrored(errored('SELL', 3, 0), { portfolio: holding(1) })}
+    `('should no longer hold the balance back for a SELL once it $end', ({ deliver }) => {
+      buy(1, 100, 1);
+      tracker.registerInitiated({ id: 'SELL-3' as UUID, side: 'SELL' });
+      deliver();
+      sell(4, 110, 0.5);
+      expect(tracker.closedRoundTrips).toHaveLength(1);
+    });
+  });
+
+  // A fill no event reported: a SELL whose creation's outcome was unknown, which executed (Binance -1006), a fill an order did not
+  // report before its error, a sale made outside Gekko. The balance ended the round trip, its coins booked as lost, or a BUY merged the
+  // next round trip into it.
+  describe('what the balance after an order shows gone of the round trip in progress', () => {
+    /** The warning of the 1 BTC of the round trip the account no longer holds after an order of minute 2 or 3 */
+    const unseen = (order: string) =>
+      `1 BTC of the round trip in progress on BTC/USDT are no longer in the account, as the balance read after ${order} shows: sold by a fill no event reported (an order ended in error, a sale made outside Gekko), they count as sold at the last close, 110 USDT, without a fee.`;
+
+    // 1 BTC bought at 100, the last close 110
+    beforeEach(() => {
+      buy(1, 100, 1);
+      tracker.readCandle(candleAt(1, 110), true);
+    });
+
+    describe('after a SELL that ended in error without a fill reported, the account holding none of the asset', () => {
+      let closed: RoundTrip | undefined;
+      beforeEach(() => {
+        closed = tracker.registerErrored({ ...errored('SELL', 2, 0), mayBeLive: true }, { portfolio: READ });
+      });
+
+      it('should close the round trip, what it held counted as sold at the last close, without a fee', () => {
+        expect(closed).toEqual(expect.objectContaining({ exitAt: 2 * ONE_MINUTE, exitPrice: 110, proceeds: 110, fees: 0, pnl: 10 }));
+      });
+
+      it('should warn of it, naming the pair and the amount', () => {
+        expect(warning).toHaveBeenCalledExactlyOnceWith('roundtrip analyzer', unseen('SELL order SELL-2'));
+      });
+
+      it('should count no trade for it', () => {
+        expect(tracker.tradeCount).toBe(1);
+      });
+    });
+
+    it('should leave the round trip open after a SELL ended in error without a fill while the account still holds its position', () => {
+      tracker.registerErrored(errored('SELL', 2, 0), { portfolio: holding(1) });
+      expect(openRoundTrip()?.position).toBe(1);
+    });
+
+    it('should hold the round trip to the balance after a SELL canceled without a fill reported', () => {
+      tracker.registerCanceled(canceled('SELL', 2, 110, { filled: 0 }), { portfolio: READ });
+      expect(tracker.closedRoundTrips).toEqual([expect.objectContaining({ proceeds: 110, pnl: 10 })]);
+    });
+
+    it('should not hold it to the balance after a BUY canceled without a fill', () => {
+      tracker.registerCanceled(canceled('BUY', 2, 110, { filled: 0 }), { portfolio: READ });
+      expect(openRoundTrip()?.position).toBe(1);
+    });
+
+    describe('before a BUY that finds the account without the position of the round trip in progress', () => {
+      let closed: RoundTrip | undefined;
+      beforeEach(() => {
+        // The account holds the 1 BTC of that BUY alone
+        closed = buy(3, 105, 1, 0, holding(1));
+      });
+
+      it('should close the round trip in progress, what it held counted as sold at the last close', () => {
+        expect(closed).toEqual(expect.objectContaining({ exitAt: 3 * ONE_MINUTE, exitPrice: 110, proceeds: 110, pnl: 10 }));
+      });
+
+      it('should open the next one with the BUY, rather than merge the two', () => {
+        expect(openRoundTrip()).toEqual(
+          expect.objectContaining({ entryOrderId: 'BUY-3', entryAt: 3 * ONE_MINUTE, entryPrice: 105, bought: 1, sold: 0, position: 1 }),
+        );
+      });
+
+      it('should warn of it, naming the BUY whose balance shows it', () => {
+        expect(warning).toHaveBeenCalledExactlyOnceWith('roundtrip analyzer', unseen('BUY order BUY-3'));
+      });
+    });
+
+    it('should count what the account lacks of a position it still holds in part as sold, the BUY adding to the rest', () => {
+      buy(3, 105, 1, 0, holding(1.5));
+      // 0.5 of the first BTC sold unseen at 110, then 1 more bought
+      expect(openRoundTrip()).toEqual(expect.objectContaining({ bought: 2, sold: 0.5, position: 1.5, proceeds: 55, cost: 205 }));
+    });
+
+    // Its synchronization after the fill failed: the event carries the read before, which tells nothing of the fill
+    it.each`
+      readAt | closes   | description
+      ${2}   | ${false} | ${'before the SELL, which it does not show'}
+      ${3}   | ${true}  | ${'as the SELL filled'}
+      ${4}   | ${true}  | ${'after the SELL'}
+    `('should hold the round trip to a read dated $description ($closes)', ({ readAt, closes }) => {
+      tracker.registerCompleted(completed('SELL', 3, 110, 0.5), { portfolio: READ, portfolioReadAt: readAt * ONE_MINUTE });
+      expect(tracker.closedRoundTrips).toHaveLength(closes ? 1 : 0);
+    });
+
+    it('should not hold the round trip to a read dated before a BUY, which does not show its coins', () => {
+      tracker.registerCompleted(completed('BUY', 3, 105, 1), { portfolio: holding(0), portfolioReadAt: 2 * ONE_MINUTE });
+      expect(openRoundTrip()).toEqual(expect.objectContaining({ bought: 2, position: 2, sold: 0 }));
+    });
+
+    // What a fee taken in the asset that the BUY did not report so leaves, or an amount rounded to the step of the exchange
+    it('should neither count nor warn of the dust the account lacks', () => {
+      sell(3, 110, 0.995, 0, READ);
+      expect({ warned: vi.mocked(warning).mock.calls.length, proceeds: tracker.closedRoundTrips[0]?.proceeds }).toEqual({
+        warned: 0,
+        proceeds: 109.45,
+      });
     });
   });
 
@@ -760,9 +1067,10 @@ describe('RoundTripTracker', () => {
           entryAt: 10 * ONE_MINUTE,
           entryPrice: 110,
           entryEquity: 1100,
-          // Kept: the rule that ends it needs them, and the mean price of its next SELLs this one
+          // Kept: the rules that count its SELLs and end it need them, and the mean price of its next SELLs this one
           bought: 2,
           sold: 1,
+          position: 1,
           exitPrice: 120,
           // The BTC it still holds, 2 - 1, at the start price: what its warmup trading made is left out
           cost: 110,
@@ -809,6 +1117,16 @@ describe('RoundTripTracker', () => {
           expect(tracker.tradeCount).toBe(1);
         });
       });
+    });
+
+    // Binance without BNB: the fee of 0.1 USDT taken in BTC, out of the 1 bought at 100. Rebased at the 1 BTC bought, its cost counted
+    // the coins the fee took, 0.11 USDT at 110, which no SELL could sell.
+    it('should rebase a round trip whose BUY fee the exchange took in the asset at what it holds then, net of that fee', () => {
+      paidIn('BTC', 'BUY', 1, 100, 1, 0.1, holding(0.999));
+      tracker.readCandle(candleAt(9, 110), false);
+      tracker.startPeriod(START);
+      // 0.999 at 110
+      expect(openRoundTrip()?.cost).toBe(109.89);
     });
 
     describe('when no start equity was taken by then', () => {
@@ -918,17 +1236,18 @@ describe('RoundTripTracker', () => {
       valuePortfolio.mockReturnValue(1000);
       holdOne(150);
       tracker.logOpenPosition();
-      // 120 + 150 - 200 - 0.32 = 69.68, in % of 1,000.2: 6.9666…, +6.97% rounded half to even
+      // 120 + 150 - 200 - 0.32 = 69.68, in % of 1,000.2: 6.9666…, 6.96% rounded down, as the profit of a round trip is wherever it is
+      // written (see PERCENT_ROUNDING): +6.97%, rounded half to even, read 0.01 above the same profit in the table and on Telegram
       expect(info).toHaveBeenCalledExactlyOnceWith(
         'roundtrip analyzer',
-        'Position still open on BTC/USDT at the end of the period, entered at 100 USDT on 1970-01-01T00:04:00.000Z: unrealized P&L of 69.68 USDT (+6.97%) at the last close, 150 USDT. The final balance and the exposure include it; the win rate, the ratios and the MAEs leave it out.',
+        'Position still open on BTC/USDT at the end of the period, entered at 100 USDT on 1970-01-01T00:04:00.000Z: unrealized P&L of 69.68 USDT (6.96%) at the last close, 150 USDT. The final balance and the exposure include it; the win rate, the ratios and the MAEs leave it out.',
       );
     });
 
-    // From an entry equity of 999.8 + 0.2: 120 + the last close - 200.32
+    // From an entry equity of 999.8 + 0.2: 120 + the last close - 200.32. A loss of -3.032 % is -3.04 % rounded down, -3.03 % half to even.
     it.each`
       lastClose | portfolio   | unrealized
-      ${50}     | ${READ}     | ${'unrealized P&L of -30.32 USDT (-3.03%)'}
+      ${50}     | ${READ}     | ${'unrealized P&L of -30.32 USDT (-3.04%)'}
       ${80.32}  | ${READ}     | ${'unrealized P&L of 0 USDT (0%)'}
       ${150}    | ${NOT_READ} | ${'unrealized P&L of 69.68 USDT (profit unknown, no portfolio having valued its entry)'}
     `('should log $unrealized at a last close of $lastClose', ({ lastClose, portfolio, unrealized }) => {
@@ -936,6 +1255,20 @@ describe('RoundTripTracker', () => {
       holdOne(lastClose, portfolio);
       tracker.logOpenPosition();
       expect(info).toHaveBeenCalledWith('roundtrip analyzer', expect.stringContaining(`: ${unrealized} at the last close,`));
+    });
+
+    // Binance without BNB: 1 BTC bought at 100, the fee of 0.1 USDT taken in BTC: the account holds 0.999 BTC, which a SELL at 110 would
+    // sell for 109.89. Valued at the 1 BTC bought, the line read 10 USDT (1 %), the fee counted nowhere.
+    it('should value the position net of a BUY fee taken in the asset, as the SELL that would close it would sell it', () => {
+      valuePortfolio.mockReturnValue(999.9);
+      paidIn('BTC', 'BUY', 4, 100, 1, 0.1, holding(0.999));
+      tracker.readCandle(candleAt(6, 110), true);
+      tracker.logOpenPosition();
+      // 109.89 - 100, in % of 999.9 + 0.1: 0.989 %, 0.98 % rounded down
+      expect(info).toHaveBeenCalledWith(
+        'roundtrip analyzer',
+        expect.stringContaining(': unrealized P&L of 9.89 USDT (0.98%) at the last close, 110 USDT.'),
+      );
     });
 
     it('should log nothing while flat', () => {

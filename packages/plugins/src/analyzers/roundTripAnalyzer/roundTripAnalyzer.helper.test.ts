@@ -14,7 +14,7 @@ import {
   measureAdverseExcursion,
   measureCoveredMs,
   measureRoundTrip,
-  priceCanceledFill,
+  priceUncompletedFill,
 } from './roundTripAnalyzer.helper';
 
 vi.mock('@gekko/core/logger/logger', () => ({ info: vi.fn() }));
@@ -86,6 +86,7 @@ const openRoundTrip = (fields: Partial<OpenRoundTrip> = {}): OpenRoundTrip => ({
   entryEquity: 1000,
   bought: 1,
   sold: 0,
+  position: 1,
   cost: 100,
   proceeds: 0,
   fees: 0,
@@ -108,10 +109,14 @@ describe('roundTripAnalyzer.helper', () => {
   });
 
   describe('addToMeanPrice', () => {
+    // In decimal: in binary, 1 at 0.1 and 1 at 0.2 made 0.15000000000000002, and 0.3 at 104.44 and 0.3 at 104.46 made 104.44999999999999
     it.each`
-      meanPrice | amount | price  | addedAmount | expected
-      ${100}    | ${1}   | ${130} | ${2}        | ${120}
-      ${0}      | ${0}   | ${110} | ${1}        | ${110}
+      meanPrice | amount | price     | addedAmount | expected
+      ${100}    | ${1}   | ${130}    | ${2}        | ${120}
+      ${0}      | ${0}   | ${110}    | ${1}        | ${110}
+      ${0.1}    | ${1}   | ${0.2}    | ${1}        | ${0.15}
+      ${104.44} | ${0.3} | ${104.46} | ${0.3}      | ${104.45}
+      ${100}    | ${0}   | ${100}    | ${0}        | ${NaN}
     `(
       'should make $expected of $amount at $meanPrice and $addedAmount at $price',
       ({ meanPrice, amount, price, addedAmount, expected }) => {
@@ -465,9 +470,10 @@ describe('roundTripAnalyzer.helper', () => {
     });
   });
 
-  describe('priceCanceledFill', () => {
+  describe('priceUncompletedFill', () => {
     // The last close is 90. The price a MARKET or a STICKY order carries is the one the strategy sized it from, 100: priced at it, the
-    // part it filled at the market made the cost and the P&L of its round trip off by that amount times the gap.
+    // part it filled at the market, before it was canceled or ended in error, made the cost and the P&L of its round trip off by that
+    // amount times the gap.
     const FILLS = 'the prices of its fills, as the exchange reported them';
     it.each`
       order                                                        | type        | price        | fillPrice    | expected
@@ -482,7 +488,7 @@ describe('roundTripAnalyzer.helper', () => {
       ${'a LIMIT order at 100, a fill price that is not a number'} | ${'LIMIT'}  | ${100}       | ${NaN}       | ${{ price: 100, source: 'its limit price' }}
       ${'a STICKY order sized at 100, a fill price of 0'}          | ${'STICKY'} | ${100}       | ${0}         | ${{ price: 90, source: 'the last close' }}
     `('should price the fill of $order at $expected.price ($expected.source)', ({ type, price, fillPrice, expected }) => {
-      expect(priceCanceledFill({ type, price, fillPrice }, 90)).toEqual(expected);
+      expect(priceUncompletedFill({ type, price, fillPrice }, 90)).toEqual(expected);
     });
   });
 });

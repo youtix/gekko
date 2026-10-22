@@ -2,7 +2,14 @@ import { PERFORMANCE_REPORT_EVENT, ROUNDTRIP_COMPLETED_EVENT } from '@gekko/shar
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { calculateExposurePct, calculateVolatility } from '@gekko/shared/helpers/finance/stats.helper';
-import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import {
+  CandleBucket,
+  OrderCanceledEvent,
+  OrderCompletedEvent,
+  OrderErroredEvent,
+  OrderInitiatedEvent,
+  RoundTrip,
+} from '@gekko/shared/models/event.types';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
@@ -104,24 +111,45 @@ const canceled = (
     },
     exchange: { portfolio, price: 0 },
   }) as OrderCanceledEvent;
-/** A BUY of 10 BTC at 100 that ended in error at the given minute, and the portfolio after it */
-const errored = (minute: number, portfolio: Portfolio) =>
+/**
+ * An order of 10 that ended in error at the given minute, and the portfolio after it: a BUY of BTC at 100 refused, unless the test gives
+ * another pair, side, fill (what the exchange reported it had filled before) and the price of that fill, as the Trader relays it
+ */
+const errored = (
+  minute: number,
+  portfolio: Portfolio,
+  {
+    symbol = 'BTC/USDT',
+    side = 'BUY',
+    filled = 0,
+    fillPrice,
+  }: { symbol?: TradingPair; side?: OrderSide; filled?: number; fillPrice?: number } = {},
+) =>
   ({
     order: {
-      id: `BUY-${minute}`,
-      symbol: 'BTC/USDT',
-      side: 'BUY',
-      type: 'MARKET',
+      id: `${symbol.split('/')[0]}-${side}-${minute}`,
+      symbol,
+      side,
+      type: 'STICKY',
       price: 100,
       amount: 10,
-      reason: 'refused',
+      reason: filled > 0 ? 'relaunch failed' : 'refused',
       orderCreationDate: minute * ONE_MINUTE,
       orderErrorDate: minute * ONE_MINUTE,
-      filled: 0,
+      filled,
       mayBeLive: false,
+      fillPrice,
     },
     exchange: { portfolio, price: 100 },
   }) as OrderErroredEvent;
+/** An order the Trader initiated, with its id: the empty portfolio it carries plays no part */
+const initiated = (symbol: TradingPair, side: OrderSide, id: string) =>
+  ({
+    order: { id, symbol, side, type: 'MARKET', amount: 0.5, orderCreationDate: ONE_MINUTE },
+    exchange: { portfolio: NOT_READ, price: 0 },
+  }) as OrderInitiatedEvent;
+/** An order event with another id: two orders of one pair, one side and one minute */
+const withId = <T extends OrderCompletedEvent>(event: T, id: string): T => ({ ...event, order: { ...event.order, id } });
 
 describe('RoundTripAnalyzer', () => {
   let analyzer: RoundTripAnalyzer;
@@ -482,7 +510,7 @@ describe('RoundTripAnalyzer', () => {
       expect(analyzer['latestPortfolio']).toBe(CHANGED);
     });
 
-    it('should neither count an order ended in error as a trade nor open a round trip with it', () => {
+    it('should neither count an order ended in error without a fill as a trade nor open a round trip with it', () => {
       analyzer.onOrderErrored([errored(1, AFTER)]);
       expect({ tradeCount: tracker('BTC/USDT').tradeCount, openRoundTrip: tracker('BTC/USDT')['openRoundTrip'] }).toEqual({
         tradeCount: 0,
@@ -507,6 +535,26 @@ describe('RoundTripAnalyzer', () => {
       expect({ BTC: tracker('BTC/USDT').tradeCount, ETH: tracker('ETH/USDT').tradeCount }).toEqual({ BTC: 0, ETH: 1 });
     });
 
+    // A STICKY BUY whose relaunch failed after a fill: left out, its coins were in no round trip
+    it('should count the part an order ended in error filled on the tracker of its pair alone, at the price of its fills', () => {
+      analyzer.onOrderErrored([errored(1, holding({ ETH: 4, USDT: 960 }), { symbol: 'ETH/USDT', filled: 4, fillPrice: 9.5 })]);
+      expect({ BTC: openRoundTrip('BTC/USDT'), ETH: openRoundTrip('ETH/USDT')?.entryPrice }).toEqual({ BTC: null, ETH: 9.5 });
+    });
+
+    // A SELL is pending until its end is heard: the balance its batch shares tells nothing of what a round trip holds meanwhile
+    it('should hand each order initiated to the tracker of its pair alone', () => {
+      analyzer.onOrderInitiated([initiated('ETH/USDT', 'SELL', 'ETH-SELL-a')]);
+      expect({ BTC: [...tracker('BTC/USDT')['pendingSells']], ETH: [...tracker('ETH/USDT')['pendingSells']] }).toEqual({
+        BTC: [],
+        ETH: ['ETH-SELL-a'],
+      });
+    });
+
+    it('should say nothing of an order initiated on a pair the run does not watch, which its end will say', () => {
+      analyzer.onOrderInitiated([initiated('XRP/USDT', 'SELL', 'XRP-SELL-a')]);
+      expect(warning).not.toHaveBeenCalled();
+    });
+
     // A MARKET order without the price of its fills: the last close of its own pair, 10, not that of BTC
     it('should price the part a canceled order filled at the last close of its pair when nothing else prices it', () => {
       analyzer.onOrderCanceled([canceled('ETH/USDT', 'BUY', 1, 4, holding({ ETH: 4, USDT: 960 }), { type: 'MARKET', price: 12 })]);
@@ -527,6 +575,7 @@ describe('RoundTripAnalyzer', () => {
         event                                    | deliver                                                                                                               | line
         ${'a completed SELL'}                    | ${() => analyzer.onOrderCompleted([completed('XRP/USDT', 'SELL', 2 * ONE_MINUTE, 1, 5, 0, holding({ USDT: 1000 }))])} | ${'SELL order XRP-SELL-2 on XRP/USDT'}
         ${'a BUY canceled after a partial fill'} | ${() => analyzer.onOrderCanceled([canceled('XRP/USDT', 'BUY', 2, 4, holding({ USDT: 1000 }), { price: 1 })])}         | ${'BUY order XRP-BUY-2 on XRP/USDT'}
+        ${'a BUY ended in error after a fill'}   | ${() => analyzer.onOrderErrored([errored(2, holding({ USDT: 1000 }), { symbol: 'XRP/USDT', filled: 4 })])}            | ${'BUY order XRP-BUY-2 on XRP/USDT'}
       `('should skip $event with a warning naming the pairs watched', ({ deliver, line }) => {
         deliver();
         expect(warning).toHaveBeenCalledExactlyOnceWith(
@@ -540,8 +589,12 @@ describe('RoundTripAnalyzer', () => {
         expect([...analyzer['trackers'].values()].map(({ tradeCount }) => tradeCount)).toEqual([0, 0]);
       });
 
-      it('should say nothing of an order canceled without a fill, which counts for nothing', () => {
-        analyzer.onOrderCanceled([canceled('XRP/USDT', 'BUY', 2, 0, holding({ USDT: 1000 }))]);
+      it.each`
+        event                                 | deliver
+        ${'an order canceled without a fill'} | ${() => analyzer.onOrderCanceled([canceled('XRP/USDT', 'BUY', 2, 0, holding({ USDT: 1000 }))])}
+        ${'an order ended in error, no fill'} | ${() => analyzer.onOrderErrored([errored(2, holding({ USDT: 1000 }), { symbol: 'XRP/USDT' })])}
+      `('should say nothing of $event, which counts for nothing', ({ deliver }) => {
+        deliver();
         expect(warning).not.toHaveBeenCalled();
       });
     });
@@ -619,6 +672,24 @@ describe('RoundTripAnalyzer', () => {
       expect(emittedRoundTrips().map(({ symbol, exitPrice, pnl }) => ({ symbol, exitPrice, pnl }))).toEqual([
         { symbol: 'BTC/USDT', exitPrice: 110, pnl: 40 },
       ]);
+    });
+
+    it('should emit the round trip that a SELL ended in error after a fill ends', () => {
+      analyzer.onOrderCompleted([completed('BTC/USDT', 'BUY', ONE_MINUTE, 100, 4, 0, holding({ BTC: 4, USDT: 600 }))]);
+      analyzer.onOrderErrored([errored(2, holding({ USDT: 1044 }), { side: 'SELL', filled: 4, fillPrice: 111 })]);
+      expect(emittedRoundTrips().map(({ symbol, exitPrice, pnl }) => ({ symbol, exitPrice, pnl }))).toEqual([
+        { symbol: 'BTC/USDT', exitPrice: 111, pnl: 44 },
+      ]);
+    });
+
+    // Two SELLs of one candle, delivered together, both carrying the read after both: the first, taken for the account after it, ended
+    // the round trip with its own proceeds, a loss of 45, and the second was skipped as sold while flat, where the account made 10
+    it('should end a round trip with both of its SELLs heard together, which share the read after both', () => {
+      analyzer.onOrderCompleted([completed('BTC/USDT', 'BUY', ONE_MINUTE, 100, 1, 0, holding({ BTC: 1, USDT: 900 }))]);
+      analyzer.onOrderInitiated([initiated('BTC/USDT', 'SELL', 'BTC-SELL-a'), initiated('BTC/USDT', 'SELL', 'BTC-SELL-b')]);
+      const sold = completed('BTC/USDT', 'SELL', 2 * ONE_MINUTE, 110, 0.5, 0, holding({ USDT: 1010 }));
+      analyzer.onOrderCompleted([withId(sold, 'BTC-SELL-a'), withId(sold, 'BTC-SELL-b')]);
+      expect(emittedRoundTrips().map(({ proceeds, pnl }) => ({ proceeds, pnl }))).toEqual([{ proceeds: 110, pnl: 10 }]);
     });
 
     it('should log each, naming its pair in its table on a run that watches several', () => {
@@ -1065,11 +1136,12 @@ describe('RoundTripAnalyzer', () => {
     });
 
     // A method of its own named on… would be wired as the handler of an event
-    it('should export the six handlers it listens with, and nothing else', () => {
+    it('should export the seven handlers it listens with, and nothing else', () => {
       expect(RoundTripAnalyzer.getStaticConfiguration().eventsHandlers).toEqual([
         'onPortfolioChange',
         'onStrategyWarmupCompleted',
         'onTimeframeCandle',
+        'onOrderInitiated',
         'onOrderCompleted',
         'onOrderCanceled',
         'onOrderErrored',
