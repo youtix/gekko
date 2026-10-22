@@ -7,9 +7,10 @@ import tseslint from 'typescript-eslint';
 /**
  * The workspaces and what each may import (CLAUDE.md, Project): the graph is one way, from an app down to @gekko/shared. The
  * e2e suite of apps/gekko reads the schemas and the fixture strategies' types, which its executable does not: its test directory
- * may import every package, its sources the three the executable is composed of.
+ * may import every package, its sources the three the executable is composed of. Exported for scripts/tooling/dependencies.test.ts,
+ * which holds each workspace's package.json to it.
  */
-const DEPENDENCIES = {
+export const DEPENDENCIES = {
   'packages/shared': [],
   'packages/schemas': ['packages/shared'],
   'packages/indicators': ['packages/shared'],
@@ -49,12 +50,13 @@ const boundaryZones = Object.entries(DEPENDENCIES).flatMap(([target, allowed]) =
 
 /** @type {import('eslint').Linter.Config[]} */
 export default [
-  // `eslint .` lints the whole checkout, but for what the tools write (the executables, an html or lcov coverage report), the
+  // `eslint .` lints the whole checkout, but for what the tools write (the executables, an html or lcov coverage report, at the
+  // root or in a workspace), the
   // candles the importer stores, the local notes of documentation/dev and the worktrees the Claude desktop app checks out under
   // .claude/worktrees/, which git hides through .git/info/exclude, a file eslint does not read. Each worktree is a copy of the
   // checkout with an eslint.config.js of its own, which eslint 10 reads for the files under it: typescript-eslint then holds two
   // candidate tsconfigRootDirs and refuses every file of the lint, the root's too
-  { ignores: ['dist/', 'db/', 'coverage/', 'documentation/dev/', '.claude/', '.turbo/', '**/.turbo/'] },
+  { ignores: ['dist/', 'db/', '**/coverage/', 'documentation/dev/', '.claude/', '**/.turbo/'] },
   // Node's globals, without CommonJS's (the .cjs files get them below): Bun has Node's globals, and the .js files are ES modules. With
   // the browser's, `status = 'x'` and `document.title` passed the lint
   { languageOptions: { globals: globals.nodeBuiltin } },

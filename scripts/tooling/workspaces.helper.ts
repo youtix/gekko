@@ -4,7 +4,13 @@ import path from 'node:path';
 /** The root of the checkout, where the root package.json declares the workspaces and tsconfig.base.json their paths */
 export const ROOT = path.resolve(import.meta.dirname, '../..');
 
-export type PackageJson = { name: string; workspaces?: string[]; scripts?: Partial<Record<string, string>> };
+export type PackageJson = {
+  name: string;
+  workspaces?: string[];
+  scripts?: Partial<Record<string, string>>;
+  dependencies?: Record<string, string>;
+  devDependencies?: Record<string, string>;
+};
 
 /** The package.json of a directory, relative to the root ('.' for the root's own) */
 export const readPackageJson = (directory: string): PackageJson =>
