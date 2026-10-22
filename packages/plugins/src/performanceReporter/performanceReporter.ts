@@ -11,18 +11,21 @@ import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readSync, s
 import { random } from 'lodash-es';
 import path from 'path';
 import { BYTE_ORDER_MARK, REPORT_TYPES } from './performanceReporter.const';
-import { generateStrategyId, portfolioOnly, toCsvCell, tradingOnly } from './performanceReporter.helper';
+import { generateRowId, portfolioOnly, toCsvCell, tradingOnly } from './performanceReporter.helper';
 import { performanceReporterSchema } from '@gekko/schemas/plugins/performanceReporter.schema';
 import { CsvColumn, PerformanceReport, PerformanceReporterConfig } from './performanceReporter.types';
 
 export class PerformanceReporter extends Plugin {
   private readonly filePath: string;
+  private readonly label?: string;
   private fs: Fs = { lockSync: defaultLockSync };
 
   // Both analyzers write to the same file by default, so both report types share one header, and the header and the rows
   // are built from this one list: a metric that a report type does not have leaves its column empty.
   private readonly columns: CsvColumn[] = [
-    { header: 'id', value: () => generateStrategyId(this.strategySettings) },
+    // The label, when given, follows the values of the strategy block in the same cell: the rows of runs of one block (the variants
+    // Fox makes of a fee) are told apart, and the columns stay those of a file written before
+    { header: 'id', value: () => generateRowId(this.strategySettings, this.label) },
     { header: 'report type', value: report => REPORT_TYPES[report.id] },
     // Without the pair and the timeframe, runs of the same strategy on other pairs or timeframes could not be told apart.
     // A run can watch several pairs, under either analyzer: they share the cell, separated by a space as ';' separates the columns.
@@ -87,9 +90,10 @@ export class PerformanceReporter extends Plugin {
 
   private readonly header = this.columns.map(({ header }) => header).join(';');
 
-  constructor({ name, filePath, fileName }: PerformanceReporterConfig, context: RunContext) {
+  constructor({ name, filePath, fileName, label }: PerformanceReporterConfig, context: RunContext) {
     super(name, context);
     this.filePath = path.join(filePath, fileName);
+    this.label = label;
   }
 
   public setFs(fs: Fs) {

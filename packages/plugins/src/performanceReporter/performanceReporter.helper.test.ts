@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { generateStrategyId, toCsvCell } from './performanceReporter.helper';
+import { generateRowId, generateStrategyId, toCsvCell } from './performanceReporter.helper';
 
 describe('generateStrategyId', () => {
   it.each`
@@ -17,6 +17,18 @@ describe('generateStrategyId', () => {
     ${'a missing block'}                       | ${undefined}                                                                         | ${''}
   `('should return $expected for $description', ({ strategy, expected }) => {
     expect(generateStrategyId(strategy)).toBe(expected);
+  });
+});
+
+describe('generateRowId', () => {
+  it.each`
+    description                               | strategy                                               | label                     | expected
+    ${'the strategy block alone, unlabelled'} | ${{ name: 'DEMA', period: 12, thresholds: { up: 1 } }} | ${undefined}              | ${'DEMA-12-1'}
+    ${'the label after the strategy block'}   | ${{ name: 'DEMA', period: 12, thresholds: { up: 1 } }} | ${'--strategy.period 12'} | ${'DEMA-12-1 (--strategy.period 12)'}
+    ${'the label alone without a block'}      | ${undefined}                                           | ${'baseline'}             | ${'(baseline)'}
+    ${'nothing without either'}               | ${undefined}                                           | ${undefined}              | ${''}
+  `('should write $description: $expected', ({ strategy, label, expected }) => {
+    expect(generateRowId(strategy, label)).toBe(expected);
   });
 });
 

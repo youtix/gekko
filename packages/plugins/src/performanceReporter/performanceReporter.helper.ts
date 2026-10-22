@@ -20,6 +20,13 @@ export const generateStrategyId = (input: unknown): string => {
   return collectPrimitives(input).join('-');
 };
 
+/**
+ * The id of a row: the values of the run's strategy block joined by '-' (see generateStrategyId), then its label in parentheses when it
+ * has one, `DEMA-12-100--150 (--exchange.marketData.0.marketData.fee.maker 0.01)`, the label alone without a strategy block.
+ */
+export const generateRowId = (strategy: unknown, label?: string): string =>
+  [generateStrategyId(strategy), label === undefined ? '' : `(${label})`].filter(Boolean).join(' ');
+
 export const isNative = (node: unknown): node is string | number | boolean => ['string', 'number', 'boolean'].includes(typeof node);
 
 /**

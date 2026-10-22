@@ -429,6 +429,37 @@ describe('PerformanceReporter', () => {
       });
     });
 
+    // Fox labels the reporter of each variant with the values that make it: the rows of a sweep of a fee share their strategy block
+    describe('When the reporter has a label', () => {
+      /** Writes the row of a run whose reporter has `label`, and returns the file. */
+      const writeLabelledRow = (label: string) => {
+        const file = useInMemoryFile();
+        const labelledReporter = new PerformanceReporter(
+          { ...baseConfig, label },
+          createPluginContext({ watch: WATCH, strategy: STRATEGY }),
+        );
+        labelledReporter.setFs({ lockSync: lockSyncMock });
+        labelledReporter.onPerformanceReport(samplePortfolioReport);
+        return file;
+      };
+
+      it.each`
+        label                                                  | value
+        ${'--exchange.marketData.0.marketData.fee.maker 0.01'} | ${'DEMA (--exchange.marketData.0.marketData.fee.maker 0.01)'}
+        ${'--strategy.src a;b'}                                | ${'"DEMA (--strategy.src a;b)"'}
+      `('should write $value under id for the label $label', ({ label, value }) => {
+        expect(cellOf(writeLabelledRow(label).content, 'id')).toBe(value);
+      });
+
+      it('should write a row with as many columns as the header when the label holds the separator', () => {
+        expect(toCells(toLines(writeLabelledRow('--strategy.src a;b').content)[1])).toHaveLength(HEADER_COLUMN_COUNT);
+      });
+
+      it('should write the header an unlabelled run writes', () => {
+        expect(toLines(writeLabelledRow('--strategy.period 14').content)[0]).toBe(HEADER);
+      });
+    });
+
     describe('When a strategy parameter holds the separator', () => {
       /** Writes the row of a run whose strategy block has a ';' in a parameter, and returns the file. */
       const writeRowWithSeparatorInStrategy = () => {

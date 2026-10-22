@@ -349,7 +349,7 @@ The percentages of the report (the total, annualized and market returns, the alp
 ### How It Works
 
 1. Receives the performance report of the PortfolioAnalyzer or of the RoundTripAnalyzer
-2. Identifies the run by the values of the `strategy` block joined by `-` (the `id` column), the same for every run with the same parameters
+2. Identifies the run by the values of the `strategy` block joined by `-` (the `id` column), the same for every run with the same parameters, followed by its `label` in parentheses when it has one (`RSI-21-70-30-0 (fee 0.1%)`), which tells apart runs of the same parameters
 3. Appends the row to the CSV file while holding a lock file, `<fileName>.lock`, next to it, so that backtests ending together, such as the variants Fox runs side by side, do not write into each other's rows. It makes up to 6 attempts, 25 to 75 ms apart. If the lock is still held, the report is lost and an error says so, naming the lock file. A lock left behind by a run killed while writing (kill -9, Ctrl-C at that instant, a crash) is taken over automatically once it is 30 s old. Before that, delete it by hand if no other run is writing the file. A `<fileName>.lock.takeover` file left by a run killed while taking such a lock over is handled the same way.
 4. Creates the output directory and file if they don't exist
 
@@ -360,15 +360,19 @@ plugins:
   - name: PerformanceReporter
     filePath: ./reports        # Directory for CSV output
     fileName: backtest.csv     # Output filename
+    label: fee 0.1%            # Optional: written after the id of each row
 ```
 
 ### Configuration Reference
 
-| Parameter  | Type   | Required | Default                   | Description                            |
-|------------|--------|----------|---------------------------|----------------------------------------|
-| `name`     | string | Yes      | —                         | Must be `PerformanceReporter`          |
-| `filePath` | string | No       | Current working directory | Directory for output file              |
-| `fileName` | string | No       | `performance_reports.csv` | Name of the output CSV file, not empty |
+| Parameter  | Type   | Required | Default                   | Description                                                            |
+|------------|--------|----------|---------------------------|------------------------------------------------------------------------|
+| `name`     | string | Yes      | —                         | Must be `PerformanceReporter`                                          |
+| `filePath` | string | No       | Current working directory | Directory for output file                                              |
+| `fileName` | string | No       | `performance_reports.csv` | Name of the output CSV file, not empty                                 |
+| `label`    | string | No       | —                         | Written after the `id` of each row, in parentheses, not empty          |
+
+The `label` tells apart the rows of runs whose `strategy` blocks are the same, such as backtests of one strategy under two fees: without it, their `id` is the same. [Fox](./fox.md#results) gives each variant of a sweep the label of its values, `--exchange.marketData.0.marketData.fee.maker 0.01`, unless the template's PerformanceReporter has a label of its own. Without a label, the `id` is the values of the `strategy` block alone, as before, and the columns are the same either way, so a file keeps taking the rows of both.
 
 ### Events
 
@@ -385,7 +389,7 @@ Amounts and prices (`net profit`, the profit in `yearly profit`, `start balance`
 
 | Column                      | Description                                                                                                                                                                                                        |
 |-----------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `id`                        | `strategy` block values joined by `-` (e.g., `RSI-21-70-30-0`)                                                                                                                                                     |
+| `id`                        | `strategy` block values joined by `-` (e.g., `RSI-21-70-30-0`), then the `label` of the reporter in parentheses when it has one (e.g., `RSI-21-70-30-0 (--strategy.period 21)`, as Fox labels each variant)        |
 | `report type`               | `Portfolio` (PortfolioAnalyzer) or `Trading` (RoundTripAnalyzer)                                                                                                                                                   |
 | `pair`                      | Watched pairs, separated by a space (e.g., `BTC/USDT ETH/USDT`)                                                                                                                                                    |
 | `timeframe`                 | Candle timeframe of the run, `watch.timeframe` (e.g., `1h`)                                                                                                                                                        |
