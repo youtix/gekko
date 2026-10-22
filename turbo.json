@@ -1,36 +1,69 @@
 {
   "$schema": "https://turbo.build/schema.json",
+  // Read by the tasks of every workspace, from outside it: tsc's paths and compiler options, which Bun and vitest's aliases read too,
+  // and the vitest configuration each workspace's vitest.config.ts is built from
+  "globalDependencies": ["tsconfig.base.json", "vitest.shared.ts"],
   "globalEnv": ["GEKKO_LOG_LEVEL", "GEKKO_CONFIG_FILE_PATH", "TZ", "CI", "HUSKY"],
   "tasks": {
+    // No workspace has a transit script: the task runs nothing, and its hash covers the files of its workspace and of every
+    // workspace it depends on. A package's tests import the sources of the packages below it, which a task hashes only through a task
+    // it depends on: without it, a change of @gekko/shared replayed the passing tests of @gekko/core from the cache
+    "transit": {
+      "dependsOn": ["^transit"]
+    },
+    // The private strategies of src/custom, which git ignores, and so turbo unless an input names them: the tests and the type checks
+    // of the strategies and of every workspace above them (through transit and ^type:check) read them
+    "@gekko/strategies#transit": {
+      "dependsOn": ["^transit"],
+      "inputs": ["$TURBO_DEFAULT$", "src/custom/**"]
+    },
     "type:check": {
       "dependsOn": ["^type:check"],
       "outputs": []
     },
+    "@gekko/strategies#type:check": {
+      "dependsOn": ["^type:check"],
+      "inputs": ["$TURBO_DEFAULT$", "src/custom/**"],
+      "outputs": []
+    },
+    // The root's own tasks, over scripts/: their inputs are every file of the checkout, the workspaces' included, which the
+    // documentation test reads
     "//#type:check:scripts": {
+      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**"],
       "outputs": []
     },
     "test": {
+      "dependsOn": ["transit"],
       "outputs": []
     },
     "//#test:scripts": {
+      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**"],
       "outputs": []
     },
     "test:coverage": {
+      "dependsOn": ["transit"],
       "outputs": []
     },
     "//#test:coverage:scripts": {
+      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**"],
       "outputs": []
     },
     "test:e2e": {
+      "dependsOn": ["transit"],
       "outputs": []
     },
     "bench": {
       "cache": false
     },
+    // Writes dist/<name> at the root, outside the workspace, where turbo restores nothing from its cache
     "build:exec": {
       "cache": false
     },
     "dev": {
+      "cache": false,
+      "persistent": true
+    },
+    "dev:fox": {
       "cache": false,
       "persistent": true
     }

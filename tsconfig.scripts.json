@@ -1,4 +1,11 @@
 {
   "extends": "./tsconfig.base.json",
-  "include": ["scripts/**/*.ts", "scripts/release/version.cjs", "vitest.config.ts", "vitest.shared.ts"]
+  "include": [
+    "scripts/**/*.ts",
+    "scripts/release/version.cjs",
+    "vitest.config.ts",
+    "vitest.shared.ts",
+    "packages/shared/src/modules/global.d.ts",
+    "packages/indicators/src/**/*.types.ts"
+  ]
 }

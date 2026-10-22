@@ -14,20 +14,20 @@ import type { StrategyConstructor } from '@gekko/strategies/strategy.types';
 import { CORE_SCHEMA, load } from 'js-yaml';
 import { isPlainObject, omit } from 'lodash-es';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import ts from 'typescript';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import type { ZodType } from 'zod';
+import { globalDeclarationFiles, ROOT } from '../tooling/workspaces.helper';
 
 // CLAUDE.md says that the YAML examples of the guides validate against the schemas and that their TypeScript examples type-check, and
 // nothing read them: a schema or a type that changed left them stale until someone checked them by hand. These tests read every fenced
-// block of documentation/*.md and README.md, and every configuration of config/, and hold them to the code. A block that shows part of
-// something only (a key of a section, a line of a file) carries `fragment` after its language, as in ```yaml fragment, and is left out.
+// block of documentation/*.md and README.md, every configuration of config/ and every template of Fox (apps/fox/templates), and hold
+// them to the code. A block that shows part of something only (a key of a section, a line of a file) carries `fragment` after its
+// language, as in ```yaml fragment, and is left out.
 
-const ROOT = fileURLToPath(new URL('../../', import.meta.url));
 const read = (file: string) => readFileSync(path.join(ROOT, file), 'utf8');
 
 const GUIDES = [
@@ -84,9 +84,9 @@ const fenced = (info: string, ...lines: string[]) => ['```' + info, ...lines, '`
 /* -------------------------------------------------------------------------- */
 
 /**
- * The options of each plugin, by the name a configuration gives it. From the schema files: a plugin's own module loads the
- * configuration singleton, which throws without GEKKO_CONFIG_FILE_PATH. The type holds the map to the registry, so that a plugin added
- * there, or given another schema, fails the type check here.
+ * The options of each plugin, by the name a configuration gives it. From the schema files (@gekko/schemas): a plugin's own module loads
+ * the core, down to its SQLite storage on bun:sqlite, which Node, under which vitest runs, cannot load. The type holds the map to the
+ * registry, so that a plugin added there, or given another schema, fails the type check here.
  */
 const PLUGIN_SCHEMAS: { [Name in keyof typeof plugins]: ReturnType<(typeof plugins)[Name]['getStaticConfiguration']>['schema'] } = {
   CandleWriter: candleWriterSchema,
@@ -118,7 +118,7 @@ const CREDENTIAL_STAND_INS: Record<string, string> = {
 };
 const DISCLAIMER = 'I understand that Gekko only automates MY OWN trading strategies';
 
-/** A yaml block, or a file of config/, which is a whole configuration whatever it holds */
+/** A yaml block, or a file of config/ or of Fox's templates, which is a whole configuration whatever it holds */
 type Document = { where: string; source: string; content: unknown; isFile?: boolean };
 type Check = { where: string; what: string; issues: () => string[] };
 type YamlChecks = { configurations: Check[]; entries: Check[]; strategyBlocks: Check[]; sections: Check[]; unchecked: string[] };
@@ -258,12 +258,21 @@ const copiesToName = (files: Document[]) =>
     .filter(({ where, source }) => where.includes('credentials filled in') && !isLocalCopy(source))
     .map(({ source }) => [source, source.replace(/\.ya?ml$/, '.local.yml')] as const);
 
+/**
+ * The directories whose YAML files are whole configurations, each read as Gekko reads the file it is given: the examples of config/, and
+ * the templates of apps/fox, from which Fox writes the configuration of each of its backtests. A directory that does not exist holds
+ * none.
+ */
+const CONFIGURATION_DIRECTORIES = ['config', 'apps/fox/templates'];
+
 const guideDocuments = documentsOf(guideBlocks);
 const configurationFiles = configurationFilesOf(
-  readdirSync(path.join(ROOT, 'config'))
-    .filter(file => /\.ya?ml$/.test(file))
-    .sort()
-    .map(file => ({ source: `config/${file}`, text: read(`config/${file}`) })),
+  CONFIGURATION_DIRECTORIES.filter(directory => existsSync(path.join(ROOT, directory))).flatMap(directory =>
+    readdirSync(path.join(ROOT, directory))
+      .filter(file => /\.ya?ml$/.test(file))
+      .sort()
+      .map(file => ({ source: `${directory}/${file}`, text: read(`${directory}/${file}`) })),
+  ),
 );
 const yamlDocuments = [...guideDocuments.documents, ...configurationFiles.documents];
 const externalStrategies = new Set(
@@ -283,7 +292,7 @@ const issuesOfSample = (markdown: string) => {
 // Rows of [where, what, check]: vitest prints a %s whole, where it quotes a $value and cuts it at 40 characters
 const rowsOf = (checks: Check[]) => checks.map(check => [check.where, check.what, check] as const);
 
-describe('yaml blocks of the guides and configurations of config/', () => {
+describe('yaml blocks of the guides, configurations of config/ and templates of Fox', () => {
   it.each(rowsOf(yaml.configurations))('%s is a valid %s', (_where, _what, { issues }) => {
     expect(issues()).toEqual([]);
   });
@@ -304,7 +313,7 @@ describe('yaml blocks of the guides and configurations of config/', () => {
     expect([...guideDocuments.unreadable, ...yaml.unchecked]).toEqual([]);
   });
 
-  it('should read every file of config/ as the loader reads it', () => {
+  it('should read every file of config/ and every template of Fox as the loader reads it', () => {
     expect(configurationFiles.unreadable).toEqual([]);
   });
 
@@ -539,11 +548,11 @@ const TYPESCRIPT_SAMPLES = [
     source: 'module.sample.md',
     markdown: fenced(
       'typescript',
-      'import { Strategy } from "@strategies/strategy";',
+      'import { Strategy } from "@gekko/strategies/strategy";',
       '',
       'export class Empty implements Strategy<object> {}',
     ),
-    error: /^module\.sample\.md:2: TS2307 Cannot find module '@strategies\/strategy' or its corresponding type declarations\.$/,
+    error: /^module\.sample\.md:2: TS2307 Cannot find module '@gekko\/strategies\/strategy' or its corresponding type declarations\.$/,
   },
 ].map(sample => ({ ...sample, written: snippetsOf(blocksOf(sample.source, sample.markdown)) }));
 
@@ -578,15 +587,12 @@ describe('typescript blocks of the guides', () => {
       writeFileSync(path.join(directory, file), content ?? '');
     }
     writeFileSync(path.join(directory, 'context.ts'), CONTEXT);
-    // The program sees the global declarations of src, as the type check of the codebase does (IndicatorRegistry, EpochTimeStamp): a
-    // module only imported by the snippets would leave out the declaration files and the indicators' registry entries
-    const isGlobal = (file: string) =>
-      file.endsWith('.d.ts') || (!/\.(test|bench)\.ts$/.test(file) && read(`src/${file}`).includes('declare global'));
-    const globals = readdirSync(path.join(ROOT, 'src'), { recursive: true, encoding: 'utf8' })
-      .filter(file => file.endsWith('.ts') && isGlobal(file))
-      .map(file => path.join(ROOT, 'src', file));
+    // The program sees the global declarations of the workspaces' sources, as the type check of the checkout does (IndicatorRegistry,
+    // EpochTimeStamp): a module only imported by the snippets would leave out the declaration files and the indicators' registry entries
+    const globals = globalDeclarationFiles();
+    // tsconfig.base.json's compiler options and paths, which resolve `@gekko/<package>/<path>` to the sources of the package
     const tsconfig = {
-      extends: path.join(ROOT, 'tsconfig.json'),
+      extends: path.join(ROOT, 'tsconfig.base.json'),
       compilerOptions: { noEmit: true, incremental: false },
       include: ['**/*.ts', ...globals],
     };

@@ -1,7 +1,11 @@
 node_modules
 dist
-# The html or lcov report of a coverage run (test:coverage prints its table)
-/coverage
+# Turborepo's cache and the log of each task it runs, at the root and in every workspace. turbo hashes the files git does not ignore:
+# a task's log, written as it ran, changed the hash of its next run, which never replayed from the cache
+.turbo
+# The html or lcov report of a coverage run, which each workspace writes in a coverage directory of its own (test:coverage prints its
+# table)
+coverage
 .env.local
 # SQLite: the db folder (or a link to one) the example configurations write to, and a database elsewhere with its -shm and -wal
 /db

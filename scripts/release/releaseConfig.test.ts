@@ -1,18 +1,28 @@
 import { createRequire } from 'node:module';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import packageJson from '../../package.json';
+import { readPackageJson, workspaceDirectories } from '../tooling/workspaces.helper';
 
 // The release attached an executable the build no longer wrote, which @semantic-release/github only logs, and committed no
-// package.json. These tests read release.config.cjs as semantic-release does and hold it to the build:exec script.
+// package.json. These tests read release.config.cjs as semantic-release does and hold it to the build:exec scripts.
 type ConfiguredPlugin = [string, Record<string, unknown>];
-type Asset = string | { path: string };
+type Asset = string | { path: string; label?: string };
 const require = createRequire(import.meta.url);
 const { plugins }: { plugins: (string | ConfiguredPlugin)[] } = require('../../release.config.cjs');
 
 const names = plugins.map(plugin => (Array.isArray(plugin) ? plugin[0] : plugin));
 const isConfigured = (plugin: string | ConfiguredPlugin): plugin is ConfiguredPlugin => Array.isArray(plugin);
 const optionsOf = (name: string) => plugins.filter(isConfigured).find(([pluginName]) => pluginName === name)?.[1];
-const buildOutfile = /--outfile[= ](\S+)/.exec(packageJson.scripts['build:exec'])?.[1];
+const assets = (optionsOf('@semantic-release/github')?.assets ?? []) as Asset[];
+const attached = assets.map(asset => (typeof asset === 'string' ? asset : asset.path));
+
+// The workspaces whose build:exec script `turbo run build:exec` runs, each with the file it writes, relative to the root
+const builds = workspaceDirectories().flatMap(workspace => {
+  const script = readPackageJson(workspace).scripts?.['build:exec'];
+  const outfile = script === undefined ? undefined : /--outfile[= ](\S+)/.exec(script)?.[1];
+  return script === undefined ? [] : [[workspace, outfile && path.posix.join(workspace, outfile)] as const];
+});
 
 // The parser the commit-msg hook validates a message with: commitlint.config.cjs's own preset, else that of the configuration it
 // extends. The release read the commits with the default Angular preset instead, which takes neither `feat!:` nor a
@@ -26,13 +36,28 @@ const semanticReleaseDependencies: Record<string, string> = require('semantic-re
 const majorOf = (range: string | undefined) => /^\^(\d+)\./.exec(range ?? '')?.[1];
 
 describe('release.config.cjs', () => {
-  it('should attach to the GitHub release the file build:exec writes', () => {
-    const assets = optionsOf('@semantic-release/github')?.assets as Asset[];
-    expect(assets.map(asset => (typeof asset === 'string' ? asset : asset.path))).toEqual([buildOutfile]);
+  it('should attach to the GitHub release dist/gekko and dist/fox, the executables of the two apps', () => {
+    expect(attached).toEqual(['dist/gekko', 'dist/fox']);
   });
 
-  it('should have the version plugin check the file build:exec writes', () => {
-    expect(optionsOf('./scripts/release/version.cjs')?.executable).toBe(buildOutfile);
+  it('should label each executable with its name and the platform that built it', () => {
+    expect(assets.map(asset => (typeof asset === 'string' ? undefined : asset.label))).toEqual([
+      `gekko executable (${process.platform}-${process.arch})`,
+      `fox executable (${process.platform}-${process.arch})`,
+    ]);
+  });
+
+  it('should have the version plugin check the files it attaches', () => {
+    expect(optionsOf('./scripts/release/version.cjs')?.executables).toEqual(attached);
+  });
+
+  // The version plugin runs the root's build:exec once: through turbo, it builds every app
+  it('should build with turbo, which runs the build:exec script of every workspace that has one', () => {
+    expect(packageJson.scripts['build:exec']).toBe('turbo run build:exec');
+  });
+
+  it.each(builds)('should attach the file the build:exec script of %s writes, %s', (_workspace, outfile) => {
+    expect(attached).toContain(outfile);
   });
 
   it('should write the version after the changelog and before the release commit', () => {

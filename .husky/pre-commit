@@ -2,8 +2,10 @@
 # Type-checks what is committed, the index, rather than the working tree: an untracked file that did not compile refused a correct
 # commit, and a staged file that did not compile passed once its working copy was fixed. git keeps a copy of the tree being
 # committed in node_modules/.cache/index-check, with an index of its own, and updates it in place: a file deleted from the index
-# leaves the copy too, and the copy keeps its place, so that tsc's incremental build info saves most of the work.
-# The private strategies of src/strategies/custom are untracked: `bun run type:check` checks them, this hook does not.
+# leaves the copy too, and the copy keeps its place, so that tsc's incremental build info saves most of the work. The copy's root
+# tsconfig.json reads every workspace in one program, resolving @gekko/<package>/<path> to the copy's own sources through the paths of
+# its tsconfig.base.json. The private strategies of packages/strategies/src/custom are untracked: `bun run type:check` checks them,
+# this hook does not.
 index_copy=node_modules/.cache/index-check
 mkdir -p "$index_copy"
 tree=$(git write-tree)

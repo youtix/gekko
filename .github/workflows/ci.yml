@@ -6,6 +6,10 @@ on:
   pull_request:
     branches: [main, development]
 
+# turbo runs the tasks of each workspace (type:check, test:coverage, test:e2e, build:exec): no usage report sent from the runners
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -74,20 +78,23 @@ jobs:
       - name: Lint
         run: bun run lint:check
 
+      # Each workspace's tsc after those of the workspaces it imports, and the root's over scripts/
       - name: Type check
         run: bun run type:check
 
+      # Each workspace's vitest suite, one after the other, at 95 % on the four metrics, and the root's over scripts/
       - name: Test with coverage
         run: bun run test:coverage
 
-      # The whole pipeline of each mode on Bun's test runner, the realtime flows playing real minutes under fake timers (about 15 s).
-      # No git hook runs it. A step of this job rather than a job of its own: the release needs this job, so a failure holds it back.
-      # Under fake timers Bun checks a test's timeout only while the clock advances: a flow that awaits a promise that never settles
-      # hangs past every timeout of its own, and fails here after ten minutes rather than at the job's bound
+      # The whole pipeline of each mode on Bun's test runner (apps/gekko/test/e2e), the realtime flows playing real minutes under fake
+      # timers (about 15 s). No git hook runs it. A step of this job rather than a job of its own: the release needs this job, so a
+      # failure holds it back. Under fake timers Bun checks a test's timeout only while the clock advances: a flow that awaits a promise
+      # that never settles hangs past every timeout of its own, and fails here after ten minutes rather than at the job's bound
       - name: Test end to end
         timeout-minutes: 10
         run: bun run test:e2e
 
+      # Both executables, dist/gekko and dist/fox, which the release builds again with the version it releases
       - name: Build
         run: bun run build:exec
 
@@ -134,7 +141,8 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
-      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko with the version it releases
+      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko and dist/fox with the version it
+      # releases
       - name: Release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
