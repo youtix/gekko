@@ -6,9 +6,6 @@ import type { gridBotStrategySchema } from '@gekko/schemas/strategies/gridBot.sc
 /** Strategy configuration parameters: the output of GridBot.schema, retryOnError defaulted */
 export type GridBotStrategyParams = z.infer<typeof gridBotStrategySchema>;
 
-/** The spacing types the configuration offers, atr included (see gridBotStrategySchema) */
-export type GridSpacingOption = GridBotStrategyParams['spacingType'];
-
 /**
  * The spacing a grid is built with: the configured one as it is, or the fixed step an atr spacing resolves to around the center price
  * (see resolveSpacing), which the helpers compute the prices of the grid from. None of them ever sees 'atr'.

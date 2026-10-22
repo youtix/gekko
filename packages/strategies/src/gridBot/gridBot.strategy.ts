@@ -179,7 +179,6 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const [base, quote] = this.pair.split('/');
     this.base = base;
     this.quote = quote;
-    this.reset();
     this.retryLimit = tools.strategyParams.retryOnError;
     // The step of an atr grid is resolved from the ATR of the pair when the grid is built, and again at each reset
     if (tools.strategyParams.spacingType === 'atr') addIndicator('ATR', this.pair, { period: tools.strategyParams.atrPeriod });
@@ -362,31 +361,6 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.placeAgain(levelIndex, level.amount, order.reason, tools);
   }
 
-  /** Reset all internal state */
-  private reset(): void {
-    this.isGridStarted = false;
-    this.outOfRangeSide = null;
-    this.isOneSided = false;
-    this.levels = [];
-    this.gridBounds = undefined;
-    this.reentryPrices = undefined;
-    this.quantity = 0;
-    this.spacing = undefined;
-    this.atr = null;
-    this.retryCount.clear();
-    this.untrackedOrders = [];
-    this.orderToLevel.clear();
-    this.awaitingRebalance = false;
-    this.pendingRebalance = undefined;
-    this.rebalanceOrderId = undefined;
-    this.rebalanceRetryCount = 0;
-    this.awaitingReset = false;
-    this.outOfRange = null;
-    this.cooldownLeft = 0;
-    this.resetCount = 0;
-    this.resetStartedAt = 0;
-  }
-
   /** The levels and the spacing the grid is built with (see GridLayout): the parameters, their spacing resolved (see resolveSpacing) */
   private getLayout({ strategyParams }: Tools<GridBotStrategyParams>): GridLayout {
     const { buyLevels, sellLevels } = strategyParams;
@@ -519,18 +493,12 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       this.stopRun(`${untracked}: the grid of reset ${this.resetCount} is not built over ${them}. Check ${them} on the exchange`, tools);
     }
 
-    // Every level of the new grid is built from nothing, as at the start, the rebalance state being idle already
+    // No grid is in place until the new one is built (see buildGrid), which sets its levels, bounds, quantity and their state from
+    // nothing, as at the start, the rebalance state being idle already. Nothing reads the old grid's meanwhile: none of its orders is
+    // open, and a candle reads nothing while a rebalance is pending.
     this.awaitingReset = false;
-    this.cooldownLeft = tools.strategyParams.resetCooldownCandles;
-    this.levels = [];
     this.gridBounds = undefined;
-    this.reentryPrices = undefined;
-    this.quantity = 0;
-    this.retryCount.clear();
-    this.orderToLevel.clear();
-    this.outOfRangeSide = null;
-    this.isOneSided = false;
-    this.outOfRange = null;
+    this.cooldownLeft = tools.strategyParams.resetCooldownCandles;
 
     const centerPrice = roundPrice(price, this.priceDecimals, this.priceStep, this.priceSignificantDigits);
     this.placeGridAround(centerPrice, portfolio, tools);
