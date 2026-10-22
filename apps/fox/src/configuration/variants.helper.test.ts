@@ -3,6 +3,7 @@ import { warning } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { cloneDeep, get, range } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { parseOverrides } from '../cli/cli.helper';
 import type { Overrides, Template, Variant } from '../fox.types';
 import { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } from './variants.helper';
 
@@ -167,6 +168,28 @@ describe('generateVariants', () => {
       '2: --strategy.period 10 --strategy.thresholds.up 100',
       '3: --strategy.period 15 --strategy.thresholds.up 50',
       '4: --strategy.period 15 --strategy.thresholds.up 100',
+    ]);
+  });
+
+  // As the command line writes them: String wrote a number below 1e-6 or from 1e21 in exponent form (1e-7), which reads back as a text
+  it.each`
+    description                   | values                    | labels
+    ${'numbers below 1e-6'}       | ${[0.0000001, 0.0000002]} | ${['--strategy.thresholds.up 0.0000001', '--strategy.thresholds.up 0.0000002']}
+    ${'numbers from 1e21'}        | ${[1e21, 2]}              | ${['--strategy.thresholds.up 1000000000000000000000', '--strategy.thresholds.up 2']}
+    ${'negative decimal numbers'} | ${[-0.5, -150]}           | ${['--strategy.thresholds.up -0.5', '--strategy.thresholds.up -150']}
+    ${'booleans'}                 | ${[true, false]}          | ${['--strategy.thresholds.up true', '--strategy.thresholds.up false']}
+    ${'texts'}                    | ${['close', 'ohlc4']}     | ${['--strategy.thresholds.up close', '--strategy.thresholds.up ohlc4']}
+  `('should label the variants of $description as the command line writes them', ({ values, labels }) => {
+    expect(generateVariants(template, { strategy: { thresholds: { up: values } } }).map(({ label }) => label)).toStrictEqual(labels);
+  });
+
+  // fox.md's re-run of a variant: each of its keys given the value of its label
+  it('should write labels that the command line reads back as the values of the variants', () => {
+    const variants = generateVariants(template, { strategy: { thresholds: { up: [0.0000001, 1e21] } } });
+
+    expect(variants.map(({ label }) => parseOverrides(label.split(' ')))).toStrictEqual([
+      { strategy: { thresholds: { up: 0.0000001 } } },
+      { strategy: { thresholds: { up: 1e21 } } },
     ]);
   });
 

@@ -109,6 +109,12 @@ const checkVariantCount = (choices: readonly Choice[]) => {
 };
 
 /**
+ * A value as the command line writes it, which parseOverrides reads back as that value: a number with every decimal (`0.0000001`,
+ * `1000000000000000000000`), not in the exponent form String gives it below 1e-6 and from 1e21 (`1e-7`), which reads back as a text
+ */
+const writeValue = (value: OverrideValue) => (typeof value === 'number' ? formatEveryDecimal(value) : String(value));
+
+/**
  * Gives a PerformanceReporter entry of a labelled variant the variant's label, after the entry's own when it has one:
  * `baseline --strategy.period 14`. Kept alone, the entry's label named every row of a sweep alike, a sweep of a fee writing rows that
  * nothing told apart. A label that is not a text, or an empty one, is left as it is, for the reporter's schema to refuse as Gekko would.
@@ -140,7 +146,7 @@ export const generateVariants = (template: Template, overrides: Overrides): Vari
   );
   return combinations.map((values, index) => {
     const label = choices
-      .flatMap(({ path, values: tried }, position) => (tried.length > 1 ? [`--${path.join('.')} ${values[position]}`] : []))
+      .flatMap(({ path, values: tried }, position) => (tried.length > 1 ? [`--${path.join('.')} ${writeValue(values[position])}`] : []))
       .join(' ');
     // setWith with Object builds plain objects for the keys of the path, numbers included: merged into an array of the template (a
     // plugin, `plugins.3.fileName`), an object of index keys sets that item and keeps the others (checkListKeys refused any other key)
