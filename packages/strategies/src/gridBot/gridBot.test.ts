@@ -2672,6 +2672,32 @@ describe('GridBot', () => {
       expect(log).not.toHaveBeenCalledWith('warn', expect.stringContaining('states no price tick'));
     });
 
+    // Every figure of GridBot's lines is written with every decimal (see formatEveryDecimal): String wrote these prices 8.7e-7, 9.5e-7,
+    // 8e-7 and 9.4e-7
+    describe('on a pair priced under a millionth, on a tick of 0.00000001', () => {
+      // A 1/1 grid spaced by 0.00000007 around 0.00000087, its split: 1000000 for its SELL at 0.00000094, and 0.8 USDT for its BUY at
+      // 0.0000008
+      const underAMillionth = { buyLevels: 1, sellLevels: 1, spacingType: 'fixed', spacingValue: 7e-8 } as const;
+      const millionUnits: Portfolio = new Map<string, BalanceDetail>([
+        ['BTC', { free: 1_000_000, used: 0, total: 1_000_000 }],
+        ['USDT', { free: 0.8, used: 0, total: 0.8 }],
+      ]);
+
+      beforeEach(() => {
+        tools.marketData = new Map([['BTC/USDT', { amount: { min: 1 }, precision: { price: 1e-8, amount: 1 } }]]);
+      });
+
+      it('writes every decimal of the prices its lines name', () => {
+        startStrategy(8.7e-7, underAMillionth, millionUnits);
+        strategy.onEachTimeframeCandle({ candle: makeCandle(9.5e-7), portfolio: millionUnits, tools });
+
+        expect(log.mock.calls.map(([level, message]) => `${level} ${message}`)).toEqual([
+          'info GridBot: Grid built around 0.00000087 with 1 buy / 1 sell levels, qty=1000000',
+          'warn GridBot: Price 0.00000095 is out of grid range [0.0000008, 0.00000094]: the grid stays in place, its orders waiting for the price to come back to 0.00000087',
+        ]);
+      });
+    });
+
     // The decimals were read from the close then: a close of 100 rounded the prices of a grid spaced by 0.5 % to whole units, 99, 99,
     // 100, 100, 101 and 101, which the start refused, two levels buying and selling at one price
     describe('on a market that states none', () => {

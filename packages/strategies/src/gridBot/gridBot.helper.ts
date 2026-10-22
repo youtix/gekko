@@ -12,7 +12,7 @@ import {
   toSignificantDigits,
 } from '@gekko/shared/utils/math/math.utils';
 import { countDecimals, round } from '@gekko/shared/utils/math/round.utils';
-import { pluralize } from '@gekko/shared/utils/string/string.utils';
+import { formatEveryDecimal, pluralize } from '@gekko/shared/utils/string/string.utils';
 import { getAssetBalance } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { minBy } from 'lodash-es';
 import { DEFAULT_AMOUNT_PRECISION, DEFAULT_PRICE_PRECISION } from './gridBot.const';
@@ -296,7 +296,7 @@ export const isResetSide = (resetMode: GridResetMode, side: OutOfRangeSide): boo
  * spacing carries, an atr step naming the step and what it was resolved from (see resolveSpacing)
  */
 export const describeSpacing = ({ spacingType, spacingValue, description }: GridSpacing): string =>
-  description ?? `spacingValue ${spacingValue} (${spacingType})`;
+  description ?? `spacingValue ${formatEveryDecimal(spacingValue)} (${spacingType})`;
 
 /**
  * Validate grid configuration against the center price, its lowest BUY included (see checkLowestBuyPrice), the exchange limits and
@@ -304,7 +304,8 @@ export const describeSpacing = ({ spacingType, spacingValue, description }: Grid
  * Returns an error message if invalid, null if valid.
  */
 export const validateConfig = (params: GridLayout, centerPrice: number, marketData: MarketData): string | null => {
-  if (centerPrice <= 0) return 'Center price must be positive';
+  // Nor one that is not a finite number, which the strategy never passes, its center price rounded to the tick (0 for one not finite)
+  if (!isFinitePositive(centerPrice)) return 'Center price must be positive';
 
   const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
 
@@ -315,8 +316,10 @@ export const validateConfig = (params: GridLayout, centerPrice: number, marketDa
   const priceLimits = checkOrderPrice(centerPrice, marketData);
   if (!priceLimits.isValid) {
     const { min, max } = priceLimits;
-    if (min !== undefined && centerPrice < min) return `Center price ${centerPrice} is below exchange minimum ${min}`;
-    return `Center price ${centerPrice} is above exchange maximum ${max}`;
+    const center = `Center price ${formatEveryDecimal(centerPrice)}`;
+    if (min !== undefined && centerPrice < min) return `${center} is below exchange minimum ${formatEveryDecimal(min)}`;
+    // A finite center price above 0 that is not under the minimum is refused for being above the maximum, which is then set
+    return `${center} is above exchange maximum ${formatEveryDecimal(max!)}`;
   }
 
   // Last, so that a configuration refused before keeps its message
@@ -351,7 +354,9 @@ export const checkLowestBuyPrice = (
     priceSignificantDigits,
   );
   if (lowestBuyPrice > 0) return null;
-  return `Grid configuration would result in non-positive buy prices: the lowest of buyLevels ${buyLevels}, spaced by ${describeSpacing(params)} below the center price ${centerPrice}, would be at ${lowestBuyPrice}`;
+  const lowest = `the lowest of buyLevels ${buyLevels}, spaced by ${describeSpacing(params)}`;
+  const center = `below the center price ${formatEveryDecimal(centerPrice)}`;
+  return `Grid configuration would result in non-positive buy prices: ${lowest} ${center}, would be at ${formatEveryDecimal(lowestBuyPrice)}`;
 };
 
 /**
@@ -373,13 +378,14 @@ export const checkPriceTick = (
   const collision = prices.findIndex((price, i) => i > 0 && price <= prices[i - 1]);
   if (collision <= 0) return null;
 
-  const spaced = `spaced by ${describeSpacing(params)} around the center price ${centerPrice}`;
+  const spaced = `spaced by ${describeSpacing(params)} around the center price ${formatEveryDecimal(centerPrice)}`;
   const precision = { priceDecimals, priceStep, priceSignificantDigits };
   const step = getPriceStep(precision);
   const tick = getTickAt(prices[collision], precision);
   const rule = `the market taking ${priceSignificantDigits} significant digits in a price (precision.priceSignificantDigits)`;
-  const tickNamed = tick > step ? `${tick}, ${rule}` : step;
-  return `Grid configuration would result in a level buying and selling at the same price: ${spaced}, two adjacent prices of the grid would both round to ${prices[collision]} at the price tick ${tickNamed}`;
+  const tickNamed = tick > step ? `${formatEveryDecimal(tick)}, ${rule}` : formatEveryDecimal(step);
+  const merged = `two adjacent prices of the grid would both round to ${formatEveryDecimal(prices[collision])} at the price tick ${tickNamed}`;
+  return `Grid configuration would result in a level buying and selling at the same price: ${spaced}, ${merged}`;
 };
 
 /**
@@ -399,9 +405,11 @@ const isLosingLevel = (buyPrice: number, sellPrice: number, fee: number): boolea
 
 /**
  * A ratio as a percentage of four significant digits, for a message: 0.00016655 as 0.01666 %. With three, the round trip of a maker fee
- * of 0.04 %, 0.08003 %, read 0.08 %, and a warning of percent spacing 0.08 read as if 0.08 were under 0.08.
+ * of 0.04 %, 0.08003 %, read 0.08 %, and a warning of percent spacing 0.08 read as if 0.08 were under 0.08. Written with every decimal
+ * (see formatEveryDecimal), as every figure of GridBot's messages: 0.0000001667 % for a level one tick of 1e-8 wide at 6, which String
+ * writes 1.667e-7.
  */
-const toPercent = (ratio: number): string => `${Number((ratio * 100).toPrecision(4))} %`;
+const toPercent = (ratio: number): string => `${formatEveryDecimal(Number((ratio * 100).toPrecision(4)))} %`;
 
 /**
  * Checks the spacing against the round-trip fee. The round trip of a level, a BUY at its lower price then a SELL at its upper one,
@@ -423,9 +431,10 @@ export const checkRoundTripFee = (params: GridLayout, centerPrice: number, marke
 
   const { buyPrice, sellPrice } = narrowest;
   const levelsUnder = `a level that sells less than ${toPercent((2 * fee) / (1 - fee))} above its buy`;
-  const paying = `paying the maker fee of ${fee} (fee.maker) on its BUY and on its SELL`;
+  const paying = `paying the maker fee of ${formatEveryDecimal(fee)} (fee.maker) on its BUY and on its SELL`;
   const count = `${losing.length} out of ${levels.length} here`;
-  const example = `the narrowest selling at ${sellPrice}, ${toPercent(sellPrice / buyPrice - 1)} above its buy at ${buyPrice}`;
+  const above = `${toPercent(sellPrice / buyPrice - 1)} above its buy at ${formatEveryDecimal(buyPrice)}`;
+  const example = `the narrowest selling at ${formatEveryDecimal(sellPrice)}, ${above}`;
   return `${describeSpacing(params)} is under the round-trip fee: ${levelsUnder}, ${paying}, loses money at each round trip, ${count}, ${example}`;
 };
 
@@ -562,7 +571,12 @@ export const resolveSpacing = (
   const { fee, tick } = context;
   const atrValue = isFiniteNumber(atr) ? atr : 0;
   const atrStep = roundToStep(toSignificantDigits(spacingValue * atrValue), tick, 'up');
-  const origin = `spacingValue ${spacingValue} × ATR ${Number(atrValue.toPrecision(6))}`;
+  // Every figure with every decimal, as every check writes it (see describeSpacing): String wrote the ATR of a pair priced under a cent
+  // with an exponent, 3e-9, and its tick, 1e-8
+  const write = formatEveryDecimal;
+  const origin = `spacingValue ${write(spacingValue)} × ATR ${write(Number(atrValue.toPrecision(6)))}`;
+  const resolved = `${origin} is a step of ${write(atrStep)} on the price tick ${write(tick)}`;
+  const makerFee = `the maker fee of ${write(fee)} (fee.maker)`;
   const minimumStep = getMinimumStepIn(centerPrice, sellLevels, context);
   if (atrStep >= minimumStep) {
     // Kept as it was, a step at or above the minimum was only compared with it, never checked on its own prices: 8.3 for 8 sell levels
@@ -571,16 +585,16 @@ export const resolveSpacing = (
     // as the minimum is
     const { step, tick: topTick } = raiseToBreakEven(centerPrice, sellLevels, atrStep, context);
     if (topTick === undefined) {
-      return { spacing: { spacingType: 'fixed', spacingValue: atrStep, description: `a step of ${atrStep} (${origin}, atr)` } };
+      return { spacing: { spacingType: 'fixed', spacingValue: atrStep, description: `a step of ${write(atrStep)} (${origin}, atr)` } };
     }
-    const losing = `at which a level of the grid loses money on the maker fee of ${fee} (fee.maker) on the price tick ${topTick} at the top of the grid`;
+    const losing = `at which a level of the grid loses money on ${makerFee} on the price tick ${write(topTick)} at the top of the grid`;
     return {
       spacing: {
         spacingType: 'fixed',
         spacingValue: step,
-        description: `a step of ${step} (${origin} giving ${atrStep}, raised on the price tick ${topTick}, atr)`,
+        description: `a step of ${write(step)} (${origin} giving ${write(atrStep)}, raised on the price tick ${write(topTick)}, atr)`,
       },
-      warning: `ATR spacing: ${origin} is a step of ${atrStep} on the price tick ${tick}, ${losing}: the grid is spaced by ${step} instead`,
+      warning: `ATR spacing: ${resolved}, ${losing}: the grid is spaced by ${write(step)} instead`,
     };
   }
 
@@ -588,21 +602,21 @@ export const resolveSpacing = (
   // none does, from 501 sell levels at 0.1 % or at a fee of 1 or more, the line says so. Chosen by the fee alone, it called that tick the
   // minimum step at which every level breaks even, right before checkRoundTripFee warned that every level loses money. A center price
   // that is not a number above 0 works out no step either, and makes no grid (see validateConfig).
-  const makerFee = `the maker fee of ${fee} (fee.maker)`;
-  const spacedByOneTick = `under the price tick: the grid is spaced by one tick, ${tick}, instead`;
+  const breakingEven = `the minimum step at which every level of the grid breaks even on ${makerFee}`;
+  const spacedByOneTick = `under the price tick: the grid is spaced by one tick, ${write(tick)}, instead`;
   const levels = `${sellLevels} sell ${pluralize('level', sellLevels)}`;
   const noneBreaksEven = fee > 0 && isFinitePositive(centerPrice) ? `; no step breaks even on ${makerFee} with ${levels}` : '';
   const under =
     context.breakEven !== null
-      ? `under ${minimumStep}, the minimum step at which every level of the grid breaks even on ${makerFee}: the grid is spaced by ${minimumStep} instead`
+      ? `under ${write(minimumStep)}, ${breakingEven}: the grid is spaced by ${write(minimumStep)} instead`
       : `${spacedByOneTick}${noneBreaksEven}`;
   return {
     spacing: {
       spacingType: 'fixed',
       spacingValue: minimumStep,
-      description: `a step of ${minimumStep} (the minimum step, ${origin} giving ${atrStep}, atr)`,
+      description: `a step of ${write(minimumStep)} (the minimum step, ${origin} giving ${write(atrStep)}, atr)`,
     },
-    warning: `ATR spacing: ${origin} is a step of ${atrStep} on the price tick ${tick}, ${under}`,
+    warning: `ATR spacing: ${resolved}, ${under}`,
   };
 };
 

@@ -17,7 +17,7 @@ import {
   Tools,
 } from '../strategy.types';
 import { addPrecise, isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
-import { pluralize } from '@gekko/shared/utils/string/string.utils';
+import { formatEveryDecimal, pluralize } from '@gekko/shared/utils/string/string.utils';
 import type { UUID } from 'node:crypto';
 import { DEFAULT_RETRY_LIMIT } from '@gekko/schemas/strategies/gridBot.const';
 import { gridBotStrategySchema } from '@gekko/schemas/strategies/gridBot.schema';
@@ -204,7 +204,9 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // No grid in place: not built yet, waiting for its rebalance, or for the orders a reset canceled to end
     if (!this.gridBounds || !this.reentryPrices || this.awaitingRebalance || this.awaitingReset) return;
     const close = candle.get(this.pair)!.close;
-    const range = `grid range [${this.gridBounds.min}, ${this.gridBounds.max}]`;
+    // Every figure of GridBot's lines is written with every decimal (see formatEveryDecimal): String wrote a price under 1e-6, a pair
+    // priced in BTC or a token of many units, with an exponent, 9.5e-7, and the amounts of an account of a few satoshis likewise
+    const range = `grid range [${formatEveryDecimal(this.gridBounds.min)}, ${formatEveryDecimal(this.gridBounds.max)}]`;
 
     // The reset says why in its own line, in place of the warning below
     if (this.countTowardsReset(close, range, tools)) return this.startReset(close, range, portfolio, tools);
@@ -218,9 +220,9 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
     if (side) {
       const outcome = this.describeOutOfRange(side, this.reentryPrices[side], tools);
-      tools.log('warn', `GridBot: Price ${close} is out of ${range}: ${outcome}`);
+      tools.log('warn', `GridBot: Price ${formatEveryDecimal(close)} is out of ${range}: ${outcome}`);
     } else {
-      tools.log('info', `GridBot: Price ${close} is back in ${range}`);
+      tools.log('info', `GridBot: Price ${formatEveryDecimal(close)} is back in ${range}`);
     }
   }
 
@@ -307,20 +309,21 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const minimumAmount = getMinimumAmount(price, tools.marketData.get(this.pair)!);
     if (left < minimumAmount) {
       if (left > 0) {
-        const under = `${left} left, under the market minimum of ${minimumAmount}`;
-        tools.log(
-          'info',
-          `GridBot: ${level.side} at ${price} was canceled with ${under}: its level turns to its other side, as after a fill`,
-        );
+        const under = `${formatEveryDecimal(left)} left, under the market minimum of ${formatEveryDecimal(minimumAmount)}`;
+        const canceled = `${level.side} at ${formatEveryDecimal(price)} was canceled with ${under}`;
+        tools.log('info', `GridBot: ${canceled}: its level turns to its other side, as after a fill`);
       }
       return this.turnLevel(levelIndex, tools);
     }
 
-    const fill = isFillReported ? `filled: ${filled}, remaining: ${remaining}` : 'no fill reported';
+    // The remaining amount comes with the fill (see OrderCanceledEvent): written as the event gives it should it be left out
+    const remainder = remaining === undefined ? remaining : formatEveryDecimal(remaining);
+    const fill = isFillReported ? `filled: ${formatEveryDecimal(filled)}, remaining: ${remainder}` : 'no fill reported';
     const isPlacedAgain = this.placeAgain(levelIndex, left, `Order was canceled (${fill})`, tools);
     if (isPlacedAgain && !isFillReported) {
-      const canceled = `${level.side} at ${price} was canceled with no fill reported`;
-      tools.log('warn', `GridBot: ${canceled}: it is placed again whole, ${left}, which trades again any part of it that had filled`);
+      const canceled = `${level.side} at ${formatEveryDecimal(price)} was canceled with no fill reported`;
+      const whole = `it is placed again whole, ${formatEveryDecimal(left)}, which trades again any part of it that had filled`;
+      tools.log('warn', `GridBot: ${canceled}: ${whole}`);
     }
   }
 
@@ -332,7 +335,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       // check that one order before starting again.
       if (order.mayBeLive) {
         const plan = this.pendingRebalance;
-        const rebalance = plan ? `The rebalance, a STICKY ${plan.side} of ${plan.amount},` : 'The rebalance';
+        const rebalance = plan ? `The rebalance, a STICKY ${plan.side} of ${formatEveryDecimal(plan.amount)},` : 'The rebalance';
         const untracked = `${rebalance} may be live on the exchange without GridBot tracking it: the grid is not built`;
         this.stopRun(`${untracked}. Check it on the exchange. Last error: ${order.reason}`, tools);
       }
@@ -423,7 +426,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.outOfRange = { side, count };
     if (count >= resetConfirmCandles) return true;
     const towards = `${count} of ${resetConfirmCandles} consecutive timeframe ${pluralize('candle', resetConfirmCandles)} towards a reset`;
-    tools.log('debug', `GridBot: Price ${close} closed ${side} ${range}: ${towards}`);
+    tools.log('debug', `GridBot: Price ${formatEveryDecimal(close)} closed ${side} ${range}: ${towards}`);
     return false;
   }
 
@@ -440,14 +443,14 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.outOfRange = null;
 
     const candles = `${count} consecutive timeframe ${pluralize('candle', count)}`;
-    const closed = `Price ${close} closed ${side} ${range} for ${candles} (resetConfirmCandles): reset ${this.resetCount}`;
+    const closed = `Price ${formatEveryDecimal(close)} closed ${side} ${range} for ${candles} (resetConfirmCandles): reset ${this.resetCount}`;
     const open = this.levels.filter(({ orderId }) => orderId);
     // Over an order that may be live untracked, the rebuild refuses the new grid (see rebuild): the line used to announce it all the
     // same, relayed to Telegram, and the run then stopped with every order of the grid canceled. It names the stop to come instead.
     const stop = this.untrackedOrders.length ? this.describeUntrackedStop() : undefined;
     // Kept for completeness: a grid whose levels all gave up on their orders, or left them untracked, stopped the run before
     if (!open.length) {
-      const next = stop ? `and ${stop}` : `a new grid is built around ${close}`;
+      const next = stop ? `and ${stop}` : `a new grid is built around ${formatEveryDecimal(close)}`;
       tools.log('info', `GridBot: ${closed}, no order is open, ${next}`);
       return this.rebuild(close, portfolio, tools);
     }
@@ -512,7 +515,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    */
   private describeOutOfRange(side: OutOfRangeSide, reentryPrice: number, tools: Tools<GridBotStrategyParams>): string {
     const { resetMode, resetConfirmCandles, resetCooldownCandles } = tools.strategyParams;
-    const waiting = `its orders waiting for the price to come back to ${reentryPrice}`;
+    const waiting = `its orders waiting for the price to come back to ${formatEveryDecimal(reentryPrice)}`;
     if (!isResetSide(resetMode, side)) return `the grid stays in place, ${waiting}`;
     if (this.cooldownLeft > 0) {
       const left = `${this.cooldownLeft} timeframe ${pluralize('candle', this.cooldownLeft)} left of its cooldown`;
@@ -531,9 +534,12 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    */
   private prepareGrid(centerPrice: number, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
     const { asset, currency } = getPortfolioContent(portfolio, this.base, this.quote);
-    const locked = [asset.used > 0 && `${asset.used} ${this.base}`, currency.used > 0 && `${currency.used} ${this.quote}`].filter(Boolean);
+    const locked = [
+      asset.used > 0 && `${formatEveryDecimal(asset.used)} ${this.base}`,
+      currency.used > 0 && `${formatEveryDecimal(currency.used)} ${this.quote}`,
+    ].filter(Boolean);
     if (locked.length) {
-      const free = `the free balances only, ${asset.free} ${this.base} and ${currency.free} ${this.quote}`;
+      const free = `the free balances only, ${formatEveryDecimal(asset.free)} ${this.base} and ${formatEveryDecimal(currency.free)} ${this.quote}`;
       tools.log('info', `GridBot: ${locked.join(' and ')} locked in other orders, left out: the rebalance and the grid use ${free}`);
     }
 
@@ -570,8 +576,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       checkLowestBuyPrice(layout, centerPrice, priceDecimals, priceStep, priceSignificantDigits) ??
       (isPlaced ? checkPriceTick(layout, centerPrice, priceDecimals, priceStep, priceSignificantDigits) : null);
     if (gridError) {
-      if (failure)
-        tools.log('warn', `GridBot: ${failure}. Not placed again: the grid is refused around ${centerPrice}, the price it ended at`);
+      const refused = `the grid is refused around ${formatEveryDecimal(centerPrice)}, the price it ended at`;
+      if (failure) tools.log('warn', `GridBot: ${failure}. Not placed again: ${refused}`);
       this.stopRun(gridError, tools);
     }
 
@@ -609,7 +615,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // refused, planned again identically at every attempt, until the run stopped, while the portfolio as it was funded a grid
     const minimumAmount = getMinimumAmount(getRebalanceOrderPrice(plan.side, plan.centerPrice, marketData), marketData);
     if (plan.amount < minimumAmount) {
-      const under = `its ${plan.side} of ${plan.amount} ${this.base} being under the market minimum of ${minimumAmount} ${this.base}`;
+      const minimum = `the market minimum of ${formatEveryDecimal(minimumAmount)} ${this.base}`;
+      const under = `its ${plan.side} of ${formatEveryDecimal(plan.amount)} ${this.base} being under ${minimum}`;
       return { level: 'info', message: `No rebalance, ${under}: the grid is built on the free balances as they are` };
     }
     if (plan.side === 'SELL' && plan.amount > asset.free)
@@ -627,7 +634,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
     const { side, amount } = this.pendingRebalance;
     this.rebalanceOrderId = tools.createOrder({ type: 'STICKY', side, amount, symbol: this.pair });
-    tools.log('info', `GridBot: Rebalancing - ${side} ${amount} (STICKY order)`);
+    tools.log('info', `GridBot: Rebalancing - ${side} ${formatEveryDecimal(amount)} (STICKY order)`);
   }
 
   /** Handle successful rebalance order completion */
@@ -709,7 +716,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       priceStep,
       priceSignificantDigits,
     );
-    const free = `${assetFree} ${this.base} and ${currencyFree} ${this.quote} free`;
+    const free = `${formatEveryDecimal(assetFree)} ${this.base} and ${formatEveryDecimal(currencyFree)} ${this.quote} free`;
     if (size.quantity <= 0) this.stopRun(`Insufficient portfolio for any grid levels: ${free} fund no order the market takes`, tools);
 
     // The start checked the prices of the grid around its own center price, but a grid rebalanced first is built around the price the
@@ -736,7 +743,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       size.sellLevels < sellLevels && `${sellLevels - size.sellLevels} of the ${sellLevels} sell levels`,
     ].filter(Boolean);
     if (leftOut.length) {
-      const minimum = `the market minimum, ${size.minimumAmount} ${this.base} at ${bounds.min}, the lowest price of the grid`;
+      const minimumAmount = `${formatEveryDecimal(size.minimumAmount)} ${this.base}`;
+      const minimum = `the market minimum, ${minimumAmount} at ${formatEveryDecimal(bounds.min)}, the lowest price of the grid`;
       tools.log(
         'warn',
         `GridBot: ${leftOut.join(' and ')} left out, the farthest from the center price: ${free} fund no more orders of ${minimum}`,
@@ -776,7 +784,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     }
 
     const levels = `${size.buyLevels} buy / ${size.sellLevels} sell levels`;
-    tools.log('info', `GridBot: Grid built around ${centerPrice} with ${levels}, qty=${this.quantity}`);
+    tools.log(
+      'info',
+      `GridBot: Grid built around ${formatEveryDecimal(centerPrice)} with ${levels}, qty=${formatEveryDecimal(this.quantity)}`,
+    );
   }
 
   /**
@@ -860,7 +871,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    * first one to give up stopped the bot, with a message naming an array index rather than the order.
    */
   private giveUpLevel(level: LevelState, attempts: number, reason: string, tools: Tools<GridBotStrategyParams>): void {
-    const failure = `${level.side} at ${this.priceOf(level)} failed after ${attempts} attempts (retryOnError: ${this.retryLimit})`;
+    const failed = `failed after ${attempts} attempts (retryOnError: ${this.retryLimit})`;
+    const failure = `${level.side} at ${formatEveryDecimal(this.priceOf(level))} ${failed}`;
     if (this.levels.every(({ orderId }) => !orderId))
       this.stopRun(`${failure}: no level of the grid holds an order any more. Last error: ${reason}`, tools);
     tools.log('warn', `GridBot: ${failure}: its level is left without an order, the rest of the grid trades on. Last error: ${reason}`);
@@ -872,7 +884,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    * orders than retryOnError ended so, many orders the bot may have lost track of, or once no level holds an order.
    */
   private leaveUntracked(level: LevelState, reason: string, tools: Tools<GridBotStrategyParams>): void {
-    const order = `${level.side} ${level.amount} at ${this.priceOf(level)}`;
+    const order = `${level.side} ${formatEveryDecimal(level.amount)} at ${formatEveryDecimal(this.priceOf(level))}`;
     this.untrackedOrders.push(order);
     const count = this.untrackedOrders.length;
     const { untracked, them } = this.describeUntracked();
@@ -907,7 +919,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    */
   private refuseOpenOrders(orders: OpenOrder[], tools: Tools<GridBotStrategyParams>): never {
     const count = orders.length === 1 ? '1 order is' : `${orders.length} orders are`;
-    const list = orders.map(({ id, side, type, price, remaining }) => `${type} ${side} ${remaining} at ${price ?? 'market'} (id ${id})`);
+    const list = orders.map(({ id, side, type, price, remaining }) => {
+      const at = isFiniteNumber(price) ? formatEveryDecimal(price) : 'market';
+      return `${type} ${side} ${formatEveryDecimal(remaining)} at ${at} (id ${id})`;
+    });
     const unfollowed = [
       'GridBot keeps its grid in memory and follows only the orders it places: an order placed before this run, by a previous run,',
       'by hand or by another bot, would trade beside the new grid without GridBot hearing of its fills.',

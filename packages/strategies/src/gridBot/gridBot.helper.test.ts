@@ -65,6 +65,8 @@ const aroundOneMarketData: MarketData = { precision: { price: 0.00001, priceSign
 // A tick of 0.01 at a maker fee of 0.04 %, on which a level spaced by 3.3 above 4123.35 breaks even exactly: its SELL at 4126.65 brings
 // in 4126.65 × 0.9996 = 4124.99934, what its BUY costs, 4123.35 × 1.0004, though 4124.999339999999 in binary
 const exactBreakEvenMarketData: MarketData = { precision: { price: 0.01 }, fee: { maker: 0.0004 } };
+// A token priced under a thousandth of a cent, such as PEPE/USDT: a tick of 1e-8, whole units, a maker fee of 0.1 %
+const pepeMarketData: MarketData = { precision: { price: 1e-8, amount: 1 }, fee: { maker: 0.001 } };
 
 describe('gridBot.helper', () => {
   describe('inferPricePrecision', () => {
@@ -460,8 +462,16 @@ describe('gridBot.helper', () => {
       expect(validateConfig(validParams, 100, {})).toBeNull();
     });
 
-    it('returns error for non-positive center price', () => {
-      expect(validateConfig(validParams, 0, {})).toBe('Center price must be positive');
+    // A center price that is not a finite number, which the strategy never passes, read the limits: NaN was refused for being above a
+    // maximum of undefined
+    it.each`
+      center
+      ${0}
+      ${-1}
+      ${NaN}
+      ${Infinity}
+    `('returns error for a center price of $center, not a finite number above 0', ({ center }) => {
+      expect(validateConfig({ ...validParams, buyLevels: 0 }, center, {})).toBe('Center price must be positive');
     });
 
     // On a tick of 1, where the lowest of a logarithmic grid, 100 / 1.1 ** 60, 0.328, rounds to 0
@@ -487,11 +497,12 @@ describe('gridBot.helper', () => {
       expect(validateConfig(halfPercent, 100, {})).toBeNull();
     });
 
+    // Every figure with every decimal (see formatEveryDecimal), where String wrote 1e-7 and 1e-8
     it('returns error naming the tick of 8 decimals for two adjacent prices rounded together on a market that states no tick', () => {
       const underTheDefaultTick = { ...validParams, buyLevels: 1, sellLevels: 1, spacingType: 'percent' as const, spacingValue: 1e-7 };
 
       expect(validateConfig(underTheDefaultTick, 1, {})).toBe(
-        'Grid configuration would result in a level buying and selling at the same price: spaced by spacingValue 1e-7 (percent) around the center price 1, two adjacent prices of the grid would both round to 1 at the price tick 1e-8',
+        'Grid configuration would result in a level buying and selling at the same price: spaced by spacingValue 0.0000001 (percent) around the center price 1, two adjacent prices of the grid would both round to 1 at the price tick 0.00000001',
       );
     });
 
@@ -535,6 +546,17 @@ describe('gridBot.helper', () => {
 
     it('returns error for price above exchange maximum', () => {
       expect(validateConfig(validParams, 1000, { price: { max: 500 } })).toBe('Center price 1000 is above exchange maximum 500');
+    });
+
+    // Every figure with every decimal (see formatEveryDecimal): String wrote a price under a millionth with an exponent, 5e-7
+    it.each`
+      center      | price                | description                     | expected
+      ${5e-7}     | ${{ min: 0.000001 }} | ${'below the exchange minimum'} | ${'Center price 0.0000005 is below exchange minimum 0.000001'}
+      ${0.000002} | ${{ max: 0.000001 }} | ${'above the exchange maximum'} | ${'Center price 0.000002 is above exchange maximum 0.000001'}
+    `('returns error writing every decimal of a center price $description, under a millionth', ({ center, price, expected }) => {
+      const tickApart: GridLayout = { buyLevels: 1, sellLevels: 1, spacingType: 'fixed', spacingValue: 1e-8 };
+
+      expect(validateConfig(tickApart, center, { price, precision: { price: 1e-8 } })).toBe(expected);
     });
 
     // Read as the order layer reads them for every order (checkOrderPrice): a limit that is not a finite number above 0 sets none. Read
@@ -597,6 +619,13 @@ describe('gridBot.helper', () => {
 
       expect(checkLowestBuyPrice(params, center, priceDecimals, priceStep)).toBe(
         `Grid configuration would result in non-positive buy prices: ${expected}`,
+      );
+    });
+
+    // Every figure with every decimal (see formatEveryDecimal), where String wrote 5e-7, 9e-7 and -1e-7
+    it('is the error writing every decimal of a grid priced under a millionth: fixed 0.0000005 around 0.0000009', () => {
+      expect(checkLowestBuyPrice({ buyLevels: 2, spacingType: 'fixed', spacingValue: 5e-7 }, 9e-7, 8, 1e-8)).toBe(
+        'Grid configuration would result in non-positive buy prices: the lowest of buyLevels 2, spaced by spacingValue 0.0000005 (fixed) below the center price 0.0000009, would be at -0.0000001',
       );
     });
 
@@ -732,6 +761,21 @@ describe('gridBot.helper', () => {
         expect(checkRoundTripFee(oneSellLevel, 4123.35, exactBreakEvenMarketData)).toBe(expected);
       },
     );
+
+    // Every figure with every decimal (see formatEveryDecimal): String wrote the step, 1e-8, and the percentage, 1.667e-7
+    it('warns writing every decimal of a spacing of one tick of 0.00000001 at 6, 0.0000001667 % a level', () => {
+      const oneTick: GridLayout = { ...fivePerSide, spacingType: 'fixed', spacingValue: 1e-8 };
+
+      expect(checkRoundTripFee(oneTick, 6, { precision: { price: 1e-8 }, fee: { maker: 0.001 } })).toBe(
+        underFee(
+          '0.00000001 (fixed)',
+          '0.2002 %',
+          0.001,
+          '10 out of 10',
+          'selling at 5.99999996, 0.0000001667 % above its buy at 5.99999995',
+        ),
+      );
+    });
 
     // No step breaks even on 501 sell levels at 0.1 %, 500 × 0.2002 % being over 1: an atr step is kept at one tick (see getMinimumStep),
     // and warned of here, the message naming the step and its ATR
@@ -911,6 +955,16 @@ describe('gridBot.helper', () => {
       ${0}     | ${5}       | ${tenthPercentFeeMarketData}                         | ${'a center price of 0, which makes no grid'} | ${underTheTick}
     `('raises a step rounded to 0 to one tick, saying why, for $description', ({ center, sellLevels, marketData, instead }) => {
       expect(resolveSpacing(atrSpacedBy(1.5, sellLevels), center, marketData, 0.002)).toStrictEqual(raised(0.002, 0, 0.01, instead));
+    });
+
+    // Every figure with every decimal (see formatEveryDecimal): on a token priced under a thousandth of a cent, String wrote its ATR, its
+    // tick and its steps with an exponent, 4.5e-8, 1e-8 and 5e-8
+    it.each`
+      atr       | description                                    | expected
+      ${4.5e-8} | ${'a step of 0.00000005, above the minimum'}   | ${{ spacing: { spacingType: 'fixed', spacingValue: 5e-8, description: 'a step of 0.00000005 (spacingValue 1 × ATR 0.000000045, atr)' } }}
+      ${3e-9}   | ${'a step rounded to 0, raised to 0.00000003'} | ${{ spacing: { spacingType: 'fixed', spacingValue: 3e-8, description: 'a step of 0.00000003 (the minimum step, spacingValue 1 × ATR 0.000000003 giving 0, atr)' }, warning: 'ATR spacing: spacingValue 1 × ATR 0.000000003 is a step of 0 on the price tick 0.00000001, under 0.00000003, the minimum step at which every level of the grid breaks even on the maker fee of 0.001 (fee.maker): the grid is spaced by 0.00000003 instead' }}
+    `('writes every decimal of $description around 0.00001234 on a tick of 0.00000001', ({ atr, expected }) => {
+      expect(resolveSpacing(atrSpacedBy(1), 0.00001234, pepeMarketData, atr)).toStrictEqual(expected);
     });
 
     // Its break-even exactly (see getMinimumStep): raised to 3.31, with a warning that named 3.31 the minimum step at which every level
