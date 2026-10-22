@@ -1,5 +1,5 @@
 import { defineConfig } from 'vitest/config';
-import { alias, cacheDirFor, COVERAGE_THRESHOLDS, DEPS_OPTIMIZER, MONOREPO_ROOT } from './vitest.shared';
+import { alias, cacheDirFor, COVERAGE_THRESHOLDS, depsOptimizerFor, MONOREPO_ROOT } from './vitest.shared';
 
 // The root's own suites: the tests of scripts/ (the release plugin, the documentation and the tooling checks). Each workspace has
 // a vitest.config.ts of its own, built by vitest.shared.ts, which turbo runs one by one (bun run test).
@@ -9,7 +9,7 @@ export default defineConfig({
     mockReset: true,
     restoreMocks: true,
     include: ['scripts/**/*.test.ts'],
-    deps: { optimizer: DEPS_OPTIMIZER },
+    deps: { optimizer: depsOptimizerFor(MONOREPO_ROOT) },
     coverage: {
       reporter: ['text'],
       // scripts/release holds the release's own semantic-release plugin

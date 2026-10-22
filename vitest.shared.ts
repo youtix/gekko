@@ -41,12 +41,27 @@ export const COVERAGE_EXCLUDE = ['src/**/*.{schema,mock,types,error,const}.ts', 
 // The suites cover over 98 % of each: at 80 %, a new module of a thousand untested lines passed
 export const COVERAGE_THRESHOLDS = { lines: 95, functions: 95, branches: 95, statements: 95 };
 
+/** The packages the package.json of a directory lists, its dependencies and its devDependencies */
+const listedPackages = (dir: string): string[] => {
+  const { dependencies = {}, devDependencies = {} } = JSON.parse(readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  return Object.keys({ ...dependencies, ...devDependencies });
+};
+
+/** Whether the suites of a directory can load a package: its package.json lists it, or lists a workspace that can, at any depth */
+const canLoad = (dir: string, name: string): boolean =>
+  listedPackages(dir).some(listed => listed === name || (Object.hasOwn(alias, listed) && canLoad(path.dirname(alias[listed]), name)));
+
 /**
- * Each test file runs in a process of its own, which loaded date-fns, lodash-es and ccxt module by module, hundreds of modules each:
- * bundled once, they load in a fraction of the time. ccxt must be bundled with the others: left out, the suites that load it fail on one
- * of its import cycles (Cannot access 'bydfiRest' before initialization).
+ * The dependencies vitest bundles for the suites of a directory, `dir` a workspace's or the root's. Each test file runs in a process of
+ * its own, which loaded them module by module, hundreds of modules each: bundled once, they load in a fraction of the time. date-fns and
+ * lodash-es for every one; ccxt where the suites can load it, @gekko/core, which lists it, and every workspace above it (the plugins,
+ * apps/gekko and apps/fox), where it must be bundled with the others: left out, the suites that load it fail on one of its import cycles
+ * (Cannot access 'bydfiRest' before initialization). Bundled for the others, which never load it, it cost each an esbuild run of half a
+ * second and 39 MB of its cache directory.
  */
-export const DEPS_OPTIMIZER = { ssr: { enabled: true, include: ['date-fns', 'lodash-es', 'ccxt'] } };
+export const depsOptimizerFor = (dir: string) => ({
+  ssr: { enabled: true, include: ['date-fns', 'lodash-es', ...(canLoad(dir, 'ccxt') ? ['ccxt'] : [])] },
+});
 
 /**
  * The vitest configuration of a workspace (a package or an app), `dir` its directory: its unit tests are `src/**\/*.test.ts` (the e2e
@@ -60,7 +75,7 @@ export const workspaceVitestConfig = (dir: string, { coverageExclude = COVERAGE_
       mockReset: true,
       restoreMocks: true,
       include: ['src/**/*.test.ts'],
-      deps: { optimizer: DEPS_OPTIMIZER },
+      deps: { optimizer: depsOptimizerFor(dir) },
       coverage: {
         reporter: ['text'],
         include: ['src/**/*.ts'],
