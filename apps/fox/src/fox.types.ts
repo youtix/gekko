@@ -38,6 +38,8 @@ export type VariantResult = {
   status: 'done' | 'failed';
   /** Why it failed, as describeError writes it */
   error?: string;
+  /** The stack and causes of a failure that is not a GekkoError, whose message alone does not say where it came from */
+  stack?: string;
   /** From the start of the backtest to its end */
   durationMs: number;
 };

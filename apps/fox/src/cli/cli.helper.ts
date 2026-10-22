@@ -1,11 +1,12 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { addPrecise } from '@gekko/shared/utils/math/math.utils';
-import { countDecimals } from '@gekko/shared/utils/math/round.utils';
+import { countDecimals, shiftDecimalPoint } from '@gekko/shared/utils/math/round.utils';
 import { showValue } from '@gekko/shared/utils/object/object.utils';
+import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
 import { Command, type CommanderError } from 'commander';
 import { setWith } from 'lodash-es';
 import { availableParallelism } from 'node:os';
-import { FORBIDDEN_KEYS, MAX_WORKERS_VARIABLE, PROGRAM_DESCRIPTION, TEMPLATE_PATH_VARIABLE, VALUES_HELP } from '../fox.const';
+import { FORBIDDEN_KEYS, MAX_VARIANTS, MAX_WORKERS_VARIABLE, PROGRAM_DESCRIPTION, TEMPLATE_PATH_VARIABLE, VALUES_HELP } from '../fox.const';
 import type { FoxOptions, OverrideValue, Overrides } from '../fox.types';
 
 /** A number as the command line writes one: digits, a minus sign before them, and a decimal point between them */
@@ -27,9 +28,26 @@ const toValue = (text: string): OverrideValue => {
 };
 
 /**
+ * How many values the range from `start` to `end` holds at `increment`: those its steps reach below its end, then its end. Counted in
+ * BigInt on the integers the three make once scaled to their decimals, as addPrecise adds them: in binary, 0.6..3000.3:0.3 would count
+ * 10001 values for its 10000. The count is exact up to 2 ** 53, the nearest double beyond. Infinity when the bounds, scaled to the
+ * decimals of a step so small (1e-320), are past the largest double, or are themselves.
+ */
+const countRangeValues = (start: number, end: number, increment: number): number => {
+  const decimals = Math.max(0, countDecimals(start), countDecimals(end), countDecimals(increment));
+  const [from, to, step] = [start, end, increment].map(value => shiftDecimalPoint(value, decimals));
+  if (![from, to, step].every(Number.isFinite)) return Infinity;
+  // The steps below the end, rounded up (a step that goes past the end leaves the end to be tried on its own), then the end
+  return Number((BigInt(to) - BigInt(from) + BigInt(step) - 1n) / BigInt(step) + 1n);
+};
+
+/**
  * The values of a range, `<from>..<to>` or `<from>..<to>:<step>`: from its start, a step at a time, up to its end, both bounds included
  * (`12..24:5` is 12, 17, 22 and 24). Without a step, it is a unit of the last decimal of the bounds: 1 for `12..24`, 0.01 for
- * `0.5..0.75`. Each value is added up in decimal (addPrecise), so that `0.1..0.3` holds 0.3, which binary sums would miss.
+ * `0.5..0.75`. Each value is added up in decimal (addPrecise), so that `0.1..0.3` holds 0.3, which binary sums would miss. Refused,
+ * before any value is made: a step that leaves a value as it is (bounds of 17 significant digits, which take a step of 1e-17 by
+ * default, or of 2 ** 53 and above, where a number cannot change by 1), whose range would never end, and a range of more than
+ * MAX_VARIANTS values.
  */
 const parseRange = (option: string, range: string): number[] => {
   const refuse = (reason: string) => new GekkoError('fox', `Invalid range ${showValue(range)} of ${option}: ${reason}`);
@@ -42,10 +60,26 @@ const parseRange = (option: string, range: string): number[] => {
   if (start > end) throw refuse(`its start, ${from}, is above its end, ${to}`);
   if (step !== undefined && !(NUMBER.test(step) && Number(step) > 0))
     throw refuse(`its step must be a number above 0, got ${showValue(step)}`);
-  // countDecimals is negative for a whole number ending in zeros (-1 for 20): a range of whole numbers steps by 1, not by 10
-  const increment = step === undefined ? 10 ** -Math.max(0, countDecimals(start), countDecimals(end)) : Number(step);
+  // countDecimals is negative for a whole number ending in zeros (-1 for 20): a range of whole numbers steps by 1, not by 10. The unit
+  // is written in decimal, not raised in binary: under Node, 10 ** -4 is 0.00009999999999999999
+  const increment = step === undefined ? shiftDecimalPoint(1, -Math.max(0, countDecimals(start), countDecimals(end))) : Number(step);
+  /** The value after `value`, which must be above it: a step that leaves a value as it is would never reach the end */
+  const next = (value: number) => {
+    const following = addPrecise(value, increment);
+    if (following > value) return following;
+    throw refuse(
+      `its step of ${formatEveryDecimal(increment)} leaves ${formatEveryDecimal(value)} as it is, a number holding too many digits for so small a step: write the bounds with fewer digits, or give a larger step`,
+    );
+  };
+  // The start first: a step that cannot move it would count values without end
+  if (start < end) next(start);
+  const count = countRangeValues(start, end, increment);
+  if (count > MAX_VARIANTS)
+    throw refuse(
+      `it holds ${formatEveryDecimal(count)} values, more than the ${MAX_VARIANTS} variants Fox makes at most: narrow it, or give it a larger step`,
+    );
   const values: number[] = [];
-  for (let value = start; value < end; value = addPrecise(value, increment)) values.push(value);
+  for (let value = start; value < end; value = next(value)) values.push(value);
   // The end is always tried, also when the step goes past it
   values.push(end);
   return values;
@@ -86,13 +120,15 @@ const parseKey = (argument: string, key: string): string[] => {
  * `--strategy.period 12,24` is `{ strategy: { period: [12, 24] } }`, `--strategy.period 12..24` the 13 values of the range and
  * `--strategy.period 12` 12 alone. A GekkoError refuses an argument that is neither an override nor its values (a value written after
  * the first, `--strategy.period 12 24`), an override without values, a key given twice or inside another one (`--strategy.thresholds`
- * and `--strategy.thresholds.up`), and a malformed range.
+ * and `--strategy.thresholds.up`), and a malformed range. A bare `--`, the end of Fox's own options, is skipped wherever it is:
+ * commander drops the first one when no override comes before it, and leaves it among the overrides otherwise.
  */
 export const parseOverrides = (argv: readonly string[]): Overrides => {
   const overrides: Overrides = {};
   const keys: string[] = [];
-  for (let index = 0; index < argv.length; index++) {
-    const argument = argv[index];
+  const args = argv.filter(argument => argument !== '--');
+  for (let index = 0; index < args.length; index++) {
+    const argument = args[index];
     if (!argument.startsWith('--'))
       throw new GekkoError(
         'fox',
@@ -107,9 +143,9 @@ export const parseOverrides = (argv: readonly string[]): Overrides => {
     if (given) throw new GekkoError('fox', `--${given} and ${option} overlap, one holding the other: give one of them`);
     keys.push(key);
     // Without =, the values are the next argument, unless it is another option: a negative number starts with a single dash
-    const next = argv[index + 1];
+    const next = args[index + 1];
     if (equals === -1 && (next === undefined || next.startsWith('--'))) throw new GekkoError('fox', `${option} has no value`);
-    const text = equals === -1 ? argv[++index] : argument.slice(equals + 1);
+    const text = equals === -1 ? args[++index] : argument.slice(equals + 1);
     setWith(overrides, path, parseValues(option, text), Object);
   }
   return overrides;

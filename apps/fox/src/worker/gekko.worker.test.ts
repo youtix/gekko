@@ -1,6 +1,7 @@
 import { gekkoPipeline } from '@gekko/core/core/pipeline/pipeline';
 import { createRunContext } from '@gekko/core/run/runContext.helper';
 import type { RunContext } from '@gekko/core/run/runContext.types';
+import { inspect } from 'node:util';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Template, VariantRequest, VariantResult } from '../fox.types';
 
@@ -107,9 +108,10 @@ describe('gekko.worker', () => {
   });
 
   describe('when the configuration is refused', () => {
-    beforeEach(() => {
+    beforeEach(async () => {
+      const { GekkoError } = await import('@gekko/shared/errors/gekko.error');
       vi.mocked(createRunContext).mockImplementation(() => {
-        throw new Error('Invalid configuration variant 3');
+        throw new GekkoError('configuration', 'Invalid configuration variant 3');
       });
     });
 
@@ -124,6 +126,24 @@ describe('gekko.worker', () => {
     });
   });
 
+  describe('when the backtest fails unexpectedly', () => {
+    const failure = new TypeError("Cannot read properties of undefined (reading 'close')", { cause: new Error('no candle') });
+
+    beforeEach(() => {
+      vi.mocked(gekkoPipeline).mockRejectedValue(failure);
+    });
+
+    it('should post the failure with its stack and its causes', async () => {
+      expect(await backtest()).toStrictEqual({
+        variant: 3,
+        status: 'failed',
+        error: "Cannot read properties of undefined (reading 'close')",
+        stack: inspect(failure),
+        durationMs: 3000,
+      });
+    });
+  });
+
   it('should post a failure when the storage cannot be closed', async () => {
     vi.mocked(context.services.closeStorage).mockImplementation(() => {
       throw new Error('database is locked');
@@ -133,6 +153,7 @@ describe('gekko.worker', () => {
       variant: 3,
       status: 'failed',
       error: 'Could not close the storage: database is locked',
+      stack: expect.stringMatching(/^Could not close the storage: Error: database is locked\n {4}at /),
       durationMs: 3000,
     });
   });

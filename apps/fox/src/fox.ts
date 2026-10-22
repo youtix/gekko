@@ -24,10 +24,12 @@ export const main = async () => {
       // strategy, a private one of custom/ included, whose import can throw (a path that moved), as the module is evaluated. From a
       // static import, that error would be thrown before the process handlers are registered and printed raw by Bun, instead of being
       // reported below like any other failure.
-      const { generateVariants, loadTemplate, validateVariants } = await import('./configuration/variants.helper');
+      const { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } =
+        await import('./configuration/variants.helper');
       const { runWorkers } = await import('./worker/worker.helper');
       const variants = generateVariants(loadTemplate(templatePath), overrides);
       validateVariants(variants);
+      warnOfUnreportedVariants(variants);
       const count = `${variants.length} ${pluralize('variant', variants.length)}`;
       info('fox', `Backtesting ${count} of ${templatePath}, ${Math.min(maxWorkers, variants.length)} at a time`);
       if (logSummary(await runWorkers(variants, maxWorkers))) process.exitCode = 1;

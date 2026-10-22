@@ -1,6 +1,11 @@
-import { error, info } from '@gekko/core/logger/logger';
+import { debug, error, info } from '@gekko/core/logger/logger';
 import { times } from 'lodash-es';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import packageJson from '../../package.json';
+import { COMPILED_WORKER_MODULE } from '../fox.const';
 import type { Template, Variant, VariantResult } from '../fox.types';
 import { describeWorkerError, runWorker, runWorkers, workerModule } from './worker.helper';
 
@@ -60,6 +65,16 @@ describe('workerModule', () => {
   `('should find the worker of $description', ({ moduleUrl, expected }) => {
     expect(workerModule(moduleUrl)).toBe(expected);
   });
+
+  // The executable embeds the entry points build:exec names, and Bun resolves a worker from the root of the bundle, src/fox.ts's
+  // directory: renamed on one side only, every variant of dist/fox would fail, which no run of the sources shows
+  it.each`
+    entry
+    ${'src/fox.ts'}
+    ${path.join('src', COMPILED_WORKER_MODULE)}
+  `('should be compiled into the executable by build:exec: $entry', ({ entry }) => {
+    expect(packageJson.scripts['build:exec'].split(' ')).toContain(entry);
+  });
 });
 
 describe('describeWorkerError', () => {
@@ -102,6 +117,10 @@ describe('runWorker', () => {
 
   it('should start the worker module beside its own', () => {
     expect(worker.module).toMatch(/\/src\/worker\/gekko\.worker\.ts$/);
+  });
+
+  it('should start a worker module that exists, run from source', () => {
+    expect(existsSync(fileURLToPath(worker.module))).toBe(true);
   });
 
   it('should post the variant to the worker', () => {
@@ -244,5 +263,19 @@ describe('runWorkers', () => {
         done(3),
       ]);
     });
+
+    it('should log no stack for a failure posted without one', async () => {
+      await runWorkers(variantsOf(3), 2);
+
+      expect(debug).not.toHaveBeenCalled();
+    });
+  });
+
+  it('should log the stack of an unexpected failure at debug level, under its line', async () => {
+    const stack = "TypeError: Cannot read properties of undefined (reading 'close')\n    at onTimeframeCandle (dema.strategy.ts:42:7)";
+    FakeWorker.answer = ({ variant }) => ({ result: { variant, status: 'failed', error: 'boom', stack, durationMs: 300 }, delayMs: 1 });
+    await runWorkers(variantsOf(1), 1);
+
+    expect(debug).toHaveBeenCalledExactlyOnceWith('fox', `Variant 1 of 1: ${stack}`);
   });
 });

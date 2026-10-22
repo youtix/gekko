@@ -2,7 +2,7 @@ import { info } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { parseCommandLine } from './cli/cli.helper';
-import { generateVariants, loadTemplate, validateVariants } from './configuration/variants.helper';
+import { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } from './configuration/variants.helper';
 import { logFailure } from '@gekko/core/logger/failure.helper';
 import { logSummary } from './fox.helper';
 import type { FoxOptions, Template, Variant, VariantResult } from './fox.types';
@@ -11,7 +11,12 @@ import { runWorkers } from './worker/worker.helper';
 vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 vi.mock('@gekko/shared/utils/process/process.utils', () => ({ logVersion: () => 'Gekko version: v2.0.0, Bun version: v1.3.14' }));
 vi.mock('./cli/cli.helper', () => ({ parseCommandLine: vi.fn() }));
-vi.mock('./configuration/variants.helper', () => ({ generateVariants: vi.fn(), loadTemplate: vi.fn(), validateVariants: vi.fn() }));
+vi.mock('./configuration/variants.helper', () => ({
+  generateVariants: vi.fn(),
+  loadTemplate: vi.fn(),
+  validateVariants: vi.fn(),
+  warnOfUnreportedVariants: vi.fn(),
+}));
 vi.mock('@gekko/core/logger/failure.helper', () => ({ logFailure: vi.fn() }));
 vi.mock('./fox.helper', () => ({ logSummary: vi.fn() }));
 vi.mock('./worker/worker.helper', () => ({ runWorkers: vi.fn() }));
@@ -82,6 +87,22 @@ describe('main', () => {
 
     it('should check the variants before running them', () => {
       expect(vi.mocked(validateVariants).mock.invocationCallOrder[0]).toBeLessThan(vi.mocked(runWorkers).mock.invocationCallOrder[0]);
+    });
+
+    it('should warn of the variants without a PerformanceReporter', () => {
+      expect(warnOfUnreportedVariants).toHaveBeenCalledExactlyOnceWith(VARIANTS);
+    });
+
+    it('should warn of them once they are checked', () => {
+      expect(vi.mocked(warnOfUnreportedVariants).mock.invocationCallOrder[0]).toBeGreaterThan(
+        vi.mocked(validateVariants).mock.invocationCallOrder[0],
+      );
+    });
+
+    it('should warn of them before running any', () => {
+      expect(vi.mocked(warnOfUnreportedVariants).mock.invocationCallOrder[0]).toBeLessThan(
+        vi.mocked(runWorkers).mock.invocationCallOrder[0],
+      );
     });
 
     it('should run the variants in its workers', () => {
@@ -157,6 +178,10 @@ describe('main', () => {
 
     it('should run no variant', () => {
       expect(runWorkers).not.toHaveBeenCalled();
+    });
+
+    it('should not warn of the variants without a PerformanceReporter', () => {
+      expect(warnOfUnreportedVariants).not.toHaveBeenCalled();
     });
 
     it('should exit with code 1', () => {

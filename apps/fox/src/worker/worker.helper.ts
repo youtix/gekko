@@ -1,4 +1,4 @@
-import { error, info } from '@gekko/core/logger/logger';
+import { debug, error, info } from '@gekko/core/logger/logger';
 import { formatDurationUTC } from '@gekko/shared/utils/date/date.utils';
 import { times } from 'lodash-es';
 import { COMPILED_MODULE_URL_PREFIX, COMPILED_WORKER_MODULE, WORKER_MODULE } from '../fox.const';
@@ -54,8 +54,9 @@ const formatDuration = (durationMs: number) => formatDurationUTC(0, durationMs) 
 
 /**
  * Backtests the variants, `maxWorkers` at a time, each in a worker of its own: the next one starts as soon as one ends. Logs a line as
- * each starts and as each ends, at info level, a failed one's at error level with its reason. Settles once every variant is over, with
- * their results in the order of the variants, failed ones included.
+ * each starts and as each ends, at info level, a failed one's at error level with its reason, followed at debug level by the stack its
+ * worker posted for a failure that is not a GekkoError. Settles once every variant is over, with their results in the order of the
+ * variants, failed ones included.
  */
 export const runWorkers = async (variants: readonly Variant[], maxWorkers: number): Promise<VariantResult[]> => {
   const results: VariantResult[] = [];
@@ -68,6 +69,7 @@ export const runWorkers = async (variants: readonly Variant[], maxWorkers: numbe
       const result = await runWorker(variant, configuration);
       if (result.status === 'done') info('fox', `${name} done in ${formatDuration(result.durationMs)}`);
       else error('fox', `${name} failed after ${formatDuration(result.durationMs)}: ${result.error}`);
+      if (result.stack) debug('fox', `${name}: ${result.stack}`);
       results[index] = result;
     }
   };

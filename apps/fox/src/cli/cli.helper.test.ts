@@ -26,6 +26,7 @@ describe('parseOverrides', () => {
     ${'a range of one value'}                           | ${['--strategy.period', '12..12']}                                       | ${{ strategy: { period: [12] } }}
     ${'a range of decimals, a step of their last unit'} | ${['--x', '1.05..1.07']}                                                 | ${{ x: [1.05, 1.06, 1.07] }}
     ${'a range of decimals summed in decimal'}          | ${['--x', '0.1..0.3']}                                                   | ${{ x: [0.1, 0.2, 0.3] }}
+    ${'a range of 4 decimals, a step of 0.0001'}        | ${['--x', '0.0001..0.0003']}                                             | ${{ x: [0.0001, 0.0002, 0.0003] }}
     ${'a range of hundreds'}                            | ${['--x', '100..300:100']}                                               | ${{ x: [100, 200, 300] }}
     ${'a range across 0'}                               | ${['--x', '-2..2:2']}                                                    | ${{ x: [-2, 0, 2] }}
     ${'a range with a decimal step'}                    | ${['--x', '0.5..0.75:0.125']}                                            | ${{ x: [0.5, 0.625, 0.75] }}
@@ -35,8 +36,16 @@ describe('parseOverrides', () => {
     ${'a key of the plugins, by index'}                 | ${['--plugins.3.fileName', 'a.csv']}                                     | ${{ plugins: { 3: { fileName: 'a.csv' } } }}
     ${'two keys of one block'}                          | ${['--strategy.thresholds.up', '1', '--strategy.thresholds.down', '-1']} | ${{ strategy: { thresholds: { up: 1, down: -1 } } }}
     ${'two keys whose names start alike'}               | ${['--a.b', '1', '--a.bc', '2']}                                         | ${{ a: { b: 1, bc: 2 } }}
+    ${'the end of the options first, skipped'}          | ${['--', '--x', '1']}                                                    | ${{ x: 1 }}
+    ${'the end of the options between two, skipped'}    | ${['--x', '1', '--', '--y', '2']}                                        | ${{ x: 1, y: 2 }}
+    ${'the end of the options before a value, skipped'} | ${['--strategy.src', '--', '-tma']}                                      | ${{ strategy: { src: '-tma' } }}
   `('should read $description', ({ argv, expected }) => {
     expect(parseOverrides(argv)).toStrictEqual(expected);
+  });
+
+  // 0.6 + 9999 × 0.3 is 3000.3: in binary, (3000.3 - 0.6) / 0.3 is 9999.000000000002, which would count one value more than the cap
+  it('should read a range of as many values as the cap, counted in decimal', () => {
+    expect(parseOverrides(['--x', '0.6..3000.3:0.3']).x).toHaveLength(10_000);
   });
 
   it.each`
@@ -50,7 +59,8 @@ describe('parseOverrides', () => {
     ${'an option with a blank value'}              | ${['--x', ' ']}                    | ${'[FOX] --x has no value'}
     ${'a list with an empty item'}                 | ${['--x', '1,,2']}                 | ${'[FOX] --x has an empty item in its values "1,,2"'}
     ${'a list ending with a comma'}                | ${['--x', '1,']}                   | ${'[FOX] --x has an empty item in its values "1,"'}
-    ${'the end of the options'}                    | ${['--', '1']}                     | ${'[FOX] Invalid option "--": an override names a key of the template, written with dots (--strategy.period)'}
+    ${'a value after the end of the options'}      | ${['--', '1']}                     | ${'[FOX] Unexpected argument "1": an override is written --<key> <values> (--strategy.period 12,24)'}
+    ${'a key without a name'}                      | ${['--=1']}                        | ${'[FOX] Invalid option "--=1": an override names a key of the template, written with dots (--strategy.period)'}
     ${'a key with an empty name'}                  | ${['--a..b', '1']}                 | ${'[FOX] Invalid option "--a..b": an override names a key of the template, written with dots (--strategy.period)'}
     ${'a key ending with a dot'}                   | ${['--a.=1']}                      | ${'[FOX] Invalid option "--a.=1": an override names a key of the template, written with dots (--strategy.period)'}
     ${'a key lodash would skip'}                   | ${['--__proto__.x', '1']}          | ${'[FOX] Invalid option "--__proto__.x": __proto__ is the key of no configuration'}
@@ -74,6 +84,29 @@ describe('parseOverrides', () => {
   `('should refuse $description', ({ argv, message }) => {
     expect(() => parseOverrides(argv)).toThrow(message);
   });
+
+  describe('when a range would never end, or holds more values than the cap', () => {
+    /** The reason Fox gives for a step that cannot move a value of the range */
+    const stuck = (step: string, value: string) =>
+      `its step of ${step} leaves ${value} as it is, a number holding too many digits for so small a step: write the bounds with fewer digits, or give a larger step`;
+    /** The reason Fox gives for a range of more values than the cap */
+    const tooMany = (count: string) =>
+      `it holds ${count} values, more than the 10000 variants Fox makes at most: narrow it, or give it a larger step`;
+
+    it.each`
+      description                                           | range                                   | reason
+      ${'a default step of 17 decimals, lost on its start'} | ${'0.30000000000000004..0.5'}           | ${stuck('0.00000000000000001', '0.30000000000000004')}
+      ${'a step under the precision of its start'}          | ${'1..2:0.0000000000000001'}            | ${stuck('0.0000000000000001', '1')}
+      ${'bounds from 2 ** 53'}                              | ${'9007199254740992..9007199254740994'} | ${stuck('1', '9007199254740992')}
+      ${'bounds reaching 2 ** 53, lost on its way'}         | ${'9007199254740990..9007199254740994'} | ${stuck('1', '9007199254740992')}
+      ${'more values than the cap'}                         | ${'2..100001'}                          | ${tooMany('100000')}
+      ${'one decimal value more than the cap'}              | ${'0.6..3000.6:0.3'}                    | ${tooMany('10001')}
+      ${'a step too small for so wide a range'}             | ${'0..1:0.0000000001'}                  | ${tooMany('10000000001')}
+      ${'a step too small for its values to be counted'}    | ${`0..1:0.${'0'.repeat(319)}1`}         | ${tooMany('Infinity')}
+    `('should refuse $description', ({ range, reason }) => {
+      expect(() => parseOverrides(['--x', range])).toThrow(`[FOX] Invalid range "${range}" of --x: ${reason}`);
+    });
+  });
 });
 
 /** The help as commander prints it: helpInformation leaves out what addHelpText adds after the options */
@@ -87,10 +120,11 @@ const helpOf = (threads: number) => {
 
 describe('createProgram', () => {
   it.each`
-    description                                 | text
-    ${'the usage'}                              | ${'Usage: fox [options] [--<key> <values>...]'}
-    ${'the threads of the machine, by default'} | ${'by default, else 12'}
-    ${'how the values of an override are read'} | ${'--strategy.period 12..24:4    12, 16, 20 and 24, a step of 4'}
+    description                                  | text
+    ${'the usage'}                               | ${'Usage: fox [options] [--<key> <values>...]'}
+    ${'the threads of the machine, by default'}  | ${'by default, else 12'}
+    ${'how the values of an override are read'}  | ${'--strategy.period 12..24:4    12, 16, 20 and 24, a step of 4'}
+    ${'the = form of a value read as an option'} | ${'--strategy.src=-tma           the = form, for a value that starts with -t, -w or -h'}
   `('should describe $description in the help', ({ text }) => {
     expect(helpOf(12)).toContain(text);
   });
@@ -115,6 +149,9 @@ describe('parseCommandLine', () => {
     ${'the overrides before the options'}                        | ${['--strategy.period', '12', '-t', 'dema.yml', '-w', '2']} | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: 2, overrides: { strategy: { period: 12 } } }}
     ${'an override of a negative number'}                        | ${['-t', 'dema.yml', '--strategy.thresholds.down', '-5']}   | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { thresholds: { down: -5 } } } }}
     ${'the overrides after the end of the options'}              | ${['-t', 'dema.yml', '--', '--x', '1']}                     | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { x: 1 } }}
+    ${'the end of the options after an override'}                | ${['-t', 'dema.yml', '--x', '1', '--', '--y', '2']}         | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { x: 1, y: 2 } }}
+    ${'a value like -t after the end of the options'}            | ${['-t', 'dema.yml', '--strategy.src', '--', '-tma']}       | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-tma' } } }}
+    ${'a value like -t in the = form'}                           | ${['-t', 'dema.yml', '--strategy.src=-tma']}                | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-tma' } } }}
   `('should read $description', ({ argv, env, expected }) => {
     expect(parseCommandLine(argv, env, THREADS)).toStrictEqual(expected);
   });

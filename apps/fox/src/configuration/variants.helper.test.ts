@@ -1,27 +1,34 @@
 import { loadConfigurationFile } from '@gekko/core/configuration/configuration.helper';
+import { warning } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { cloneDeep } from 'lodash-es';
+import { cloneDeep, range } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Overrides, Template, Variant } from '../fox.types';
-import { generateVariants, loadTemplate, validateVariants } from './variants.helper';
+import { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } from './variants.helper';
 
 vi.mock('@gekko/core/configuration/configuration.helper', () => ({ loadConfigurationFile: vi.fn() }));
+vi.mock('@gekko/core/logger/logger', () => ({ debug: vi.fn(), info: vi.fn(), warning: vi.fn(), error: vi.fn() }));
 
-// The registries, with the real schemas: the plugins' own modules load the exchanges and bun:sqlite, which vitest, on Node, cannot
+// The registries, with the real schemas, and the modes and events of the real plugins: the plugins' own modules load the exchanges and
+// bun:sqlite, which vitest, on Node, cannot
 vi.mock('@gekko/plugins/index', async () => {
   const { analyzerSchema } = await import('@gekko/schemas/plugins/analyzer.schema');
   const { candleWriterSchema } = await import('@gekko/schemas/plugins/candleWriter.schema');
   const { performanceReporterSchema } = await import('@gekko/schemas/plugins/performanceReporter.schema');
   const { traderSchema } = await import('@gekko/schemas/plugins/trader.schema');
   const { tradingAdvisorSchema } = await import('@gekko/schemas/plugins/tradingAdvisor.schema');
-  const pluginOf = (schema?: unknown) => ({ getStaticConfiguration: () => ({ schema }) });
+  const BOTH = ['realtime', 'backtest'];
+  const pluginOf = (schema?: unknown, modes = BOTH, eventsEmitted: string[] = []) => ({
+    getStaticConfiguration: () => ({ schema, modes, eventsEmitted }),
+  });
   return {
-    CandleWriter: pluginOf(candleWriterSchema),
-    PerformanceReporter: pluginOf(performanceReporterSchema),
-    PortfolioAnalyzer: pluginOf(analyzerSchema),
+    CandleWriter: pluginOf(candleWriterSchema, ['realtime', 'importer']),
+    PerformanceReporter: pluginOf(performanceReporterSchema, ['backtest']),
+    PortfolioAnalyzer: pluginOf(analyzerSchema, BOTH, ['performanceReport', 'equitySnapshot']),
+    RoundTripAnalyzer: pluginOf(analyzerSchema, BOTH, ['performanceReport', 'roundtripCompleted']),
     SchemaLess: pluginOf(),
-    Trader: pluginOf(traderSchema),
-    TradingAdvisor: pluginOf(tradingAdvisorSchema),
+    Trader: pluginOf(traderSchema, BOTH, ['portfolioChange', 'orderCanceled', 'orderCompleted', 'orderErrored', 'orderInitiated']),
+    TradingAdvisor: pluginOf(tradingAdvisorSchema, BOTH, ['strategyInfo', 'strategyCreateOrder', 'strategyCancelOrder']),
   };
 });
 vi.mock('@gekko/strategies/index', async () => {
@@ -181,6 +188,49 @@ describe('generateVariants', () => {
 
     expect(first.configuration.plugins).not.toBe(second.configuration.plugins);
   });
+
+  // The reporter writes the label after the id of its row, which only names the strategy block: a sweep of a fee needs it
+  describe('when the template has a PerformanceReporter', () => {
+    const REPORTER = { name: 'PerformanceReporter', fileName: 'a.csv' };
+    const reported: Template = { ...template, plugins: [{ name: 'A' }, REPORTER] };
+
+    /** The plugins of each variant of `source` made of `overrides` */
+    const pluginsOfVariants = (overrides: Overrides, source = reported) =>
+      generateVariants(source, overrides).map(({ configuration }) => configuration.plugins);
+
+    it.each`
+      description                                    | overrides                                                                | expected
+      ${'each variant its label'}                    | ${{ strategy: { period: [10, 20] } }}                                    | ${[[{ name: 'A' }, { ...REPORTER, label: '--strategy.period 10' }], [{ name: 'A' }, { ...REPORTER, label: '--strategy.period 20' }]]}
+      ${'no label to a single variant'}              | ${{ strategy: { period: 14 } }}                                          | ${[[{ name: 'A' }, REPORTER]]}
+      ${'the label of its own an override gives it'} | ${{ strategy: { period: [10, 20] }, plugins: { 1: { label: 'mine' } } }} | ${[[{ name: 'A' }, { ...REPORTER, label: 'mine' }], [{ name: 'A' }, { ...REPORTER, label: 'mine' }]]}
+    `('should give $description', ({ overrides, expected }) => {
+      expect(pluginsOfVariants(overrides)).toStrictEqual(expected);
+    });
+
+    it.each`
+      description                                     | plugins                                           | expected
+      ${'the label of its own the template gives it'} | ${[{ ...REPORTER, label: 'baseline' }]}           | ${[{ ...REPORTER, label: 'baseline' }]}
+      ${'every PerformanceReporter its label'}        | ${[REPORTER, { ...REPORTER, fileName: 'b.csv' }]} | ${[{ ...REPORTER, label: '--strategy.period 10' }, { ...REPORTER, fileName: 'b.csv', label: '--strategy.period 10' }]}
+      ${'an entry that is not an object as it is'}    | ${['PerformanceReporter']}                        | ${['PerformanceReporter']}
+      ${'plugins that are not a list as they are'}    | ${'PerformanceReporter'}                          | ${'PerformanceReporter'}
+    `('should keep $description', ({ plugins, expected }) => {
+      expect(pluginsOfVariants({ strategy: { period: [10, 20] } }, { ...template, plugins })[0]).toStrictEqual(expected);
+    });
+  });
+
+  describe('when the overrides make more variants than the cap', () => {
+    it.each`
+      description                                | overrides                                                         | message
+      ${'one more than the cap'}                 | ${{ a: range(10_001) }}                                           | ${'[FOX] The overrides make 10001 variants (10001 values of --a), more than the 10000 Fox makes at most: give them fewer values'}
+      ${'a hundred million, before any is made'} | ${{ a: range(10_000), showLogo: false, b: { c: range(10_000) } }} | ${'[FOX] The overrides make 100000000 variants (10000 values of --a × 10000 values of --b.c), more than the 10000 Fox makes at most: give them fewer values'}
+    `('should refuse $description, naming the values of each option', ({ overrides, message }) => {
+      expect(() => generateVariants(template, overrides)).toThrow(message);
+    });
+
+    it('should make as many variants as the cap', () => {
+      expect(generateVariants(template, { strategy: { period: range(100), thresholds: { up: range(100) } } })).toHaveLength(10_000);
+    });
+  });
 });
 
 describe('validateVariants', () => {
@@ -203,9 +253,13 @@ describe('validateVariants', () => {
     ${'a strategy block missing a parameter'} | ${(configuration: Template) => delete strategyOf(configuration).thresholds}                         | ${'[FOX] Variant 1 is invalid:\n✖ Invalid input: expected object, received undefined\n  → at strategy.thresholds'}
     ${'a strategy no registry holds'}         | ${(configuration: Template) => Object.assign(configuration, UNKNOWN_STRATEGY)}                      | ${'[FOX] Variant 1 is invalid:\n✖ No strategy is named "DEMAX": the strategies are DEMA and Unchecked\n  → at plugins[0].strategyName'}
     ${'a strategyName that is not a text'}    | ${(configuration: Template) => Object.assign(pluginsOf(configuration)[0], { strategyName: 12 })}    | ${'[FOX] Variant 1 is invalid:\n✖ Invalid input: expected string, received number\n  → at plugins[0].strategyName'}
-    ${'a plugin no registry holds'}           | ${(configuration: Template) => Object.assign(pluginsOf(configuration)[3], { name: 'Reporter' })}    | ${'[FOX] Variant 1 is invalid:\n✖ No plugin is named "Reporter": the plugins are CandleWriter, PerformanceReporter, PortfolioAnalyzer, SchemaLess, Trader and TradingAdvisor\n  → at plugins[3].name'}
+    ${'a plugin no registry holds'}           | ${(configuration: Template) => Object.assign(pluginsOf(configuration)[3], { name: 'Reporter' })}    | ${'[FOX] Variant 1 is invalid:\n✖ No plugin is named "Reporter": the plugins are CandleWriter, PerformanceReporter, PortfolioAnalyzer, RoundTripAnalyzer, SchemaLess, Trader and TradingAdvisor\n  → at plugins[3].name'}
+    ${'a plugin no registry holds, first'}    | ${(configuration: Template) => pluginsOf(configuration).unshift({ name: 'Reporter' })}              | ${'[FOX] Variant 1 is invalid:\n✖ No plugin is named "Reporter": the plugins are CandleWriter, PerformanceReporter, PortfolioAnalyzer, RoundTripAnalyzer, SchemaLess, Trader and TradingAdvisor\n  → at plugins[0].name'}
     ${'a plugin named as an inherited key'}   | ${(configuration: Template) => Object.assign(pluginsOf(configuration)[3], { name: 'constructor' })} | ${'[FOX] Variant 1 is invalid:\n✖ No plugin is named "constructor"'}
     ${'a plugin entry its schema refuses'}    | ${(configuration: Template) => Object.assign(pluginsOf(configuration)[3], { fileName: '' })}        | ${'[FOX] Variant 1 is invalid:\n✖ File name must not be empty\n  → at plugins[3].fileName'}
+    ${'a plugin that does not backtest'}      | ${(configuration: Template) => pluginsOf(configuration).push({ name: 'CandleWriter' })}             | ${'[FOX] Variant 1 is invalid:\n✖ Plugin CandleWriter does not support backtest mode, only realtime and importer\n  → at plugins[4].name'}
+    ${'two plugins emitting one event'}       | ${(configuration: Template) => pluginsOf(configuration).push({ name: 'RoundTripAnalyzer' })}        | ${'[FOX] Variant 1 is invalid:\n✖ Plugins PortfolioAnalyzer (plugins[2]) and RoundTripAnalyzer are broadcasting the same event: performanceReport. This behavior is unsupported.\n  → at plugins[4].name'}
+    ${'a plugin configured twice'}            | ${(configuration: Template) => pluginsOf(configuration).push({ name: 'PortfolioAnalyzer' })}        | ${'[FOX] Variant 1 is invalid:\n✖ Plugins PortfolioAnalyzer (plugins[2]) and PortfolioAnalyzer are broadcasting the same events: performanceReport and equitySnapshot. This behavior is unsupported.\n  → at plugins[4].name'}
   `('should refuse $description', ({ changes, message }) => {
     expect(() => validateVariants([variantOf(changes)])).toThrow(message);
   });
@@ -235,6 +289,35 @@ describe('validateVariants', () => {
         '  → at plugins[3].fileName',
       ].join('\n'),
     );
+  });
+});
+
+describe('warnOfUnreportedVariants', () => {
+  /** A variant whose plugins are those named */
+  const variantWith = (variant: number, ...names: string[]): Variant => ({
+    variant,
+    label: '',
+    configuration: { plugins: names.map(name => ({ name })) },
+  });
+  const reported = (variant: number) => variantWith(variant, 'PortfolioAnalyzer', 'PerformanceReporter');
+  const unreported = (variant: number) => variantWith(variant, 'PortfolioAnalyzer');
+
+  it('should not warn when every variant has a PerformanceReporter', () => {
+    warnOfUnreportedVariants([reported(1), reported(2)]);
+
+    expect(warning).not.toHaveBeenCalled();
+  });
+
+  it.each`
+    description                          | variants                                       | message
+    ${'the template of every variant'}   | ${[unreported(1), unreported(2)]}              | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variants'}
+    ${'the template of its one variant'} | ${[unreported(1)]}                             | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variant'}
+    ${'the one variant without one'}     | ${[reported(1), unreported(2), reported(3)]}   | ${'Variant 2 has no PerformanceReporter: no CSV row will record its figures'}
+    ${'the variants without one'}        | ${[unreported(1), reported(2), unreported(3)]} | ${'Variants 1 and 3 have no PerformanceReporter: no CSV row will record their figures'}
+  `('should warn once of $description', ({ variants, message }) => {
+    warnOfUnreportedVariants(variants);
+
+    expect(warning).toHaveBeenCalledExactlyOnceWith('fox', message);
   });
 });
 

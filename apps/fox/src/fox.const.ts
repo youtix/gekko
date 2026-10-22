@@ -11,6 +11,15 @@ export const PROGRAM_DESCRIPTION = [
   'values makes a variant of each, one per combination of the values of every option.',
 ].join(' ');
 
+/**
+ * The most variants Fox makes of a template, and so the most values a range may hold: every variant is made and checked before the
+ * first backtest starts, and a sweep of that many backtests already takes hours
+ */
+export const MAX_VARIANTS = 10_000;
+
+/** The plugin that writes the figures of each variant as a row of its CSV file, which Fox labels with the variant's values */
+export const REPORTER_PLUGIN = 'PerformanceReporter';
+
 /** The help printed after the options: how the values of an override are written */
 export const VALUES_HELP = `
 Values:
@@ -20,6 +29,7 @@ Values:
   --strategy.period 12..24:4    12, 16, 20 and 24, a step of 4
   --strategy.period 10,20..30:5 a list holding a range: 10, 20, 25 and 30
   --strategy.src close,ohlc4    texts (true and false are booleans, a path such as ../db/x.sql a text)
+  --strategy.src=-tma           the = form, for a value that starts with -t, -w or -h, as Fox's own options do
 
 Example:
   fox --template-path apps/fox/templates/dema.yml --strategy.period 10..30:5 --strategy.thresholds.up 50,100

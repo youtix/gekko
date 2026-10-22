@@ -1,16 +1,18 @@
 import { loadConfigurationFile } from '@gekko/core/configuration/configuration.helper';
 import type { PluginRegistry } from '@gekko/core/core/pipeline/pipeline.types';
+import { warning } from '@gekko/core/logger/logger';
 import * as pluginRegistry from '@gekko/plugins/index';
 import { configurationSchema } from '@gekko/schemas/configuration/configuration.schema';
 import type { Configuration } from '@gekko/schemas/configuration/configuration.types';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { showValue } from '@gekko/shared/utils/object/object.utils';
-import { listInWords } from '@gekko/shared/utils/string/string.utils';
+import { formatEveryDecimal, listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import * as strategyRegistry from '@gekko/strategies/index';
 import type { StrategyConstructor } from '@gekko/strategies/strategy.types';
-import { cloneDeep, isPlainObject, merge, omit, setWith } from 'lodash-es';
+import { cloneDeep, get, isPlainObject, merge, omit, setWith } from 'lodash-es';
 import { z } from 'zod';
+import { MAX_VARIANTS, REPORTER_PLUGIN } from '../fox.const';
 import type { OverrideValue, Overrides, Template, Variant } from '../fox.types';
 
 /** An option of the command line and the values it tries: a single value is a list of one */
@@ -54,31 +56,60 @@ const choicesOf = (overrides: Overrides, parent: string[] = []): Choice[] =>
     return [{ path, values: [value] }];
   });
 
+/** Whether a plugin entry of a configuration, as a file holds it, is a PerformanceReporter's */
+const isReporterEntry = (entry: unknown): entry is Record<string, unknown> =>
+  isPlainObject(entry) && get(entry, 'name') === REPORTER_PLUGIN;
+
+/** The PerformanceReporter entries of a configuration, as a file holds it: none when its plugins are not a list */
+const reportersOf = (configuration: Template) =>
+  Array.isArray(configuration.plugins) ? configuration.plugins.filter(isReporterEntry) : [];
+
+/** Refuses overrides that would make more than MAX_VARIANTS variants, before any is made, naming the values of each option */
+const checkVariantCount = (choices: readonly Choice[]) => {
+  const count = choices.reduce((product, { values }) => product * values.length, 1);
+  if (count <= MAX_VARIANTS) return;
+  const factors = choices
+    .filter(({ values }) => values.length > 1)
+    .map(({ path, values }) => `${values.length} values of --${path.join('.')}`)
+    .join(' × ');
+  throw new GekkoError(
+    'fox',
+    `The overrides make ${formatEveryDecimal(count)} variants (${factors}), more than the ${MAX_VARIANTS} Fox makes at most: give them fewer values`,
+  );
+};
+
 /**
  * The variants of `template`, one for each combination of the values of the overrides: the cartesian product of their lists and ranges,
  * the first option's values changing last (variant 1 takes the first value of every option, variant 2 the second value of the last
  * option), numbered from 1. Each is a deep copy of the template with its values merged over it (lodash's merge, so that a key set
  * inside a block keeps the block's other keys), and is labelled with the values that tell it from the others, the options of a single
- * value left out. Without overrides, the template is the one variant.
+ * value left out. Without overrides, the template is the one variant. A GekkoError refuses more than MAX_VARIANTS variants before any
+ * is made.
+ *
+ * A labelled variant's PerformanceReporter entries take its label, which the reporter writes after the id of its row (the values of
+ * the strategy block): without it, the rows of variants that differ outside that block (a fee, a balance) could not be told apart. An
+ * entry with a label of its own keeps it.
  */
 export const generateVariants = (template: Template, overrides: Overrides): Variant[] => {
   const choices = choicesOf(overrides);
+  checkVariantCount(choices);
   const combinations = choices.reduce<OverrideValue[][]>(
     (partials, { values }) => partials.flatMap(partial => values.map(value => [...partial, value])),
     [[]],
   );
-  return combinations.map((values, index) => ({
-    variant: index + 1,
-    label: choices
+  return combinations.map((values, index) => {
+    const label = choices
       .flatMap(({ path, values: tried }, position) => (tried.length > 1 ? [`--${path.join('.')} ${values[position]}`] : []))
-      .join(' '),
+      .join(' ');
     // setWith with Object builds plain objects for the keys of the path, numbers included: merged into an array of the template (a
     // plugin, `plugins.3.fileName`), an object of index keys sets that item and keeps the others
-    configuration: merge(
+    const configuration: Template = merge(
       cloneDeep(template),
       choices.reduce((variant, { path }, position) => setWith(variant, path, values[position], Object), {}),
-    ),
-  }));
+    );
+    if (label) for (const entry of reportersOf(configuration)) if (entry.label === undefined) entry.label = label;
+    return { variant: index + 1, label, configuration };
+  });
 };
 
 const prefixIssues = (prefix: PropertyKey[], issues: readonly Issue[]): Issue[] =>
@@ -108,17 +139,34 @@ const strategyIssues = (plugins: Configuration['plugins'], strategy: Configurati
   return prefixIssues(['strategy'], schema?.safeParse(omit(strategy, 'name')).error?.issues ?? []);
 };
 
-/** A plugin entry checked by the schema of its plugin, as the pipeline checks it */
-const pluginIssues = (entry: { name: string }, index: number): Issue[] => {
+/** The events a plugin entry's plugin emits: none for a name the registry does not hold, which pluginIssues refuses */
+const eventsOf = ({ name }: { name: string }) => (Object.hasOwn(PLUGINS, name) ? PLUGINS[name].getStaticConfiguration().eventsEmitted : []);
+
+/**
+ * A plugin entry checked as the pipeline checks it: its name, which the registry must hold, the modes of its plugin, which must
+ * include backtest (checkPluginsModesCompatibility: the CandleWriter, the EventSubscriber and Supervision do not), its options by the
+ * schema of its plugin, and the events its plugin emits, which no plugin of an entry before it may emit (checkPluginsDuplicateEvents:
+ * the PortfolioAnalyzer and the RoundTripAnalyzer both emit performanceReport).
+ */
+const pluginIssues = (entry: { name: string }, index: number, plugins: readonly { name: string }[]): Issue[] => {
+  const at = ['plugins', index, 'name'];
   // Its own keys only: bundled by `bun build`, the namespace of the registry is a plain object, which inherits 'constructor'
   if (!Object.hasOwn(PLUGINS, entry.name)) {
     const names = Object.keys(PLUGINS).sort();
-    return [
-      { message: `No plugin is named ${showValue(entry.name)}: the plugins are ${listInWords(names)}`, path: ['plugins', index, 'name'] },
-    ];
+    return [{ message: `No plugin is named ${showValue(entry.name)}: the plugins are ${listInWords(names)}`, path: at }];
   }
-  const { schema } = PLUGINS[entry.name].getStaticConfiguration();
-  return prefixIssues(['plugins', index], schema?.safeParse(entry).error?.issues ?? []);
+  const { schema, modes } = PLUGINS[entry.name].getStaticConfiguration();
+  const issues: Issue[] = modes.includes('backtest')
+    ? []
+    : [{ message: `Plugin ${entry.name} does not support backtest mode, only ${listInWords(modes)}`, path: at }];
+  issues.push(...prefixIssues(['plugins', index], schema?.safeParse(entry).error?.issues ?? []));
+  const emitted = eventsOf(entry);
+  const earlier = plugins.slice(0, index).findIndex(other => eventsOf(other).some(event => emitted.includes(event)));
+  if (earlier === -1) return issues;
+  const shared = emitted.filter(event => eventsOf(plugins[earlier]).includes(event));
+  const emitters = `${plugins[earlier].name} (plugins[${earlier}]) and ${entry.name}`;
+  const message = `Plugins ${emitters} are broadcasting the same ${pluralize('event', shared.length)}: ${listInWords(shared)}. This behavior is unsupported.`;
+  return [...issues, { message, path: at }];
 };
 
 /**
@@ -149,4 +197,21 @@ export const validateVariants = (variants: readonly Variant[]) => {
     if (issues.length)
       throw new GekkoError('fox', `Variant ${variant}${label ? ` (${label})` : ''} is invalid:\n${z.prettifyError({ issues })}`);
   }
+};
+
+/**
+ * Warns, once, of the variants without a PerformanceReporter, all of them when the template has none: no CSV row will record their
+ * figures. Not refused: an analyzer logs its report at info level, and prints it as a table with enableConsoleTable, in the output of
+ * each worker.
+ */
+export const warnOfUnreportedVariants = (variants: readonly Variant[]) => {
+  const unreported = variants.filter(({ configuration }) => !reportersOf(configuration).length).map(({ variant }) => String(variant));
+  const count = unreported.length;
+  if (!count) return;
+  warning(
+    'fox',
+    count === variants.length
+      ? `The template has no ${REPORTER_PLUGIN}: no CSV row will record the figures of its ${pluralize('variant', count)}`
+      : `${pluralize('Variant', count)} ${listInWords(unreported)} ${pluralize('has', count, 'have')} no ${REPORTER_PLUGIN}: no CSV row will record ${pluralize('its', count, 'their')} figures`,
+  );
 };
