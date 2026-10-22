@@ -15,7 +15,7 @@ import type { SMACrossoverStrategyParams } from './smaCrossover.types';
 
 // The fixtures used to be cast to `any`, and the fill of an order to carry its id alone: the PositionTracker read the pair of the first
 // SELL that filled, undefined, and threw, so the three oscillating benches measured nothing while `bun run bench` passed (see
-// @utils/bench/bench.mock). They are what the StrategyManager hands the strategy: a bucket of candles, the SMA as the indicator computes
+// @gekko/shared/utils/bench/bench.mock). They are what the StrategyManager hands the strategy: a bucket of candles, the SMA as the indicator computes
 // it, the tools, and the fill of each order as the Trader relays it.
 
 const PAIR: TradingPair = 'BTC/USDT';

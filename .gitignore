@@ -12,8 +12,9 @@ coverage
 *.sql
 *.sql-shm
 *.sql-wal
-# The PerformanceReporter's default CSV and the lock taken while writing it
-performance_reports.csv*
+# The PerformanceReporter's CSV files (its default name, and the names Fox's templates give theirs) and the locks taken while
+# writing them
+*performance_reports.csv*
 # A configuration copied from a tracked one to hold your own keys, such as config/realtime-trader.local.yml
 config/*.local.*
 packages/strategies/src/custom

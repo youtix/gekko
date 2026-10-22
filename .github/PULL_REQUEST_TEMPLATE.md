@@ -15,7 +15,7 @@
 - [ ] Type checks pass (`bun run type:check`)
 - [ ] Tests pass with coverage (`bun run test:coverage`)
 - [ ] The end-to-end tests pass (`bun run test:e2e`)
-- [ ] The executable builds (`bun run build:exec`)
+- [ ] Both executables build (`bun run build:exec`: `dist/gekko` and `dist/fox`)
 - [ ] I've added or updated documentation (if applicable)
 
 ## Screenshots or Additional Context (optional)

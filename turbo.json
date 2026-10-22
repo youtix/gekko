@@ -36,8 +36,10 @@
       "dependsOn": ["transit"],
       "outputs": []
     },
+    // The two test tasks also read the local copies of config/ (config/<name>.local.yml), which git ignores and the documentation
+    // test checks as it checks the tracked examples
     "//#test:scripts": {
-      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**"],
+      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**", "config/*.local.*"],
       "outputs": []
     },
     "test:coverage": {
@@ -45,7 +47,7 @@
       "outputs": []
     },
     "//#test:coverage:scripts": {
-      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**"],
+      "inputs": ["$TURBO_DEFAULT$", "packages/strategies/src/custom/**", "config/*.local.*"],
       "outputs": []
     },
     "test:e2e": {
@@ -60,10 +62,6 @@
       "cache": false
     },
     "dev": {
-      "cache": false,
-      "persistent": true
-    },
-    "dev:fox": {
       "cache": false,
       "persistent": true
     }

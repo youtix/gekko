@@ -8,6 +8,7 @@
     "resolveJsonModule": true,
     "allowJs": true,
     "skipLibCheck": true,
+    "noEmit": true,
     "paths": {
       "@gekko/shared/*": ["./packages/shared/src/*"],
       "@gekko/schemas/*": ["./packages/schemas/src/*"],

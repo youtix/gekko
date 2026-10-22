@@ -65,7 +65,7 @@ const isAbortError = (failure: unknown) => failure instanceof Error && failure.n
  * Mocks what every realtime flow mocks, to be called at the top of the file, before anything imports the pipeline: winston, whose lines
  * the flows read; ccxt, whose mock serves the candles; and the fetcher of the Telegram bots, so that no request leaves the test. Not the
  * clock: the flows run on real minutes, with the real Heart, under the fake timers of startFakeClock. They shrank ONE_MINUTE to 50 ms
- * and mocked the Heart, which made src carry literals for the durations that had to stay real, and every scenario race 500 ms of wall
+ * and mocked the Heart, which made the sources carry literals for the durations that had to stay real, and every scenario race 500 ms of wall
  * clock. Also gives the tests and hooks of the file REALTIME_TEST_TIMEOUT. Under fake timers, Bun checks that timeout only as it
  * advances them: a test that awaits a promise that never settles, the clock still, hangs whatever its timeout, so a flow waits on a run
  * through the functions below, whose every wait is bounded in fake time.
