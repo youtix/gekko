@@ -1,6 +1,6 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { describe, expect, it, vi } from 'vitest';
-import { Configuration } from './configuration';
+import { Configuration } from '../configuration/configuration';
 import { createRunContext } from './runContext.helper';
 import { Services } from './services';
 

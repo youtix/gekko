@@ -22,7 +22,7 @@ export class Services {
   public storage() {
     if (this.storageInstance) return this.storageInstance;
     const storageConfig = this.configuration.getStorage();
-    if (!storageConfig?.type) throw new GekkoError('injecter', 'Missing or unknown storage.');
+    if (!storageConfig?.type) throw new GekkoError('configuration', 'Missing or unknown storage.');
     this.storageInstance = new SQLiteStorage(storageConfig, this.configuration.getWatch());
     return this.storageInstance;
   }
@@ -35,7 +35,7 @@ export class Services {
   public exchange() {
     if (this.exchangeInstance) return this.exchangeInstance;
     const exchangeConfig = this.configuration.getExchange();
-    if (!exchangeConfig?.name) throw new GekkoError('injecter', 'Missing or unknown exchange.');
+    if (!exchangeConfig?.name) throw new GekkoError('configuration', 'Missing or unknown exchange.');
     const watch = this.configuration.getWatch();
     switch (exchangeConfig.name) {
       case 'binance':
@@ -49,7 +49,7 @@ export class Services {
         this.exchangeInstance = new PaperTradingBinanceExchange(exchangeConfig, watch);
         break;
       default:
-        throw new GekkoError('injecter', 'Missing or unknown exchange.');
+        throw new GekkoError('configuration', 'Missing or unknown exchange.');
     }
     return this.exchangeInstance;
   }

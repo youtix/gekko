@@ -51,8 +51,8 @@ export class SQLiteStorage extends Storage {
         each(symbols, symbol => this.createTable(symbol));
       }
     } catch (error) {
-      // The storage never reaches the injecter, whose closeStorage() closes the one it created: a backtest refused for a pair without
-      // a table left its connection open, holding the database, until the garbage collector closed it
+      // The storage never reaches the run's services, whose closeStorage() closes the one they created: a backtest refused for a pair
+      // without a table left its connection open, holding the database, until the garbage collector closed it
       this.db.close(false);
       throw error;
     }

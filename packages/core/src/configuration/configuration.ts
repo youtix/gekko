@@ -1,24 +1,40 @@
-import { Configuration } from '../run/configuration';
-import { getCurrentRunContext } from '../run/currentRun.helper';
-import type { ConfigurationReader } from '../run/runContext.types';
-import { readConfigurationFromEnvironment } from './configuration.helper';
+import type { Configuration as ConfigurationModel } from '@gekko/schemas/configuration/configuration.types';
+import { find } from 'lodash-es';
 
-// Transitional, for the monorepo wave: the `config` singleton the modules not yet converted to a RunContext read. It reads the
-// configuration of the run in progress (setCurrentRunContext) or, for a run started without one (the executable until its main()
-// builds one), the file GEKKO_CONFIG_FILE_PATH names, as the singleton did. This module goes once no module imports it: the class
-// lives in run/configuration.ts, the file helpers in configuration.helper.ts.
+/**
+ * The configuration of one run, as the schema outputs it (readConfigurationFile or parseConfiguration): a getter per section. Built
+ * by createRunContext and read through the RunContext the plugins and the orders receive; the streams, the exchanges and the storage
+ * receive the sections they read instead (see Services). The file helpers (loadConfigurationFile, parseConfiguration,
+ * readConfigurationFile) are beside it, in configuration.helper.ts.
+ */
+export class Configuration {
+  constructor(private readonly configuration: ConfigurationModel) {}
 
-let fallback: Configuration | undefined;
+  public showLogo() {
+    return this.configuration.showLogo;
+  }
 
-const currentConfiguration = () =>
-  getCurrentRunContext()?.configuration ?? (fallback ??= new Configuration(readConfigurationFromEnvironment()));
+  public getPlugins() {
+    return this.configuration.plugins;
+  }
 
-/** @deprecated Transitional: receive the configuration through the RunContext instead (constructor injection, see CLAUDE.md). */
-export const config: ConfigurationReader = {
-  showLogo: () => currentConfiguration().showLogo(),
-  getPlugins: () => currentConfiguration().getPlugins(),
-  getStrategy: () => currentConfiguration().getStrategy(),
-  getWatch: () => currentConfiguration().getWatch(),
-  getStorage: () => currentConfiguration().getStorage(),
-  getExchange: () => currentConfiguration().getExchange(),
-};
+  public getStrategy() {
+    return this.configuration.strategy;
+  }
+
+  public getWatch() {
+    return this.configuration.watch;
+  }
+
+  /** The storage section, in backtest mode or with a CandleWriter: the only two users of a storage. Undefined otherwise. */
+  public getStorage() {
+    const { watch, plugins, storage } = this.configuration;
+    if (storage && (watch.mode === 'backtest' || find(plugins, { name: 'CandleWriter' }))) {
+      return storage;
+    }
+  }
+
+  public getExchange() {
+    return this.configuration.exchange;
+  }
+}

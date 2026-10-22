@@ -38,21 +38,11 @@ export type PluginRegistry = Record<string, PluginClass>;
 export type GekkoPipelineOptions = {
   /** The plugin classes the configuration's `plugins[].name` entries pick from */
   plugins: PluginRegistry;
-  /**
-   * The run's configuration and services (createRunContext). Optional during the monorepo wave only: without it the pipeline runs on
-   * the transitional `config` and `inject` singletons, the configuration GEKKO_CONFIG_FILE_PATH names.
-   */
-  context?: RunContext;
+  /** The run's configuration and services (createRunContext), which every step reads and each plugin is built with */
+  context: RunContext;
   /** Ends the run once aborted (see gekkoPipeline) */
   signal?: AbortSignal;
 };
-
-/**
- * What each step of gekkoPipeline receives besides the plugins' entries: the options of gekkoPipeline, with the run's context, which
- * every step reads its configuration and its services from. During the monorepo wave only, the context may be the transitional one,
- * built on the `config` and `inject` singletons when gekkoPipeline was given none.
- */
-export type PipelineStepOptions = GekkoPipelineOptions & { context: RunContext };
 
 export type PipelineContext = {
   name: string;

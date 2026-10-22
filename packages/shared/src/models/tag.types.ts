@@ -7,7 +7,6 @@ export type Tag =
   | 'fox'
   | 'gekko'
   | 'order'
-  | 'injecter'
   | 'roundtrip analyzer'
   | 'portfolio analyzer'
   | 'performance reporter'

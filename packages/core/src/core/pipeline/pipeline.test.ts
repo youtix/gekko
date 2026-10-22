@@ -8,7 +8,6 @@ import {
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import type { PipelineContext, PluginRegistry } from './pipeline.types';
 import { warning } from '../../logger/logger';
-import { getCurrentRunContext, setCurrentRunContext } from '../../run/currentRun.helper';
 import type { RunContext } from '../../run/runContext.types';
 import { CandleDateranges } from '../../storage/storage.types';
 import { useTimeZone } from '@gekko/shared/utils/date/date.mock';
@@ -19,10 +18,6 @@ import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import * as pipelineModule from './pipeline';
 import { PluginsEmitSameEventError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
-
-// Transitional, for the monorepo wave: pipeline.ts imports the `inject` singleton for its fallback, whose Services build the SQLite
-// storage, and bun:sqlite cannot load under vitest. Goes with the fallback.
-vi.mock('../../run/services', () => ({ Services: vi.fn() }));
 
 vi.mock('../../logger/logger', () => ({
   debug: vi.fn(),
@@ -725,7 +720,6 @@ describe('Pipeline Service', () => {
     afterEach(() => {
       delete registry.Sender;
       delete registry.Receiver;
-      setCurrentRunContext(undefined);
     });
 
     describe('with valid plugins', () => {
@@ -829,20 +823,6 @@ describe('Pipeline Service', () => {
 
       it(`should stop after ${lastStep}`, () => {
         expect(journal).toEqual(documentedOrder.slice(0, documentedOrder.indexOf(lastStep) + 1));
-      });
-    });
-
-    // Transitional, for the monorepo wave: goes with the fallback of gekkoPipeline and the `config` and `inject` singletons
-    describe('transitional: the run in progress', () => {
-      it('should make the context it is given the run in progress, which the singletons read', async () => {
-        await pipelineModule.gekkoPipeline({ plugins, context });
-        expect(getCurrentRunContext()).toBe(context);
-      });
-
-      it('should run the steps on the singletons, which read the run in progress, when given no context', async () => {
-        setCurrentRunContext(context);
-        await pipelineModule.gekkoPipeline({ plugins });
-        expect(journal).toEqual(documentedOrder);
       });
     });
   });

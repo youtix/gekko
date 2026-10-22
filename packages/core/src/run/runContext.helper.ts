@@ -1,5 +1,5 @@
 import { parseConfiguration } from '../configuration/configuration.helper';
-import { Configuration } from './configuration';
+import { Configuration } from '../configuration/configuration';
 import type { RunContext } from './runContext.types';
 import { Services } from './services';
 

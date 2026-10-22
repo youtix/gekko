@@ -200,7 +200,7 @@ describe('SQLiteStorage', () => {
     });
 
     // Once the database is open, a failure of the rest of its setup left the connection open: the storage never reached the
-    // injecter, whose closeStorage() closes the one it created
+    // run's services, whose closeStorage() closes the one they created
     describe('when its setup fails once the database is open', () => {
       const locked = Object.assign(new Error('database is locked'), { name: 'SQLiteError', code: 'SQLITE_BUSY' });
       /** Every statement holding `statement` throws `locked`, the others run */

@@ -5,11 +5,7 @@ import {
   STRATEGY_CREATE_ORDER_EVENT,
 } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { GekkoPipelineOptions, PipelineContext, PipelineStepOptions } from './pipeline.types';
-import { config } from '../../configuration/configuration';
-import { inject } from '../../injecter/injecter';
-import { setCurrentRunContext } from '../../run/currentRun.helper';
-import type { RunContext } from '../../run/runContext.types';
+import { GekkoPipelineOptions, PipelineContext } from './pipeline.types';
 import { debug, warning } from '../../logger/logger';
 import { keepDuplicates } from '@gekko/shared/utils/collection/array.utils';
 import { startOfMinuteUTC } from '@gekko/shared/utils/date/date.utils';
@@ -20,7 +16,10 @@ import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import { PluginsEmitSameEventError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
 
-export const launchStream = async (context: PipelineContext, { context: run, signal }: Pick<PipelineStepOptions, 'context' | 'signal'>) => {
+export const launchStream = async (
+  context: PipelineContext,
+  { context: run, signal }: Pick<GekkoPipelineOptions, 'context' | 'signal'>,
+) => {
   const plugins = compact(map(context, p => p.plugin));
   await streamPipelines[run.configuration.getWatch().mode](plugins, run, signal);
   return context;
@@ -30,7 +29,7 @@ export const launchStream = async (context: PipelineContext, { context: run, sig
  * Hands each plugin the run's services its static configuration names (`inject`): `setExchange(services.exchange())` for 'exchange',
  * `setStorage(services.storage())` for 'storage'
  */
-export const injectServices = async (context: PipelineContext, { context: { services } }: Pick<PipelineStepOptions, 'context'>) =>
+export const injectServices = async (context: PipelineContext, { context: { services } }: Pick<GekkoPipelineOptions, 'context'>) =>
   each(context, pipeline => {
     each(pipeline.inject, serviceName => {
       // @ts-expect-error TODO fix complex typescript error
@@ -57,7 +56,7 @@ export const wirePlugins = async (context: PipelineContext) => {
 
 export const createPlugins = async (
   context: PipelineContext,
-  { plugins, context: run }: Pick<PipelineStepOptions, 'plugins' | 'context'>,
+  { plugins, context: run }: Pick<GekkoPipelineOptions, 'plugins' | 'context'>,
 ) =>
   map(context, pluginCtx => {
     const { name, parameters } = pluginCtx;
@@ -68,7 +67,7 @@ export const createPlugins = async (
     return { ...pluginCtx, plugin };
   });
 
-export const preloadMarkets = async (context: PipelineContext, { context: { services } }: Pick<PipelineStepOptions, 'context'>) => {
+export const preloadMarkets = async (context: PipelineContext, { context: { services } }: Pick<GekkoPipelineOptions, 'context'>) => {
   const exchange = services.exchange();
   debug('pipeline', `Preloading Markets data for ${exchange.getExchangeName()}`);
   await exchange.loadMarkets();
@@ -136,7 +135,7 @@ export const checkPluginsDependencies = async (context: PipelineContext) => {
 
 export const validatePluginsSchema = async (
   context: PipelineContext,
-  { context: { configuration } }: Pick<PipelineStepOptions, 'context'>,
+  { context: { configuration } }: Pick<GekkoPipelineOptions, 'context'>,
 ) => {
   const parameters = configuration.getPlugins();
   return map(context, (plugin, i) => {
@@ -151,7 +150,7 @@ export const validatePluginsSchema = async (
 
 export const checkPluginsModesCompatibility = async (
   context: PipelineContext,
-  { context: { configuration } }: Pick<PipelineStepOptions, 'context'>,
+  { context: { configuration } }: Pick<GekkoPipelineOptions, 'context'>,
 ) => {
   const { mode } = configuration.getWatch();
   return each(context, ({ name, modes }) => {
@@ -159,7 +158,7 @@ export const checkPluginsModesCompatibility = async (
   });
 };
 
-export const getPluginsStaticConfiguration = async (context: PipelineContext, { plugins }: Pick<PipelineStepOptions, 'plugins'>) => {
+export const getPluginsStaticConfiguration = async (context: PipelineContext, { plugins }: Pick<GekkoPipelineOptions, 'plugins'>) => {
   // Bundled by `bun build`, the namespace is a plain object: arbitrary key order, and inherited keys such as 'constructor'
   const pluginNames = Object.keys(plugins).sort();
   return map(context, plugin => {
@@ -176,7 +175,7 @@ export const getPluginsStaticConfiguration = async (context: PipelineContext, { 
 
 export const checkDateRange = async (
   context: PipelineContext,
-  { context: { configuration, services } }: Pick<PipelineStepOptions, 'context'>,
+  { context: { configuration, services } }: Pick<GekkoPipelineOptions, 'context'>,
 ) => {
   const { pairs, mode, daterange } = configuration.getWatch();
   if (mode === 'backtest' && daterange) {
@@ -213,10 +212,6 @@ export const checkDateRange = async (
  * and the streams of the mode receive what they read of it (see streamPipelines).
  */
 export const gekkoPipeline = (options: GekkoPipelineOptions) => {
-  // Transitional (the monorepo wave): a caller without a context runs on the configuration GEKKO_CONFIG_FILE_PATH names and the
-  // services built from it, through the `config` and `inject` singletons; one with a context makes it theirs too
-  if (options.context) setCurrentRunContext(options.context);
-  const context: RunContext = options.context ?? { configuration: config, services: inject };
   return [
     checkDateRange,
     getPluginsStaticConfiguration,
@@ -230,5 +225,5 @@ export const gekkoPipeline = (options: GekkoPipelineOptions) => {
     wirePlugins,
     injectServices,
     launchStream,
-  ].reduce(async (pipeline, step) => step(await pipeline, { ...options, context }), Promise.resolve(context.configuration.getPlugins()));
+  ].reduce(async (pipeline, step) => step(await pipeline, options), Promise.resolve(options.context.configuration.getPlugins()));
 };

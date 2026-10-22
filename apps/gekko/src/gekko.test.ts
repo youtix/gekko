@@ -162,7 +162,7 @@ describe('main', () => {
       // Importer mode without CandleWriter: the services' storage() would throw, as the real one does
       vi.mocked(gekkoPipeline).mockResolvedValue([]);
       vi.mocked(context.services.storage).mockImplementation(() => {
-        throw new Error('[INJECTER] Missing or unknown storage.');
+        throw new Error('[CONFIGURATION] Missing or unknown storage.');
       });
     });
 

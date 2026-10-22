@@ -1,4 +1,4 @@
-import type { Configuration } from './configuration';
+import type { Configuration } from '../configuration/configuration';
 import type { Services } from './services';
 
 /** What a run reads of its configuration: the getters of Configuration, which a test can stand in for with a literal */

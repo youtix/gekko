@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseConfiguration } from '../configuration/configuration.helper';
+import { parseConfiguration } from './configuration.helper';
 import { Configuration } from './configuration';
 
 /** A paper trading configuration as a file holds it, before the schema checks it */

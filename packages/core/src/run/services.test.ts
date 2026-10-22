@@ -88,7 +88,7 @@ describe('Services', () => {
       ${{ database: 'gekko.db' }}
     `('refuses to build a storage from the storage section $section', ({ section }) => {
       configuration.getStorage.mockReturnValue(section);
-      expect(() => services.storage()).toThrow(new GekkoError('injecter', 'Missing or unknown storage.'));
+      expect(() => services.storage()).toThrow(new GekkoError('configuration', 'Missing or unknown storage.'));
     });
   });
 
@@ -141,7 +141,7 @@ describe('Services', () => {
       ${{ name: 'unknown' }}
     `('refuses to build an exchange from the exchange section $section', ({ section }) => {
       configuration.getExchange.mockReturnValue(section);
-      expect(() => services.exchange()).toThrow(new GekkoError('injecter', 'Missing or unknown exchange.'));
+      expect(() => services.exchange()).toThrow(new GekkoError('configuration', 'Missing or unknown exchange.'));
     });
   });
 });
