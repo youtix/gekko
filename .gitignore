@@ -17,5 +17,8 @@ coverage
 *performance_reports.csv*
 # A configuration copied from a tracked one to hold your own keys, such as config/realtime-trader.local.yml
 config/*.local.*
+# The private strategies, but the placeholder index.ts git tracks, and their directory before the monorepo, where a checkout updated
+# since may still hold some: not ignored there, they showed in git status and `git add -A` staged them
 packages/strategies/src/custom
+/src/strategies/custom
 documentation/dev
