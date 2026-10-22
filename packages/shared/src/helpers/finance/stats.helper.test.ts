@@ -16,6 +16,7 @@ import {
   calculateVolatility,
   calculateWinRate,
   extractTopMAEs,
+  toPercent,
 } from './stats.helper';
 
 /** An equity curve of these values, a second apart */
@@ -64,6 +65,19 @@ describe('calculateElapsedYears', () => {
     expect(() => calculateElapsedYears(Date.UTC(2025, 0, 1), Date.UTC(2024, 0, 1))).toThrow(
       'endDate must be greater than or equal to startDate',
     );
+  });
+});
+
+describe('toPercent', () => {
+  it.each`
+    description                                 | part      | whole     | expected
+    ${'a round trip of 9.79 on 310000'}         | ${9.79}   | ${310000} | ${0.00315806451612903}
+    ${'1 of 3, 33.333333333333336 in binary'}   | ${1}      | ${3}      | ${33.3333333333333}
+    ${'0.07 of 1, 7.000000000000001 in binary'} | ${0.07}   | ${1}      | ${7}
+    ${'a loss'}                                 | ${-5.001} | ${100}    | ${-5.001}
+    ${'nothing'}                                | ${0}      | ${100}    | ${0}
+  `('should give $expected % for $description', ({ part, whole, expected }) => {
+    expect(toPercent(part, whole)).toBe(expected);
   });
 });
 

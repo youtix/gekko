@@ -88,9 +88,11 @@ export const calculateElapsedYears = (startDate: number, endDate: number): numbe
 
 /**
  * part as a percentage of whole: part moved two places in decimal, divided once, and rid of the noise of that division (see
- * toSignificantDigits)
+ * toSignificantDigits). The one way a percentage is worked out from two figures, those of the reports here as the profit of a round trip
+ * (its P&L in % of its entry equity) and the fee rate of an order: written out again elsewhere, a change to its rounding would leave
+ * them worked out another way.
  */
-const toPercent = (part: number, whole: number): number => toSignificantDigits(shiftDecimalPoint(part, 2) / whole);
+export const toPercent = (part: number, whole: number): number => toSignificantDigits(shiftDecimalPoint(part, 2) / whole);
 
 /**
  * Calculates total return as a percentage.
