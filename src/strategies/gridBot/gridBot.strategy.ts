@@ -1,5 +1,6 @@
 import { GekkoError } from '@errors/gekko.error';
 import { pickTradedPair } from '@helpers/strategy/positionTracker/positionTracker.helper';
+import type { ExchangeEvent } from '@models/event.types';
 import type { LogLevel } from '@models/logLevel.types';
 import type { OrderSide } from '@models/order.types';
 import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
@@ -26,6 +27,7 @@ import type {
   GridLayout,
   GridSpacing,
   LevelState,
+  OutOfRangeCount,
   OutOfRangeSide,
   RebalancePlan,
 } from './gridBot.types';
@@ -44,6 +46,7 @@ import {
   getRebalanceOrderPrice,
   hasOnlyOneSide,
   inferPricePrecision,
+  isResetSide,
   resolveSpacing,
   roundPrice,
   validateConfig,
@@ -63,9 +66,9 @@ import {
  *   adjacent prices, as fixed spacing) or logarithmic (a ratio between adjacent prices). One under the round-trip fee, two maker fees,
  *   is warned of once
  * - With atr spacing, the step is spacingValue × the ATR of atrPeriod timeframe candles on the candle the grid is built around, a fixed
- *   step from then on: rounded to the tick, and raised to the smallest step at which every level breaks even on the maker fee, one tick
- *   at least, with a warning (see resolveSpacing). The run stops on the first candle after the warmup when the ATR has no value yet:
- *   warmup.candleCount must be at least atrPeriod + 1
+ *   step from then on, until a reset resolves it again from the ATR of the last candle: rounded to the tick, and raised to the smallest
+ *   step at which every level breaks even on the maker fee, one tick at least, with a warning (see resolveSpacing). The run stops on the
+ *   first candle after the warmup when the ATR has no value yet: warmup.candleCount must be at least atrPeriod
  * - A grid whose lowest BUY would be at or below 0, or whose spacing rounds two adjacent prices to the same tick, stops the run: around
  *   the close it starts on, and again around the price a rebalance ended at, before it is placed again and when the grid is built
  * - Prices are rounded to the tick of the market (precision.price) as they are written, in decimal, a tie upwards, or to the tick at the
@@ -84,9 +87,16 @@ import {
  * - An order that errored while it may be live on the exchange (its creation lost on the network, its poll failed for good) is never
  *   placed again: a grid order is left out with a warning, the run stopping once more than retryOnError orders are in that case or no
  *   level holds an order, and a rebalance stops the run
- * - The grid stays in place when the price leaves its range: a timeframe candle that closes out of the range is warned of once, until
- *   one closes back at the grid's price next to the bound it left, where the grid trades again, logged once at info, or out on the
- *   other side. A fill that leaves orders on one side of the grid only is warned of once, until a fill gives it both sides again
+ * - The grid stays in place when the price leaves its range, unless resetMode arms a reset on that side: a timeframe candle that
+ *   closes out of the range is warned of once, until one closes back at the grid's price next to the bound it left, where the grid
+ *   trades again, logged once at info, or out on the other side. A fill that leaves orders on one side of the grid only is warned of
+ *   once, until a fill gives it both sides again
+ * - With resetMode 'up', 'down' or 'both', resetConfirmCandles timeframe candles closing in a row beyond the grid on a side it arms
+ *   reset the grid: its open orders are canceled, and once the last has ended the grid is placed again around the price of that last
+ *   event, as at the start, the free balances rebalanced first, which realizes what the breakout lost, and an atr step resolved again.
+ *   Meanwhile a fill turns no level and a canceled or refused order is not placed again: the new grid replaces every level. An order
+ *   that may be live untracked, from before the reset or during it, stops the run where the new grid would be built over it. The
+ *   resetCooldownCandles timeframe candles of the new grid are not counted towards another reset
  */
 export class GridBot implements Strategy<GridBotStrategyParams> {
   /** Parses the strategy block before the strategy is created: tools.strategyParams is its output */
@@ -134,6 +144,16 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private rebalanceOrderId?: UUID;
   private rebalanceRetryCount = 0;
 
+  // Reset state (see resetMode)
+  /** Whether a reset waits for the orders it canceled to end: the new grid is placed once the last has ended (see rebuildOnceEnded) */
+  private awaitingReset = false;
+  /** The closes beyond the grid counted towards a reset, in a row on a side resetMode arms: null while none is (see countTowardsReset) */
+  private outOfRange: OutOfRangeCount | null = null;
+  /** Timeframe candles left of the cooldown of the grid a reset built, not counted towards another reset (see resetCooldownCandles) */
+  private cooldownLeft = 0;
+  /** The resets started in the run: the number of the last one, which its lines name */
+  private resetCount = 0;
+
   // Cached price precision
   private priceDecimals = 2;
   private priceStep?: number;
@@ -161,15 +181,24 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     if (open.length) this.refuseOpenOrders(open, tools);
   }
 
-  onEachTimeframeCandle({ candle, tools }: OnCandleEventParams<GridBotStrategyParams>, ...indicators: IndicatorResults[]): void {
+  /**
+   * Reads the ATR of an atr grid, then, once the grid is in place, counts the close towards a reset (see countTowardsReset), starts the
+   * reset on the close that completes the count (see startReset), and otherwise warns of a close out of the range, once per side
+   */
+  onEachTimeframeCandle({ candle, portfolio, tools }: OnCandleEventParams<GridBotStrategyParams>, ...indicators: IndicatorResults[]): void {
     // The ATR of the last candle, read on every candle, the warmup included: a grid built or rebuilt between two candles takes it from
     // the candle before
     if (tools.strategyParams.spacingType === 'atr') {
       const results = indicators[0]?.results;
       this.atr = isFiniteNumber(results) ? results : null;
     }
-    if (!this.gridBounds || !this.reentryPrices || this.awaitingRebalance) return;
+    // No grid in place: not built yet, waiting for its rebalance, or for the orders a reset canceled to end
+    if (!this.gridBounds || !this.reentryPrices || this.awaitingRebalance || this.awaitingReset) return;
     const close = candle.get(this.pair)!.close;
+    const range = `grid range [${this.gridBounds.min}, ${this.gridBounds.max}]`;
+
+    // The reset says why in its own line, in place of the warning below
+    if (this.countTowardsReset(close, range, tools)) return this.startReset(close, range, portfolio, tools);
 
     // Logged once each time the side of the grid the price is out on changes, back in range at the grid's price next to the bound it
     // left (see getOutOfRangeSide). The warning used to be logged on every timeframe candle out of the range, each one relayed to
@@ -178,10 +207,9 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     if (side === this.outOfRangeSide) return;
     this.outOfRangeSide = side;
 
-    const range = `grid range [${this.gridBounds.min}, ${this.gridBounds.max}]`;
     if (side) {
-      const waiting = `its orders waiting for the price to come back to ${this.reentryPrices[side]}`;
-      tools.log('warn', `GridBot: Price ${close} is out of ${range}: the grid stays in place, ${waiting}`);
+      const outcome = this.describeOutOfRange(side, this.reentryPrices[side], tools);
+      tools.log('warn', `GridBot: Price ${close} is out of ${range}: ${outcome}`);
     } else {
       tools.log('info', `GridBot: Price ${close} is back in ${range}`);
     }
@@ -217,22 +245,12 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // wait for it in silence, up to atrPeriod candles, two weeks on 1d. Refused instead, naming the warmup that gives it
     const { spacingType, atrPeriod } = tools.strategyParams;
     if (spacingType === 'atr' && this.atr === null) {
-      const needed = `with atrPeriod ${atrPeriod} it needs ${atrPeriod + 1} timeframe ${pluralize('candle', atrPeriod + 1)}`;
-      const warmup = `so set watch.warmup.candleCount to ${atrPeriod + 1} or more`;
+      const candles = `${atrPeriod + 1} timeframe ${pluralize('candle', atrPeriod + 1)}, the warmup's and the first after it`;
+      const needed = `with atrPeriod ${atrPeriod} it needs ${candles}`;
+      const warmup = `so set watch.warmup.candleCount to ${atrPeriod} or more`;
       this.stopRun(`The ATR has no value yet on the first candle after the warmup: ${needed}, ${warmup}`, tools);
     }
-    this.resolveSpacing(centerPrice, marketData, tools);
-    const layout = this.getLayout(tools);
-
-    const validationError = validateConfig(layout, centerPrice, marketData);
-    if (validationError) this.stopRun(validationError, tools);
-    // A spacing under the round-trip fee makes a grid that loses money at each round trip of a level: a bad grid, not an impossible
-    // one, placed all the same, after one warning
-    const feeWarning = checkRoundTripFee(layout, centerPrice, marketData);
-    if (feeWarning) tools.log('warn', `GridBot: ${feeWarning}`);
-
-    // Always attempt rebalancing first
-    this.prepareGrid(centerPrice, portfolio, tools);
+    this.placeGridAround(centerPrice, portfolio, tools);
   }
 
   onOrderCompleted({ order, exchange, tools }: OnOrderCompletedEventParams<GridBotStrategyParams>): void {
@@ -244,7 +262,11 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
     // Handle grid order completion
     const levelIndex = this.releaseLevel(order.id);
-    if (levelIndex !== undefined) this.turnLevel(levelIndex, tools);
+    if (levelIndex === undefined) return;
+    // Filled before the cancel of a reset reached it: its level is not turned, the new grid replacing every level, built on the
+    // portfolio the fill left
+    if (this.awaitingReset) return this.rebuildOnceEnded(exchange, tools);
+    this.turnLevel(levelIndex, tools);
   }
 
   onOrderCanceled({ order, exchange, tools }: OnOrderCanceledEventParams<GridBotStrategyParams>): void {
@@ -258,6 +280,9 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // Handle grid order cancellation
     const levelIndex = this.releaseLevel(order.id);
     if (levelIndex === undefined) return;
+    // Canceled by a reset: nothing of it is placed again, the new grid replacing every level, built on the portfolio that holds what it
+    // filled first
+    if (this.awaitingReset) return this.rebuildOnceEnded(exchange, tools);
     const level = this.levels[levelIndex];
 
     // What is left of the order is placed again, and the cancel counts as a failed attempt. The whole quantity used to be placed
@@ -312,6 +337,13 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     if (levelIndex === undefined) return;
     const level = this.levels[levelIndex];
 
+    // Ended in error during a reset: not placed again, the new grid replacing every level. One that may be live is left untracked
+    // all the same (see leaveUntracked), which stops the run at the latest where the new grid would be built over it (see rebuild)
+    if (this.awaitingReset) {
+      if (order.mayBeLive) this.leaveUntracked(level, order.reason, tools);
+      return this.rebuildOnceEnded(exchange, tools);
+    }
+
     // Any error used to place the order again. One that may be live on the exchange, where nothing tracks it any more, its creation
     // lost on the network or its poll failed for good, was doubled: two lots bought or sold where the level holds one, or the copy
     // refused for want of the reserve the first one holds. The order says whether it may be (OrderErroredEvent.mayBeLive); any other
@@ -338,6 +370,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.pendingRebalance = undefined;
     this.rebalanceOrderId = undefined;
     this.rebalanceRetryCount = 0;
+    this.awaitingReset = false;
+    this.outOfRange = null;
+    this.cooldownLeft = 0;
+    this.resetCount = 0;
   }
 
   /** The levels and the spacing the grid is built with (see GridLayout): the parameters, their spacing resolved (see resolveSpacing) */
@@ -347,13 +383,145 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   }
 
   /**
-   * Resolves the spacing the grid is built with around the center price (see resolveSpacing), once when it starts: an atr step raised
-   * to the minimum step is warned of
+   * Resolves the spacing the grid is built with around the center price (see resolveSpacing), when it starts and at each reset, an atr
+   * step from the ATR of the last timeframe candle: an atr step raised to the minimum step is warned of
    */
   private resolveSpacing(centerPrice: number, marketData: MarketData, tools: Tools<GridBotStrategyParams>): void {
     const { spacing, warning } = resolveSpacing(tools.strategyParams, centerPrice, marketData, this.atr);
     if (warning) tools.log('warn', `GridBot: ${warning}`);
     this.spacing = spacing;
+  }
+
+  /**
+   * Places the grid around the center price, when it starts and at each reset (see rebuild): its spacing resolved there (see
+   * resolveSpacing), the grid checked there (see validateConfig), then a rebalance first if the free balances need one (see prepareGrid)
+   */
+  private placeGridAround(centerPrice: number, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
+    const marketData = tools.marketData.get(this.pair)!;
+    this.resolveSpacing(centerPrice, marketData, tools);
+    const layout = this.getLayout(tools);
+
+    const validationError = validateConfig(layout, centerPrice, marketData);
+    if (validationError) this.stopRun(validationError, tools);
+    // A spacing under the round-trip fee makes a grid that loses money at each round trip of a level: a bad grid, not an impossible
+    // one, placed all the same, after one warning
+    const feeWarning = checkRoundTripFee(layout, centerPrice, marketData);
+    if (feeWarning) tools.log('warn', `GridBot: ${feeWarning}`);
+
+    // Always attempt rebalancing first
+    this.prepareGrid(centerPrice, portfolio, tools);
+  }
+
+  /**
+   * Counts the close towards a reset of the grid (see resetMode), and says whether it completes the count, resetConfirmCandles closes
+   * in a row: a close beyond a bound on a side resetMode arms adds one to the closes of that side, and any other, back in the range, a
+   * bound included, or out on a side not armed, starts the count again. None is counted in the cooldown of a grid a reset built (see
+   * resetCooldownCandles). A close counted short of the count is logged at debug.
+   */
+  private countTowardsReset(close: number, range: string, tools: Tools<GridBotStrategyParams>): boolean {
+    if (this.cooldownLeft > 0) {
+      this.cooldownLeft--;
+      return false;
+    }
+
+    // Beyond the bounds themselves, not the side of the warning (see getOutOfRangeSide), which keeps a price back in the range between
+    // a bound and the grid's price next to it on the side it left: a wick back in the range would not start the count again
+    const { resetMode, resetConfirmCandles } = tools.strategyParams;
+    const { min, max } = this.gridBounds!;
+    const side = close > max ? 'above' : close < min ? 'below' : null;
+    if (!side || !isResetSide(resetMode, side)) {
+      this.outOfRange = null;
+      return false;
+    }
+
+    const count = this.outOfRange?.side === side ? this.outOfRange.count + 1 : 1;
+    this.outOfRange = { side, count };
+    if (count >= resetConfirmCandles) return true;
+    const towards = `${count} of ${resetConfirmCandles} consecutive timeframe ${pluralize('candle', resetConfirmCandles)} towards a reset`;
+    tools.log('debug', `GridBot: Price ${close} closed ${side} ${range}: ${towards}`);
+    return false;
+  }
+
+  /**
+   * Starts a reset once the closes counted towards it complete the count (see countTowardsReset): every open order of the grid is
+   * canceled, and the new grid is placed once the last has ended (see rebuildOnceEnded), at once around the close when none is open
+   */
+  private startReset(close: number, range: string, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
+    const { side, count } = this.outOfRange!;
+    this.awaitingReset = true;
+    this.resetCount++;
+    this.outOfRange = null;
+
+    const candles = `${count} consecutive timeframe ${pluralize('candle', count)}`;
+    const closed = `Price ${close} closed ${side} ${range} for ${candles} (resetConfirmCandles): reset ${this.resetCount}`;
+    const open = this.levels.filter(({ orderId }) => orderId);
+    // Kept for completeness: a grid whose levels all gave up on their orders, or left them untracked, stopped the run before
+    if (!open.length) {
+      tools.log('info', `GridBot: ${closed}, no order is open, a new grid is built around ${close}`);
+      return this.rebuild(close, portfolio, tools);
+    }
+
+    const canceled = `its ${open.length} open ${pluralize('order', open.length)} ${open.length === 1 ? 'is' : 'are'} canceled`;
+    const ended = `once ${open.length === 1 ? 'it has' : 'they have'} ended`;
+    tools.log('info', `GridBot: ${closed}, ${canceled} and a new grid is built around the price ${ended}`);
+    for (const { orderId } of open) tools.cancelOrder(orderId!);
+  }
+
+  /**
+   * Places the grid of a reset once the last order it canceled has ended, canceled, filled or in error (see rebuild): around the price
+   * of that last event, on the portfolio it carries, which holds what the canceled orders filled first
+   */
+  private rebuildOnceEnded({ price, portfolio }: ExchangeEvent, tools: Tools<GridBotStrategyParams>): void {
+    if (this.orderToLevel.size === 0) this.rebuild(price, portfolio, tools);
+  }
+
+  /**
+   * Places a new grid around `price` once a reset has ended the orders of the grid, as at the start (see placeGridAround): the free
+   * balances rebalanced to the split of the new grid, which realizes what the breakout lost, then the grid built, an atr step resolved
+   * again. Its first resetCooldownCandles timeframe candles are not counted towards another reset. An order of the grid that may be
+   * live on the exchange untracked (see leaveUntracked), from before the reset or during it, stops the run instead: the new grid would
+   * trade beside it, on funds it may hold.
+   */
+  private rebuild(price: number, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
+    if (this.untrackedOrders.length) {
+      const { untracked, them } = this.describeUntracked();
+      this.stopRun(`${untracked}: the grid of reset ${this.resetCount} is not built over ${them}. Check ${them} on the exchange`, tools);
+    }
+
+    // Every level of the new grid is built from nothing, as at the start, the rebalance state being idle already
+    this.awaitingReset = false;
+    this.cooldownLeft = tools.strategyParams.resetCooldownCandles;
+    this.levels = [];
+    this.gridBounds = undefined;
+    this.reentryPrices = undefined;
+    this.quantity = 0;
+    this.retryCount.clear();
+    this.orderToLevel.clear();
+    this.outOfRangeSide = null;
+    this.isOneSided = false;
+    this.outOfRange = null;
+
+    const centerPrice = roundPrice(price, this.priceDecimals, this.priceStep, this.priceSignificantDigits);
+    this.placeGridAround(centerPrice, portfolio, tools);
+  }
+
+  /**
+   * What the grid does while the price is out of its range on `side`, as the warning says it: it stays in place, its orders waiting for
+   * the price to come back to `reentryPrice`, unless resetMode arms a reset on that side (see isResetSide). It then stays for the
+   * candles left of the cooldown of a grid a reset built (see resetCooldownCandles), or until resetConfirmCandles closes in a row
+   * beyond it reset it, from the candle that ends the cooldown on: that one is not counted, the next ones are.
+   */
+  private describeOutOfRange(side: OutOfRangeSide, reentryPrice: number, tools: Tools<GridBotStrategyParams>): string {
+    const { resetMode, resetConfirmCandles, resetCooldownCandles } = tools.strategyParams;
+    const waiting = `its orders waiting for the price to come back to ${reentryPrice}`;
+    if (!isResetSide(resetMode, side)) return `the grid stays in place, ${waiting}`;
+    if (this.cooldownLeft > 0) {
+      const left = `${this.cooldownLeft} timeframe ${pluralize('candle', this.cooldownLeft)} left of its cooldown`;
+      return `the grid stays in place for the ${left} (resetCooldownCandles ${resetCooldownCandles}), ${waiting}`;
+    }
+    const candles = `${resetConfirmCandles} consecutive timeframe ${pluralize('candle', resetConfirmCandles)}`;
+    const close = resetConfirmCandles === 1 ? 'closes' : 'close';
+    return `the grid is reset once ${candles} ${close} ${side} it (resetConfirmCandles), ${waiting} until then`;
   }
 
   /**
@@ -708,8 +876,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const order = `${level.side} ${level.amount} at ${this.priceOf(level)}`;
     this.untrackedOrders.push(order);
     const count = this.untrackedOrders.length;
-    const them = count > 1 ? 'them' : 'it';
-    const untracked = `${this.untrackedOrders.join(', ')} may be live on the exchange without GridBot tracking ${them}`;
+    const { untracked, them } = this.describeUntracked();
     const check = `Check ${them} on the exchange. Last error: ${reason}`;
     if (count > this.retryLimit)
       this.stopRun(`${untracked}: ${count} orders, more than retryOnError (${this.retryLimit}). ${check}`, tools);
@@ -721,6 +888,12 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
       'warn',
       `GridBot: ${order} may be live on the exchange without GridBot tracking it: ${left}. Check it there. Last error: ${reason}`,
     );
+  }
+
+  /** The orders that may be live on the exchange untracked (see leaveUntracked), as the messages name them, and `it` or `them` */
+  private describeUntracked(): { untracked: string; them: string } {
+    const them = this.untrackedOrders.length > 1 ? 'them' : 'it';
+    return { untracked: `${this.untrackedOrders.join(', ')} may be live on the exchange without GridBot tracking ${them}`, them };
   }
 
   /**

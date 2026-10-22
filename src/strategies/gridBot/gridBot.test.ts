@@ -2,7 +2,7 @@ import { GekkoError } from '@errors/gekko.error';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { ETH_IGNORED_WARNING, logsAtInit } from '@helpers/strategy/positionTracker/positionTracker.mock';
 import type { Candle } from '@models/candle.types';
-import type { CandleBucket } from '@models/event.types';
+import type { CandleBucket, ExchangeEvent } from '@models/event.types';
 import type { LogLevel } from '@models/logLevel.types';
 import type { OrderSide } from '@models/order.types';
 import type { BalanceDetail, Portfolio } from '@models/portfolio.types';
@@ -110,6 +110,10 @@ describe('GridBot', () => {
     afterWarmup(price, portfolio);
   };
 
+  /** A timeframe candle closing at that price, with the ATR the indicator gives it, as the StrategyManager hands it to the hooks */
+  const candleWithAtr = (close: number, atr: unknown, portfolio: Portfolio = balancedPortfolio) =>
+    strategy.onEachTimeframeCandle({ candle: makeCandle(close), portfolio, tools }, { results: atr, symbol: 'BTC/USDT' });
+
   /** Runs a step that stops the run, as tools.log('error') does, to look at what it did before */
   const untilStopped = (step: () => void) => {
     try {
@@ -127,17 +131,18 @@ describe('GridBot', () => {
 
   /**
    * Delivers the outcome of the live order at that price and side, as the Trader reports it: a cancel with nothing filled and an
-   * error 'Test error' that filled nothing and is not live, a refusal, unless `details` say otherwise
+   * error 'Test error' that filled nothing and is not live, a refusal, unless `details` say otherwise. The event carries the price of
+   * the order and the balanced portfolio, unless `exchange` says otherwise.
    */
   const settle = (
     outcome: 'completed' | 'canceled' | 'errored',
     price: number,
     side: OrderSide,
     details: { filled?: number; remaining?: number; reason?: string; mayBeLive?: boolean } = {},
+    exchange: ExchangeEvent = { price, portfolio: balancedPortfolio },
   ) => {
     const { id, amount } = liveOrder(price, side) ?? {};
     const order = { id, symbol: 'BTC/USDT', side, type: 'LIMIT', amount, price } as any;
-    const exchange = { price, portfolio: balancedPortfolio };
     settledIds.add(order.id);
     if (outcome === 'completed') strategy.onOrderCompleted({ order, exchange, tools });
     if (outcome === 'canceled')
@@ -1036,6 +1041,20 @@ describe('GridBot', () => {
 
       expect(createOrder).toHaveBeenCalledTimes(initialCalls);
     });
+
+    it.each`
+      outcome
+      ${'canceled'}
+      ${'errored'}
+    `('ignores an order it did not place once $outcome', ({ outcome }) => {
+      startStrategy(100);
+      const order = { id: 'unknown-id', reason: 'Test error', filled: 0, mayBeLive: false } as any;
+      const exchange = { price: 100, portfolio: balancedPortfolio };
+      if (outcome === 'canceled') strategy.onOrderCanceled({ order, exchange, tools });
+      else strategy.onOrderErrored({ order, exchange, tools });
+
+      expect(createOrder).toHaveBeenCalledTimes(4);
+    });
   });
 
   // A fill armed the neighbouring level, and only if it held no order: a neighbour whose own fill was not reported yet was skipped.
@@ -1635,6 +1654,653 @@ describe('GridBot', () => {
     });
   });
 
+  // The grid stayed in place once the price left its range, its orders waiting for a price that might never come back: with resetMode,
+  // closes beyond the grid on a side it arms cancel the grid's orders, and a new grid is placed around the price once they have ended
+  describe('grid reset', () => {
+    /** A portfolio of `btc` BTC and `usdt` USDT, all free */
+    const portfolioOf = (btc: number, usdt: number): Portfolio =>
+      new Map<string, BalanceDetail>([
+        ['BTC', { free: btc, used: 0, total: btc }],
+        ['USDT', { free: usdt, used: 0, total: usdt }],
+      ]);
+    // At 111 on the split of the default grid there, 2.5 a level: 5 BTC for its SELLs, 517.5 USDT for its BUYs at 106 and 101
+    const at111: ExchangeEvent = { price: 111, portfolio: portfolioOf(5, 517.5) };
+    // The default grid placed again at 111: 101, 106, 111, 116 and 121
+    const gridAt111 = ['LIMIT BUY 101', 'LIMIT BUY 106', 'LIMIT SELL 116', 'LIMIT SELL 121'];
+    // All in the asset, as a sell-only grid wants it: no rebalance
+    const assetOnly = portfolioOf(10, 0);
+    /** A reset on one close above the grid */
+    const upOnce = { resetMode: 'up' } as const;
+    // The default grid at 100, [90, 110], reset on the close at 111
+    const RESET_AT_111 =
+      'info GridBot: Price 111 closed above grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended';
+    const ALL_FOUR = ['order-1', 'order-2', 'order-3', 'order-4'];
+    const lost = { reason: lostOnTheNetwork, mayBeLive: true };
+
+    /** Timeframe candles closing at these prices, one after the other */
+    const closeAt = (closes: number[], portfolio: Portfolio = balancedPortfolio) =>
+      closes.forEach(close => strategy.onEachTimeframeCandle({ candle: makeCandle(close), portfolio, tools }));
+    /** The lines logged about the range of the grid and its resets, as `level message` */
+    const rangeLogs = () =>
+      log.mock.calls.filter(([, message]) => message.includes('grid range')).map(([level, message]) => `${level} ${message}`);
+    /** The ids of the orders the strategy asked to cancel */
+    const canceledIds = () => cancelOrder.mock.calls.map(([id]) => id);
+    /**
+     * Reports the cancel of every order sent and not ended yet, nothing filled, in the order they were sent: the event of the last one
+     * carries `last`, those before it `others`, else the price of their order and the balanced portfolio
+     */
+    const cancelOpen = (last: ExchangeEvent = at111, others?: ExchangeEvent) => {
+      const open = issuedOrders.filter(({ id }) => !settledIds.has(id));
+      open.forEach(({ price, side }, i) => settle('canceled', price, side, {}, i === open.length - 1 ? last : others));
+    };
+
+    describe('the closes counted towards it', () => {
+      it('logs each close counted at debug, then warns once, then says why the grid is reset: 3 above it, resetConfirmCandles 3', () => {
+        startStrategy(100, { resetMode: 'up', resetConfirmCandles: 3 });
+        closeAt([111, 112, 113]);
+
+        expect(rangeLogs()).toEqual([
+          'debug GridBot: Price 111 closed above grid range [90, 110]: 1 of 3 consecutive timeframe candles towards a reset',
+          'warn GridBot: Price 111 is out of grid range [90, 110]: the grid is reset once 3 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 105 until then',
+          'debug GridBot: Price 112 closed above grid range [90, 110]: 2 of 3 consecutive timeframe candles towards a reset',
+          'info GridBot: Price 113 closed above grid range [90, 110] for 3 consecutive timeframe candles (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        ]);
+      });
+
+      // With resetConfirmCandles 1 the close that leaves the range resets the grid: no count, no warning
+      it('says why the grid is reset alone on the first close above it, resetConfirmCandles 1', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+
+        expect(rangeLogs()).toEqual([RESET_AT_111]);
+      });
+
+      it('cancels every open order of the grid, once each', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+
+        expect(canceledIds()).toEqual(ALL_FOUR);
+      });
+
+      // The warning's side holds a price back between a bound and the grid's price next to it as out, 109 here, which the count does not
+      it.each`
+        closes                  | description
+        ${[111, 105, 111]}      | ${'one back in the range, at 105'}
+        ${[111, 109, 111]}      | ${'one back in the range above 105, where the grid waits'}
+        ${[111, 110, 111]}      | ${'one back on the bound itself, 110'}
+        ${[111, 89, 111]}       | ${'one out below it, a side not armed'}
+        ${[111, 112, 105, 111]} | ${'one back in the range after two'}
+      `('starts the count again on a close that is not above the grid: $description', ({ closes }) => {
+        startStrategy(100, { resetMode: 'up', resetConfirmCandles: 3 });
+        closeAt([...closes, 112]);
+
+        expect(cancelOrder).not.toHaveBeenCalled();
+      });
+
+      it('resets the grid once the closes after the restart complete the count', () => {
+        startStrategy(100, { resetMode: 'up', resetConfirmCandles: 2 });
+        closeAt([111, 109, 111, 112]);
+
+        expect(rangeLogs()).toEqual([
+          'debug GridBot: Price 111 closed above grid range [90, 110]: 1 of 2 consecutive timeframe candles towards a reset',
+          'warn GridBot: Price 111 is out of grid range [90, 110]: the grid is reset once 2 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 105 until then',
+          'debug GridBot: Price 111 closed above grid range [90, 110]: 1 of 2 consecutive timeframe candles towards a reset',
+          'info GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        ]);
+      });
+
+      it('counts again from 1 on the other side of the grid, both armed', () => {
+        startStrategy(100, { resetMode: 'both', resetConfirmCandles: 2 });
+        closeAt([111, 89, 88]);
+
+        expect(rangeLogs()).toEqual([
+          'debug GridBot: Price 111 closed above grid range [90, 110]: 1 of 2 consecutive timeframe candles towards a reset',
+          'warn GridBot: Price 111 is out of grid range [90, 110]: the grid is reset once 2 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 105 until then',
+          'debug GridBot: Price 89 closed below grid range [90, 110]: 1 of 2 consecutive timeframe candles towards a reset',
+          'warn GridBot: Price 89 is out of grid range [90, 110]: the grid is reset once 2 consecutive timeframe candles close below it (resetConfirmCandles), its orders waiting for the price to come back to 95 until then',
+          'info GridBot: Price 88 closed below grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        ]);
+      });
+
+      it('warns as before of a close out on a side not armed, and counts nothing there', () => {
+        startStrategy(100, { resetMode: 'up', resetConfirmCandles: 2 });
+        closeAt([89, 88]);
+
+        expect(rangeLogs()).toEqual([
+          'warn GridBot: Price 89 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 95',
+        ]);
+      });
+
+      const startRebalancing = () => startStrategy(100, upOnce, unbalancedPortfolio);
+      const resetting = () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+      };
+      // On the balanced portfolio of 100, the grid placed again at 111 waits for a STICKY SELL first
+      const resetRebalancing = () => {
+        resetting();
+        cancelOpen({ price: 111, portfolio: balancedPortfolio });
+      };
+
+      it.each`
+        description                                     | setup
+        ${'the rebalance of the start pending'}         | ${startRebalancing}
+        ${'a reset waiting for the orders it canceled'} | ${resetting}
+        ${'the rebalance of a reset pending'}           | ${resetRebalancing}
+      `('counts nothing and warns of nothing while $description', ({ setup }) => {
+        setup();
+        const [canceled, logged] = [cancelOrder.mock.calls.length, rangeLogs().length];
+        closeAt([200, 201, 80]);
+
+        expect({ canceled: cancelOrder.mock.calls.length - canceled, logged: rangeLogs().slice(logged) }).toEqual({
+          canceled: 0,
+          logged: [],
+        });
+      });
+    });
+
+    describe('by resetMode', () => {
+      it.each`
+        resetMode | close
+        ${'up'}   | ${111}
+        ${'down'} | ${89}
+        ${'both'} | ${111}
+        ${'both'} | ${89}
+      `('resets the grid on a close at $close with resetMode $resetMode', ({ resetMode, close }) => {
+        startStrategy(100, { resetMode });
+        closeAt([close]);
+
+        expect(canceledIds()).toEqual(ALL_FOUR);
+      });
+
+      // resetMode none, the default, runs as before: one warning, and the grid stays in place
+      it.each`
+        resetMode | closes             | expected
+        ${'none'} | ${[111, 112, 113]} | ${'warn GridBot: Price 111 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 105'}
+        ${'none'} | ${[89, 88, 87]}    | ${'warn GridBot: Price 89 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 95'}
+        ${'up'}   | ${[89, 88, 87]}    | ${'warn GridBot: Price 89 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 95'}
+        ${'down'} | ${[111, 112, 113]} | ${'warn GridBot: Price 111 is out of grid range [90, 110]: the grid stays in place, its orders waiting for the price to come back to 105'}
+      `('warns as before of closes at $closes with resetMode $resetMode', ({ resetMode, closes, expected }) => {
+        startStrategy(100, { resetMode });
+        closeAt(closes);
+
+        expect(rangeLogs()).toEqual([expected]);
+      });
+
+      it.each`
+        resetMode | closes
+        ${'none'} | ${[111, 112, 113]}
+        ${'none'} | ${[89, 88, 87]}
+        ${'up'}   | ${[89, 88, 87]}
+        ${'down'} | ${[111, 112, 113]}
+      `('leaves the grid in place for closes at $closes with resetMode $resetMode', ({ resetMode, closes }) => {
+        startStrategy(100, { resetMode });
+        closeAt(closes);
+
+        expect(cancelOrder).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('the line that starts it', () => {
+      it.each`
+        params                                                | portfolio              | closes        | description                                   | expected
+        ${{ resetMode: 'up', resetConfirmCandles: 2 }}        | ${balancedPortfolio}   | ${[111, 112]} | ${'two closes above, four orders'}            | ${'GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended'}
+        ${{ resetMode: 'down' }}                              | ${balancedPortfolio}   | ${[89]}       | ${'one close below'}                          | ${'GridBot: Price 89 closed below grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 4 open orders are canceled and a new grid is built around the price once they have ended'}
+        ${{ resetMode: 'up', buyLevels: 1, sellLevels: 0 }}   | ${unbalancedPortfolio} | ${[101]}      | ${'one order, the BUY of a 1/0 grid'}         | ${'GridBot: Price 101 closed above grid range [95, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 1 open order is canceled and a new grid is built around the price once it has ended'}
+        ${{ resetMode: 'up', buyLevels: 3, sellLevels: 0 }}   | ${unbalancedPortfolio} | ${[101]}      | ${'a buy-only grid, above its center price'}  | ${'GridBot: Price 101 closed above grid range [85, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 3 open orders are canceled and a new grid is built around the price once they have ended'}
+        ${{ resetMode: 'down', buyLevels: 0, sellLevels: 3 }} | ${assetOnly}           | ${[99]}       | ${'a sell-only grid, below its center price'} | ${'GridBot: Price 99 closed below grid range [100, 115] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 3 open orders are canceled and a new grid is built around the price once they have ended'}
+      `('says at info why the grid is reset: $description', ({ params, portfolio, closes, expected }) => {
+        startStrategy(100, params, portfolio);
+        closeAt(closes, portfolio);
+
+        expect(log).toHaveBeenCalledWith('info', expected);
+      });
+
+      // BUY 95 refused at every attempt, the first and the 3 retries, then left without an order: orders 2, 5, 6 and 7
+      describe('with a level that gave up on its order', () => {
+        const giveUpBuy95 = () => {
+          startStrategy(100, upOnce);
+          Array.from({ length: 4 }).forEach(() => settle('errored', 95, 'BUY'));
+          closeAt([111]);
+        };
+
+        it('says that it cancels the 3 orders still open', () => {
+          giveUpBuy95();
+
+          expect(log).toHaveBeenCalledWith(
+            'info',
+            'GridBot: Price 111 closed above grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 3 open orders are canceled and a new grid is built around the price once they have ended',
+          );
+        });
+
+        it('cancels them, BUY 90, SELL 105 and SELL 110', () => {
+          giveUpBuy95();
+
+          expect(canceledIds()).toEqual(['order-1', 'order-3', 'order-4']);
+        });
+      });
+    });
+
+    // As the Trader may report them: a fill can beat the cancel to the exchange, a cancel can follow a partial fill, and an order can
+    // be refused. The new grid replaces every level, on the portfolio the last of them leaves.
+    describe('while the orders it canceled end', () => {
+      /** The default grid reset on the close at 111, its SELL 105 then ended as `outcome` */
+      const resetThenEndSell105 = (outcome: 'completed' | 'canceled' | 'errored', details: object) => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        settle(outcome, 105, 'SELL', details);
+      };
+
+      it.each`
+        outcome        | details                                        | description
+        ${'completed'} | ${{}}                                          | ${'filled before its cancel'}
+        ${'canceled'}  | ${{ filled: 1, remaining: 1.5 }}               | ${'canceled after a fill of 1'}
+        ${'canceled'}  | ${{ filled: 2.45, remaining: 0.05 }}           | ${'canceled with less left than the market minimum'}
+        ${'canceled'}  | ${{ filled: undefined, remaining: undefined }} | ${'canceled with no fill reported'}
+        ${'errored'}   | ${{}}                                          | ${'refused'}
+      `('places nothing once SELL 105 is $description: its level is not turned, nor its order placed again', ({ outcome, details }) => {
+        resetThenEndSell105(outcome, details);
+
+        expect(sentAfter(4)).toEqual([]);
+      });
+
+      it.each`
+        outcome        | details                                        | description
+        ${'completed'} | ${{}}                                          | ${'filled before its cancel'}
+        ${'canceled'}  | ${{ filled: 1, remaining: 1.5 }}               | ${'canceled after a fill of 1'}
+        ${'canceled'}  | ${{ filled: 2.45, remaining: 0.05 }}           | ${'canceled with less left than the market minimum'}
+        ${'canceled'}  | ${{ filled: undefined, remaining: undefined }} | ${'canceled with no fill reported'}
+        ${'errored'}   | ${{}}                                          | ${'refused'}
+      `('logs nothing of SELL 105 $description', ({ outcome, details }) => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        const logged = log.mock.calls.length;
+        settle(outcome, 105, 'SELL', details);
+
+        expect(log.mock.calls.slice(logged)).toEqual([]);
+      });
+
+      it.each`
+        outcome        | details                                        | description
+        ${'completed'} | ${{}}                                          | ${'filled before its cancel'}
+        ${'canceled'}  | ${{ filled: 1, remaining: 1.5 }}               | ${'canceled after a fill of 1'}
+        ${'canceled'}  | ${{ filled: 2.45, remaining: 0.05 }}           | ${'canceled with less left than the market minimum'}
+        ${'canceled'}  | ${{ filled: undefined, remaining: undefined }} | ${'canceled with no fill reported'}
+        ${'errored'}   | ${{}}                                          | ${'refused'}
+      `('places the new grid at 111 once the others are canceled, SELL 105 $description', ({ outcome, details }) => {
+        resetThenEndSell105(outcome, details);
+        cancelOpen(at111);
+
+        expect(sentAfter(4)).toEqual(gridAt111);
+      });
+    });
+
+    describe('the new grid', () => {
+      it('places nothing while an order it canceled is still open: 3 of the 4 ended', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        [90, 95].forEach(price => settle('canceled', price, 'BUY'));
+        settle('canceled', 105, 'SELL');
+
+        expect(sentAfter(4)).toEqual([]);
+      });
+
+      it('places the grid again around the price of the event that ends the last order, on its portfolio: at 111', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111);
+
+        expect(sentAfter(4)).toEqual(gridAt111);
+      });
+
+      it('goes by that last event alone: those before it at 200, on a portfolio all in USDT, change nothing', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111, { price: 200, portfolio: unbalancedPortfolio });
+
+        expect(sentAfter(4)).toEqual(gridAt111);
+      });
+
+      it('logs the grid it builds as the start does', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111);
+
+        expect(log).toHaveBeenCalledWith('info', 'GridBot: Grid built around 111 with 2 buy / 2 sell levels, qty=2.5');
+      });
+
+      it.each`
+        outcome
+        ${'completed'}
+        ${'canceled'}
+        ${'errored'}
+      `('places it on the event of the last order whatever its end: $outcome', ({ outcome }) => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        [90, 95].forEach(price => settle('canceled', price, 'BUY'));
+        settle('canceled', 105, 'SELL');
+        settle(outcome, 110, 'SELL', {}, at111);
+
+        expect(sentAfter(4)).toEqual(gridAt111);
+      });
+
+      // At 111, the SELLs of the grid need less of the asset than the 5 BTC the balanced portfolio of 100 holds: a SELL first
+      describe('on a portfolio it needs to rebalance', () => {
+        const resetOnBalancedAt100 = () => {
+          startStrategy(100, upOnce);
+          closeAt([111]);
+          cancelOpen({ price: 111, portfolio: balancedPortfolio });
+        };
+
+        it('rebalances it first, as at the start: a STICKY SELL of 0.25 at 111', () => {
+          resetOnBalancedAt100();
+
+          expect(issuedOrders.slice(4).map(({ type, side, amount }) => `${type} ${side} ${amount}`)).toEqual(['STICKY SELL 0.25']);
+        });
+
+        // Sold at 111, without fee: 4.75 BTC and 490.25 USDT, which fund 2.36 a level
+        it('builds the grid once the rebalance has filled, on the balances it left', () => {
+          resetOnBalancedAt100();
+          const exchange = { price: 111, portfolio: portfolioOf(4.75, 490.25) };
+          strategy.onOrderCompleted({ order: { id: issuedOrders[4].id } as any, exchange, tools });
+
+          expect(amountsSentAfter(5)).toEqual(['BUY 101 x2.36', 'BUY 106 x2.36', 'SELL 116 x2.36', 'SELL 121 x2.36']);
+        });
+      });
+
+      // As the start refuses it there, with the same message
+      it('stops the run for a new grid whose lowest BUY would be at or below 0: around 9, at -1', () => {
+        startStrategy(100, { resetMode: 'down' });
+        closeAt([9]);
+
+        expect(() => cancelOpen({ price: 9, portfolio: balancedPortfolio })).toThrow(
+          'GridBot: Grid configuration would result in non-positive buy prices: the lowest of buyLevels 2, spaced by spacingValue 5 (fixed) below the center price 9, would be at -1',
+        );
+      });
+
+      // One tick on a maker fee of 0.0004, at 100 and again at 100.03
+      it('warns again of a spacing under the round-trip fee around the price it is placed at', () => {
+        tools.marketData = new Map([['BTC/USDT', { ...marketDataMock, fee: { maker: 0.0004 } }]]);
+        startStrategy(100, { spacingValue: 0.01, resetMode: 'up' }, portfolioOf(5, 500));
+        closeAt([100.03]);
+        cancelOpen({ price: 100.03, portfolio: portfolioOf(5, 500) });
+
+        expect(log.mock.calls.filter(([level, message]) => level === 'warn' && message.includes('round-trip fee'))).toHaveLength(2);
+      });
+
+      it('warns of a close out of its range as of the first grid', () => {
+        startStrategy(100, { resetMode: 'up', resetConfirmCandles: 2 });
+        closeAt([111, 112]);
+        cancelOpen({ price: 112, portfolio: portfolioOf(5, 522.5) });
+        closeAt([123]);
+
+        expect(rangeLogs().filter(line => line.startsWith('warn'))).toEqual([
+          'warn GridBot: Price 111 is out of grid range [90, 110]: the grid is reset once 2 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 105 until then',
+          'warn GridBot: Price 123 is out of grid range [102, 122]: the grid is reset once 2 consecutive timeframe candles close above it (resetConfirmCandles), its orders waiting for the price to come back to 117 until then',
+        ]);
+      });
+
+      // BUY 95 fills and leaves SELLs only, warned of; the grid reset at 106 is placed again, 1 BTC a level, and its BUY 101 fills
+      it('warns again that one side remains once a fill of the new grid leaves one', () => {
+        startStrategy(100, { buyLevels: 1, sellLevels: 1, resetMode: 'up' });
+        settle('completed', 95, 'BUY');
+        closeAt([106]);
+        cancelOpen({ price: 106, portfolio: portfolioOf(4, 404) });
+        settle('completed', 101, 'BUY');
+
+        expect(log.mock.calls.filter(([, message]) => message === 'GridBot: Only one side of the grid remains active')).toHaveLength(2);
+      });
+
+      it('trades as any grid: a fill turns its level', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111);
+        settle('completed', 106, 'BUY');
+
+        expect(sentAfter(8)).toEqual(['LIMIT SELL 111']);
+      });
+
+      it('is reset in turn, its reset numbered 2', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111);
+        closeAt([122]);
+
+        expect(rangeLogs().at(-1)).toEqual(
+          'info GridBot: Price 122 closed above grid range [101, 121] for 1 consecutive timeframe candle (resetConfirmCandles): reset 2, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        );
+      });
+
+      it('has its own orders canceled by the next reset', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        cancelOpen(at111);
+        closeAt([122]);
+
+        expect(canceledIds()).toEqual([...ALL_FOUR, 'order-5', 'order-6', 'order-7', 'order-8']);
+      });
+
+      // An atr grid started at 100 on an ATR of 2, 2.5 × 2: the step of 5 of the default grid
+      describe('of an atr grid', () => {
+        const startAtr = () => {
+          initStrategy(100, { spacingType: 'atr', spacingValue: 2.5, resetMode: 'up' });
+          candleWithAtr(100, 2);
+          afterWarmup(100);
+        };
+
+        // Its BUYs at 101 and 91 take 480 USDT, 2.5 a level
+        it('is spaced by the ATR of the candle that reset the grid: 2.5 × 4, a step of 10 around 111', () => {
+          startAtr();
+          candleWithAtr(111, 4);
+          cancelOpen({ price: 111, portfolio: portfolioOf(5, 480) });
+
+          expect(sentAfter(4)).toEqual(['LIMIT BUY 91', 'LIMIT BUY 101', 'LIMIT SELL 121', 'LIMIT SELL 131']);
+        });
+
+        // Its BUYs at 96 and 81 take 442.5 USDT, 2.5 a level
+        it('is spaced by the ATR of the last candle, read while the reset waited for its orders: 2.5 × 6, a step of 15', () => {
+          startAtr();
+          candleWithAtr(111, 4);
+          candleWithAtr(115, 6);
+          cancelOpen({ price: 111, portfolio: portfolioOf(5, 442.5) });
+
+          expect(sentAfter(4)).toEqual(['LIMIT BUY 81', 'LIMIT BUY 96', 'LIMIT SELL 126', 'LIMIT SELL 141']);
+        });
+
+        it('warns again of a step raised to the minimum: 2.5 × 0.001 rounds to 0, one tick at 111', () => {
+          startAtr();
+          candleWithAtr(111, 0.001);
+          cancelOpen(at111);
+
+          expect(log).toHaveBeenCalledWith(
+            'warn',
+            'GridBot: ATR spacing: spacingValue 2.5 × ATR 0.001 is a step of 0 on the price tick 0.01, under the price tick: the grid is spaced by one tick, 0.01, instead',
+          );
+        });
+      });
+    });
+
+    describe('the cooldown of a grid a reset built', () => {
+      /** The default grid reset on the close at 111 and placed again there: [101, 121], its orders back at 116 above it */
+      const resetAt111 = (params: Partial<GridBotStrategyParams>) => {
+        startStrategy(100, { resetMode: 'up', ...params });
+        closeAt([111]);
+        cancelOpen(at111);
+      };
+
+      it('counts none of the closes of its resetCooldownCandles candles: reset 2 comes on the third close above, the cooldown 2', () => {
+        resetAt111({ resetCooldownCandles: 2 });
+        const logged = rangeLogs().length;
+        closeAt([122, 123, 124]);
+
+        expect(rangeLogs().slice(logged)).toEqual([
+          'warn GridBot: Price 122 is out of grid range [101, 121]: the grid stays in place for the 1 timeframe candle left of its cooldown (resetCooldownCandles 2), its orders waiting for the price to come back to 116',
+          'info GridBot: Price 124 closed above grid range [101, 121] for 1 consecutive timeframe candle (resetConfirmCandles): reset 2, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        ]);
+      });
+
+      // The candles left once the close is not counted: none on the one that ends the cooldown, after which the closes are counted
+      it.each`
+        cooldown | expected
+        ${10}    | ${'warn GridBot: Price 122 is out of grid range [101, 121]: the grid stays in place for the 9 timeframe candles left of its cooldown (resetCooldownCandles 10), its orders waiting for the price to come back to 116'}
+        ${2}     | ${'warn GridBot: Price 122 is out of grid range [101, 121]: the grid stays in place for the 1 timeframe candle left of its cooldown (resetCooldownCandles 2), its orders waiting for the price to come back to 116'}
+        ${1}     | ${'warn GridBot: Price 122 is out of grid range [101, 121]: the grid is reset once 1 consecutive timeframe candle closes above it (resetConfirmCandles), its orders waiting for the price to come back to 116 until then'}
+      `('warns of a close out of its range on its first candle, with resetCooldownCandles $cooldown', ({ cooldown, expected }) => {
+        resetAt111({ resetCooldownCandles: cooldown });
+        closeAt([122]);
+
+        expect(rangeLogs().at(-1)).toEqual(expected);
+      });
+
+      it('counts the candles in range towards it: reset 2 on the first close above once two closed in range', () => {
+        resetAt111({ resetCooldownCandles: 2 });
+        closeAt([111, 112, 122]);
+
+        expect(rangeLogs().at(-1)).toEqual(
+          'info GridBot: Price 122 closed above grid range [101, 121] for 1 consecutive timeframe candle (resetConfirmCandles): reset 2, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        );
+      });
+
+      it('resets at once without one: resetCooldownCandles 0', () => {
+        resetAt111({ resetCooldownCandles: 0 });
+        closeAt([122]);
+
+        expect(canceledIds()).toHaveLength(8);
+      });
+
+      it('does not apply to the grid of the start', () => {
+        startStrategy(100, { resetMode: 'up', resetCooldownCandles: 5 });
+        closeAt([111]);
+
+        expect(canceledIds()).toEqual(ALL_FOUR);
+      });
+
+      // Placed again on the balanced portfolio of 100, the grid waits for a STICKY SELL of 0.25 first: the candle meanwhile counts for
+      // nothing, the grid not being in place
+      it('counts the candles of the new grid only, not those of its rebalance', () => {
+        startStrategy(100, { resetMode: 'up', resetCooldownCandles: 1 });
+        closeAt([111]);
+        cancelOpen({ price: 111, portfolio: balancedPortfolio });
+        closeAt([300]);
+        const exchange = { price: 111, portfolio: portfolioOf(4.75, 490.25) };
+        strategy.onOrderCompleted({ order: { id: issuedOrders[4].id } as any, exchange, tools });
+        closeAt([122, 123]);
+
+        expect(rangeLogs().slice(1)).toEqual([
+          'warn GridBot: Price 122 is out of grid range [101, 121]: the grid is reset once 1 consecutive timeframe candle closes above it (resetConfirmCandles), its orders waiting for the price to come back to 116 until then',
+          'info GridBot: Price 123 closed above grid range [101, 121] for 1 consecutive timeframe candle (resetConfirmCandles): reset 2, its 4 open orders are canceled and a new grid is built around the price once they have ended',
+        ]);
+      });
+    });
+
+    // An order whose outcome is unknown may be live on the exchange: a new grid placed beside it could trade with funds it holds
+    describe('with an order that may be live on the exchange, untracked', () => {
+      it('warns of one lost during the reset as of any other: its level left without an order', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        settle('errored', 95, 'BUY', lost);
+
+        expect(log).toHaveBeenCalledWith(
+          'warn',
+          `GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: it is not placed again, its level is left without an order, the rest of the grid trades on. Check it there. Last error: ${lostOnTheNetwork}`,
+        );
+      });
+
+      it('stops the run once the last order has ended, naming the one lost during the reset', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        settle('errored', 95, 'BUY', lost);
+
+        expect(() => cancelOpen()).toThrow(
+          'GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange',
+        );
+      });
+
+      it('sends no order of a new grid then', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        settle('errored', 95, 'BUY', lost);
+        untilStopped(() => cancelOpen());
+
+        expect(sentAfter(4)).toEqual([]);
+      });
+
+      it('stops the run at once when the order lost was the last one open', () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+        [90, 95].forEach(price => settle('canceled', price, 'BUY'));
+        settle('canceled', 105, 'SELL');
+
+        expect(() => settle('errored', 110, 'SELL', lost)).toThrow(
+          `GridBot: SELL 2.5 at 110 may be live on the exchange without GridBot tracking it, and no level of the grid holds an order any more. Check it on the exchange. Last error: ${lostOnTheNetwork}`,
+        );
+      });
+
+      it('cancels the orders still open, not one lost before the reset: 3 of the 4', () => {
+        startStrategy(100, upOnce);
+        settle('errored', 95, 'BUY', lost);
+        closeAt([111]);
+
+        expect(canceledIds()).toEqual(['order-1', 'order-3', 'order-4']);
+      });
+
+      it('stops the run once the reset has ended the others, naming one lost before it', () => {
+        startStrategy(100, upOnce);
+        settle('errored', 95, 'BUY', lost);
+        closeAt([111]);
+
+        expect(() => cancelOpen()).toThrow(
+          'GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange',
+        );
+      });
+
+      it('names every order lost, before the reset and during it', () => {
+        startStrategy(100, upOnce);
+        settle('errored', 95, 'BUY', lost);
+        closeAt([111]);
+        settle('errored', 105, 'SELL', lost);
+
+        expect(() => cancelOpen()).toThrow(
+          'GridBot: BUY 2.5 at 95, SELL 2.5 at 105 may be live on the exchange without GridBot tracking them: the grid of reset 1 is not built over them. Check them on the exchange',
+        );
+      });
+    });
+
+    // A grid whose levels all gave up on their orders stopped the run, which no run goes on from: the reset handles it all the same
+    describe('when no order of the grid is open', () => {
+      /** A 1/0 grid all in USDT whose BUY 95, refused twice with retryOnError 1, gave up: the run stopped there */
+      const givenUp = () => {
+        startStrategy(100, { buyLevels: 1, sellLevels: 0, retryOnError: 1, resetMode: 'up' }, unbalancedPortfolio);
+        untilStopped(() => [1, 2].forEach(() => settle('errored', 95, 'BUY')));
+      };
+
+      it('says that it places a new grid around the close at once', () => {
+        givenUp();
+        closeAt([101], unbalancedPortfolio);
+
+        expect(rangeLogs()).toEqual([
+          'info GridBot: Price 101 closed above grid range [95, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, no order is open, a new grid is built around 101',
+        ]);
+      });
+
+      // 1000 USDT fund 10.41 at 96
+      it('places it around the close, on the portfolio of the candle', () => {
+        givenUp();
+        const sentBefore = issuedOrders.length;
+        closeAt([101], unbalancedPortfolio);
+
+        expect(amountsSentAfter(sentBefore)).toEqual(['BUY 96 x10.41']);
+      });
+
+      it('cancels nothing', () => {
+        givenUp();
+        closeAt([101], unbalancedPortfolio);
+
+        expect(cancelOrder).not.toHaveBeenCalled();
+      });
+    });
+  });
+
   // The warning was logged after every fill that left one side, so after every fill of a grid holding a single order
   describe('one side of the grid', () => {
     const oneSideWarnings = () => log.mock.calls.filter(([, message]) => message === 'GridBot: Only one side of the grid remains active');
@@ -1677,6 +2343,186 @@ describe('GridBot', () => {
 
       expect(buyOrders[0]?.price).toBe(expectedBuyPrice);
       expect(sellOrders[0]?.price).toBe(expectedSellPrice);
+    });
+  });
+
+  // An atr grid is spaced by a multiple of the ATR of the pair: the indicator is registered at init, read on every timeframe candle,
+  // and the step resolved when the grid starts, from the ATR of the candle before
+  describe('atr spacing', () => {
+    const atrSpacing = { spacingType: 'atr', spacingValue: 2.5 } as const;
+    /** A portfolio of `btc` BTC and `usdt` USDT, all free */
+    const portfolioOf = (btc: number, usdt: number): Portfolio =>
+      new Map<string, BalanceDetail>([
+        ['BTC', { free: btc, used: 0, total: btc }],
+        ['USDT', { free: usdt, used: 0, total: usdt }],
+      ]);
+    /** A run without warmup on an atr grid, its first candle closing at 100 with that ATR, which the grid starts on */
+    const startOnAtr = (atr: unknown, params: Partial<GridBotStrategyParams> = {}, portfolio: Portfolio = balancedPortfolio) => {
+      initStrategy(100, { ...atrSpacing, ...params }, portfolio);
+      candleWithAtr(100, atr, portfolio);
+      afterWarmup(100, portfolio);
+    };
+    /** The ATR refusal, for an ATR of atrPeriod 14 */
+    const noAtr14 =
+      "GridBot: The ATR has no value yet on the first candle after the warmup: with atrPeriod 14 it needs 15 timeframe candles, the warmup's and the first after it, so set watch.warmup.candleCount to 14 or more";
+
+    it.each`
+      atrPeriod | expected
+      ${14}     | ${[['ATR', 'BTC/USDT', { period: 14 }]]}
+      ${3}      | ${[['ATR', 'BTC/USDT', { period: 3 }]]}
+    `('registers the ATR of the pair at init, of period atrPeriod $atrPeriod', ({ atrPeriod, expected }) => {
+      const addIndicator = vi.fn();
+      tools.strategyParams = { ...defaultParams, ...atrSpacing, atrPeriod };
+      strategy.init({ candle: makeCandle(100), portfolio: balancedPortfolio, tools, addIndicator });
+
+      expect(addIndicator.mock.calls).toEqual(expected);
+    });
+
+    it.each`
+      spacingType
+      ${'fixed'}
+      ${'percent'}
+      ${'logarithmic'}
+    `('registers no indicator for $spacingType spacing', ({ spacingType }) => {
+      const addIndicator = vi.fn();
+      tools.strategyParams = { ...defaultParams, spacingType };
+      strategy.init({ candle: makeCandle(100), portfolio: balancedPortfolio, tools, addIndicator });
+
+      expect(addIndicator).not.toHaveBeenCalled();
+    });
+
+    // Started without a value of the ATR, the grid would have waited for one in silence, up to atrPeriod candles: two weeks on 1d
+    describe('without a value of the ATR on the first candle after the warmup', () => {
+      it.each`
+        atrPeriod | expected
+        ${14}     | ${noAtr14}
+        ${1}      | ${"GridBot: The ATR has no value yet on the first candle after the warmup: with atrPeriod 1 it needs 2 timeframe candles, the warmup's and the first after it, so set watch.warmup.candleCount to 1 or more"}
+      `('says at error level why it stops, naming the warmup the ATR of atrPeriod $atrPeriod needs', ({ atrPeriod, expected }) => {
+        untilStopped(() => startOnAtr(null, { atrPeriod }));
+
+        expect(log.mock.calls.filter(([level]) => level === 'error')).toEqual([['error', expected]]);
+      });
+
+      it('stops the run', () => {
+        expect(() => startOnAtr(null)).toThrow(GekkoError);
+      });
+
+      it.each`
+        results | description
+        ${null} | ${'null, the indicator short of candles'}
+        ${NaN}  | ${'NaN'}
+        ${'15'} | ${'not a number'}
+      `('takes an ATR given as $description for none', ({ results }) => {
+        expect(() => startOnAtr(results)).toThrow(noAtr14);
+      });
+
+      it('takes a candle without an indicator argument for no ATR', () => {
+        initStrategy(100, atrSpacing);
+        strategy.onEachTimeframeCandle({ candle: makeCandle(100), portfolio: balancedPortfolio, tools });
+
+        expect(() => afterWarmup(100)).toThrow(noAtr14);
+      });
+
+      // The ATR of the last candle, not the last value seen: the indicator does not go back to null once ready, but a candle that gives
+      // none is read as none
+      it('reads the ATR of the last candle only: 2, then none', () => {
+        initStrategy(100, atrSpacing);
+        candleWithAtr(100, 2);
+        candleWithAtr(100, null);
+
+        expect(() => afterWarmup(100)).toThrow(noAtr14);
+      });
+
+      it.each`
+        portfolio              | description
+        ${balancedPortfolio}   | ${'the grid of a balanced portfolio'}
+        ${unbalancedPortfolio} | ${'the rebalance of an unbalanced one'}
+      `('sends no order, neither $description', ({ portfolio }) => {
+        untilStopped(() => startOnAtr(null, {}, portfolio));
+
+        expect(createOrder).not.toHaveBeenCalled();
+      });
+
+      // The warning says how prices are rounded, which the refusals name
+      it('warns of a missing price tick first, as before any refusal', () => {
+        tools.marketData = new Map([['BTC/USDT', { amount: { min: 0.1 }, precision: { amount: 0.01 } }]]);
+        untilStopped(() => startOnAtr(null));
+
+        expect(log.mock.calls.map(([level]) => level)).toEqual(['warn', 'error']);
+      });
+    });
+
+    it('builds the grid on a step of spacingValue × the ATR: 2.5 × 2, the step of 5 of the default grid, its orders the same', () => {
+      startOnAtr(2);
+
+      expect(openBook()).toEqual(['BUY 90', 'BUY 95', 'SELL 105', 'SELL 110']);
+    });
+
+    // The split of the grid spaced by 10 at 100, 2.5 a level: its BUYs at 90 and 80 take 425 USDT
+    it('reads the ATR of the last timeframe candle before the grid starts: 4 after 2, a step of 10', () => {
+      const balancedStep10 = portfolioOf(5, 425);
+      initStrategy(100, atrSpacing, balancedStep10);
+      candleWithAtr(100, 2);
+      candleWithAtr(100, 4);
+      afterWarmup(100, balancedStep10);
+
+      expect(openBook()).toEqual(['BUY 80', 'BUY 90', 'SELL 110', 'SELL 120']);
+    });
+
+    it('logs the grid built on the step of the ATR as on any other', () => {
+      startOnAtr(2);
+
+      expect(log).toHaveBeenCalledWith('info', 'GridBot: Grid built around 100 with 2 buy / 2 sell levels, qty=2.5');
+    });
+
+    it('names the step and the ATR it comes from where a check refuses the grid: 1.5 × 32, 48, puts the lowest of 3 BUYs at -44', () => {
+      expect(() => startOnAtr(32, { spacingValue: 1.5, buyLevels: 3 })).toThrow(
+        'GridBot: Grid configuration would result in non-positive buy prices: the lowest of buyLevels 3, spaced by a step of 48 (spacingValue 1.5 × ATR 32, atr) below the center price 100, would be at -44',
+      );
+    });
+
+    it('warns of no step raised for a step above the minimum', () => {
+      startOnAtr(2);
+
+      expect(log).not.toHaveBeenCalledWith('warn', expect.stringContaining('ATR spacing'));
+    });
+
+    // A lull in the volatility spaced the grid under the round-trip fee, or under the tick: raised to the minimum step instead
+    describe('under the minimum step', () => {
+      // 0.21 at 100 for 2 sell levels on a maker fee of 0.001: the top level buys at 100.21 and sells at 100.42, 0.2096 % above its
+      // buy, over the 0.2002 % a round trip pays
+      const feeMarket = new Map([['BTC/USDT', { ...marketDataMock, fee: { maker: 0.001 } }]]);
+      // The split of both grids, 2.5 a level: 5 BTC, and about 500 USDT for BUYs a few ticks under 100
+      const balancedNear100 = portfolioOf(5, 500);
+
+      it.each`
+        markets       | atr      | description                                            | expected
+        ${feeMarket}  | ${0.1}   | ${'0.21, the break-even step of a maker fee of 0.1 %'} | ${'GridBot: ATR spacing: spacingValue 1.5 × ATR 0.1 is a step of 0.15 on the price tick 0.01, under 0.21, the minimum step at which every level of the grid breaks even on the maker fee of 0.001 (fee.maker): the grid is spaced by 0.21 instead'}
+        ${marketData} | ${0.002} | ${'one tick, without a fee'}                           | ${'GridBot: ATR spacing: spacingValue 1.5 × ATR 0.002 is a step of 0 on the price tick 0.01, under the price tick: the grid is spaced by one tick, 0.01, instead'}
+      `('warns that it raises the step to $description', ({ markets, atr, expected }) => {
+        tools.marketData = markets;
+        startOnAtr(atr, { spacingValue: 1.5 }, balancedNear100);
+
+        expect(log).toHaveBeenCalledWith('warn', expected);
+      });
+
+      it.each`
+        markets       | atr      | description                  | expected
+        ${feeMarket}  | ${0.1}   | ${'0.21, its break-even'}    | ${['BUY 99.58', 'BUY 99.79', 'SELL 100.21', 'SELL 100.42']}
+        ${marketData} | ${0.002} | ${'one tick, without a fee'} | ${['BUY 99.98', 'BUY 99.99', 'SELL 100.01', 'SELL 100.02']}
+      `('builds the grid on the step raised to $description', ({ markets, atr, expected }) => {
+        tools.marketData = markets;
+        startOnAtr(atr, { spacingValue: 1.5 }, balancedNear100);
+
+        expect(openBook()).toEqual(expected);
+      });
+
+      it('warns of no spacing under the round-trip fee at the break-even step', () => {
+        tools.marketData = feeMarket;
+        startOnAtr(0.1, { spacingValue: 1.5 }, balancedNear100);
+
+        expect(log).not.toHaveBeenCalledWith('warn', expect.stringContaining('round-trip fee'));
+      });
     });
   });
 

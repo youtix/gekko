@@ -80,6 +80,17 @@ export interface GridBounds {
 /** The side of the grid a price is out on: under its lowest price, or over its highest */
 export type OutOfRangeSide = 'below' | 'above';
 
+/**
+ * The timeframe candles that closed beyond the grid in a row on a side resetMode arms, counted towards a reset (see
+ * resetConfirmCandles): a close back in range, the bounds included, or out on the other side, starts the count again
+ */
+export interface OutOfRangeCount {
+  /** The side of the grid they closed out on */
+  side: OutOfRangeSide;
+  /** How many closed there in a row */
+  count: number;
+}
+
 /** Rebalance plan, computed when the grid starts, after the warmup (and again after a failed attempt) */
 export interface RebalancePlan {
   /** Side of rebalance order */
