@@ -282,6 +282,13 @@ describe('exchange.helper', () => {
       expect(utils.mapCcxtTradeToTrade(trade, binanceMarket, 'BTC/USDT')).toMatchObject({ id: '', amount: 1, price: 60000 });
     });
 
+    // ccxt 4.5.39 leaves the timestamp of a trade undefined when the exchange gives none
+    it('dates a trade without a timestamp at the time it is mapped', () => {
+      vi.spyOn(Date, 'now').mockReturnValue(timestamp);
+      const trade: any = { order: 'ord1', amount: 1, price: 60000 };
+      expect(utils.mapCcxtTradeToTrade(trade, binanceMarket, 'BTC/USDT').timestamp).toBe(timestamp);
+    });
+
     // Trade.fee.rate is in % (0.1 for 0.1 %), and undefined when it cannot be known: never 0, which would be a trade without fees
     it.each`
       description                                                                  | market                    | amount | price    | fee                                                    | expected
