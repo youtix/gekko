@@ -15,10 +15,12 @@ import {
   computeLevelPrice,
   computeRebalancePlan,
   deriveLevelQuantity,
+  describeSpacing,
   getGridFunding,
   getMakerFee,
   getMaximumAmount,
   getMinimumAmount,
+  getMinimumStep,
   getOutOfRangeSide,
   getPortfolioContent,
   getRebalanceBuyCost,
@@ -26,6 +28,8 @@ import {
   hasOnlyOneSide,
   inferAmountPrecision,
   inferPricePrecision,
+  isResetSide,
+  resolveSpacing,
   roundAmount,
   roundPrice,
   validateConfig,
@@ -52,6 +56,11 @@ const tenthPercentFeeMarketData: MarketData = {
 const binanceStepsMarketData: MarketData = { ...documentedMarketData, precision: { price: 0.01, amount: 0.00001 } };
 // Binance's DOGE/BTC: whole coins, a price to the satoshi, and the minimum cost of its pairs quoted in BTC
 const dogeBtcMarketData: MarketData = { amount: { min: 1 }, cost: { min: 0.0001 }, precision: { price: 1e-8, amount: 1 } };
+// Hyperliquid's BTC loaded at 9990, 5 significant digits in a price: a tick of 0.1 stated there, of 1 from 10000 on, and a maker fee of
+// 0.04 %
+const significantDigitsMarketData: MarketData = { precision: { price: 0.1, priceSignificantDigits: 5 }, fee: { maker: 0.0004 } };
+// A pair around 1 on 5 significant digits, a tick of 0.00001 under 1 and of 0.0001 from 1 on, at a maker fee of 0.04 %
+const aroundOneMarketData: MarketData = { precision: { price: 0.00001, priceSignificantDigits: 5 }, fee: { maker: 0.0004 } };
 
 describe('gridBot.helper', () => {
   describe('inferPricePrecision', () => {
@@ -406,6 +415,33 @@ describe('gridBot.helper', () => {
     });
   });
 
+  describe('isResetSide', () => {
+    it.each`
+      resetMode | side       | expected
+      ${'none'} | ${'above'} | ${false}
+      ${'none'} | ${'below'} | ${false}
+      ${'up'}   | ${'above'} | ${true}
+      ${'up'}   | ${'below'} | ${false}
+      ${'down'} | ${'above'} | ${false}
+      ${'down'} | ${'below'} | ${true}
+      ${'both'} | ${'above'} | ${true}
+      ${'both'} | ${'below'} | ${true}
+    `('is $expected for resetMode $resetMode and a close $side the grid', ({ resetMode, side, expected }) => {
+      expect(isResetSide(resetMode, side)).toBe(expected);
+    });
+  });
+
+  // How the messages of the checks name the spacing of the grid they refuse or warn of
+  describe('describeSpacing', () => {
+    it.each`
+      spacing                                                                                                                | description                          | expected
+      ${{ spacingType: 'percent', spacingValue: 1 }}                                                                         | ${'a configured spacing'}            | ${'spacingValue 1 (percent)'}
+      ${{ spacingType: 'fixed', spacingValue: 48.01, description: 'a step of 48.01 (spacingValue 1.5 × ATR 32.0071, atr)' }} | ${'an atr step, by its description'} | ${'a step of 48.01 (spacingValue 1.5 × ATR 32.0071, atr)'}
+    `('names $description $expected', ({ spacing, expected }) => {
+      expect(describeSpacing(spacing)).toBe(expected);
+    });
+  });
+
   // The strategy block as the StrategyManager parses it, without name, before the strategy is created
   describe('schema', () => {
     // The documentation's example, without name
@@ -421,6 +457,50 @@ describe('gridBot.helper', () => {
       ${'a grid of buy levels only'}              | ${{ ...block, sellLevels: 0 }} | ${{ ...parsed, sellLevels: 0 }}
     `('accepts $scenario', ({ params, expected }) => {
       expect(GridBot.schema.parse(params)).toEqual(expected);
+    });
+
+    // The documentation example spaced by 1.5 × the ATR, and with every option of the atr spacing and of the reset given
+    const atrBlock = { ...block, spacingType: 'atr', spacingValue: 1.5 };
+    const everyOption = { ...atrBlock, atrPeriod: 21, resetMode: 'both', resetConfirmCandles: 3, resetCooldownCandles: 10 };
+
+    it.each`
+      scenario                                                         | params                                   | expected
+      ${'spacingType atr, spacingValue the multiple of the ATR'}       | ${atrBlock}                              | ${{ ...parsed, ...atrBlock }}
+      ${'an atr spacing under 1 × the ATR'}                            | ${{ ...atrBlock, spacingValue: 0.25 }}   | ${{ ...parsed, ...atrBlock, spacingValue: 0.25 }}
+      ${'an atrPeriod of 1, the true range of the last candle'}        | ${{ ...atrBlock, atrPeriod: 1 }}         | ${{ ...parsed, ...atrBlock, atrPeriod: 1 }}
+      ${'an atrPeriod with a percent spacing, which does not read it'} | ${{ ...block, atrPeriod: 7 }}            | ${{ ...parsed, atrPeriod: 7 }}
+      ${'resetMode up'}                                                | ${{ ...block, resetMode: 'up' }}         | ${{ ...parsed, resetMode: 'up' }}
+      ${'resetMode down'}                                              | ${{ ...block, resetMode: 'down' }}       | ${{ ...parsed, resetMode: 'down' }}
+      ${'resetMode both'}                                              | ${{ ...block, resetMode: 'both' }}       | ${{ ...parsed, resetMode: 'both' }}
+      ${'resetMode none, the default, given'}                          | ${{ ...block, resetMode: 'none' }}       | ${parsed}
+      ${'a resetConfirmCandles of 1, the default, given'}              | ${{ ...block, resetConfirmCandles: 1 }}  | ${parsed}
+      ${'a resetCooldownCandles of 0, the default, given'}             | ${{ ...block, resetCooldownCandles: 0 }} | ${parsed}
+      ${'every option of the atr spacing and of the reset given'}      | ${everyOption}                           | ${everyOption}
+    `('accepts $scenario', ({ params, expected }) => {
+      expect(GridBot.schema.parse(params)).toEqual(expected);
+    });
+
+    // Refused as the other options are, before the strategy is created: a misspelt resetMode would leave the grid in place without a
+    // word, and an atrPeriod the ATR refuses would stop the run at init, naming the indicator's period rather than the option
+    it.each`
+      scenario                                    | params
+      ${'an atrPeriod of 0'}                      | ${{ ...atrBlock, atrPeriod: 0 }}
+      ${'a fractional atrPeriod'}                 | ${{ ...atrBlock, atrPeriod: 1.5 }}
+      ${'a quoted atrPeriod'}                     | ${{ ...atrBlock, atrPeriod: '14' }}
+      ${'an unknown resetMode (upward)'}          | ${{ ...block, resetMode: 'upward' }}
+      ${'a resetMode in capitals (UP)'}           | ${{ ...block, resetMode: 'UP' }}
+      ${'a resetMode given as a number'}          | ${{ ...block, resetMode: 1 }}
+      ${'a resetConfirmCandles of 0'}             | ${{ ...block, resetConfirmCandles: 0 }}
+      ${'a fractional resetConfirmCandles'}       | ${{ ...block, resetConfirmCandles: 1.5 }}
+      ${'a quoted resetConfirmCandles'}           | ${{ ...block, resetConfirmCandles: '2' }}
+      ${'a negative resetCooldownCandles'}        | ${{ ...block, resetCooldownCandles: -1 }}
+      ${'a fractional resetCooldownCandles'}      | ${{ ...block, resetCooldownCandles: 0.5 }}
+      ${'a quoted resetCooldownCandles'}          | ${{ ...block, resetCooldownCandles: '10' }}
+      ${'an unknown reset option (resetCandles)'} | ${{ ...block, resetCandles: 2 }}
+      ${'an unknown spacingType (atrPercent)'}    | ${{ ...block, spacingType: 'atrPercent' }}
+      ${'an atr spacing of 0 × the ATR'}          | ${{ ...atrBlock, spacingValue: 0 }}
+    `('refuses $scenario', ({ params }) => {
+      expect(GridBot.schema.safeParse(params).success).toBe(false);
     });
 
     // Each was handed to the strategy as it was: buyLevel built a grid of SELLs only, 2.5 levels placed BUYs off the prices they
@@ -596,6 +676,15 @@ describe('gridBot.helper', () => {
         `Grid configuration would result in non-positive buy prices: ${expected}`,
       );
     });
+
+    // A huge ATR makes a step that a fixed spacing of its size would make: refused, the message naming the step and its ATR
+    it('is the error naming an atr step and its ATR for a lowest BUY under 0: 5 buy levels spaced by 1 × ATR 30 around 100', () => {
+      const { spacing } = resolveSpacing({ sellLevels: 5, spacingType: 'atr', spacingValue: 1 }, 100, { precision: { price: 0.01 } }, 30);
+
+      expect(checkLowestBuyPrice({ buyLevels: 5, ...spacing }, 100, 2, 0.01)).toBe(
+        'Grid configuration would result in non-positive buy prices: the lowest of buyLevels 5, spaced by a step of 30 (spacingValue 1 × ATR 30, atr) below the center price 100, would be at -50',
+      );
+    });
   });
 
   // A percent or logarithmic step shrinks with the price: 0.0084 % keeps the prices of a 3/3 grid a tick apart at 100, not at 99. A
@@ -640,6 +729,17 @@ describe('gridBot.helper', () => {
       it('is the error naming the step alone for two prices the step rounds together', () => {
         expect(checkPriceTick({ buyLevels: 2, sellLevels: 2, spacingType: 'fixed', spacingValue: 0.004 }, 100, 2, 0.01, 5)).toBe(
           'Grid configuration would result in a level buying and selling at the same price: spaced by spacingValue 0.004 (fixed) around the center price 100, two adjacent prices of the grid would both round to 100 at the price tick 0.01',
+        );
+      });
+
+      // Without a fee the minimum step is one tick at the center price (see getMinimumStep), which keeps an atr step of 0.5 around 9999:
+      // under the tick of 1 from 10000 on, refused as a fixed spacing of 0.5 is, the message naming the step and its ATR
+      it('is the error naming an atr step and its ATR for two prices its tick of 1 rounds together from 10000 on', () => {
+        const withoutFee: MarketData = { precision: { price: 0.1, priceSignificantDigits: 5 } };
+        const { spacing } = resolveSpacing({ sellLevels: 4, spacingType: 'atr', spacingValue: 1 }, 9999, withoutFee, 0.5);
+
+        expect(checkPriceTick({ buyLevels: 2, sellLevels: 4, ...spacing }, 9999, 1, 0.1, 5)).toBe(
+          'Grid configuration would result in a level buying and selling at the same price: spaced by a step of 0.5 (spacingValue 1 × ATR 0.5, atr) around the center price 9999, two adjacent prices of the grid would both round to 10001 at the price tick 1, the market taking 5 significant digits in a price (precision.priceSignificantDigits)',
         );
       });
     });
@@ -692,6 +792,193 @@ describe('gridBot.helper', () => {
       expect(checkRoundTripFee(oneLevelASide, 9999.7, marketData)).toBe(
         underFee('0.6 (fixed)', '0.08003 %', 0.0004, '2 out of 2', 'selling at 10000, 0.003 % above its buy at 9999.7'),
       );
+    });
+
+    // No step breaks even on 501 sell levels at 0.1 %, 500 × 0.2002 % being over 1: an atr step is kept at one tick (see getMinimumStep),
+    // and warned of here, the message naming the step and its ATR
+    it('warns of an atr step naming its ATR: one tick on 501 sell levels at 0.1 %, at which no step breaks even', () => {
+      const { spacing } = resolveSpacing(
+        { sellLevels: 501, spacingType: 'atr', spacingValue: 1.5 },
+        60000,
+        tenthPercentFeeMarketData,
+        0.004,
+      );
+
+      expect(checkRoundTripFee({ buyLevels: 0, sellLevels: 501, ...spacing }, 60000, tenthPercentFeeMarketData)).toBe(
+        'a step of 0.01 (spacingValue 1.5 × ATR 0.004, atr) is under the round-trip fee: a level that sells less than 0.2002 % above its buy, paying the maker fee of 0.001 (fee.maker) on its BUY and on its SELL, loses money at each round trip, 501 out of 501 here, the narrowest selling at 60005.01, 0.00001667 % above its buy at 60005',
+      );
+    });
+  });
+
+  // The step under which a level of a fixed grid loses money at each round trip (see checkRoundTripFee), which an atr spacing is raised
+  // to (see resolveSpacing). At a fixed step, the highest level, whose buy price is the largest, earns the least for it.
+  describe('getMinimumStep', () => {
+    // r = 2 × 0.001 / 0.999 = 0.2002 % at a maker fee of 0.1 %: the highest of 5 sell levels buys 4 steps above the center price, so
+    // step ≥ 60000 × r / (1 − 4 × r) = 121.0898…, and without a sell level the BUY next to the center price, at 60000 − step, so
+    // step ≥ 60000 × r / (1 + r) = 119.8801…
+    it.each`
+      center   | sellLevels | marketData                                               | description                                                                             | expected
+      ${60000} | ${5}       | ${tenthPercentFeeMarketData}                             | ${'5 sell levels at 60000, a maker fee of 0.1 %: 121.0898… rounded up to the cent'}     | ${121.09}
+      ${60000} | ${0}       | ${tenthPercentFeeMarketData}                             | ${'no sell level: 119.8801… rounded up to the cent'}                                    | ${119.89}
+      ${60000} | ${5}       | ${{ fee: { maker: 0.001 } }}                             | ${'a market that states no tick: rounded up to DEFAULT_PRICE_PRECISION, 8 decimals'}    | ${121.08980828}
+      ${60000} | ${5}       | ${{}}                                                    | ${'a market that states neither a tick nor a fee: one tick of 8 decimals'}              | ${1e-8}
+      ${60000} | ${5}       | ${{ precision: { price: 0.05 }, fee: { maker: 0.001 } }} | ${'a tick of 0.05, not one unit of a decimal: rounded up to it'}                        | ${121.1}
+      ${60000} | ${5}       | ${{ precision: { price: 0.5 }, fee: { maker: 0.001 } }}  | ${'a tick of 0.5: rounded up to it'}                                                    | ${121.5}
+      ${20000} | ${2}       | ${significantDigitsMarketData}                           | ${'2 sell levels at 20000 on 5 significant digits: 16.0192… rounded up to a tick of 1'} | ${17}
+      ${60000} | ${500}     | ${tenthPercentFeeMarketData}                             | ${'500 sell levels, 499 × r = 0.999 under 1: twice the center price'}                   | ${120000.01}
+    `('is $expected for $description', ({ center, sellLevels, marketData, expected }) => {
+      expect(getMinimumStep(center, sellLevels, marketData)).toBe(expected);
+    });
+
+    // A step under a tick rounds two adjacent prices to one (see checkPriceTick): one tick at least, and one tick where no fee calls for
+    // more, or where no step breaks even, which checkRoundTripFee then warns of as for any grid
+    it.each`
+      center   | sellLevels | marketData                                                 | description
+      ${60000} | ${5}       | ${{ precision: { price: 0.01 } }}                          | ${'a market without a fee'}
+      ${60000} | ${5}       | ${{ precision: { price: 0.01 }, fee: { taker: 0.001 } }}   | ${'a taker fee only, which the LIMIT orders of the grid do not pay'}
+      ${60000} | ${5}       | ${{ precision: { price: 0.01 }, fee: { maker: -0.0001 } }} | ${'a maker rebate, at which every step breaks even'}
+      ${0}     | ${5}       | ${tenthPercentFeeMarketData}                               | ${'a center price of 0'}
+      ${NaN}   | ${5}       | ${tenthPercentFeeMarketData}                               | ${'a center price that is not a number'}
+      ${60000} | ${501}     | ${tenthPercentFeeMarketData}                               | ${'501 sell levels, 500 × r over 1: no step breaks even'}
+    `('is one tick, 0.01, for $description', ({ center, sellLevels, marketData }) => {
+      expect(getMinimumStep(center, sellLevels, marketData)).toBe(0.01);
+    });
+
+    // Worked out on the prices as they are spaced, the step was taken for the minimum while the orders, each placed at its price rounded
+    // to the tick there, lost money: 8.1 around 9999 on 5 significant digits put the highest SELL of 2 at 10015, 8 above its BUY at 10007
+    // (10015.2 and 10007.1 on the tick of 1 from 10000 on), and a level exactly at its break-even reads as losing in binary. Either way
+    // checkRoundTripFee warned of the grid right after its step was said to break even. Raised to whole numbers of the tick at the
+    // highest price of the grid, until no level loses money as checkRoundTripFee reckons it
+    it.each`
+      center     | sellLevels | marketData                                                | description                                                                                           | expected
+      ${9999}    | ${2}       | ${significantDigitsMarketData}                            | ${'2 sell levels around 9999, where 8.1 lost: 9, its SELLs at 10008 and 10017'}                       | ${9}
+      ${9999}    | ${5}       | ${significantDigitsMarketData}                            | ${'5 sell levels around 9999, where 8.1 lost on 4 levels: 9'}                                         | ${9}
+      ${9994.4}  | ${1}       | ${significantDigitsMarketData}                            | ${'a sell level around 9994.4, where 8 put its SELL at 10002, 7.6 above its BUY: 9'}                  | ${9}
+      ${9999.4}  | ${1}       | ${significantDigitsMarketData}                            | ${'a sell level around 9999.4, where 8.1 puts its SELL at 10008, up from 10007.5: 8.1 kept'}          | ${8.1}
+      ${0.9999}  | ${5}       | ${aroundOneMarketData}                                    | ${'5 sell levels around 0.9999, where 0.00081 put 4 of 10 levels under the fee: 0.0009'}              | ${0.0009}
+      ${4123.35} | ${1}       | ${{ precision: { price: 0.01 }, fee: { maker: 0.0004 } }} | ${'a sell level around 4123.35, whose break-even of exactly 3.3 binary reads as a loss: a tick more'} | ${3.31}
+    `('is $expected for $description', ({ center, sellLevels, marketData, expected }) => {
+      expect(getMinimumStep(center, sellLevels, marketData)).toBe(expected);
+    });
+
+    // Beyond the largest number, the prices of its grid are 0 (see roundPrice), and a step raised by a tick no longer grows
+    it('is the step worked out, not raised, for a center price whose grid passes the largest number', () => {
+      expect(getMinimumStep(1.79e308, 5, tenthPercentFeeMarketData)).toBe(3.61251261352169e305);
+    });
+
+    // As the strategy checks the grid it builds: at the minimum, checkRoundTripFee finds no level losing money, and one tick under it the
+    // levels that earn the least for the step lose, the highest first, or without a sell level the BUY next to the center price. On 5
+    // significant digits, that tick is the one at the highest price of the grid: 1 from 10000 on, 0.0001 from 1 on
+    describe.each`
+      center    | buyLevels | sellLevels | marketData                     | description                     | under     | losing
+      ${60000}  | ${5}      | ${5}       | ${tenthPercentFeeMarketData}   | ${'a 5/5 grid at 60000, 0.1 %'} | ${121.08} | ${'1 out of 10 here, the narrowest selling at 60605.4, 0.2002 % above its buy at 60484.32'}
+      ${60000}  | ${5}      | ${0}       | ${tenthPercentFeeMarketData}   | ${'a grid of buy levels only'}  | ${119.88} | ${'1 out of 5 here, the narrowest selling at 60000, 0.2002 % above its buy at 59880.12'}
+      ${9999}   | ${2}      | ${2}       | ${significantDigitsMarketData} | ${'a 2/2 grid around 9999'}     | ${8}      | ${'2 out of 4 here, the narrowest selling at 10015, 0.07994 % above its buy at 10007'}
+      ${0.9999} | ${5}      | ${5}       | ${aroundOneMarketData}         | ${'a 5/5 grid around 0.9999'}   | ${0.0008} | ${'5 out of 10 here, the narrowest selling at 1.0039, 0.07975 % above its buy at 1.0031'}
+    `('for $description', ({ center, buyLevels, sellLevels, marketData, under, losing }) => {
+      const gridSpacedBy = (spacingValue: number): GridLayout => ({ buyLevels, sellLevels, spacingType: 'fixed', spacingValue });
+
+      it('leaves no level losing money at each round trip: checkRoundTripFee is null', () => {
+        expect(checkRoundTripFee(gridSpacedBy(getMinimumStep(center, sellLevels, marketData)), center, marketData)).toBeNull();
+      });
+
+      it(`is the smallest: spaced by ${under}, the grid loses money at each round trip, ${losing}`, () => {
+        expect(checkRoundTripFee(gridSpacedBy(under), center, marketData)).toContain(`loses money at each round trip, ${losing}`);
+      });
+    });
+  });
+
+  describe('resolveSpacing', () => {
+    // On a market without a fee, whose minimum step is one tick: the step resolved as it is, unraised
+    const withoutFee: MarketData = { precision: { price: 0.01 } };
+    const atrSpacedBy = (spacingValue: number, sellLevels = 5) => ({ sellLevels, spacingType: 'atr' as const, spacingValue });
+
+    // The ATR is read by an atr spacing only
+    it.each`
+      spacingType      | spacingValue
+      ${'percent'}     | ${1}
+      ${'fixed'}       | ${100}
+      ${'logarithmic'} | ${0.01}
+    `(
+      'is the configured $spacingType spacing as it is, without a description or a warning, whatever the ATR',
+      ({ spacingType, spacingValue }) => {
+        expect(resolveSpacing({ sellLevels: 5, spacingType, spacingValue }, 60000, tenthPercentFeeMarketData, 32)).toStrictEqual({
+          spacing: { spacingType, spacingValue },
+        });
+      },
+    );
+
+    // To the nearest tick at the center price, a tie upwards, as the prices are (see roundPrice), the product read as it is written
+    it.each`
+      spacingValue | atr                  | description                                                                  | expected
+      ${1.5}       | ${32.00714285714286} | ${'48.0107…, down to the nearest tick'}                                      | ${48.01}
+      ${2}         | ${16.0049}           | ${'32.0098, up to the nearest tick'}                                         | ${32.01}
+      ${1}         | ${48.005}            | ${'48.005, a tie upwards'}                                                   | ${48.01}
+      ${0.3}       | ${2.25}              | ${'0.675, a tie upwards, though 0.3 × 2.25 is 0.6749999999999999 in binary'} | ${0.68}
+    `('is a fixed step of $expected for spacingValue $spacingValue × ATR $atr: $description', ({ spacingValue, atr, expected }) => {
+      expect(resolveSpacing(atrSpacedBy(spacingValue), 60000, withoutFee, atr).spacing.spacingValue).toBe(expected);
+    });
+
+    // The description names the step and its origin for the messages of the checks (see describeSpacing), the ATR to 6 significant
+    // digits. A step at or above the minimum (see getMinimumStep), 121.09 at 60000 on a maker fee of 0.1 %, is kept as it is.
+    it.each`
+      atr                  | marketData                   | step      | description                                                            | expected
+      ${32.00714285714286} | ${withoutFee}                | ${48.01}  | ${'a step of 48.01, 1.5 × an ATR of 32.00714285714286, without a fee'} | ${'a step of 48.01 (spacingValue 1.5 × ATR 32.0071, atr)'}
+      ${123.456789}        | ${withoutFee}                | ${185.19} | ${'a step of 185.19, 1.5 × an ATR of 123.456789, without a fee'}       | ${'a step of 185.19 (spacingValue 1.5 × ATR 123.457, atr)'}
+      ${100}               | ${tenthPercentFeeMarketData} | ${150}    | ${'a step of 150, above the minimum step of 121.09'}                   | ${'a step of 150 (spacingValue 1.5 × ATR 100, atr)'}
+      ${80.72666666666667} | ${tenthPercentFeeMarketData} | ${121.09} | ${'a step of 121.09, the minimum step itself'}                         | ${'a step of 121.09 (spacingValue 1.5 × ATR 80.7267, atr)'}
+    `('keeps $description, described as $expected, without a warning', ({ atr, marketData, step, expected }) => {
+      expect(resolveSpacing(atrSpacedBy(1.5), 60000, marketData, atr)).toStrictEqual({
+        spacing: { spacingType: 'fixed', spacingValue: step, description: expected },
+      });
+    });
+
+    /** A step of spacingValue 1.5 × `atr` at 60000, `step` on the tick of 0.01, raised to `minimum`, its warning ending `instead` */
+    const raised = (atr: number, step: number, minimum: number, instead: string) => ({
+      spacing: {
+        spacingType: 'fixed',
+        spacingValue: minimum,
+        description: `a step of ${minimum} (the minimum step, spacingValue 1.5 × ATR ${atr} giving ${step}, atr)`,
+      },
+      warning: `ATR spacing: spacingValue 1.5 × ATR ${atr} is a step of ${step} on the price tick 0.01, ${instead}`,
+    });
+    const underTheFee =
+      'under 121.09, the minimum step at which every level of the grid breaks even on the maker fee of 0.001 (fee.maker): the grid is spaced by 121.09 instead';
+    const underTheTick = 'under the price tick: the grid is spaced by one tick, 0.01, instead';
+
+    // A lull in the volatility would space the grid under the round-trip fee, or under the tick: raised to the minimum step, with a
+    // warning naming the step, the tick and the minimum
+    it.each`
+      atr      | marketData                   | description                                                  | expected
+      ${0.004} | ${tenthPercentFeeMarketData} | ${'a step of 0.01, under the minimum step of 121.09'}        | ${raised(0.004, 0.01, 121.09, underTheFee)}
+      ${0.002} | ${tenthPercentFeeMarketData} | ${'a step rounded to 0, under the minimum step of 121.09'}   | ${raised(0.002, 0, 121.09, underTheFee)}
+      ${0.002} | ${withoutFee}                | ${'a step rounded to 0 without a fee, under the price tick'} | ${raised(0.002, 0, 0.01, underTheTick)}
+    `('raises $description, with a warning', ({ atr, marketData, expected }) => {
+      expect(resolveSpacing(atrSpacedBy(1.5), 60000, marketData, atr)).toStrictEqual(expected);
+    });
+
+    // Its prices above 10000 rounded to the tick of 1 there, a step of 8.5 sells the highest of 2 levels 8 above its buy, under the fee
+    it('raises a step of 8.5 around 9999 on 5 significant digits to 9, at which every level breaks even as it trades', () => {
+      expect(resolveSpacing(atrSpacedBy(1, 2), 9999, significantDigitsMarketData, 8.5)).toStrictEqual({
+        spacing: {
+          spacingType: 'fixed',
+          spacingValue: 9,
+          description: 'a step of 9 (the minimum step, spacingValue 1 × ATR 8.5 giving 8.5, atr)',
+        },
+        warning:
+          'ATR spacing: spacingValue 1 × ATR 8.5 is a step of 8.5 on the price tick 0.1, under 9, the minimum step at which every level of the grid breaks even on the maker fee of 0.0004 (fee.maker): the grid is spaced by 9 instead',
+      });
+    });
+
+    // The strategy refuses to start before the ATR has a value, but a candle whose ATR is not a number leaves it null
+    it.each`
+      atr
+      ${null}
+      ${undefined}
+      ${NaN}
+      ${Infinity}
+    `('takes an ATR of $atr for 0, a step raised to the minimum', ({ atr }) => {
+      expect(resolveSpacing(atrSpacedBy(1.5), 60000, tenthPercentFeeMarketData, atr)).toStrictEqual(raised(0, 0, 121.09, underTheFee));
     });
   });
 

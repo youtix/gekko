@@ -14,14 +14,14 @@ export const gridBotStrategySchema = z
   .strictObject({
     /**
      * Number of buy levels below the center price. The lowest must stay above 0: a grid whose lowest BUY would be at or below 0 stops
-     * the run, when it starts and again around the price a rebalance ended at
+     * the run, when it starts or is reset, and again around the price a rebalance ended at
      */
     buyLevels: z.int().min(0),
     /** Number of sell levels above the center price */
     sellLevels: z.int().min(0),
     /**
      * How the levels are spaced apart: by spacingValue as it is for percent, fixed and logarithmic, by spacingValue × the ATR of the
-     * pair on the candle the grid is built around for atr (see spacingValue and atrPeriod)
+     * pair on the last timeframe candle when the grid is built for atr (see spacingValue and atrPeriod)
      */
     spacingType: z.enum(['percent', 'fixed', 'logarithmic', 'atr']),
     /**
@@ -31,12 +31,13 @@ export const gridBotStrategySchema = z
      * - fixed: price units
      * - logarithmic: the ratio between adjacent prices, less 1 (0.01 === each price 1 % above the one below it)
      * - atr: a multiple of the ATR of atrPeriod timeframe candles (1.5 === 1.5 × ATR), a fixed step in price units once the grid is
-     *   built: the product rounded to the price tick, and raised to the smallest step at which every level breaks even on the maker
-     *   fee, one tick at least, with a warning (see resolveSpacing). Resolved again at each reset (see resetMode), from the ATR of the
-     *   last candle
+     *   built: the product rounded to the price tick, and raised to the minimum step at which every level breaks even on the maker
+     *   fee, one tick at least, with a warning (see resolveSpacing and getMinimumStep). Resolved again at each reset (see resetMode),
+     *   from the ATR of the last timeframe candle
      * Checked against the market around the center price: a spacing that rounds two adjacent prices of the grid to the same price tick
-     * (the tick at that price, on a market whose tick depends on the price) stops the run, when the grid starts, before a failed
-     * rebalance is placed again and once it is rebalanced, and one under the round-trip fee, two maker fees, is warned of once.
+     * (the tick at that price, on a market whose tick depends on the price) stops the run, when the grid starts or is reset, before a
+     * failed rebalance is placed again and once it is rebalanced, and one under the round-trip fee, two maker fees, is warned of each
+     * time the grid starts or is reset.
      */
     spacingValue: z.number().positive(),
     /**
@@ -48,21 +49,24 @@ export const gridBotStrategySchema = z
     retryOnError: z.int().min(1).default(DEFAULT_RETRY_LIMIT),
     /**
      * Period of the ATR an atr spacing reads, in timeframe candles, at least 1 (the true range of the last candle); read with atr
-     * spacing only. The ATR has its first value on its atrPeriod + 1-th candle, which the first candle after the warmup must be: a run
-     * whose warmup.candleCount is shorter stops on that candle, before any order.
+     * spacing only. The ATR has its first value on the atrPeriod + 1-th timeframe candle, so the first candle after the warmup, which
+     * builds the grid, needs a warmup.candleCount of atrPeriod or more: a run whose warmup.candleCount is under atrPeriod stops on that
+     * candle, before any order.
      */
     atrPeriod: z.int().min(1).default(DEFAULT_ATR_PERIOD),
     /**
      * When the grid is reset around the price: never ('none': the grid stays in place, and a close out of its range is warned of
      * once), on a close above its highest price ('up'), below its lowest ('down'), or either way ('both'). A reset cancels the grid's
      * orders, then rebalances the free balances and builds a new grid around the price once they have ended, as at the start, which
-     * realizes the loss of the breakout (see resetConfirmCandles and resetCooldownCandles).
+     * realizes the loss of the breakout (see resetConfirmCandles and resetCooldownCandles). An order whose outcome is unknown, which may
+     * be live on the exchange without GridBot tracking it, stops the run where the new grid would be built.
      */
     resetMode: z.enum(['none', 'up', 'down', 'both']).default(DEFAULT_RESET_MODE),
     /**
      * Consecutive timeframe candles closing out of the grid, on a side resetMode arms, before the reset, at least 1: a close back in
-     * the range, or out on the other side, starts the count again, so that a wick alone does not reset the grid. Read with a
-     * resetMode other than 'none' only.
+     * the range, or out on the other side, starts the count again, so that from 2 on a single close out of the range, a spike, does not
+     * reset the grid. The closes of the cooldown are not counted (see resetCooldownCandles). Read with a resetMode other than 'none'
+     * only.
      */
     resetConfirmCandles: z.int().min(1).default(DEFAULT_RESET_CONFIRM_CANDLES),
     /**

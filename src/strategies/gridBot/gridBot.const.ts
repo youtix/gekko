@@ -10,7 +10,7 @@ export const DEFAULT_AMOUNT_PRECISION = 8;
  */
 export const DEFAULT_PRICE_PRECISION = 8;
 
-/** Default atrPeriod: the period of the ATR an atr spacing reads, in timeframe candles, the indicator's own default */
+/** Default atrPeriod: the period of the ATR an atr spacing reads, in timeframe candles, Wilder's 14 (the ATR indicator has no default) */
 export const DEFAULT_ATR_PERIOD = 14;
 
 /** Default resetMode: the grid stays in place when the price leaves its range */

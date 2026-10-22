@@ -12,6 +12,7 @@ import {
   hasOnlyOneSide,
   inferAmountPrecision,
   inferPricePrecision,
+  resolveSpacing,
   roundAmount,
   roundPrice,
   validateConfig,
@@ -123,6 +124,19 @@ describe('gridBot.helper Performance', () => {
     bench('1000 config validations', () => {
       for (let i = 0; i < 1000; i++) {
         validateConfig(params, 100, marketData);
+      }
+    });
+  });
+
+  describe('resolveSpacing', () => {
+    // At a maker fee of 0.1 %, the minimum step of 5 sell levels around 100 is 0.21: the ATRs from 0.05 to 0.5 give steps from 0.08 to
+    // 0.75, some raised to it with a warning, each checked on the prices of the grid
+    const atrGrid = { sellLevels: 5, spacingType: 'atr' as const, spacingValue: 1.5 };
+    const withMakerFee: MarketData = { ...marketData, fee: { maker: 0.001 } };
+
+    bench('1000 resolutions of an atr spacing', () => {
+      for (let i = 0; i < 1000; i++) {
+        resolveSpacing(atrGrid, 100, withMakerFee, 0.05 * ((i % 10) + 1));
       }
     });
   });
