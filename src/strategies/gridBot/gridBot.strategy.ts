@@ -67,8 +67,10 @@ import {
  *   is warned of when the grid starts or is reset
  * - With atr spacing, the step is spacingValue × the ATR of atrPeriod timeframe candles on the candle the grid is built around, a fixed
  *   step from then on, until a reset resolves it again from the ATR of the last candle: rounded to the tick, and raised to the smallest
- *   step at which every level breaks even on the maker fee, one tick at least, with a warning (see resolveSpacing). The run stops on the
- *   first candle after the warmup when the ATR has no value yet: warmup.candleCount must be at least atrPeriod
+ *   step at which every level breaks even on the maker fee, one tick at least, with a warning (see resolveSpacing). On a market whose
+ *   tick depends on the price, a step above it is raised to a whole number of the coarser tick at the top of the grid where a level
+ *   would lose money there, with a warning of its own. The run stops on the first candle after the warmup when the ATR has no value
+ *   yet: warmup.candleCount must be at least atrPeriod
  * - A grid whose lowest BUY would be at or below 0, or whose spacing rounds two adjacent prices to the same tick, stops the run: around
  *   the close it starts on, or the price it is reset around, and again around the price a rebalance ended at, before it is placed
  *   again and when the grid is built

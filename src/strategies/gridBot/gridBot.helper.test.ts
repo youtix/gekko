@@ -970,6 +970,100 @@ describe('gridBot.helper', () => {
       });
     });
 
+    // A step at or above the minimum step is checked on the prices as the orders are placed, as the minimum is (see getMinimumStep)
+    describe('at or above the minimum step', () => {
+      // The market of significantDigitsMarketData with a fixed tick of 0.1, at any price
+      const fixedTickMarketData: MarketData = { precision: { price: 0.1 }, fee: { maker: 0.0004 } };
+      // 5 significant digits at a maker fee of 0.043 %, whose round trip takes a SELL 0.08604 % above its BUY
+      const higherFeeMarketData: MarketData = { precision: { price: 0.1, priceSignificantDigits: 5 }, fee: { maker: 0.00043 } };
+
+      // On a fixed tick the prices are exactly a step apart, and on 5 significant digits a step that is a whole number of the tick of 1
+      // from 10000 on keeps them so, or the tick rounds them apart by enough: every level breaks even as it trades
+      it.each`
+        center    | sellLevels | atr    | marketData                     | description                                                                                   | step
+        ${9940}   | ${8}       | ${8.3} | ${fixedTickMarketData}         | ${'8.3 for 8 sell levels around 9940 on a fixed tick of 0.1, its highest SELL at 10006.4'}    | ${8.3}
+        ${9999}   | ${2}       | ${10}  | ${significantDigitsMarketData} | ${'10 around 9999 on 5 significant digits, a whole number of the tick of 1: 10009 and 10019'} | ${10}
+        ${9999}   | ${2}       | ${9.4} | ${significantDigitsMarketData} | ${'9.4 around 9999, its SELLs at 10008 and 10018, 9 and 10 above their BUYs'}                 | ${9.4}
+        ${9995.5} | ${1}       | ${8.1} | ${significantDigitsMarketData} | ${'8.1 around 9995.5, its SELL at 10004, 8.5 above its BUY'}                                  | ${8.1}
+      `('keeps a step of $description, without a warning', ({ center, sellLevels, atr, marketData, step }) => {
+        expect(resolveSpacing(atrSpacedBy(1, sellLevels), center, marketData, atr)).toStrictEqual({
+          spacing: { spacingType: 'fixed', spacingValue: step, description: `a step of ${step} (spacingValue 1 × ATR ${atr}, atr)` },
+        });
+      });
+
+      // Kept as it was, a step at or above the minimum was only compared with it, never checked on its own prices: on 5 significant
+      // digits, 8.3 for 8 sell levels around 9940, over the minimum of 8, put the highest SELL at 10006, 7.9 above its BUY at 9998.1
+      // (10006.4 on the tick of 1 from 10000 on), under the fee of 0.04 %, which checkRoundTripFee warned of right after
+      it('raises a step of 8.3 for 8 sell levels around 9940 on 5 significant digits to 9, a whole number of the tick of 1 from 10000 on', () => {
+        expect(resolveSpacing(atrSpacedBy(1, 8), 9940, significantDigitsMarketData, 8.3)).toStrictEqual({
+          spacing: {
+            spacingType: 'fixed',
+            spacingValue: 9,
+            description: 'a step of 9 (spacingValue 1 × ATR 8.3 giving 8.3, raised on the price tick 1, atr)',
+          },
+          warning:
+            'ATR spacing: spacingValue 1 × ATR 8.3 is a step of 8.3 on the price tick 0.1, at which a level of the grid loses money on the maker fee of 0.0004 (fee.maker) on the price tick 1 at the top of the grid: the grid is spaced by 9 instead',
+        });
+      });
+
+      /**
+       * A step of spacingValue 1 × `atr`, `atrStep` on the tick `tick` at the center price, raised to `step` on the tick `topTick` at the
+       * top of the grid, at a maker fee of `maker`
+       */
+      const raisedAtTheTop = (atr: number, tick: number, atrStep: number, maker: number, step: number, topTick: number) => ({
+        spacing: {
+          spacingType: 'fixed',
+          spacingValue: step,
+          description: `a step of ${step} (spacingValue 1 × ATR ${atr} giving ${atrStep}, raised on the price tick ${topTick}, atr)`,
+        },
+        warning: `ATR spacing: spacingValue 1 × ATR ${atr} is a step of ${atrStep} on the price tick ${tick}, at which a level of the grid loses money on the maker fee of ${maker} (fee.maker) on the price tick ${topTick} at the top of the grid: the grid is spaced by ${step} instead`,
+      });
+
+      // Raised by the tick at the top of the grid until no level loses money there: 0.0001 from 1 on, and twice at a maker fee of 0.043 %,
+      // where 9 still sells a level at 10006, 8.6 above its BUY at 9997.4
+      it.each`
+        center    | sellLevels | atr         | marketData             | description                                                                             | expected
+        ${0.994}  | ${8}       | ${0.000828} | ${aroundOneMarketData} | ${'0.00083 around 0.994, over the minimum of 0.0008, to 0.0009'}                        | ${raisedAtTheTop(0.000828, 0.00001, 0.00083, 0.0004, 0.0009, 0.0001)}
+        ${9961.4} | ${5}       | ${8.8}      | ${higherFeeMarketData} | ${'8.8 around 9961.4 at a maker fee of 0.043 %, over the minimum of 8.7, twice: to 10'} | ${raisedAtTheTop(8.8, 0.1, 8.8, 0.00043, 10, 1)}
+      `('raises a step of $description, with a warning', ({ center, sellLevels, atr, marketData, expected }) => {
+        expect(resolveSpacing(atrSpacedBy(1, sellLevels), center, marketData, atr)).toStrictEqual(expected);
+      });
+
+      // As the strategy checks the grid it builds (see checkRoundTripFee), 2 buy levels below the center price
+      it.each`
+        center    | sellLevels | atr         | marketData                     | description
+        ${9940}   | ${8}       | ${8.3}      | ${fixedTickMarketData}         | ${'8.3 kept around 9940 on a fixed tick'}
+        ${9999}   | ${2}       | ${10}       | ${significantDigitsMarketData} | ${'10 kept around 9999'}
+        ${9999}   | ${2}       | ${9.4}      | ${significantDigitsMarketData} | ${'9.4 kept around 9999'}
+        ${9995.5} | ${1}       | ${8.1}      | ${significantDigitsMarketData} | ${'8.1 kept around 9995.5'}
+        ${9940}   | ${8}       | ${8.3}      | ${significantDigitsMarketData} | ${'8.3 raised to 9 around 9940'}
+        ${0.994}  | ${8}       | ${0.000828} | ${aroundOneMarketData}         | ${'0.00083 raised to 0.0009 around 0.994'}
+        ${9961.4} | ${5}       | ${8.8}      | ${higherFeeMarketData}         | ${'8.8 raised to 10 around 9961.4'}
+      `(
+        'leaves no level losing money at each round trip on the step resolved, $description: checkRoundTripFee is null',
+        ({ center, sellLevels, atr, marketData }) => {
+          const { spacing } = resolveSpacing(atrSpacedBy(1, sellLevels), center, marketData, atr);
+
+          expect(checkRoundTripFee({ buyLevels: 2, sellLevels, ...spacing }, center, marketData)).toBeNull();
+        },
+      );
+
+      // The grids the steps raised would have been: the level astride the tick of 1 from 10000 on, or of 0.0001 from 1 on, loses money
+      it.each`
+        center    | sellLevels | marketData                     | step       | description                    | losing
+        ${9940}   | ${8}       | ${significantDigitsMarketData} | ${8.3}     | ${'8.3 around 9940'}           | ${'1 out of 10 here, the narrowest selling at 10006, 0.07902 % above its buy at 9998.1'}
+        ${0.994}  | ${8}       | ${aroundOneMarketData}         | ${0.00083} | ${'0.00083 around 0.994'}      | ${'1 out of 10 here, the narrowest selling at 1.0006, 0.07902 % above its buy at 0.99981'}
+        ${9961.4} | ${5}       | ${higherFeeMarketData}         | ${9}       | ${'9, the first raise of 8.8'} | ${'1 out of 7 here, the narrowest selling at 10006, 0.08602 % above its buy at 9997.4'}
+      `(
+        'is right to raise $description: spaced by it, the grid loses money at each round trip, $losing',
+        ({ center, sellLevels, marketData, step, losing }) => {
+          const asItWas: GridLayout = { buyLevels: 2, sellLevels, spacingType: 'fixed', spacingValue: step };
+
+          expect(checkRoundTripFee(asItWas, center, marketData)).toContain(`loses money at each round trip, ${losing}`);
+        },
+      );
+    });
+
     // The strategy refuses to start before the ATR has a value, but a candle whose ATR is not a number leaves it null
     it.each`
       atr

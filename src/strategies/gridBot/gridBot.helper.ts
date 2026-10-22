@@ -399,7 +399,8 @@ export const checkRoundTripFee = (params: GridLayout, centerPrice: number, marke
 const getTickAt = (price: number, marketData: MarketData): number => {
   const { priceDecimals, priceStep, priceSignificantDigits } = inferPricePrecision(marketData);
   const step = priceStep ?? getDecimalStep(priceDecimals);
-  return getPriceTick(price, { price: step, priceSignificantDigits }) ?? step;
+  // Never undefined: getPriceTick returns the step it is given, a number here, wherever it computes no coarser tick
+  return getPriceTick(price, { price: step, priceSignificantDigits })!;
 };
 
 /**
@@ -407,8 +408,8 @@ const getTickAt = (price: number, marketData: MarketData): number => {
  * fee (see getMakerFee), on a unit of its quantity: buyPrice × (1 + fee) − sellPrice × (1 − fee), the products checkRoundTripFee
  * compares, above 0 for a level it finds losing, at or below 0 when every level breaks even. The grid of `sellLevels` sell levels spaced
  * by `step` around `centerPrice`, its prices rounded as its orders are (see computeGridPrices): its buy levels are left out, as they earn
- * more for the step than its highest level (see getMinimumStep), but for the one next to the center price of a grid without a sell
- * level. With the highest price of the grid, whose tick the step is raised by.
+ * more for the step than its highest level (see getBreakEvenStep), but for the one next to the center price of a grid without a sell
+ * level. With the highest price of the grid, whose tick the step is raised by (see raiseToBreakEven).
  */
 const getBreakEvenShortfall = (
   centerPrice: number,
@@ -427,46 +428,83 @@ const getBreakEvenShortfall = (
 };
 
 /**
- * The smallest fixed step at which every level of a grid of `sellLevels` sell levels around `centerPrice` breaks even on the maker fee
- * (see getMakerFee): a level loses money when it sells less than r = 2 × fee / (1 − fee) above its buy (see checkRoundTripFee), and at a
- * fixed step the highest level, whose buy price is the largest, earns the least for it. That level buys at centerPrice + (sellLevels − 1)
- * × step, or at centerPrice − step without a sell level, so step ≥ centerPrice × r / (1 − (sellLevels − 1) × r), or centerPrice × r /
- * (1 + r): 121.09 for 5 sell levels at 60000 on a maker fee of 0.1 % and a tick of 0.01, 119.89 without a sell level. Rounded up to the
- * tick of the market at the center price, and one tick at least, the step of a market without a fee: a step under a tick rounds two
- * adjacent prices to one (see checkPriceTick). One tick too for a grid of so many sell levels that no step breaks even ((sellLevels − 1)
- * × r at 1 or more, from 501 sell levels at 0.1 %), which checkRoundTripFee warns of as for any grid. The step is then checked on the
- * prices of the grid as its orders are placed, as checkRoundTripFee checks them, and raised to the next whole number of the tick at the
- * highest price of the grid until every level breaks even there: a level exactly at its break-even can read as a loss in binary (3.3 for
- * a sell level around 4123.35 at 0.04 %, raised to 3.31), and on a market whose tick depends on the price, the prices above the next
- * power of ten are rounded to a coarser tick, which the step is then a whole number of (9 for 2 sell levels around 9999 on 5 significant
- * digits, a tick of 1 from 10000 on, where 8.1 lost money). An atr spacing is raised to it (see resolveSpacing).
+ * The step at which the level of a fixed grid of `sellLevels` sell levels around `centerPrice` that earns the least for it breaks even on
+ * the maker fee (see getMakerFee), on the prices as they are spaced: a level loses money when it sells less than r = 2 × fee / (1 − fee)
+ * above its buy (see checkRoundTripFee), and at a fixed step the highest level, whose buy price is the largest, earns the least for it.
+ * That level buys at centerPrice + (sellLevels − 1) × step, or at centerPrice − step without a sell level, so step ≥ centerPrice × r /
+ * (1 − (sellLevels − 1) × r), or centerPrice × r / (1 + r): 121.0898… for 5 sell levels at 60000 on a maker fee of 0.1 %, 119.8801…
+ * without a sell level. Null where there is none: without a fee, or with a rebate, every step breaks even, at a fee of 1 or more, or at a
+ * divisor at or below 0 ((sellLevels − 1) × r at 1 or more, from 501 sell levels at 0.1 %), none does, and a center price that is not a
+ * number above 0 makes no grid.
  */
-export const getMinimumStep = (centerPrice: number, sellLevels: number, marketData: MarketData): number => {
-  const tick = getTickAt(centerPrice, marketData);
+const getBreakEvenStep = (centerPrice: number, sellLevels: number, marketData: MarketData): number | null => {
   const fee = getMakerFee(marketData);
   const ratio = (2 * fee) / (1 - fee);
   const divisor = sellLevels > 0 ? 1 - (sellLevels - 1) * ratio : 1 + ratio;
+  if (!isFinitePositive(centerPrice) || !isFinitePositive(ratio) || !(divisor > 0)) return null;
+  return (centerPrice * ratio) / divisor;
+};
+
+/**
+ * `step`, raised to the next whole number of the tick at the highest price of the grid until no level of the fixed grid of `sellLevels`
+ * sell levels it spaces around `centerPrice` loses money on the maker fee at its prices as its orders are placed, as checkRoundTripFee
+ * reckons it (see getBreakEvenShortfall), with the tick of the last raise, undefined for a step left as it is. The tick at the highest
+ * price is the coarsest of the grid, whole numbers of which space its prices evenly, above the next power of ten on a market whose tick
+ * depends on the price. Left as it is where no step is worked out (see getBreakEvenStep): where none breaks even, it would be raised
+ * forever.
+ */
+const raiseToBreakEven = (
+  centerPrice: number,
+  sellLevels: number,
+  step: number,
+  marketData: MarketData,
+): { step: number; tick?: number } => {
+  if (getBreakEvenStep(centerPrice, sellLevels, marketData) === null) return { step };
+
+  let raisedStep = step;
+  let raisedOn: number | undefined;
+  let { shortfall, highestPrice } = getBreakEvenShortfall(centerPrice, sellLevels, raisedStep, marketData);
+  while (shortfall > 0) {
+    const coarseTick = getTickAt(highestPrice, marketData);
+    const raised = addPrecise(roundToStep(raisedStep, coarseTick, 'down'), coarseTick);
+    // A center price near the largest number puts the prices of the grid beyond it, and the step no longer grows: left as it is
+    if (!(raised > raisedStep)) break;
+    raisedStep = raised;
+    raisedOn = coarseTick;
+    ({ shortfall, highestPrice } = getBreakEvenShortfall(centerPrice, sellLevels, raisedStep, marketData));
+  }
+  return { step: raisedStep, tick: raisedOn };
+};
+
+/**
+ * The smallest fixed step at which every level of a grid of `sellLevels` sell levels around `centerPrice` breaks even on the maker fee
+ * (see getMakerFee): the step at which its highest level breaks even on the prices as they are spaced (see getBreakEvenStep), rounded up
+ * to the tick of the market at the center price, 121.09 for 5 sell levels at 60000 on a maker fee of 0.1 % and a tick of 0.01, 119.89
+ * without a sell level, and one tick at least, the step of a market without a fee: a step under a tick rounds two adjacent prices to one
+ * (see checkPriceTick). One tick too for a grid of so many sell levels that no step breaks even (from 501 sell levels at 0.1 %), which
+ * checkRoundTripFee warns of as for any grid. The step is then checked on the prices of the grid as its orders are placed, as
+ * checkRoundTripFee checks them, and raised to the next whole number of the tick at the highest price of the grid until every level
+ * breaks even there (see raiseToBreakEven): a level exactly at its break-even can read as a loss in binary (3.3 for a sell level around
+ * 4123.35 at 0.04 %, raised to 3.31), and on a market whose tick depends on the price, the prices above the next power of ten are rounded
+ * to a coarser tick, which the step is then a whole number of (9 for 2 sell levels around 9999 on 5 significant digits, a tick of 1 from
+ * 10000 on, where 8.1 lost money). An atr step under it is raised to it, and one at or above it checked on its prices and raised the same
+ * way (see resolveSpacing).
+ */
+export const getMinimumStep = (centerPrice: number, sellLevels: number, marketData: MarketData): number => {
+  const tick = getTickAt(centerPrice, marketData);
+  const breakEven = getBreakEvenStep(centerPrice, sellLevels, marketData);
   // Without a fee every step breaks even, at a divisor at or below 0 none does, and a center price that is not a number above 0 makes no
   // grid: one tick
-  if (!isFinitePositive(centerPrice) || !isFinitePositive(ratio) || !(divisor > 0)) return tick;
+  if (breakEven === null) return tick;
 
   // Rounded up as -(the negated value rounded down): roundToStep has no ceiling (see getMinimumAmount)
-  let step = Math.max(tick, -roundToStep(-toSignificantDigits((centerPrice * ratio) / divisor), tick, 'down'));
+  const step = Math.max(tick, -roundToStep(-toSignificantDigits(breakEven), tick, 'down'));
   // Worked out on the prices as they are spaced, while each order is placed at its price rounded to the tick there (see
   // computeLevelPrice), coarser above the next power of ten on a market whose tick depends on the price: 8.1 around 9999 on 5
   // significant digits put the highest SELL of 2 at 10015, 8 above its BUY at 10007 (10015.2 and 10007.1 on the tick of 1 from 10000
   // on), under the fee of 0.04 %, warned of by checkRoundTripFee right after this step was said to break even. Raised to whole numbers of
   // that tick, which space the prices above that power of ten evenly, until no level loses money as checkRoundTripFee reckons it.
-  let { shortfall, highestPrice } = getBreakEvenShortfall(centerPrice, sellLevels, step, marketData);
-  while (shortfall > 0) {
-    const coarseTick = getTickAt(highestPrice, marketData);
-    const raised = addPrecise(roundToStep(step, coarseTick, 'down'), coarseTick);
-    // A center price near the largest number puts the prices of the grid beyond it, and the step no longer grows: left as it is
-    if (!(raised > step)) break;
-    step = raised;
-    ({ shortfall, highestPrice } = getBreakEvenShortfall(centerPrice, sellLevels, step, marketData));
-  }
-  return step;
+  return raiseToBreakEven(centerPrice, sellLevels, step, marketData).step;
 };
 
 /**
@@ -474,9 +512,12 @@ export const getMinimumStep = (centerPrice: number, sellLevels: number, marketDa
  * step of spacingValue × `atr`, the ATR of the pair on the last timeframe candle, rounded to the tick of the market at the center price
  * (the nearest, a tie upwards, as the prices are: see roundPrice), and raised to the minimum step when it is under it (see
  * getMinimumStep), the warning saying so: a lull in the volatility would otherwise space the grid under the round-trip fee, its levels
- * losing money at each round trip, or under the tick, which stops the run where the grid is checked (see checkPriceTick). An `atr` that
- * is not a finite number counts as 0. The description names the step and what it was resolved from, for the messages of the checks
- * (see describeSpacing).
+ * losing money at each round trip, or under the tick, which stops the run where the grid is checked (see checkPriceTick). A step at or
+ * above the minimum is checked on the prices as the orders are placed, as the minimum is, and raised the same way, to the next whole
+ * number of the tick at the highest price of the grid while a level loses money there, with a warning of its own (see raiseToBreakEven):
+ * on a market whose tick depends on the price, the prices above the next power of ten are rounded to a coarser tick, which can leave a
+ * level under the fee. An `atr` that is not a finite number counts as 0. The description names the step and what it was resolved from,
+ * for the messages of the checks (see describeSpacing).
  */
 export const resolveSpacing = (
   params: Pick<GridBotStrategyParams, 'sellLevels' | 'spacingType' | 'spacingValue'>,
@@ -491,12 +532,28 @@ export const resolveSpacing = (
   const atrValue = isFiniteNumber(atr) ? atr : 0;
   const atrStep = roundToStep(toSignificantDigits(spacingValue * atrValue), tick, 'up');
   const origin = `spacingValue ${spacingValue} × ATR ${Number(atrValue.toPrecision(6))}`;
+  const fee = getMakerFee(marketData);
   const minimumStep = getMinimumStep(centerPrice, sellLevels, marketData);
   if (atrStep >= minimumStep) {
-    return { spacing: { spacingType: 'fixed', spacingValue: atrStep, description: `a step of ${atrStep} (${origin}, atr)` } };
+    // Kept as it was, a step at or above the minimum was only compared with it, never checked on its own prices: 8.3 for 8 sell levels
+    // around 9940 on 5 significant digits, over the minimum of 8, put the highest SELL at 10006, 7.9 above its BUY at 9998.1 (10006.4 on
+    // the tick of 1 from 10000 on), under the fee of 0.04 %, warned of by checkRoundTripFee right after. Checked on its prices and raised
+    // as the minimum is
+    const { step, tick: topTick } = raiseToBreakEven(centerPrice, sellLevels, atrStep, marketData);
+    if (topTick === undefined) {
+      return { spacing: { spacingType: 'fixed', spacingValue: atrStep, description: `a step of ${atrStep} (${origin}, atr)` } };
+    }
+    const losing = `at which a level of the grid loses money on the maker fee of ${fee} (fee.maker) on the price tick ${topTick} at the top of the grid`;
+    return {
+      spacing: {
+        spacingType: 'fixed',
+        spacingValue: step,
+        description: `a step of ${step} (${origin} giving ${atrStep}, raised on the price tick ${topTick}, atr)`,
+      },
+      warning: `ATR spacing: ${origin} is a step of ${atrStep} on the price tick ${tick}, ${losing}: the grid is spaced by ${step} instead`,
+    };
   }
 
-  const fee = getMakerFee(marketData);
   const breakEven = `the minimum step at which every level of the grid breaks even on the maker fee of ${fee} (fee.maker)`;
   const under =
     fee > 0

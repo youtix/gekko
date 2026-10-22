@@ -32,8 +32,9 @@ export const gridBotStrategySchema = z
      * - logarithmic: the ratio between adjacent prices, less 1 (0.01 === each price 1 % above the one below it)
      * - atr: a multiple of the ATR of atrPeriod timeframe candles (1.5 === 1.5 × ATR), a fixed step in price units once the grid is
      *   built: the product rounded to the price tick, and raised to the minimum step at which every level breaks even on the maker
-     *   fee, one tick at least, with a warning (see resolveSpacing and getMinimumStep). Resolved again at each reset (see resetMode),
-     *   from the ATR of the last timeframe candle
+     *   fee, one tick at least, with a warning (see resolveSpacing and getMinimumStep), and one above it checked on the prices as the
+     *   orders are placed, raised to a whole number of the tick at the top of the grid while a level loses money there, with a warning
+     *   of its own. Resolved again at each reset (see resetMode), from the ATR of the last timeframe candle
      * Checked against the market around the center price: a spacing that rounds two adjacent prices of the grid to the same price tick
      * (the tick at that price, on a market whose tick depends on the price) stops the run, when the grid starts or is reset, before a
      * failed rebalance is placed again and once it is rebalanced, and one under the round-trip fee, two maker fees, is warned of each
