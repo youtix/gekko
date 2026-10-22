@@ -1,7 +1,7 @@
 import { loadConfigurationFile } from '@gekko/core/configuration/configuration.helper';
 import { warning } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { cloneDeep, range } from 'lodash-es';
+import { cloneDeep, get, range } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Overrides, Template, Variant } from '../fox.types';
 import { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } from './variants.helper';
@@ -215,6 +215,44 @@ describe('generateVariants', () => {
       ${'plugins that are not a list as they are'}    | ${'PerformanceReporter'}                          | ${'PerformanceReporter'}
     `('should keep $description', ({ plugins, expected }) => {
       expect(pluginsOfVariants({ strategy: { period: [10, 20] } }, { ...template, plugins })[0]).toStrictEqual(expected);
+    });
+  });
+
+  // lodash's merge kept any other key on the array, as a property no configuration reads: every variant ran the template's value under
+  // the label of the value asked for
+  describe('when an option enters a list of the template', () => {
+    /** A template whose first plugin holds a list of its own */
+    const NESTED: Template = { plugins: [{ name: 'Mine', steps: [{ candle: 0 }] }] };
+    const EMPTY: Template = { plugins: [] };
+
+    it.each`
+      description                                  | template    | overrides                                                                                           | message
+      ${'by the symbol of its item'}               | ${TEMPLATE} | ${{ exchange: { marketData: { 'BTC/USDT': { marketData: { fee: { maker: [0.001, 0.002] } } } } } }} | ${'[FOX] --exchange.marketData.BTC/USDT.marketData.fee.maker: exchange.marketData is a list, name its item by its index (0)'}
+      ${'by the asset of its item'}                | ${TEMPLATE} | ${{ exchange: { simulationBalance: { USDT: { balance: 5000 } } } }}                                 | ${'[FOX] --exchange.simulationBalance.USDT.balance: exchange.simulationBalance is a list, name its item by its index (0 or 1)'}
+      ${'by the value of its item'}                | ${TEMPLATE} | ${{ watch: { assets: { BTC: 'SOL' } } }}                                                            | ${'[FOX] --watch.assets.BTC: watch.assets is a list, name its item by its index (0)'}
+      ${'by the name of its plugin'}               | ${TEMPLATE} | ${{ plugins: { Trader: { portfolioUpdates: { threshold: [1, 5] } } } }}                             | ${'[FOX] --plugins.Trader.portfolioUpdates.threshold: plugins is a list, name its item by its index (0 to 3)'}
+      ${'by a zero-padded index'}                  | ${TEMPLATE} | ${{ plugins: { '03': { fileName: ['a.csv', 'b.csv'] } } }}                                          | ${'[FOX] --plugins.03.fileName: plugins is a list, name its item by its index (0 to 3)'}
+      ${'by a negative index'}                     | ${TEMPLATE} | ${{ plugins: { '-1': { label: ['x', 'y'] } } }}                                                     | ${'[FOX] --plugins.-1.label: plugins is a list, name its item by its index (0 to 3)'}
+      ${'by an index written with an exponent'}    | ${TEMPLATE} | ${{ plugins: { '1e0': { label: 'x' } } }}                                                           | ${'[FOX] --plugins.1e0.label: plugins is a list, name its item by its index (0 to 3)'}
+      ${'at its length, which would cut it short'} | ${TEMPLATE} | ${{ plugins: { length: 3 } }}                                                                       | ${'[FOX] --plugins.length: plugins is a list, name its item by its index (0 to 3)'}
+      ${'inside an item of another list'}          | ${NESTED}   | ${{ plugins: { 0: { steps: { first: { candle: 2 } } } } }}                                          | ${'[FOX] --plugins.0.steps.first.candle: plugins.0.steps is a list, name its item by its index (0)'}
+      ${'that is empty'}                           | ${EMPTY}    | ${{ plugins: { Trader: { name: 'Trader' } } }}                                                      | ${'[FOX] --plugins.Trader.name: plugins is a list, name its item by its index (it is empty: 0 adds an item)'}
+      ${'among more values than the cap, first'}   | ${TEMPLATE} | ${{ plugins: { Trader: { portfolioUpdates: { threshold: range(10_001) } } } }}                      | ${'[FOX] --plugins.Trader.portfolioUpdates.threshold: plugins is a list, name its item by its index (0 to 3)'}
+    `('should refuse a key of the list $description, before any variant is made', ({ template, overrides, message }) => {
+      expect(() => generateVariants(template, overrides)).toThrow(message);
+    });
+
+    it.each`
+      description                                     | template    | overrides                                                                         | path                                                           | value
+      ${'an item by its index'}                       | ${TEMPLATE} | ${{ plugins: { 3: { fileName: 'b.csv' } } }}                                      | ${['plugins', 3, 'fileName']}                                  | ${'b.csv'}
+      ${'an item of a list by its index, then a key'} | ${TEMPLATE} | ${{ exchange: { marketData: { 0: { marketData: { fee: { maker: 0.001 } } } } } }} | ${['exchange', 'marketData', 0, 'marketData', 'fee', 'maker']} | ${0.001}
+      ${'an item of a list inside an item'}           | ${NESTED}   | ${{ plugins: { 0: { steps: { 0: { candle: 2 } } } } }}                            | ${['plugins', 0, 'steps', 0, 'candle']}                        | ${2}
+      ${'a new item, at the length of the list'}      | ${TEMPLATE} | ${{ plugins: { 4: { name: 'RoundTripAnalyzer' } } }}                              | ${['plugins', 4, 'name']}                                      | ${'RoundTripAnalyzer'}
+      ${'the first item of an empty list'}            | ${EMPTY}    | ${{ plugins: { 0: { name: 'Trader' } } }}                                         | ${['plugins', 0, 'name']}                                      | ${'Trader'}
+      ${'a key below a value that is not an object'}  | ${TEMPLATE} | ${{ showLogo: { now: true } }}                                                    | ${['showLogo', 'now']}                                         | ${true}
+      ${'a key below a key the template lacks'}       | ${TEMPLATE} | ${{ watch: { tickrate: { length: 3 } } }}                                         | ${['watch', 'tickrate', 'length']}                             | ${3}
+    `('should set $description', ({ template, overrides, path, value }) => {
+      expect(get(generateVariants(template, overrides)[0].configuration, path)).toBe(value);
     });
   });
 

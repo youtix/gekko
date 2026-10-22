@@ -10,7 +10,7 @@ import { showValue } from '@gekko/shared/utils/object/object.utils';
 import { formatEveryDecimal, listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import * as strategyRegistry from '@gekko/strategies/index';
 import type { StrategyConstructor } from '@gekko/strategies/strategy.types';
-import { cloneDeep, get, isPlainObject, merge, omit, setWith } from 'lodash-es';
+import { cloneDeep, get, isPlainObject, merge, omit, range, setWith } from 'lodash-es';
 import { z } from 'zod';
 import { MAX_VARIANTS, REPORTER_PLUGIN } from '../fox.const';
 import type { OverrideValue, Overrides, Template, Variant } from '../fox.types';
@@ -20,6 +20,9 @@ type Choice = { path: string[]; values: OverrideValue[] };
 
 /** A problem of a variant, at the path of the configuration it is about */
 type Issue = { message: string; path: PropertyKey[] };
+
+/** A key that names an item of a list: its index, as JavaScript writes one (0, 12), not 01, -1, 1e0, length or a name */
+const LIST_INDEX = /^(0|[1-9]\d*)$/;
 
 // Annotated, not cast: the compiler checks that every export of the registries is a plugin class, or a strategy class whose schema, if
 // any, is a zod schema
@@ -64,6 +67,33 @@ const isReporterEntry = (entry: unknown): entry is Record<string, unknown> =>
 const reportersOf = (configuration: Template) =>
   Array.isArray(configuration.plugins) ? configuration.plugins.filter(isReporterEntry) : [];
 
+/** The indexes that name the items of a list of `length` items, as a refusal writes them: 0, 0 or 1, then 0 to <last> */
+const describeIndexes = (length: number) => {
+  if (!length) return 'it is empty: 0 adds an item';
+  return length > 2 ? `0 to ${length - 1}` : range(length).join(' or ');
+};
+
+/**
+ * Refuses, before any variant is made, an option whose path enters a list of the template by a key that is not an index: lodash's
+ * merge kept such a key (a symbol, an asset, the name of a plugin, 01, -1) on the array, as a property that no configuration reads, so
+ * that every variant ran the template's value under the label of the value asked for, and `length` cut the list short. The template's
+ * lists are the only ones to check: an option never builds one (setWith with Object), and an index past the last item adds one.
+ */
+const checkListKeys = (template: Template, choices: readonly Choice[]) => {
+  for (const { path } of choices) {
+    let node: unknown = template;
+    for (const [depth, key] of path.entries()) {
+      if (Array.isArray(node) && !LIST_INDEX.test(key)) {
+        const list = path.slice(0, depth).join('.');
+        throw new GekkoError('fox', `--${path.join('.')}: ${list} is a list, name its item by its index (${describeIndexes(node.length)})`);
+      }
+      // Below a value that is not an object, or a key the template lacks, the option builds what it sets: no list of the template is there
+      if (node === null || typeof node !== 'object' || !Object.hasOwn(node, key)) break;
+      node = (node as Record<string, unknown>)[key];
+    }
+  }
+};
+
 /** Refuses overrides that would make more than MAX_VARIANTS variants, before any is made, naming the values of each option */
 const checkVariantCount = (choices: readonly Choice[]) => {
   const count = choices.reduce((product, { values }) => product * values.length, 1);
@@ -83,8 +113,8 @@ const checkVariantCount = (choices: readonly Choice[]) => {
  * the first option's values changing last (variant 1 takes the first value of every option, variant 2 the second value of the last
  * option), numbered from 1. Each is a deep copy of the template with its values merged over it (lodash's merge, so that a key set
  * inside a block keeps the block's other keys), and is labelled with the values that tell it from the others, the options of a single
- * value left out. Without overrides, the template is the one variant. A GekkoError refuses more than MAX_VARIANTS variants before any
- * is made.
+ * value left out. Without overrides, the template is the one variant. A GekkoError refuses, before any variant is made, an option that
+ * names an item of a list of the template by anything but its index (see checkListKeys), and more than MAX_VARIANTS variants.
  *
  * A labelled variant's PerformanceReporter entries take its label, which the reporter writes after the id of its row (the values of
  * the strategy block): without it, the rows of variants that differ outside that block (a fee, a balance) could not be told apart. An
@@ -92,6 +122,7 @@ const checkVariantCount = (choices: readonly Choice[]) => {
  */
 export const generateVariants = (template: Template, overrides: Overrides): Variant[] => {
   const choices = choicesOf(overrides);
+  checkListKeys(template, choices);
   checkVariantCount(choices);
   const combinations = choices.reduce<OverrideValue[][]>(
     (partials, { values }) => partials.flatMap(partial => values.map(value => [...partial, value])),
@@ -102,7 +133,7 @@ export const generateVariants = (template: Template, overrides: Overrides): Vari
       .flatMap(({ path, values: tried }, position) => (tried.length > 1 ? [`--${path.join('.')} ${values[position]}`] : []))
       .join(' ');
     // setWith with Object builds plain objects for the keys of the path, numbers included: merged into an array of the template (a
-    // plugin, `plugins.3.fileName`), an object of index keys sets that item and keeps the others
+    // plugin, `plugins.3.fileName`), an object of index keys sets that item and keeps the others (checkListKeys refused any other key)
     const configuration: Template = merge(
       cloneDeep(template),
       choices.reduce((variant, { path }, position) => setWith(variant, path, values[position], Object), {}),

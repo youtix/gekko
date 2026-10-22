@@ -199,6 +199,7 @@ Fox refuses before anything runs, with a line saying why:
 - an option without a value, or a list with an empty item (`1,,2`);
 - a key given twice, or one inside another (`--strategy.thresholds` and `--strategy.thresholds.up`): give one of them;
 - a key named `__proto__`, `constructor` or `prototype`, which names no key of a configuration;
+- a key that names an item of a list of the template otherwise than by its index (`--plugins.Trader.portfolioUpdates.threshold`, see [Variants](#variants));
 - a range without both bounds (`12..`), whose start is above its end (`24..12`), or whose step is not a number above 0 (`12..24:0`);
 - a range whose step leaves a value as it is, which would never reach its end: bounds of 17 significant digits (`0.30000000000000004..0.5`, whose step by default is 0.00000000000000001), a step below what its start can change by (`1..2:0.0000000000000001`), bounds at 9007199254740992 and above, where a number no longer changes by 1: `Invalid range "0.30000000000000004..0.5" of --x: its step of 0.00000000000000001 leaves 0.30000000000000004 as it is, …`;
 - a range of more than 10 000 values, the most variants Fox makes: `Invalid range "2..100001" of --strategy.period: it holds 100000 values, more than the 10000 variants Fox makes at most: narrow it, or give it a larger step`.
@@ -214,6 +215,8 @@ The variants are numbered from 1, the first option's values changing last: with 
 Fox makes 10 000 variants at most: options whose values would make more are refused before any variant is made, naming the values of each (`The overrides make 10100 variants (100 values of --strategy.period × 101 values of --strategy.thresholds.up), more than the 10000 Fox makes at most: give them fewer values`).
 
 Any key of the template can vary, not only those of the strategy: `--watch.warmup.candleCount 50,100` backtests each combination after a warmup of 50 candles and after one of 100, and a single value sets that key in every variant (`--watch.timeframe 4h`, `--watch.daterange.start 2024-06-01`, a range that must be in the database too).
+
+An item of a list of the template, `plugins`, `watch.assets`, `exchange.marketData` or `exchange.simulationBalance`, is named by its index, from 0, in the order of the list: `--exchange.marketData.0.marketData.fee.maker 0.0004,0.01` sets the maker fee of BTC/USDT, the first entry of the shipped templates' `marketData`, and `--exchange.simulationBalance.2.balance 1000,5000` the balance of USDT, their third. An index one past the last item adds an item, which the variant's configuration must then accept as a whole. Any other key of a list, the symbol of a pair, the name of an asset or of a plugin, `01`, `-1` or `length`, would set nothing a backtest reads, so Fox refuses it before any variant is made, naming the list and its indexes: `--exchange.marketData.BTC/USDT.marketData.fee.maker: exchange.marketData is a list, name its item by its index (0 or 1)`.
 
 ---
 
@@ -286,6 +289,10 @@ A variant was refused before any backtest (see [Checked Before the First Backtes
 ### "Unexpected argument …", "… has no value" or "Invalid range …"
 
 The command line itself was refused (see [Values: Lists and Ranges](#values-lists-and-ranges)): a value written after the first (`--strategy.period 12 24`, write `12,24`), an option without its value (a value that starts with `-t`, `-w` or `-h` is taken for one of Fox's options: write it `--strategy.src=-tma`), or a range that is not `<from>..<to>` or `<from>..<to>:<step>`, of numbers, its start at most its end and its step above 0, a step that changes its values and 10 000 values at most.
+
+### "… is a list, name its item by its index"
+
+An option names an item of a list of the template by its symbol, its asset, its plugin's name or a number written otherwise than as an index (`01`, `-1`): count the items of the list in the template, from 0, and write that index in the key (see [Variants](#variants)), `--plugins.3.fileName` for the fourth plugin.
 
 ### "The overrides make … variants, more than the 10000 Fox makes at most"
 
