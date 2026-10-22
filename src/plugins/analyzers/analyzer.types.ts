@@ -28,4 +28,4 @@ export type PerformanceStatisticsInput = {
 };
 
 /** The fields of a report that both analyzers compute the same way */
-export type PerformanceStatistics = Omit<Report, 'id' | 'startPrice' | 'endPrice'>;
+export type PerformanceStatistics = Omit<Report, 'id' | 'startPrice' | 'endPrice' | 'benchmarkAsset'>;

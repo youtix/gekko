@@ -33,6 +33,9 @@ export const PERCENT_ROUNDING = {
  */
 export const DUST_TOLERANCE = 0.01;
 
+/** The benchmark of a report whose configuration names none, when it is watched; else the first asset of watch.assets (see pickBenchmarkAsset) */
+export const DEFAULT_BENCHMARK_ASSET = 'BTC';
+
 /**
  * The shortest horizon the annualized figures extrapolate from: a day. Annualizing multiplies the return of the period by the number
  * of such periods in a year, about 66,000 for a period of 8 minutes: the moves of a few candles would make a yearly return of

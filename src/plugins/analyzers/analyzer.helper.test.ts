@@ -1,9 +1,10 @@
 import { ONE_MINUTE } from '@constants/time.const';
+import { GekkoError } from '@errors/gekko.error';
 import { warning } from '@services/logger';
 import { useTimeZone } from '@utils/date/date.mock';
 import { describe, expect, it, vi } from 'vitest';
 import { PerformanceStatisticsInput } from './analyzer.types';
-import { calculatePerformanceStatistics } from './analyzer.helper';
+import { calculatePerformanceStatistics, pickBenchmarkAsset } from './analyzer.helper';
 
 vi.mock('@services/logger', () => ({ warning: vi.fn() }));
 
@@ -173,5 +174,29 @@ describe('calculatePerformanceStatistics', () => {
       const input = { ...INPUT, periodStartAt: Date.parse(start), periodEndAt: Date.parse(end) };
       expect(calculatePerformanceStatistics(input, 'portfolio analyzer').formattedDuration).toBe(expected);
     });
+  });
+});
+
+describe('pickBenchmarkAsset', () => {
+  it.each`
+    scenario                                     | assets            | configured   | expected
+    ${'BTC when it is watched'}                  | ${['ETH', 'BTC']} | ${undefined} | ${'BTC'}
+    ${'the first asset when BTC is not watched'} | ${['ETH', 'SOL']} | ${undefined} | ${'ETH'}
+    ${'the configured asset when it is watched'} | ${['BTC', 'ETH']} | ${'ETH'}     | ${'ETH'}
+  `('picks $scenario', ({ assets, configured, expected }) => {
+    expect(pickBenchmarkAsset(assets, configured, 'portfolio analyzer')).toBe(expected);
+  });
+
+  // The message names the watched assets and quotes the asset refused, as the configuration wrote it
+  it.each`
+    tag                     | configured | message
+    ${'portfolio analyzer'} | ${'SOL'}   | ${'[PORTFOLIO ANALYZER] benchmarkAsset must be one of the watched assets (BTC and ETH), got "SOL"'}
+    ${'roundtrip analyzer'} | ${'btc'}   | ${'[ROUNDTRIP ANALYZER] benchmarkAsset must be one of the watched assets (BTC and ETH), got "btc"'}
+  `('refuses a configured asset that is not watched: $message', ({ tag, configured, message }) => {
+    expect(() => pickBenchmarkAsset(['BTC', 'ETH'], configured, tag)).toThrowError(message);
+  });
+
+  it('refuses with a GekkoError, which the run reports in one line', () => {
+    expect(() => pickBenchmarkAsset(['BTC'], 'ETH', 'portfolio analyzer')).toThrow(GekkoError);
   });
 });

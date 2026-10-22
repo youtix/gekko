@@ -2,7 +2,7 @@ import { UUID } from 'node:crypto';
 import { Candle } from './candle.types';
 import { OrderSide, OrderType } from './order.types';
 import { Portfolio } from './portfolio.types';
-import { TradingPair } from './utility.types';
+import { Asset, TradingPair } from './utility.types';
 
 export type CandleBucket = Map<TradingPair, Candle>;
 
@@ -189,6 +189,11 @@ export type Report = {
   id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT';
   /** Why the run stopped before its end, when it did: the report then covers a partial period */
   interruption?: string;
+  /**
+   * The asset whose price gives marketReturnPct, startPrice and endPrice: the benchmarkAsset option of the analyzer, else BTC when it is
+   * watched, else the first asset of watch.assets (see pickBenchmarkAsset); '' in an empty report, which measures nothing
+   */
+  benchmarkAsset: Asset;
   /** Performance relative to the benchmark market return (Excess Return) */
   alpha: number;
   /** Downside deviation of the returns: root mean square of the negative ones, positive ones counting as 0 (Sortino ratio) */

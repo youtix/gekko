@@ -18,6 +18,3 @@ export const EMPTY_PORTFOLIO_REPORT: PortfolioReport = {
   portfolioChangeCount: 0,
   benchmarkAsset: '', // Will be populated dynamically if possible, or empty string on fail
 };
-
-/** Default benchmark asset for portfolio analyzer */
-export const DEFAULT_BENCHMARK_ASSET = 'BTC';

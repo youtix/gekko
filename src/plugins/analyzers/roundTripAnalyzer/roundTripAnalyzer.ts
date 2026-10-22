@@ -458,6 +458,8 @@ export class RoundTripAnalyzer extends Plugin {
       ...statistics,
       startPrice: this.startPrice,
       endPrice: this.endPrice,
+      // The market return is that of its one pair
+      benchmarkAsset: this.asset,
       startBalance: this.start.equity,
       finalBalance: this.currentEquity,
       // Rounded once, by the printers: rounded to 4 decimals here first, 40 wins of 103 (38.83495 %) were written 38.84 %

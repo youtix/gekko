@@ -18,11 +18,11 @@ import { calculateDrawdowns, calculateMarketReturnPct, calculateReturns } from '
 import { calculatePortfolioTotalValue, getAssetBalance, isFetchedPortfolio } from '@helpers/portfolio/portfolio.helper';
 import { first, isNil, omit } from 'lodash-es';
 import { Plugin } from '../../plugin';
-import { DUST_TOLERANCE } from '../analyzer.const';
+import { DEFAULT_BENCHMARK_ASSET, DUST_TOLERANCE } from '../analyzer.const';
 import { analyzerSchema } from '../analyzer.schema';
 import { AnalyzerConfig } from '../analyzer.types';
 import { calculatePerformanceStatistics } from '../analyzer.helper';
-import { DEFAULT_BENCHMARK_ASSET, EMPTY_PORTFOLIO_REPORT, PLUGIN_NAME } from './portfolioAnalyzer.const';
+import { EMPTY_PORTFOLIO_REPORT, PLUGIN_NAME } from './portfolioAnalyzer.const';
 import { PortfolioReport } from './portfolioAnalyzer.types';
 import { logPortfolioReport } from './portfolioAnalyzer.helper';
 

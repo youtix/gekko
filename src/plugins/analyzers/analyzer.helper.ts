@@ -1,4 +1,6 @@
+import { GekkoError } from '@errors/gekko.error';
 import { Tag } from '@models/tag.types';
+import { Asset } from '@models/utility.types';
 import { warning } from '@services/logger';
 import { formatDurationUTC } from '@utils/date/date.utils';
 import {
@@ -14,9 +16,22 @@ import {
   RatioParams,
 } from '@helpers/finance/stats.helper';
 import { addPrecise, toSignificantDigits } from '@utils/math/math.utils';
+import { showValue } from '@utils/object/object.utils';
+import { listInWords } from '@utils/string/string.utils';
 import { differenceInMilliseconds } from 'date-fns';
-import { MIN_ANNUALIZATION_HORIZON_MS } from './analyzer.const';
+import { DEFAULT_BENCHMARK_ASSET, MIN_ANNUALIZATION_HORIZON_MS } from './analyzer.const';
 import { PerformanceStatistics, PerformanceStatisticsInput } from './analyzer.types';
+
+/**
+ * The asset whose price gives the market return of a report: the benchmarkAsset option when the configuration gives one, which must be
+ * a watched asset (a GekkoError under the analyzer's tag otherwise, naming the watched assets, so that the run stops as the plugin is
+ * built), else DEFAULT_BENCHMARK_ASSET when it is watched, else the first asset of watch.assets. Both analyzers pick theirs so.
+ */
+export const pickBenchmarkAsset = (assets: Asset[], configured: Asset | undefined, tag: Tag): Asset => {
+  if (configured === undefined) return assets.includes(DEFAULT_BENCHMARK_ASSET) ? DEFAULT_BENCHMARK_ASSET : assets[0];
+  if (assets.includes(configured)) return configured;
+  throw new GekkoError(tag, `benchmarkAsset must be one of the watched assets (${listInWords(assets)}), got ${showValue(configured)}`);
+};
 
 /**
  * The statistics both analyzers report, computed the same way from their own period, equities and returns. The annualized return, the

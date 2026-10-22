@@ -99,6 +99,7 @@ const samplePortfolioReport: PortfolioReport = {
 const sampleTradingReport: TradingReport = {
   ...commonReportProps,
   id: 'TRADING REPORT',
+  benchmarkAsset: 'BTC',
   finalBalance: 1320,
   startBalance: 1000,
   winRate: 60,

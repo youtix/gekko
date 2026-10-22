@@ -19,6 +19,7 @@ export const EMPTY_TRADING_REPORT: TradingReport = {
   ...EMPTY_PERFORMANCE_STATISTICS,
   startPrice: 0,
   endPrice: 0,
+  benchmarkAsset: '',
   startBalance: 0,
   finalBalance: 0,
   winRate: null,

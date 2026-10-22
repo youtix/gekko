@@ -1,5 +1,4 @@
 import { EquitySnapshot, Report } from '@models/event.types';
-import { Asset } from '@models/utility.types';
 
 export interface PortfolioReport extends Report {
   id: 'PORTFOLIO PROFIT REPORT';
@@ -18,6 +17,4 @@ export interface PortfolioReport extends Report {
   endEquity: number;
   /** Total number of portfolio change events */
   portfolioChangeCount: number;
-  /** Benchmark asset used for alpha calculation */
-  benchmarkAsset: Asset;
 }

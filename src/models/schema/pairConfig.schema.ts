@@ -31,10 +31,13 @@ export const symbolSchema = z
   })
   .transform(symbol => symbol as TradingPair);
 
+/** An asset as watch.assets lists one; the benchmarkAsset option of the analyzers is written so too */
+export const assetSchema = tickerSchema('Asset');
+
 export const currencySchema = tickerSchema('Currency');
 
 export const assetsSchema = z
-  .array(tickerSchema('Asset'))
+  .array(assetSchema)
   .min(1, 'At least one asset is required')
   .max(MAX_WATCHED_ASSETS, `Maximum ${MAX_WATCHED_ASSETS} assets allowed`)
   .superRefine((assets, ctx) => {

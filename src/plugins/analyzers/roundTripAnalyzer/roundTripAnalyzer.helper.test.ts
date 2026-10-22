@@ -40,6 +40,7 @@ const report: TradingReport = {
   volatility: 2.5,
   startPrice: 0.0000012,
   endPrice: 0.0000013,
+  benchmarkAsset: 'PEPE',
   formattedDuration: '1 day',
   annualizedNetProfit: 85617.247,
   finalBalance: 1234.5678,
