@@ -35,9 +35,9 @@ export class Services {
   public exchange() {
     if (this.exchangeInstance) return this.exchangeInstance;
     const exchangeConfig = this.configuration.getExchange();
-    if (!exchangeConfig?.name) throw new GekkoError('configuration', 'Missing or unknown exchange.');
     const watch = this.configuration.getWatch();
-    switch (exchangeConfig.name) {
+    // A section left out, or naming no exchange Gekko knows, falls through to the default: each case narrows the section to its own
+    switch (exchangeConfig?.name) {
       case 'binance':
       case 'hyperliquid':
         this.exchangeInstance = new CCXTExchange(exchangeConfig, watch);

@@ -135,9 +135,11 @@ describe('Services', () => {
       });
     });
 
+    // One refusal for all three, the switch's default: a section left out, an empty name and a name Gekko does not know
     it.each`
       section
       ${undefined}
+      ${{ name: '' }}
       ${{ name: 'unknown' }}
     `('refuses to build an exchange from the exchange section $section', ({ section }) => {
       configuration.getExchange.mockReturnValue(section);
