@@ -6,6 +6,7 @@ import * as pluginRegistry from '@gekko/plugins/index';
 import { configurationSchema } from '@gekko/schemas/configuration/configuration.schema';
 import type { Configuration } from '@gekko/schemas/configuration/configuration.types';
 import { describeError } from '@gekko/shared/errors/error.helper';
+import { PERFORMANCE_REPORT_EVENT } from '@gekko/shared/constants/event.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { showValue } from '@gekko/shared/utils/object/object.utils';
 import { formatEveryDecimal, listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
@@ -64,9 +65,11 @@ const choicesOf = (overrides: Overrides, parent: string[] = []): Choice[] =>
 const isReporterEntry = (entry: unknown): entry is Record<string, unknown> =>
   isPlainObject(entry) && get(entry, 'name') === REPORTER_PLUGIN;
 
-/** The PerformanceReporter entries of a configuration, as a file holds it: none when its plugins are not a list */
-const reportersOf = (configuration: Template) =>
-  Array.isArray(configuration.plugins) ? configuration.plugins.filter(isReporterEntry) : [];
+/** The plugin entries of a configuration, as a file holds it: none when its plugins are not a list */
+const entriesOf = (configuration: Template): unknown[] => (Array.isArray(configuration.plugins) ? configuration.plugins : []);
+
+/** The PerformanceReporter entries of a configuration, as a file holds it */
+const reportersOf = (configuration: Template) => entriesOf(configuration).filter(isReporterEntry);
 
 /** The indexes that name the items of a list of `length` items, as a refusal writes them: 0, 0 or 1, then 0 to <last> */
 const describeIndexes = (length: number) => {
@@ -245,19 +248,49 @@ export const validateVariants = (variants: readonly Variant[]) => {
   }
 };
 
+/** Why no CSV row will record the figures of a variant: it has no PerformanceReporter, or no plugin sends its reporter the report */
+type Unreported = 'no reporter' | 'no report';
+
+/** Whether a plugin entry of a configuration, as a file holds it, is that of a plugin that sends the performance report (an analyzer) */
+const isReportEntry = (entry: unknown) => isPlainObject(entry) && eventsOf(entry as { name: string }).includes(PERFORMANCE_REPORT_EVENT);
+
 /**
- * Warns, once, of the variants without a PerformanceReporter, all of them when the template has none: no CSV row will record their
- * figures. Not refused: an analyzer logs its report at info level, and prints it as a table with enableConsoleTable, in the output of
- * each worker.
+ * Why no CSV row will record the figures of a variant, undefined when one will: the PerformanceReporter writes a row from the
+ * performance report an analyzer sends it, and nothing else, so that without an analyzer a variant ended without a row or a word
+ */
+const unreportedCause = (configuration: Template): Unreported | undefined => {
+  if (!reportersOf(configuration).length) return 'no reporter';
+  return entriesOf(configuration).some(isReportEntry) ? undefined : 'no report';
+};
+
+/** What the variants named lack for a CSV row to record their figures, `their` the possessive that names them (its, their) */
+const describeLack = (cause: Unreported, their: string) => {
+  if (cause === 'no reporter') return `no ${REPORTER_PLUGIN}`;
+  const senders = Object.keys(PLUGINS)
+    .filter(name => eventsOf({ name }).includes(PERFORMANCE_REPORT_EVENT))
+    .sort();
+  const sending = `as ${listInWords(senders)} ${pluralize('does', senders.length, 'do')}`;
+  return `no plugin that sends ${their} ${REPORTER_PLUGIN} the performance report, ${sending}`;
+};
+
+/**
+ * Warns of the variants whose figures no CSV row will record, once for each cause, as the template's when every variant has it: no
+ * PerformanceReporter, or a PerformanceReporter but no plugin that sends it the performance report. Not refused, as Gekko runs such a
+ * configuration: without a reporter, an analyzer logs its report at info level, and prints it as a table with enableConsoleTable, in
+ * the output of each worker.
  */
 export const warnOfUnreportedVariants = (variants: readonly Variant[]) => {
-  const unreported = variants.filter(({ configuration }) => !reportersOf(configuration).length).map(({ variant }) => String(variant));
-  const count = unreported.length;
-  if (!count) return;
-  warning(
-    'fox',
-    count === variants.length
-      ? `The template has no ${REPORTER_PLUGIN}: no CSV row will record the figures of its ${pluralize('variant', count)}`
-      : `${pluralize('Variant', count)} ${listInWords(unreported)} ${pluralize('has', count, 'have')} no ${REPORTER_PLUGIN}: no CSV row will record ${pluralize('its', count, 'their')} figures`,
-  );
+  const causes = variants.map(({ configuration }) => unreportedCause(configuration));
+  for (const cause of ['no reporter', 'no report'] as const) {
+    const unreported = variants.filter((_variant, index) => causes[index] === cause).map(({ variant }) => String(variant));
+    const count = unreported.length;
+    if (!count) continue;
+    const their = pluralize('its', count, 'their');
+    warning(
+      'fox',
+      count === variants.length
+        ? `The template has ${describeLack(cause, 'its')}: no CSV row will record the figures of its ${pluralize('variant', count)}`
+        : `${pluralize('Variant', count)} ${listInWords(unreported)} ${pluralize('has', count, 'have')} ${describeLack(cause, their)}: no CSV row will record ${their} figures`,
+    );
+  }
 };

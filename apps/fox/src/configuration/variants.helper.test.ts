@@ -368,23 +368,48 @@ describe('warnOfUnreportedVariants', () => {
   });
   const reported = (variant: number) => variantWith(variant, 'PortfolioAnalyzer', 'PerformanceReporter');
   const unreported = (variant: number) => variantWith(variant, 'PortfolioAnalyzer');
+  // A PerformanceReporter writes its rows from the performance report an analyzer sends it, and nothing else
+  const unsent = (variant: number) => variantWith(variant, 'Trader', 'PerformanceReporter');
+  const SENDERS = 'as PortfolioAnalyzer and RoundTripAnalyzer do';
 
-  it('should not warn when every variant has a PerformanceReporter', () => {
-    warnOfUnreportedVariants([reported(1), reported(2)]);
+  it.each`
+    description                                | variants
+    ${'every variant has a PortfolioAnalyzer'} | ${[reported(1), reported(2)]}
+    ${'its variant has a RoundTripAnalyzer'}   | ${[variantWith(1, 'PerformanceReporter', 'RoundTripAnalyzer')]}
+  `('should not warn when $description beside a PerformanceReporter', ({ variants }) => {
+    warnOfUnreportedVariants(variants);
 
     expect(warning).not.toHaveBeenCalled();
   });
 
   it.each`
-    description                          | variants                                       | message
-    ${'the template of every variant'}   | ${[unreported(1), unreported(2)]}              | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variants'}
-    ${'the template of its one variant'} | ${[unreported(1)]}                             | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variant'}
-    ${'the one variant without one'}     | ${[reported(1), unreported(2), reported(3)]}   | ${'Variant 2 has no PerformanceReporter: no CSV row will record its figures'}
-    ${'the variants without one'}        | ${[unreported(1), reported(2), unreported(3)]} | ${'Variants 1 and 3 have no PerformanceReporter: no CSV row will record their figures'}
+    description                                                      | variants                                                                                                           | message
+    ${'the template of every variant without reporter'}              | ${[unreported(1), unreported(2)]}                                                                                  | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variants'}
+    ${'the template of its one variant without reporter'}            | ${[unreported(1)]}                                                                                                 | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variant'}
+    ${'the one variant without reporter'}                            | ${[reported(1), unreported(2), reported(3)]}                                                                       | ${'Variant 2 has no PerformanceReporter: no CSV row will record its figures'}
+    ${'the variants without reporter'}                               | ${[unreported(1), reported(2), unreported(3)]}                                                                     | ${'Variants 1 and 3 have no PerformanceReporter: no CSV row will record their figures'}
+    ${'a variant without reporter or analyzer, as without reporter'} | ${[variantWith(1, 'Trader')]}                                                                                      | ${'The template has no PerformanceReporter: no CSV row will record the figures of its variant'}
+    ${'the template of every variant without analyzer'}              | ${[unsent(1), unsent(2)]}                                                                                          | ${`The template has no plugin that sends its PerformanceReporter the performance report, ${SENDERS}: no CSV row will record the figures of its variants`}
+    ${'the template of its one variant without analyzer'}            | ${[unsent(1)]}                                                                                                     | ${`The template has no plugin that sends its PerformanceReporter the performance report, ${SENDERS}: no CSV row will record the figures of its variant`}
+    ${'the one variant without analyzer'}                            | ${[reported(1), unsent(2)]}                                                                                        | ${`Variant 2 has no plugin that sends its PerformanceReporter the performance report, ${SENDERS}: no CSV row will record its figures`}
+    ${'the variants without analyzer'}                               | ${[unsent(1), reported(2), unsent(3)]}                                                                             | ${`Variants 1 and 3 have no plugin that sends their PerformanceReporter the performance report, ${SENDERS}: no CSV row will record their figures`}
+    ${'an analyzer named by an entry that is not an object'}         | ${[{ variant: 1, label: '', configuration: { plugins: [{ name: 'PerformanceReporter' }, 'PortfolioAnalyzer'] } }]} | ${`The template has no plugin that sends its PerformanceReporter the performance report, ${SENDERS}: no CSV row will record the figures of its variant`}
   `('should warn once of $description', ({ variants, message }) => {
     warnOfUnreportedVariants(variants);
 
     expect(warning).toHaveBeenCalledExactlyOnceWith('fox', message);
+  });
+
+  it('should warn once of each cause, the variants without reporter first', () => {
+    warnOfUnreportedVariants([unsent(1), unreported(2), reported(3), unsent(4)]);
+
+    expect(vi.mocked(warning).mock.calls).toStrictEqual([
+      ['fox', 'Variant 2 has no PerformanceReporter: no CSV row will record its figures'],
+      [
+        'fox',
+        `Variants 1 and 4 have no plugin that sends their PerformanceReporter the performance report, ${SENDERS}: no CSV row will record their figures`,
+      ],
+    ]);
   });
 });
 

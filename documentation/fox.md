@@ -58,7 +58,7 @@ A template is a whole configuration, written as for Gekko (YAML, JSON or JSON5, 
 
 - `watch.mode` is `backtest`, the exchange `dummy-cex` with its `marketData` and `simulationBalance`, and `storage.database` the database the candles were imported into;
 - its `strategy` block holds every parameter of the strategy, the values Fox does not vary included: each variant starts from it;
-- its plugins are `TradingAdvisor`, `Trader`, an analyzer (`PortfolioAnalyzer` or `RoundTripAnalyzer`, not both: they send the same report) and a `PerformanceReporter`, which writes the results: without one, a variant's figures go to its log alone, and Fox warns of it as it starts. Each must run in backtest mode, which the `CandleWriter`, the `EventSubscriber` and `Supervision` do not.
+- its plugins are `TradingAdvisor`, `Trader`, an analyzer (`PortfolioAnalyzer` or `RoundTripAnalyzer`, not both: they send the same report) and a `PerformanceReporter`, which writes the results from the analyzer's report: without a PerformanceReporter, a variant's figures go to its log alone, without an analyzer there are none to write, and Fox warns of either as it starts. Each must run in backtest mode, which the `CandleWriter`, the `EventSubscriber` and `Supervision` do not.
 
 A relative path of the template, `storage.database` and the PerformanceReporter's file, is read from the directory Fox runs in, not from the template's: run Fox from the root of the checkout, or point a sweep at another database with `--storage.database /path/to/db.sql`.
 
@@ -232,7 +232,7 @@ Before any worker starts, Fox checks every variant as Gekko would check its conf
 
 So a sweep that would fail on its last variant fails at once, rather than after hours of the others.
 
-A template without a PerformanceReporter is not refused, its backtests run, but Fox warns as it starts, at `warn` level, that no CSV row will record their figures: `The template has no PerformanceReporter: no CSV row will record the figures of its variants`. The analyzer of each variant still logs its report at `info` level in the output of its worker, and prints it as a table with `enableConsoleTable`, whatever the level.
+A template without a PerformanceReporter is not refused, its backtests run, but Fox warns as it starts, at `warn` level, that no CSV row will record their figures: `The template has no PerformanceReporter: no CSV row will record the figures of its variants`. The analyzer of each variant still logs its report at `info` level in the output of its worker, and prints it as a table with `enableConsoleTable`, whatever the level. A template with a PerformanceReporter but no analyzer is warned of too, the reporter writing its rows from the analyzer's report alone: `The template has no plugin that sends its PerformanceReporter the performance report, as PortfolioAnalyzer and RoundTripAnalyzer do: no CSV row will record the figures of its variants`. When an option gives some variants a plugin list of their own, the warnings name those variants (`Variants 1 and 3 have no PerformanceReporter: …`), one line for each cause.
 
 ---
 
