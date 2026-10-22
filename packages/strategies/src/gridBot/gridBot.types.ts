@@ -20,6 +20,31 @@ export interface GridSpacing {
 /** The spacing types a grid is built with (see GridSpacing) */
 export type GridSpacingType = GridSpacing['spacingType'];
 
+/** The precision of a market's prices (see inferPricePrecision), which the prices of a grid are rounded to (see roundPrice) */
+export interface PricePrecision {
+  /** Decimals of the price tick, or DEFAULT_PRICE_PRECISION on a market that states none */
+  priceDecimals: number;
+  /** The price tick (precision.price), undefined on a market that states none */
+  priceStep?: number;
+  /** The significant digits of a market whose tick depends on the price (precision.priceSignificantDigits, Hyperliquid's) */
+  priceSignificantDigits?: number;
+}
+
+/**
+ * What the minimum step of a grid around a center price is worked out from (see getMinimumStep), read once for the resolution of a
+ * spacing (see resolveSpacing)
+ */
+export interface BreakEvenContext {
+  /** The maker fee of the market (see getMakerFee) */
+  fee: number;
+  /** The precision of its prices */
+  precision: PricePrecision;
+  /** Its tick at the center price */
+  tick: number;
+  /** The step at which the highest level breaks even around the center price, null where none is worked out (see getBreakEvenStep) */
+  breakEven: number | null;
+}
+
 /** The levels and the spacing a grid is built with: the strategy parameters, their spacing resolved (see GridSpacing) */
 export type GridLayout = Pick<GridBotStrategyParams, 'buyLevels' | 'sellLevels'> & GridSpacing;
 
