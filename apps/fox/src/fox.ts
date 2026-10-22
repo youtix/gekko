@@ -11,6 +11,7 @@ import { logVersion } from '@gekko/shared/utils/process/process.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
 import { parseCommandLine } from './cli/cli.helper';
 import { logFailure } from '@gekko/core/logger/failure.helper';
+import { WORKER_MODULE } from './fox.const';
 import { logSummary } from './fox.helper';
 
 export const main = async () => {
@@ -32,7 +33,11 @@ export const main = async () => {
       warnOfUnreportedVariants(variants);
       const count = `${variants.length} ${pluralize('variant', variants.length)}`;
       info('fox', `Backtesting ${count} of ${templatePath}, ${Math.min(maxWorkers, variants.length)} at a time`);
-      if (logSummary(await runWorkers(variants, maxWorkers))) process.exitCode = 1;
+      // Resolved from this module's URL, which names the worker from source and compiled alike. In the executable every module's
+      // import.meta.url is the entry's (file:///$bunfs/root/fox): resolved from the worker helper's, the worker was looked for at
+      // /$bunfs/root/gekko.worker.ts, so the helper branched on Bun's virtual root, which a build on another platform roots elsewhere
+      const workerModule = new URL(WORKER_MODULE, import.meta.url).href;
+      if (logSummary(await runWorkers(variants, maxWorkers, workerModule))) process.exitCode = 1;
     }
   } catch (e) {
     logFailure('fox', e);

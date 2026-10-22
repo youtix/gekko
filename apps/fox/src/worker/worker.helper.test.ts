@@ -1,13 +1,8 @@
 import { debug, error, info } from '@gekko/core/logger/logger';
 import { times } from 'lodash-es';
-import { existsSync } from 'node:fs';
-import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import packageJson from '../../package.json';
-import { COMPILED_WORKER_MODULE } from '../fox.const';
 import type { Template, Variant, VariantResult } from '../fox.types';
-import { describeWorkerError, runWorker, runWorkers, workerModule } from './worker.helper';
+import { describeWorkerError, runWorker, runWorkers } from './worker.helper';
 
 const { WRITE_LOCK } = vi.hoisted(() => ({ WRITE_LOCK: new SharedArrayBuffer(8) }));
 vi.mock('@gekko/core/logger/logger', () => ({
@@ -65,25 +60,8 @@ class FakeWorker {
 
 const done = (variant: number, durationMs = 2000): VariantResult => ({ variant, status: 'done', durationMs });
 
-describe('workerModule', () => {
-  it.each`
-    description                  | moduleUrl                                                       | expected
-    ${'the compiled executable'} | ${'file:///$bunfs/root/fox'}                                    | ${'./worker/gekko.worker.ts'}
-    ${'a run from source'}       | ${'file:///home/me/gekko/apps/fox/src/worker/worker.helper.ts'} | ${'file:///home/me/gekko/apps/fox/src/worker/gekko.worker.ts'}
-  `('should find the worker of $description', ({ moduleUrl, expected }) => {
-    expect(workerModule(moduleUrl)).toBe(expected);
-  });
-
-  // The executable embeds the entry points build:exec names, and Bun resolves a worker from the root of the bundle, src/fox.ts's
-  // directory: renamed on one side only, every variant of dist/fox would fail, which no run of the sources shows
-  it.each`
-    entry
-    ${'src/fox.ts'}
-    ${path.join('src', COMPILED_WORKER_MODULE)}
-  `('should be compiled into the executable by build:exec: $entry', ({ entry }) => {
-    expect(packageJson.scripts['build:exec'].split(' ')).toContain(entry);
-  });
-});
+/** The worker's module, as fox.ts resolves it */
+const WORKER_MODULE_URL = 'file:///home/me/gekko/apps/fox/src/worker/gekko.worker.ts';
 
 describe('describeWorkerError', () => {
   /** The message of the error event of a worker whose timer threw, as Bun writes it */
@@ -115,7 +93,7 @@ describe('runWorker', () => {
     FakeWorker.answer = undefined;
     vi.stubGlobal('Worker', FakeWorker);
     vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValue(3500);
-    outcome = runWorker(3, configuration);
+    outcome = runWorker(3, configuration, WORKER_MODULE_URL);
     [worker] = FakeWorker.instances;
   });
 
@@ -123,12 +101,8 @@ describe('runWorker', () => {
     vi.unstubAllGlobals();
   });
 
-  it('should start the worker module beside its own', () => {
-    expect(worker.module).toMatch(/\/src\/worker\/gekko\.worker\.ts$/);
-  });
-
-  it('should start a worker module that exists, run from source', () => {
-    expect(existsSync(fileURLToPath(worker.module))).toBe(true);
+  it('should start the worker module it is given', () => {
+    expect(worker.module).toBe(WORKER_MODULE_URL);
   });
 
   // The worker writes its lines under the lock of stdout this thread writes under, so that no thread's line lands among another's parts
@@ -207,7 +181,19 @@ describe('runWorkers', () => {
   });
 
   it('should give the results in the order of the variants', async () => {
-    expect(await runWorkers(variantsOf(5), 2)).toStrictEqual([done(1, 1000), done(2, 2000), done(3, 3000), done(4, 4000), done(5, 5000)]);
+    expect(await runWorkers(variantsOf(5), 2, WORKER_MODULE_URL)).toStrictEqual([
+      done(1, 1000),
+      done(2, 2000),
+      done(3, 3000),
+      done(4, 4000),
+      done(5, 5000),
+    ]);
+  });
+
+  it('should start the worker of each variant from the worker module it is given', async () => {
+    await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL);
+
+    expect(FakeWorker.instances.map(({ module }) => module)).toStrictEqual(times(3, () => WORKER_MODULE_URL));
   });
 
   it.each`
@@ -216,13 +202,13 @@ describe('runWorkers', () => {
     ${2}       | ${2}
     ${8}       | ${5}
   `('should run $mostRunning workers at most for at most $maxWorkers', async ({ maxWorkers, mostRunning }) => {
-    await runWorkers(variantsOf(5), maxWorkers);
+    await runWorkers(variantsOf(5), maxWorkers, WORKER_MODULE_URL);
 
     expect(FakeWorker.mostRunning).toBe(mostRunning);
   });
 
   it('should start the next variant as one ends, while the slowest still runs', async () => {
-    await runWorkers(variantsOf(5), 2);
+    await runWorkers(variantsOf(5), 2, WORKER_MODULE_URL);
 
     // The variants in the order they end: from the second on, each started in the slot the one before it left
     expect(infoLinesWith(' done ').map(([, message]) => Number(/^Variant (\d+)/.exec(String(message))?.[1]))).toStrictEqual([
@@ -231,7 +217,7 @@ describe('runWorkers', () => {
   });
 
   it('should log each variant as it starts', async () => {
-    await runWorkers(variantsOf(2), 2);
+    await runWorkers(variantsOf(2), 2, WORKER_MODULE_URL);
 
     expect(infoLinesWith('started')).toStrictEqual([
       ['fox', 'Variant 1 of 2 (--strategy.period 10) started'],
@@ -240,7 +226,7 @@ describe('runWorkers', () => {
   });
 
   it('should log each variant as it ends, with the duration of its backtest', async () => {
-    await runWorkers(variantsOf(2), 1);
+    await runWorkers(variantsOf(2), 1, WORKER_MODULE_URL);
 
     expect(infoLinesWith(' done ')).toStrictEqual([
       ['fox', 'Variant 1 of 2 (--strategy.period 10) done in 1 second'],
@@ -257,7 +243,7 @@ describe('runWorkers', () => {
     });
 
     it('should log its failure at error level', async () => {
-      await runWorkers(variantsOf(3), 2);
+      await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL);
 
       expect(error).toHaveBeenCalledExactlyOnceWith(
         'fox',
@@ -266,7 +252,7 @@ describe('runWorkers', () => {
     });
 
     it('should run the other variants', async () => {
-      expect(await runWorkers(variantsOf(3), 2)).toStrictEqual([
+      expect(await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL)).toStrictEqual([
         done(1),
         { variant: 2, status: 'failed', error: 'Missing candles in database', durationMs: 300 },
         done(3),
@@ -274,7 +260,7 @@ describe('runWorkers', () => {
     });
 
     it('should log no stack for a failure posted without one', async () => {
-      await runWorkers(variantsOf(3), 2);
+      await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL);
 
       expect(debug).not.toHaveBeenCalled();
     });
@@ -283,7 +269,7 @@ describe('runWorkers', () => {
   it('should log the stack of an unexpected failure at debug level, under its line', async () => {
     const stack = "TypeError: Cannot read properties of undefined (reading 'close')\n    at onTimeframeCandle (dema.strategy.ts:42:7)";
     FakeWorker.answer = ({ variant }) => ({ result: { variant, status: 'failed', error: 'boom', stack, durationMs: 300 }, delayMs: 1 });
-    await runWorkers(variantsOf(1), 1);
+    await runWorkers(variantsOf(1), 1, WORKER_MODULE_URL);
 
     expect(debug).toHaveBeenCalledExactlyOnceWith('fox', `Variant 1 of 1: ${stack}`);
   });

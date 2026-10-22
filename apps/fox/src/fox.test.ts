@@ -1,9 +1,14 @@
 import { info } from '@gekko/core/logger/logger';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import packageJson from '../package.json';
 import { parseCommandLine } from './cli/cli.helper';
 import { generateVariants, loadTemplate, validateVariants, warnOfUnreportedVariants } from './configuration/variants.helper';
 import { logFailure } from '@gekko/core/logger/failure.helper';
+import { WORKER_MODULE } from './fox.const';
 import { logSummary } from './fox.helper';
 import type { FoxOptions, Template, Variant, VariantResult } from './fox.types';
 import { runWorkers } from './worker/worker.helper';
@@ -106,7 +111,7 @@ describe('main', () => {
     });
 
     it('should run the variants in its workers', () => {
-      expect(runWorkers).toHaveBeenCalledExactlyOnceWith(VARIANTS, 4);
+      expect(runWorkers).toHaveBeenCalledExactlyOnceWith(VARIANTS, 4, expect.any(String));
     });
 
     it('should log the summary of their results', () => {
@@ -119,6 +124,33 @@ describe('main', () => {
 
     it('should exit once the variants are over', () => {
       expect(process.exit).toHaveBeenCalledExactlyOnceWith();
+    });
+  });
+
+  // Resolved from fox.ts's own URL, which names the worker from source and in the executable alike, the executable embedding it as an
+  // entry point of its own at that path from the root of the bundle, the directory of fox.ts
+  describe('the worker module', () => {
+    /** The module the workers run, as main() gives it to runWorkers */
+    const workerModuleUrl = async () => {
+      await import('./fox');
+      return String(vi.mocked(runWorkers).mock.calls[0][2]);
+    };
+
+    it('should be gekko.worker.ts, in the worker directory beside fox.ts', async () => {
+      expect(await workerModuleUrl()).toMatch(/^file:\/\/.*\/apps\/fox\/src\/worker\/gekko\.worker\.ts$/);
+    });
+
+    it('should be a module that exists, run from source', async () => {
+      expect(existsSync(fileURLToPath(await workerModuleUrl()))).toBe(true);
+    });
+
+    // Renamed or moved on one side only, every variant of dist/fox would fail, which no run of the sources shows
+    it.each`
+      entry
+      ${'src/fox.ts'}
+      ${path.join('src', WORKER_MODULE)}
+    `('should be compiled into the executable by build:exec, beside fox.ts: $entry', ({ entry }) => {
+      expect(packageJson.scripts['build:exec'].split(' ')).toContain(entry);
     });
   });
 

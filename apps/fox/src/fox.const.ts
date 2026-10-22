@@ -36,17 +36,12 @@ Example:
 
 Fox logs at the level GEKKO_LOG_LEVEL sets, error by default: set it to info to follow the variants.`;
 
-/** The worker's module beside worker.helper.ts, where a run from source finds it */
-export const WORKER_MODULE = './gekko.worker.ts';
-
 /**
- * The worker's module in the compiled executable, which embeds it as an entry point of its own (see build:exec): Bun resolves it from
- * the root of the bundle, the directory of src/fox.ts, whatever module creates the worker
+ * The worker's module, from the directory of src/fox.ts, which resolves it from its own URL: from source, the file there; in the
+ * compiled executable, which embeds it as an entry point of its own (see build:exec), the module Bun serves at that path from the root
+ * of the bundle, the entry's directory
  */
-export const COMPILED_WORKER_MODULE = './worker/gekko.worker.ts';
-
-/** How the URL of a module of the compiled executable starts: Bun serves its modules from a virtual file system */
-export const COMPILED_MODULE_URL_PREFIX = 'file:///$bunfs/';
+export const WORKER_MODULE = './worker/gekko.worker.ts';
 
 /** The keys lodash's set and merge skip without a word: an override of one would set nothing */
 export const FORBIDDEN_KEYS = ['__proto__', 'constructor', 'prototype'];
