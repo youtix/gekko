@@ -1,6 +1,6 @@
 import type { Candle } from '@gekko/shared/models/candle.types';
 import { describe, expect, it } from 'bun:test';
-import { candleAt, candlesClosingAt, minute } from './backtestRun.helper';
+import { candleAt, candleOf, candlesClosingAt, minute } from './backtestRun.helper';
 
 describe('backtestRun.helper', () => {
   describe('candleAt', () => {
@@ -14,6 +14,12 @@ describe('backtestRun.helper', () => {
       ['its low stretched to an open below it', { open: 2000, close: 2200 }, { high: 2300, low: 2000 }],
     ])('should build a candle with %s', (_title, { open, close }, bounds) => {
       expect(candleAt(3, { open, close, spread: 100, volume: 10 })).toEqual({ start: minute(3), open, ...bounds, close, volume: 10 });
+    });
+  });
+
+  describe('candleOf', () => {
+    it('should build the candle of the minute of these prices, a volume of 10', () => {
+      expect(candleOf(4, 100, 105, 99.5, 104)).toEqual({ start: minute(4), open: 100, high: 105, low: 99.5, close: 104, volume: 10 });
     });
   });
 

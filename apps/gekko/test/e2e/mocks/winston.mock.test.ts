@@ -5,6 +5,8 @@ import {
   findLoggedObject,
   findTextLine,
   findTextLines,
+  loggedReport,
+  loggedRoundTrips,
   logStore,
   withOrderNumbers,
   type LoggedLine,
@@ -70,6 +72,19 @@ describe('the finders of the logged lines', () => {
     ['undefined when it accepts none', message => message.id === 'PORTFOLIO PROFIT REPORT', undefined],
   ])('findLoggedObject should give %s', (_title, matches, expected) => {
     expect(findLoggedObject(matches)).toBe(expected);
+  });
+
+  it.each<[string, Parameters<typeof loggedReport>[0], object | undefined]>([
+    ['the report logged with that id', 'TRADING REPORT', report],
+    ['undefined when no report has that id', 'PORTFOLIO PROFIT REPORT', undefined],
+  ])('loggedReport should give %s', (_title, id, expected) => {
+    expect(loggedReport(id)).toBe(expected);
+  });
+
+  it('loggedRoundTrips should give the objects logged with a number for id, oldest first, neither a report nor a line of text', () => {
+    const second = { id: 1, entryAt: 3, exitAt: 4, profit: -1 };
+    logStore.push({ level: 'info', message: second, _tag: 'ROUNDTRIP ANALYZER' }, { level: 'info', message: null, _tag: 'STREAM' });
+    expect(loggedRoundTrips()).toEqual([roundtrip, second]);
   });
 });
 

@@ -1,6 +1,5 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
-import type { RoundTrip } from '@gekko/shared/models/event.types';
 import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { Tag } from '@gekko/shared/models/tag.types';
 import type { traderSchema } from '@gekko/schemas/plugins/trader.schema';
@@ -10,7 +9,6 @@ import type { DebugAdviceParams } from '@gekko/strategies/debug/debugAdvice.type
 import type { debugOrderScriptStrategySchema } from '@gekko/schemas/strategies/debug/debugOrderScript.schema';
 import type { debugPositionBookStrategySchema } from '@gekko/schemas/strategies/debug/debugPositionBook.schema';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, mock, spyOn } from 'bun:test';
-import { isObjectLike } from 'lodash-es';
 import type { z } from 'zod';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { paperExchange } from '../../helpers/configuration.helper';
@@ -23,7 +21,7 @@ import {
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
 import { MockFetcherService, SUBSCRIBE_ALL_UPDATES } from '../../mocks/fetcher.mock';
-import { clearLogs, findLoggedObject, findTextLine, isTextLine, logStore, ORDER_ID } from '../../mocks/winston.mock';
+import { clearLogs, findTextLine, isTextLine, loggedReport, loggedRoundTrips, logStore, ORDER_ID } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -212,10 +210,6 @@ const linesOf = (tag: Uppercase<Tag>, level: LogLevel) =>
     .filter(isTextLine)
     .filter(line => line._tag === tag && line.level === level)
     .map(({ message }) => message);
-
-/** The round trips the RoundTripAnalyzer logged as they closed, oldest first: numbered from 0, where its report is named */
-const loggedRoundTrips = () =>
-  logStore.map(({ message }) => message).filter(message => isObjectLike(message) && typeof (message as RoundTrip).id === 'number');
 
 /** The reason an order lost on the network at its creation ends with: placed or not, nobody knows */
 const OUTCOME_UNKNOWN =
@@ -836,7 +830,7 @@ describe('E2E: Realtime Screener Flow', () => {
       expect({
         notified: postsWith('Roundtrip completed for '),
         roundTrips: loggedRoundTrips(),
-        report: findLoggedObject(logged => logged.id === 'TRADING REPORT'),
+        report: loggedReport('TRADING REPORT'),
       }).toEqual({
         // Each round trip notified as it closes, with the P&L of its own fills and its profit, rounded down as the console rounds it
         notified: [

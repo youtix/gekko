@@ -9,7 +9,7 @@ import { REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
 import { endRealtimeRun, mockRealtimeModules, runRealtimeUntil, useRealtimeConfiguration } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, findTextLines } from '../../mocks/winston.mock';
+import { clearLogs, findTextLines, loggedRoundTrips } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -180,14 +180,13 @@ describe('E2E: Realtime paper trading options', () => {
     paperRun = { balance: { BTC: 100, USDT: 300000 }, feeOverride, analyzer: 'RoundTripAnalyzer' };
 
     // The round trip exits on the second candle, and is heard as the third arrives, before the plugins process it
-    const isRoundTrip = (message: Record<string, any>) => message.id === 0 && 'exitAt' in message;
-    await runRealtimeUntil(() => findLoggedObject(isRoundTrip) !== undefined, { maxMinutes: 5 });
+    await runRealtimeUntil(() => loggedRoundTrips().length > 0, { maxMinutes: 5 });
 
     // From the BUY on the candle of 12:00, filled at its end, to the SELL on that of 12:01. Its P&L is that of its fills, 1 BTC bought at
     // 100 and sold at 110, less their fees: the 100 BTC held before it, which that move valued 1,000 higher, are not its own. The profit
     // is the pnl over the entry equity, the whole portfolio before the BUY, in %, to 15 significant digits. The low of the candle held,
     // 110, is above the entry price: no adverse excursion.
-    expect(findLoggedObject(isRoundTrip)).toEqual({
+    expect(loggedRoundTrips().at(0)).toEqual({
       id: 0,
       symbol: 'BTC/USDT',
       entryAt: minute(12, 1),

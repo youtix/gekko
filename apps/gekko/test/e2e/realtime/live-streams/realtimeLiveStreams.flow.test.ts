@@ -18,7 +18,7 @@ import {
   useRealtimeConfiguration,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, findTextLine, findTextLines, isTextLine, logStore } from '../../mocks/winston.mock';
+import { clearLogs, findTextLine, findTextLines, isTextLine, loggedReport, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -111,10 +111,7 @@ describe('E2E: Realtime live streams', () => {
       failure: pick(failure, ['name', 'message']),
       endedAt: Date.now(),
       streamLines: streamLines(),
-      report: pick(
-        findLoggedObject(message => message.id === 'PORTFOLIO PROFIT REPORT'),
-        ['periodStartAt', 'periodEndAt', 'equityCurveLength', 'interruption'],
-      ),
+      report: pick(loggedReport('PORTFOLIO PROFIT REPORT'), ['periodStartAt', 'periodEndAt', 'equityCurveLength', 'interruption']),
     }).toEqual({
       failure: { name: 'GekkoError', message: stop },
       endedAt: minute(12, 7) + 2 * ONE_SECOND,

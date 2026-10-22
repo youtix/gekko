@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs, findLoggedObject, findTextLines } from '../mocks/winston.mock';
+import { clearLogs, findTextLines, loggedReport } from '../mocks/winston.mock';
 import { candlesClosingAt, minute, mockBacktestModules, rawMarket, refusedMarketOrder, runBacktest } from './backtestRun.helper';
 
 mockBacktestModules();
@@ -134,7 +134,7 @@ describe('E2E: Backtest reports', () => {
       failure: failure && { name: failure.name, message: failure.message },
       orderCalls,
       stopLine: findTextLines('Application stopped', 'warn').map(({ message }) => message),
-      report: findLoggedObject(({ id }) => id === 'PORTFOLIO PROFIT REPORT'),
+      report: loggedReport('PORTFOLIO PROFIT REPORT'),
       rows: readRows('stopped.csv'),
     }).toEqual({
       failure: { name: 'ApplicationStopError', message: BREAKER_STOP },

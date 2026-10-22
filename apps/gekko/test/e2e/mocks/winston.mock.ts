@@ -1,3 +1,4 @@
+import type { RoundTrip } from '@gekko/shared/models/event.types';
 import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { Tag } from '@gekko/shared/models/tag.types';
 
@@ -58,6 +59,18 @@ export const findLoggedObject = (matches: (message: Record<string, any>) => bool
   logStore
     .map(({ message }) => message)
     .find((message): message is Record<string, any> => typeof message === 'object' && message !== null && matches(message));
+
+/** The report an analyzer logged as the plugins were finalised: the PortfolioAnalyzer logs the length of its equity curve, not the curve */
+export const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findLoggedObject(message => message.id === id);
+
+/**
+ * The round trips the RoundTripAnalyzer logged as they closed, oldest first: the objects logged with a number for id, from 0, where a
+ * report is named by its id
+ */
+export const loggedRoundTrips = () =>
+  logStore
+    .map(({ message }) => message)
+    .filter(message => typeof message === 'object' && message !== null && typeof (message as RoundTrip).id === 'number');
 
 export const MockWinstonLogger = {
   info: () => {},

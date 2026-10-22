@@ -13,7 +13,7 @@ import {
   useRealtimeConfiguration,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange, type AccountCall, type BalanceEntry, type CreationFault } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, findTextLine, numberedTextLines, type TextLine } from '../../mocks/winston.mock';
+import { clearLogs, findTextLine, loggedRoundTrips, numberedTextLines, type TextLine } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -90,9 +90,6 @@ const book = () =>
 /** The line the Trader logs as it summarizes a completed order, executed at `time` (see Trader.checkOrderSummary) */
 const summaryLine = (order: string, time: string, figures: string) =>
   `${order} order summary for BTC/USDT: Completed at: 2024-01-01T${time}.000Z ${figures}`;
-
-/** The round trip the RoundTripAnalyzer logged as it closed */
-const loggedRoundTrip = () => findLoggedObject(message => 'entryAt' in message && 'exitAt' in message);
 
 /** The calls to the account at start-up, before the first candle: the TradingAdvisor's, then the Trader's */
 const START_UP_CALLS: AccountCall[] = [
@@ -210,14 +207,14 @@ describe('E2E: Realtime Live Trader Flow', () => {
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', [{ close: 100 }, { close: 110 }, { close: 120 }, { close: 125 }]);
 
       // The SELL is reported between the buckets of candles 1 and 2, and heard as candle 2's arrives, at 12:03:02, with the round trip
-      await runRealtimeUntil(() => loggedRoundTrip() !== undefined, { maxMinutes: 5 });
+      await runRealtimeUntil(() => loggedRoundTrips().length > 0, { maxMinutes: 5 });
 
       expect({
         calls: MockCCXTExchange.accountCalls,
         trader: traderLines(),
         strategy: strategyLines(),
         warnings: warnings(),
-        roundTrip: loggedRoundTrip(),
+        roundTrip: loggedRoundTrips().at(0),
         balances: MockCCXTExchange.getBalances(),
       }).toEqual({
         calls: [

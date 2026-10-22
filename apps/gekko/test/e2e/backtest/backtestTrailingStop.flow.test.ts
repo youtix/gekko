@@ -1,8 +1,7 @@
-import type { Candle } from '@gekko/shared/models/candle.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
-import { filledMarketOrder, minute, mockBacktestModules, rawMarket, runBacktest, unreservedRead } from './backtestRun.helper';
+import { candleOf, filledMarketOrder, minute, mockBacktestModules, rawMarket, runBacktest, unreservedRead } from './backtestRun.helper';
 
 mockBacktestModules();
 // DebugTrailingStop logs the life of its stop at debug level: the logger hands a debug line to winston only when GEKKO_LOG_LEVEL lets it
@@ -31,16 +30,6 @@ const BACKTEST: RawConfiguration = {
   // Dormant until a high reaches 9930, then 0.1 % under the highest price met
   strategy: { name: 'DebugTrailingStop', trigger: 9930, percentage: 0.1 },
 };
-
-/** The candle of the minute `n` minutes after 00:00, of these prices */
-const candleOf = (n: number, open: number, high: number, low: number, close: number): Candle => ({
-  start: minute(n),
-  open,
-  high,
-  low,
-  close,
-  volume: 10,
-});
 
 describe('E2E: Backtest of a trailing stop', () => {
   beforeEach(() => {

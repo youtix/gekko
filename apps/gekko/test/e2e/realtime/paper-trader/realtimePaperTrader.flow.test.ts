@@ -1,10 +1,10 @@
 import { ORDER_INITIATED_EVENT, PORTFOLIO_CHANGE_EVENT } from '@gekko/shared/constants/event.const';
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
-import type { OrderCompletedEvent, OrderInitiatedEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import type { OrderCompletedEvent, OrderInitiatedEvent } from '@gekko/shared/models/event.types';
 import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { Trader } from '@gekko/plugins/trader/trader';
 import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
-import { isNil, isObjectLike, range } from 'lodash-es';
+import { isNil, range } from 'lodash-es';
 import { minuteOf, REALTIME_START, startFakeClock } from '../../helpers/clock.helper';
 import { paperExchange, type RawConfiguration } from '../../helpers/configuration.helper';
 import {
@@ -15,7 +15,7 @@ import {
   useRealtimeConfiguration,
 } from '../../helpers/realtimeRun.helper';
 import { MockCCXTExchange } from '../../mocks/ccxt.mock';
-import { clearLogs, findLoggedObject, isTextLine, logStore } from '../../mocks/winston.mock';
+import { clearLogs, isTextLine, loggedReport, loggedRoundTrips, logStore } from '../../mocks/winston.mock';
 
 // --------------------------------------------------------------------------
 // MOCKS SETUP
@@ -116,13 +116,6 @@ const strategyLines = () =>
     .filter(isTextLine)
     .filter(({ _tag }) => _tag === 'STRATEGY')
     .map(({ message }) => message);
-
-/** The round trips the RoundTripAnalyzer logged as they closed, oldest first: numbered from 0, where its report is named */
-const loggedRoundTrips = () =>
-  logStore.map(({ message }) => message).filter(message => isObjectLike(message) && typeof (message as RoundTrip).id === 'number');
-
-/** The report the analyzer logged when the plugins were finalised: the PortfolioAnalyzer logs the length of its equity curve */
-const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findLoggedObject(message => message.id === id);
 
 // --------------------------------------------------------------------------
 // TEST SUITE

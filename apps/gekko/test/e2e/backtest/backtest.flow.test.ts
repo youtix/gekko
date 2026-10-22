@@ -1,11 +1,10 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
-import type { RoundTrip } from '@gekko/shared/models/event.types';
 import type { DebugBacktestParams } from '@gekko/strategies/debug/debugBacktest.types';
 import type { DebugPositionBookParams } from '@gekko/strategies/debug/debugPositionBook.types';
 import { beforeEach, describe, expect, it } from 'bun:test';
-import { isObjectLike, range } from 'lodash-es';
+import { range } from 'lodash-es';
 import { rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
-import { clearLogs, findLoggedObject, findTextLine, findTextLines, logStore } from '../mocks/winston.mock';
+import { clearLogs, findTextLine, findTextLines, loggedReport, loggedRoundTrips } from '../mocks/winston.mock';
 import {
   candleAt,
   candlesClosingAt,
@@ -91,17 +90,6 @@ const configurationOf = (backtest: Backtest): RawConfiguration => {
     strategy,
   };
 };
-
-// --------------------------------------------------------------------------
-// HELPERS
-// --------------------------------------------------------------------------
-
-/** The report the analyzer logged at the end of the run: the PortfolioAnalyzer logs the length of its equity curve, not the curve */
-const loggedReport = (id: 'TRADING REPORT' | 'PORTFOLIO PROFIT REPORT') => findLoggedObject(message => message.id === id);
-
-/** The round trips the RoundTripAnalyzer logged as they closed, oldest first: numbered from 0, where its report is named */
-const loggedRoundTrips = () =>
-  logStore.map(({ message }) => message).filter(message => isObjectLike(message) && typeof (message as RoundTrip).id === 'number');
 
 // --------------------------------------------------------------------------
 // TEST SUITE

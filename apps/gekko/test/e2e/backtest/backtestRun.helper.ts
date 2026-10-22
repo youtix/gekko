@@ -39,6 +39,16 @@ export const candleAt = (
   volume,
 });
 
+/** The candle of the minute `n` minutes after START, of these prices, a volume of 10: for a scenario that sets every price of a candle */
+export const candleOf = (n: number, open: number, high: number, low: number, close: number): Candle => ({
+  start: minute(n),
+  open,
+  high,
+  low,
+  close,
+  volume: 10,
+});
+
 /**
  * The candles of 00:00 to 00:08, opening every minute at `open` and closing there, but at the prices `closes` lists by minute, each high
  * and low `spread` off its close, stretched to the open (see candleAt): those of BTC at 10000, 100 either side, unless the options give

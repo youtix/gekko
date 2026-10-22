@@ -1,4 +1,3 @@
-import type { Candle } from '@gekko/shared/models/candle.types';
 import type { gridBotStrategySchema } from '@gekko/schemas/strategies/gridBot.schema';
 import { beforeEach, describe, expect, it } from 'bun:test';
 import type { z } from 'zod';
@@ -6,6 +5,7 @@ import { rawDaterange, type RawConfiguration } from '../helpers/configuration.he
 import { clearLogs, numberedTextLines } from '../mocks/winston.mock';
 import {
   canceledLimitOrder,
+  candleOf,
   minute,
   mockBacktestModules,
   openLimitOrder,
@@ -92,16 +92,6 @@ const backtestOf = ({
   storage: { type: 'sqlite', database: ':memory:' },
   plugins: [{ name: 'TradingAdvisor', strategyName: 'GridBot' }, { name: 'Trader' }],
   strategy: { name: 'GridBot', ...grid },
-});
-
-/** The candle of the minute `n` minutes after 00:00, of these prices */
-const candleOf = (n: number, open: number, high: number, low: number, close: number): Candle => ({
-  start: minute(n),
-  open,
-  high,
-  low,
-  close,
-  volume: 10,
 });
 
 /** Every line of the strategy, GridBot's and the StrategyManager's, with its level, oldest first */
