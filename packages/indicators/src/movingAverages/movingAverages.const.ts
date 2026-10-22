@@ -8,9 +8,9 @@ import { WMA } from './wma/wma.indicator';
  * The moving averages an indicator can smooth with, by the name its maType parameter takes. A new kind is added here only: the names
  * the maType checks accept, MovingAverageTypes and MovingAverageClasses derive from this map. BollingerBands, EFI and Stochastic used
  * to hold a copy each, where a wrong class compiled unnoticed.
- * No moving average may import this file, even indirectly. In indicator.const.ts, which they import through indicator.helper.ts, the map
- * would close a cycle: a moving average loaded first would throw "Cannot access 'SMA' before initialization" under Bun, and be missing
- * from the map under vitest.
+ * No moving average may import this file, even indirectly. In a module they import, such as indicator.helper.ts, the map would close a
+ * cycle: a moving average loaded first would throw "Cannot access 'SMA' before initialization" under Bun, and be missing from the map
+ * under vitest.
  * Each kind is a MovingAverage built from a period: the indicators that smooth with one feed it their values through update.
  */
 export const MOVING_AVERAGES = {

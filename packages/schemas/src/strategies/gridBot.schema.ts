@@ -5,7 +5,7 @@ import {
   DEFAULT_RESET_COOLDOWN_CANDLES,
   DEFAULT_RESET_MODE,
   DEFAULT_RETRY_LIMIT,
-} from '@gekko/schemas/strategies/gridBot.const';
+} from './gridBot.const';
 
 // The strategy block, without name, as the StrategyManager parses it before the strategy is created. It used to reach GridBot
 // unchecked: a misspelt buyLevel built a grid of SELLs only, buyLevels: 2.5 placed BUYs off the prices they were sized on, and a

@@ -5,7 +5,7 @@ import path from 'node:path';
 import tseslint from 'typescript-eslint';
 
 /**
- * The workspaces and what each may import (CLAUDE.md, Architecture): the graph is one way, from an app down to @gekko/shared. The
+ * The workspaces and what each may import (CLAUDE.md, Project): the graph is one way, from an app down to @gekko/shared. The
  * e2e suite of apps/gekko reads the schemas and the fixture strategies' types, which its executable does not: its test directory
  * may import every package, its sources the three the executable is composed of.
  */
@@ -43,7 +43,7 @@ const boundaryZones = Object.entries(DEPENDENCIES).flatMap(([target, allowed]) =
   WORKSPACES.filter(from => from !== workspaceOf(target) && !allowed.includes(from)).map(from => ({
     target: `./${target}`,
     from: `./${from}`,
-    message: `${target} cannot import ${from}: the packages depend one way, see CLAUDE.md (Architecture)`,
+    message: `${target} cannot import ${from}: the packages depend one way, see CLAUDE.md (Project)`,
   })),
 );
 

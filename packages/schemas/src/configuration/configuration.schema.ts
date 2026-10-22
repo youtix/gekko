@@ -11,7 +11,7 @@ import { getCandleStart, getCandleTimeOffset } from '@gekko/shared/helpers/candl
 import { startOfMinuteUTC, toISOString, toTimestamp } from '@gekko/shared/utils/date/date.utils';
 import { difference, find, some } from 'lodash-es';
 import { z } from 'zod';
-import { TIMEFRAMES } from '@gekko/schemas/configuration/configuration.const';
+import { TIMEFRAMES } from './configuration.const';
 
 const disclaimerField = 'I understand that Gekko only automates MY OWN trading strategies' as const;
 
