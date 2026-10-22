@@ -6,8 +6,8 @@ import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { InitParams, OnCandleEventParams } from '../strategy.types';
-import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { macdStrategySchema } from '@gekko/schemas/strategies/macd.schema';
 import { MACD } from './macd.strategy';
 import { MACDStrategyParams } from './macd.types';
 
@@ -354,67 +354,8 @@ describe('MACD Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { short: 12, long: 26, signal: 9, macdSrc: 'hist', thresholds: { up: 0, down: 0, persistence: 1 } };
-    const withThresholds = (thresholds: object) => ({ ...params, thresholds: { ...params.thresholds, ...thresholds } });
-    const swappedPeriods = 'short must be below long (swapped periods give the opposite MACD, equal ones a MACD of 0)';
-    const signalOfOneOnHist =
-      'signal must be at least 2 with macdSrc: hist (a signal of 1 makes the signal line the MACD line itself, and the histogram 0)';
-
-    it('accepts the documentation example as it is', () => {
-      expect(MACD.schema.parse(params)).toEqual(params);
-    });
-
-    // A signal of 1 is refused with the histogram only: the MACD line, which the signal line then equals, still moves
-    it.each`
-      scenario                                | block
-      ${'a signal of 1 with macdSrc: macd'}   | ${{ ...params, signal: 1, macdSrc: 'macd' }}
-      ${'a signal of 1 with macdSrc: signal'} | ${{ ...params, signal: 1, macdSrc: 'signal' }}
-      ${'a signal of 2 with macdSrc: hist'}   | ${{ ...params, signal: 2 }}
-    `('accepts $scenario', ({ block }) => {
-      expect(MACD.schema.parse(block)).toEqual(block);
-    });
-
-    it('refuses a misspelt persistence (persistance)', () => {
-      expect(MACD.schema.safeParse({ ...params, thresholds: { up: 0, down: 0, persistance: 1 } }).error?.issues).toMatchObject([
-        { path: ['thresholds', 'persistence'] },
-        { code: 'unrecognized_keys', keys: ['persistance'], path: ['thresholds'] },
-      ]);
-    });
-
-    // A period of 0 is refused once, by its bound alone: neither the comparison of the periods nor the check of the signal reports it
-    it.each`
-      scenario                                  | block                                   | path
-      ${'an unknown macdSrc (histogram)'}       | ${{ ...params, macdSrc: 'histogram' }}  | ${['macdSrc']}
-      ${'a missing macdSrc'}                    | ${omit(params, 'macdSrc')}              | ${['macdSrc']}
-      ${'a quoted signal'}                      | ${{ ...params, signal: '9' }}           | ${['signal']}
-      ${'a fractional long'}                    | ${{ ...params, long: 26.5 }}            | ${['long']}
-      ${'a short of 0'}                         | ${{ ...params, short: 0 }}              | ${['short']}
-      ${'a long of 0'}                          | ${{ ...params, long: 0 }}               | ${['long']}
-      ${'a signal of 0'}                        | ${{ ...params, signal: 0 }}             | ${['signal']}
-      ${'swapped periods (short 26, long 12)'}  | ${{ ...params, short: 26, long: 12 }}   | ${[]}
-      ${'equal periods'}                        | ${{ ...params, short: 26, long: 26 }}   | ${[]}
-      ${'a signal of 1 with macdSrc: hist'}     | ${{ ...params, signal: 1 }}             | ${[]}
-      ${'an infinite threshold'}                | ${withThresholds({ up: Infinity })}     | ${['thresholds', 'up']}
-      ${'a fractional persistence'}             | ${withThresholds({ persistence: 0.5 })} | ${['thresholds', 'persistence']}
-      ${'a src (the MACD strategy takes none)'} | ${{ ...params, src: 'close' }}          | ${[]}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(MACD.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
-
-    it.each`
-      scenario                              | block                                 | message
-      ${'swapped periods'}                  | ${{ ...params, short: 26, long: 12 }} | ${swappedPeriods}
-      ${'a signal of 1 with macdSrc: hist'} | ${{ ...params, signal: 1 }}           | ${signalOfOneOnHist}
-    `('says why it refuses $scenario', ({ block, message }) => {
-      expect(MACD.schema.safeParse(block).error?.issues[0].message).toBe(message);
-    });
-
-    // Each check reports on its own, so that a block with both mistakes is refused with both at once
-    it('reports a signal of 1 with macdSrc: hist besides swapped periods', () => {
-      const block = { ...params, short: 26, long: 12, signal: 1 };
-      expect(MACD.schema.safeParse(block).error?.issues.map(({ message }) => message)).toEqual([swappedPeriods, signalOfOneOnHist]);
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(MACD.schema).toBe(macdStrategySchema);
   });
 });

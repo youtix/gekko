@@ -6,8 +6,8 @@ import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { InitParams, OnCandleEventParams } from '../strategy.types';
-import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { cciStrategySchema } from '@gekko/schemas/strategies/cci.schema';
 import { CCI } from './cci.strategy';
 import { CCIStrategyParams } from './cci.types';
 
@@ -460,46 +460,8 @@ describe('CCI Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { period: 20, thresholds: { up: 100, down: -100, persistence: 0 } };
-    const withThresholds = (thresholds: object) => ({ ...params, thresholds: { ...params.thresholds, ...thresholds } });
-
-    it('accepts the documentation example as it is', () => {
-      expect(CCI.schema.parse(params)).toEqual(params);
-    });
-
-    it.each`
-      scenario                                     | block                                                                 | missing                          | keys
-      ${'a misspelt persistence (persistance)'}    | ${{ ...params, thresholds: { up: 100, down: -100, persistance: 0 } }} | ${['thresholds', 'persistence']} | ${['persistance']}
-      ${'a misspelt thresholds block (threshold)'} | ${{ ...omit(params, 'thresholds'), threshold: params.thresholds }}    | ${['thresholds']}                | ${['threshold']}
-    `('refuses $scenario', ({ block, missing, keys }) => {
-      expect(CCI.schema.safeParse(block).error?.issues).toMatchObject([
-        { path: missing },
-        { code: 'unrecognized_keys', keys, path: missing.slice(0, -1) },
-      ]);
-    });
-
-    it.each`
-      scenario                                | block                                   | path
-      ${'a quoted period'}                    | ${{ ...params, period: '20' }}          | ${['period']}
-      ${'a fractional period'}                | ${{ ...params, period: 20.5 }}          | ${['period']}
-      ${'a period of 0'}                      | ${{ ...params, period: 0 }}             | ${['period']}
-      ${'a period of 1'}                      | ${{ ...params, period: 1 }}             | ${['period']}
-      ${'a missing period'}                   | ${omit(params, 'period')}               | ${['period']}
-      ${'a quoted threshold'}                 | ${withThresholds({ up: '100' })}        | ${['thresholds', 'up']}
-      ${'an infinite threshold'}              | ${withThresholds({ down: -Infinity })}  | ${['thresholds', 'down']}
-      ${'a negative persistence'}             | ${withThresholds({ persistence: -1 })}  | ${['thresholds', 'persistence']}
-      ${'a fractional persistence'}           | ${withThresholds({ persistence: 1.5 })} | ${['thresholds', 'persistence']}
-      ${'a src, which the CCI does not take'} | ${{ ...params, src: 'close' }}          | ${[]}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(CCI.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
-
-    it('says why it refuses a period of 1', () => {
-      expect(CCI.schema.safeParse({ ...params, period: 1 }).error?.issues[0].message).toBe(
-        'period must be at least 2 (the CCI of a single candle is always 0)',
-      );
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(CCI.schema).toBe(cciStrategySchema);
   });
 });

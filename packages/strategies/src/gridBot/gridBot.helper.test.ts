@@ -4,6 +4,7 @@ import { assertOrderWithinLimits } from '@gekko/shared/helpers/market/market.hel
 import { addPrecise } from '@gekko/shared/utils/math/math.utils';
 import { omit } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
+import { gridBotStrategySchema } from '@gekko/schemas/strategies/gridBot.schema';
 import { GridBot } from './gridBot.strategy';
 import { GridBounds, GridLayout, GridSpacingType } from './gridBot.types';
 import {
@@ -443,90 +444,9 @@ describe('gridBot.helper', () => {
   });
 
   // The strategy block as the StrategyManager parses it, without name, before the strategy is created
-  describe('schema', () => {
-    // The documentation's example, without name
-    const block = { buyLevels: 5, sellLevels: 5, spacingType: 'percent', spacingValue: 1, retryOnError: 3 };
-    // The block as the strategy gets it: the defaults of the keys it leaves out
-    const parsed = { ...block, atrPeriod: 14, resetMode: 'none', resetConfirmCandles: 1, resetCooldownCandles: 0 };
-
-    it.each`
-      scenario                                    | params                         | expected
-      ${'the documentation example'}              | ${block}                       | ${parsed}
-      ${'a block without retryOnError, set to 3'} | ${omit(block, 'retryOnError')} | ${parsed}
-      ${'a grid of sell levels only'}             | ${{ ...block, buyLevels: 0 }}  | ${{ ...parsed, buyLevels: 0 }}
-      ${'a grid of buy levels only'}              | ${{ ...block, sellLevels: 0 }} | ${{ ...parsed, sellLevels: 0 }}
-    `('accepts $scenario', ({ params, expected }) => {
-      expect(GridBot.schema.parse(params)).toEqual(expected);
-    });
-
-    // The documentation example spaced by 1.5 × the ATR, and with every option of the atr spacing and of the reset given
-    const atrBlock = { ...block, spacingType: 'atr', spacingValue: 1.5 };
-    const everyOption = { ...atrBlock, atrPeriod: 21, resetMode: 'both', resetConfirmCandles: 3, resetCooldownCandles: 10 };
-
-    it.each`
-      scenario                                                         | params                                   | expected
-      ${'spacingType atr, spacingValue the multiple of the ATR'}       | ${atrBlock}                              | ${{ ...parsed, ...atrBlock }}
-      ${'an atr spacing under 1 × the ATR'}                            | ${{ ...atrBlock, spacingValue: 0.25 }}   | ${{ ...parsed, ...atrBlock, spacingValue: 0.25 }}
-      ${'an atrPeriod of 1, the true range of the last candle'}        | ${{ ...atrBlock, atrPeriod: 1 }}         | ${{ ...parsed, ...atrBlock, atrPeriod: 1 }}
-      ${'an atrPeriod with a percent spacing, which does not read it'} | ${{ ...block, atrPeriod: 7 }}            | ${{ ...parsed, atrPeriod: 7 }}
-      ${'resetMode up'}                                                | ${{ ...block, resetMode: 'up' }}         | ${{ ...parsed, resetMode: 'up' }}
-      ${'resetMode down'}                                              | ${{ ...block, resetMode: 'down' }}       | ${{ ...parsed, resetMode: 'down' }}
-      ${'resetMode both'}                                              | ${{ ...block, resetMode: 'both' }}       | ${{ ...parsed, resetMode: 'both' }}
-      ${'resetMode none, the default, given'}                          | ${{ ...block, resetMode: 'none' }}       | ${parsed}
-      ${'a resetConfirmCandles of 1, the default, given'}              | ${{ ...block, resetConfirmCandles: 1 }}  | ${parsed}
-      ${'a resetCooldownCandles of 0, the default, given'}             | ${{ ...block, resetCooldownCandles: 0 }} | ${parsed}
-      ${'every option of the atr spacing and of the reset given'}      | ${everyOption}                           | ${everyOption}
-    `('accepts $scenario', ({ params, expected }) => {
-      expect(GridBot.schema.parse(params)).toEqual(expected);
-    });
-
-    // Refused as the other options are, before the strategy is created: a misspelt resetMode would leave the grid in place without a
-    // word, and an atrPeriod the ATR refuses would stop the run at init, naming the indicator's period rather than the option
-    it.each`
-      scenario                                    | params
-      ${'an atrPeriod of 0'}                      | ${{ ...atrBlock, atrPeriod: 0 }}
-      ${'a fractional atrPeriod'}                 | ${{ ...atrBlock, atrPeriod: 1.5 }}
-      ${'a quoted atrPeriod'}                     | ${{ ...atrBlock, atrPeriod: '14' }}
-      ${'an unknown resetMode (upward)'}          | ${{ ...block, resetMode: 'upward' }}
-      ${'a resetMode in capitals (UP)'}           | ${{ ...block, resetMode: 'UP' }}
-      ${'a resetMode given as a number'}          | ${{ ...block, resetMode: 1 }}
-      ${'a resetConfirmCandles of 0'}             | ${{ ...block, resetConfirmCandles: 0 }}
-      ${'a fractional resetConfirmCandles'}       | ${{ ...block, resetConfirmCandles: 1.5 }}
-      ${'a quoted resetConfirmCandles'}           | ${{ ...block, resetConfirmCandles: '2' }}
-      ${'a negative resetCooldownCandles'}        | ${{ ...block, resetCooldownCandles: -1 }}
-      ${'a fractional resetCooldownCandles'}      | ${{ ...block, resetCooldownCandles: 0.5 }}
-      ${'a quoted resetCooldownCandles'}          | ${{ ...block, resetCooldownCandles: '10' }}
-      ${'an unknown reset option (resetCandles)'} | ${{ ...block, resetCandles: 2 }}
-      ${'an unknown spacingType (atrPercent)'}    | ${{ ...block, spacingType: 'atrPercent' }}
-      ${'an atr spacing of 0 × the ATR'}          | ${{ ...atrBlock, spacingValue: 0 }}
-    `('refuses $scenario', ({ params }) => {
-      expect(GridBot.schema.safeParse(params).success).toBe(false);
-    });
-
-    // Each was handed to the strategy as it was: buyLevel built a grid of SELLs only, 2.5 levels placed BUYs off the prices they
-    // were sized on, percentage was reported as non-positive buy prices, and the quoted '0.01' made a multiplier of 10.01
-    it.each`
-      scenario                                   | params
-      ${'an unknown key'}                        | ${{ ...block, levels: 5 }}
-      ${'a misspelt level count (buyLevel)'}     | ${{ ...omit(block, 'buyLevels'), buyLevel: 5 }}
-      ${'a missing level count'}                 | ${omit(block, 'sellLevels')}
-      ${'a fractional level count'}              | ${{ ...block, buyLevels: 2.5 }}
-      ${'a negative level count'}                | ${{ ...block, sellLevels: -1 }}
-      ${'a quoted level count'}                  | ${{ ...block, buyLevels: '5' }}
-      ${'both level counts 0'}                   | ${{ ...block, buyLevels: 0, sellLevels: 0 }}
-      ${'an unknown spacingType (percentage)'}   | ${{ ...block, spacingType: 'percentage' }}
-      ${'a missing spacingType'}                 | ${omit(block, 'spacingType')}
-      ${'a quoted spacingValue'}                 | ${{ ...block, spacingType: 'logarithmic', spacingValue: '0.01' }}
-      ${'a spacingValue of 0'}                   | ${{ ...block, spacingValue: 0 }}
-      ${'a negative spacingValue'}               | ${{ ...block, spacingValue: -1 }}
-      ${'a NaN spacingValue'}                    | ${{ ...block, spacingValue: NaN }}
-      ${'an infinite spacingValue'}              | ${{ ...block, spacingValue: Infinity }}
-      ${'a missing spacingValue'}                | ${omit(block, 'spacingValue')}
-      ${'a retryOnError of 0, once raised to 1'} | ${{ ...block, retryOnError: 0 }}
-      ${'a fractional retryOnError'}             | ${{ ...block, retryOnError: 1.5 }}
-    `('refuses $scenario', ({ params }) => {
-      expect(GridBot.schema.safeParse(params).success).toBe(false);
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(GridBot.schema).toBe(gridBotStrategySchema);
   });
 
   describe('validateConfig', () => {

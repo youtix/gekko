@@ -7,8 +7,8 @@ import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
 import type { MarketData } from '@gekko/shared/models/exchange.types';
 import { IndicatorResults, InitParams, OnCandleEventParams } from '../strategy.types';
-import { omit } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { tmaStrategySchema } from '@gekko/schemas/strategies/tma.schema';
 import { TMA } from './tma.strategy';
 import { TMAStrategyParams } from './tma.types';
 
@@ -404,45 +404,8 @@ describe('TMA Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { short: 10, medium: 21, long: 50, src: 'close' };
-
-    it.each`
-      scenario                               | block                  | expected
-      ${'the documentation example'}         | ${params}              | ${params}
-      ${'a block without src, on the close'} | ${omit(params, 'src')} | ${params}
-    `('accepts $scenario', ({ block, expected }) => {
-      expect(TMA.schema.parse(block)).toEqual(expected);
-    });
-
-    it('refuses a misspelt short (shrt)', () => {
-      expect(TMA.schema.safeParse({ ...omit(params, 'short'), shrt: 10 }).error?.issues).toMatchObject([
-        { path: ['short'] },
-        { code: 'unrecognized_keys', keys: ['shrt'], path: [] },
-      ]);
-    });
-
-    // A period of 0 is refused once, without the comparison of the periods
-    it.each`
-      scenario                                            | block                                        | path
-      ${'a quoted medium'}                                | ${{ ...params, medium: '21' }}               | ${['medium']}
-      ${'a fractional long'}                              | ${{ ...params, long: 50.5 }}                 | ${['long']}
-      ${'a short of 0'}                                   | ${{ ...params, short: 0 }}                   | ${['short']}
-      ${'a long of 0'}                                    | ${{ ...params, long: 0 }}                    | ${['long']}
-      ${'swapped periods (50, 21, 10)'}                   | ${{ ...params, short: 50, long: 10 }}        | ${[]}
-      ${'a short above the medium'}                       | ${{ ...params, short: 30 }}                  | ${[]}
-      ${'a medium equal to the long'}                     | ${{ ...params, medium: 50 }}                 | ${[]}
-      ${'an unknown source'}                              | ${{ ...params, src: 'hlc4' }}                | ${['src']}
-      ${'a misspelt src (source), not left to the close'} | ${{ ...omit(params, 'src'), source: 'hl2' }} | ${[]}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(TMA.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
-
-    it('says why it refuses swapped periods', () => {
-      expect(TMA.schema.safeParse({ ...params, short: 50, long: 10 }).error?.issues[0].message).toBe(
-        'short, medium and long must increase, short < medium < long (swapped periods give the opposite signal, equal ones none)',
-      );
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(TMA.schema).toBe(tmaStrategySchema);
   });
 });

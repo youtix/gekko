@@ -7,6 +7,7 @@ import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
 import { IndicatorResults, InitParams, OnCandleEventParams } from '../strategy.types';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { smaCrossoverStrategySchema } from '@gekko/schemas/strategies/smaCrossover.schema';
 import { SMACrossover } from './smaCrossover.strategy';
 import { SMACrossoverStrategyParams } from './smaCrossover.types';
 
@@ -492,35 +493,8 @@ describe('SMACrossover Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { period: 20, src: 'close' };
-
-    it.each`
-      scenario                               | block             | expected
-      ${'the documentation example'}         | ${params}         | ${params}
-      ${'a block without src, on the close'} | ${{ period: 20 }} | ${params}
-    `('accepts $scenario', ({ block, expected }) => {
-      expect(SMACrossover.schema.parse(block)).toEqual(expected);
-    });
-
-    it('refuses a misspelt period (periode)', () => {
-      expect(SMACrossover.schema.safeParse({ periode: 20, src: 'close' }).error?.issues).toMatchObject([
-        { path: ['period'] },
-        { code: 'unrecognized_keys', keys: ['periode'], path: [] },
-      ]);
-    });
-
-    it.each`
-      scenario                                            | block                            | path
-      ${'a quoted period'}                                | ${{ ...params, period: '20' }}   | ${['period']}
-      ${'a fractional period'}                            | ${{ ...params, period: 2.5 }}    | ${['period']}
-      ${'a period of 0'}                                  | ${{ ...params, period: 0 }}      | ${['period']}
-      ${'a NaN period'}                                   | ${{ ...params, period: NaN }}    | ${['period']}
-      ${'an unknown source'}                              | ${{ ...params, src: 'hl3' }}     | ${['src']}
-      ${'a misspelt src (source), not left to the close'} | ${{ period: 20, source: 'hl2' }} | ${[]}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(SMACrossover.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(SMACrossover.schema).toBe(smaCrossoverStrategySchema);
   });
 });

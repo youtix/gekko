@@ -4,8 +4,9 @@ import type { StrategyOrder } from '@gekko/shared/models/advice.types';
 import type { CandleBucket } from '@gekko/shared/models/event.types';
 import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { InitParams, OnCandleEventParams } from '../strategy.types';
-import { noop, omit } from 'lodash-es';
+import { noop } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { rsiStrategySchema } from '@gekko/schemas/strategies/rsi.schema';
 import { RSI } from './rsi.strategy';
 import { RSIStrategyParams } from './rsi.types';
 
@@ -298,50 +299,8 @@ describe('RSI Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { period: 14, src: 'close', thresholds: { high: 70, low: 30, persistence: 1 } };
-    const onOhlc4 = { period: 21, src: 'ohlc4', thresholds: { high: 70, low: 30, persistence: 0 } };
-    const withThresholds = (thresholds: object) => ({ ...params, thresholds: { ...params.thresholds, ...thresholds } });
-
-    it.each`
-      scenario                               | block                       | expected
-      ${'the documentation example'}         | ${params}                   | ${params}
-      ${'a persistence of 0, on ohlc4'}      | ${onOhlc4}                  | ${onOhlc4}
-      ${'a block without src, on the close'} | ${omit(params, 'src')}      | ${params}
-      ${'a period of 2, the smallest'}       | ${{ ...params, period: 2 }} | ${{ ...params, period: 2 }}
-    `('accepts $scenario', ({ block, expected }) => {
-      expect(RSI.schema.parse(block)).toEqual(expected);
-    });
-
-    it('refuses a misspelt high threshold (hight)', () => {
-      expect(RSI.schema.safeParse({ ...params, thresholds: { hight: 70, low: 30, persistence: 1 } }).error?.issues).toMatchObject([
-        { path: ['thresholds', 'high'] },
-        { code: 'unrecognized_keys', keys: ['hight'], path: ['thresholds'] },
-      ]);
-    });
-
-    it.each`
-      scenario                                         | block                                       | path
-      ${'a quoted period'}                             | ${{ ...params, period: '14' }}              | ${['period']}
-      ${'a fractional period'}                         | ${{ ...params, period: 14.5 }}              | ${['period']}
-      ${'a period of 0'}                               | ${{ ...params, period: 0 }}                 | ${['period']}
-      ${'a period of 1'}                               | ${{ ...params, period: 1 }}                 | ${['period']}
-      ${'an unknown source'}                           | ${{ ...params, src: 'hcl3' }}               | ${['src']}
-      ${'a misspelt src (scr), not left to the close'} | ${{ ...omit(params, 'src'), scr: 'ohlc4' }} | ${[]}
-      ${'a missing thresholds block'}                  | ${omit(params, 'thresholds')}               | ${['thresholds']}
-      ${'a quoted threshold'}                          | ${withThresholds({ high: '70' })}           | ${['thresholds', 'high']}
-      ${'an infinite threshold'}                       | ${withThresholds({ low: -Infinity })}       | ${['thresholds', 'low']}
-      ${'a negative persistence'}                      | ${withThresholds({ persistence: -1 })}      | ${['thresholds', 'persistence']}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(RSI.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
-
-    // A period of 1 read every unchanged close as oversold, the flat candles that fill a gap included, and the strategy bought on them
-    it('says why it refuses a period of 1', () => {
-      expect(RSI.schema.safeParse({ ...params, period: 1 }).error?.issues[0].message).toBe(
-        'period must be at least 2 (the RSI of a single change is 100 on a rise, and 0 on a fall or an unchanged close)',
-      );
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(RSI.schema).toBe(rsiStrategySchema);
   });
 });

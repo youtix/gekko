@@ -6,8 +6,9 @@ import { LogLevel } from '@gekko/shared/models/logLevel.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { InitParams, OnCandleEventParams } from '../strategy.types';
-import { omit, pick } from 'lodash-es';
+import { pick } from 'lodash-es';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { demaStrategySchema } from '@gekko/schemas/strategies/dema.schema';
 import { DEMA } from './dema.strategy';
 import { DEMAStrategyParams } from './dema.types';
 
@@ -360,47 +361,8 @@ describe('DEMA Strategy', () => {
     });
   });
 
-  describe('schema', () => {
-    // The documentation's example, without the name that labels the run: the manager parses the block without it
-    const params = { period: 21, thresholds: { up: 0.0025, down: -0.0025 } };
-    const withThresholds = (thresholds: object) => ({ ...params, thresholds: { ...params.thresholds, ...thresholds } });
-
-    it.each`
-      scenario                               | block
-      ${'the documentation example'}         | ${params}
-      ${'the block of the realtime configs'} | ${{ period: 12, thresholds: { up: 100, down: -150 } }}
-    `('accepts $scenario as it is', ({ block }) => {
-      expect(DEMA.schema.parse(block)).toEqual(block);
-    });
-
-    it.each`
-      scenario                                     | block                                                              | missing                   | keys
-      ${'a misspelt thresholds block (tresholds)'} | ${{ ...omit(params, 'thresholds'), tresholds: params.thresholds }} | ${['thresholds']}         | ${['tresholds']}
-      ${'a misspelt threshold (dwon)'}             | ${{ ...params, thresholds: { up: 0.0025, dwon: -0.0025 } }}        | ${['thresholds', 'down']} | ${['dwon']}
-    `('refuses $scenario', ({ block, missing, keys }) => {
-      expect(DEMA.schema.safeParse(block).error?.issues).toMatchObject([
-        { path: missing },
-        { code: 'unrecognized_keys', keys, path: missing.slice(0, -1) },
-      ]);
-    });
-
-    it.each`
-      scenario                                  | block                               | path
-      ${'a quoted period'}                      | ${{ ...params, period: '21' }}      | ${['period']}
-      ${'a fractional period'}                  | ${{ ...params, period: 21.5 }}      | ${['period']}
-      ${'a period of 1'}                        | ${{ ...params, period: 1 }}         | ${['period']}
-      ${'a missing period'}                     | ${omit(params, 'period')}           | ${['period']}
-      ${'a quoted threshold'}                   | ${withThresholds({ up: '0.0025' })} | ${['thresholds', 'up']}
-      ${'a NaN threshold'}                      | ${withThresholds({ down: NaN })}    | ${['thresholds', 'down']}
-      ${'a src (the DEMA strategy takes none)'} | ${{ ...params, src: 'close' }}      | ${[]}
-    `('refuses $scenario', ({ block, path }) => {
-      expect(DEMA.schema.safeParse(block).error?.issues).toMatchObject([{ path }]);
-    });
-
-    it('says why it refuses a period of 1', () => {
-      expect(DEMA.schema.safeParse({ ...params, period: 1 }).error?.issues[0].message).toBe(
-        'period must be at least 2 (the DEMA and the SMA of a single candle are both its close, so they never differ)',
-      );
-    });
+  // The refusals of the schema are tested in @gekko/schemas: here, that the class declares it, the StrategyManager parsing the block with it
+  it('should declare the strategy schema of @gekko/schemas', () => {
+    expect(DEMA.schema).toBe(demaStrategySchema);
   });
 });
