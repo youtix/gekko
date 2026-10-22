@@ -91,7 +91,7 @@ export interface OutOfRangeCount {
   count: number;
 }
 
-/** Rebalance plan, computed when the grid starts, after the warmup (and again after a failed attempt) */
+/** Rebalance plan, computed when the grid starts, after the warmup, or is reset (and again after a failed attempt) */
 export interface RebalancePlan {
   /** Side of rebalance order */
   side: OrderSide;

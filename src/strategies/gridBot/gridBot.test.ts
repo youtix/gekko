@@ -1,3 +1,4 @@
+import { ONE_MINUTE, ONE_SECOND } from '@constants/time.const';
 import { GekkoError } from '@errors/gekko.error';
 import { OrderOutOfRangeError } from '@errors/orderOutOfRange.error';
 import { ETH_IGNORED_WARNING, logsAtInit } from '@helpers/strategy/positionTracker/positionTracker.mock';
@@ -132,17 +133,19 @@ describe('GridBot', () => {
   /**
    * Delivers the outcome of the live order at that price and side, as the Trader reports it: a cancel with nothing filled and an
    * error 'Test error' that filled nothing and is not live, a refusal, unless `details` say otherwise. The event carries the price of
-   * the order and the balanced portfolio, unless `exchange` says otherwise.
+   * the order and the balanced portfolio, read as it is delivered, after what the strategy did before (a reset that canceled the order),
+   * unless `event` says otherwise.
    */
   const settle = (
     outcome: 'completed' | 'canceled' | 'errored',
     price: number,
     side: OrderSide,
     details: { filled?: number; remaining?: number; reason?: string; mayBeLive?: boolean } = {},
-    exchange: ExchangeEvent = { price, portfolio: balancedPortfolio },
+    event: Partial<ExchangeEvent> = {},
   ) => {
     const { id, amount } = liveOrder(price, side) ?? {};
     const order = { id, symbol: 'BTC/USDT', side, type: 'LIMIT', amount, price } as any;
+    const exchange: ExchangeEvent = { price, portfolio: balancedPortfolio, portfolioReadAt: Date.now(), ...event };
     settledIds.add(order.id);
     if (outcome === 'completed') strategy.onOrderCompleted({ order, exchange, tools });
     if (outcome === 'canceled')
@@ -1685,6 +1688,12 @@ describe('GridBot', () => {
       log.mock.calls.filter(([, message]) => message.includes('grid range')).map(([level, message]) => `${level} ${message}`);
     /** The ids of the orders the strategy asked to cancel */
     const canceledIds = () => cancelOrder.mock.calls.map(([id]) => id);
+    /** The lines a step logs, as `level message`, up to the stop when it stops the run */
+    const linesOf = (step: () => void) => {
+      const logged = log.mock.calls.length;
+      untilStopped(step);
+      return log.mock.calls.slice(logged).map(([level, message]) => `${level} ${message}`);
+    };
     /**
      * Reports the cancel of every order sent and not ended yet, nothing filled, in the order they were sent: the event of the last one
      * carries `last`, those before it `others`, else the price of their order and the balanced portfolio
@@ -1879,6 +1888,24 @@ describe('GridBot', () => {
           expect(canceledIds()).toEqual(['order-1', 'order-3', 'order-4']);
         });
       });
+
+      // The rebuild refuses the new grid beside an order lost before the reset: the line announced it all the same, relayed to
+      // Telegram, before a stop that left every order of the grid canceled. It names that stop.
+      it.each`
+        params                                              | portfolio              | lostOrders                      | closes        | description                                           | expected
+        ${{ resetMode: 'up', resetConfirmCandles: 2 }}      | ${balancedPortfolio}   | ${[[95, 'BUY']]}                | ${[111, 112]} | ${'its BUY 95 lost, 3 orders open'}                   | ${'GridBot: Price 112 closed above grid range [90, 110] for 2 consecutive timeframe candles (resetConfirmCandles): reset 1, its 3 open orders are canceled, then the run stops: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it'}
+        ${{ resetMode: 'up', buyLevels: 2, sellLevels: 0 }} | ${unbalancedPortfolio} | ${[[95, 'BUY']]}                | ${[101]}      | ${'the BUY 95 of a buy-only grid lost, 1 order open'} | ${'GridBot: Price 101 closed above grid range [90, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 1 open order is canceled, then the run stops: BUY 5.4 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it'}
+        ${upOnce}                                           | ${balancedPortfolio}   | ${[[95, 'BUY'], [105, 'SELL']]} | ${[111]}      | ${'its BUY 95 and its SELL 105 lost, 2 orders open'}  | ${'GridBot: Price 111 closed above grid range [90, 110] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, its 2 open orders are canceled, then the run stops: BUY 2.5 at 95, SELL 2.5 at 105 may be live on the exchange without GridBot tracking them, and no grid is built over them'}
+      `(
+        'says at info that the run stops once the orders are canceled, over orders lost before: $description',
+        ({ params, portfolio, lostOrders, closes, expected }) => {
+          startStrategy(100, params, portfolio);
+          lostOrders.forEach(([price, side]: [number, OrderSide]) => settle('errored', price, side, lost));
+          closeAt(closes, portfolio);
+
+          expect(log).toHaveBeenCalledWith('info', expected);
+        },
+      );
     });
 
     // As the Trader may report them: a fill can beat the cancel to the exchange, a cancel can follow a partial fill, and an order can
@@ -2120,6 +2147,81 @@ describe('GridBot', () => {
       });
     });
 
+    // The Trader reads the balances after each order has ended, best effort: a read that fails leaves the event with the one before, and
+    // one from before the cancels counts what the grid's orders reserved as used, which the new grid left out without a word, smaller,
+    // or refused for an insufficient portfolio
+    describe('on balances the Trader read before the reset', () => {
+      // The reset starts at 12:01, on the close at 111
+      const RESET_AT = Date.parse('2024-01-01T12:01:00Z');
+      const READ_BEFORE_RESET =
+        'warn GridBot: The Trader could not read the balances after the cancels of reset 1, its last read predating the reset: what the canceled orders held may still count as locked in other orders, and the grid is built on the rest; a restart builds it on the balances as they are';
+      const BUILT_AT_111 = 'info GridBot: Grid built around 111 with 2 buy / 2 sell levels, qty=2.5';
+      // Read before the cancels, the grid's orders reserving all of it: 5 BTC for its SELLs, 462.5 USDT for its BUYs at 90 and 95
+      const reservedByTheGrid: Portfolio = new Map<string, BalanceDetail>([
+        ['BTC', { free: 0, used: 5, total: 5 }],
+        ['USDT', { free: 0, used: 462.5, total: 462.5 }],
+      ]);
+
+      beforeEach(() => {
+        vi.spyOn(Date, 'now').mockReturnValue(RESET_AT);
+      });
+
+      /** The default grid reset on the close at 111, its 4 orders canceled */
+      const resetting = () => {
+        startStrategy(100, upOnce);
+        closeAt([111]);
+      };
+
+      it.each`
+        read                            | portfolioReadAt
+        ${'a minute before it started'} | ${RESET_AT - ONE_MINUTE}
+        ${'never, none known'}          | ${undefined}
+      `('warns that they predate the reset, before the lines of the grid it builds on them: read $read', ({ portfolioReadAt }) => {
+        resetting();
+
+        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt }))).toEqual([READ_BEFORE_RESET, BUILT_AT_111]);
+      });
+
+      it('builds the grid on them all the same: around 111, on the portfolio of the last event', () => {
+        resetting();
+        cancelOpen({ ...at111, portfolioReadAt: RESET_AT - ONE_MINUTE });
+
+        expect(sentAfter(4)).toEqual(gridAt111);
+      });
+
+      it('gives its cause to the stop that follows on balances its orders reserve: none free for the grid', () => {
+        resetting();
+        const readBefore = { price: 111, portfolio: reservedByTheGrid, portfolioReadAt: RESET_AT - ONE_MINUTE };
+
+        expect(linesOf(() => cancelOpen(readBefore))).toEqual([
+          READ_BEFORE_RESET,
+          'info GridBot: 5 BTC and 462.5 USDT locked in other orders, left out: the rebalance and the grid use the free balances only, 0 BTC and 0 USDT',
+          'error GridBot: Insufficient portfolio for any grid levels: 0 BTC and 0 USDT free fund no order the market takes',
+        ]);
+      });
+
+      it.each`
+        read                   | portfolioReadAt
+        ${'as it started'}     | ${RESET_AT}
+        ${'a second after it'} | ${RESET_AT + ONE_SECOND}
+      `('logs the lines of the grid it builds alone on balances read $read', ({ portfolioReadAt }) => {
+        resetting();
+
+        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt }))).toEqual([BUILT_AT_111]);
+      });
+
+      // No grid is built over an order that may be live untracked, on any balance: the stop alone says why
+      it('warns of nothing on them before the stop over an order lost before the reset', () => {
+        startStrategy(100, upOnce);
+        settle('errored', 95, 'BUY', lost);
+        closeAt([111]);
+
+        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt: RESET_AT - ONE_MINUTE }))).toEqual([
+          'error GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange',
+        ]);
+      });
+    });
+
     describe('the cooldown of a grid a reset built', () => {
       /** The default grid reset on the close at 111 and placed again there: [101, 121], its orders back at 116 above it */
       const resetAt111 = (params: Partial<GridBotStrategyParams>) => {
@@ -2297,6 +2399,27 @@ describe('GridBot', () => {
         closeAt([101], unbalancedPortfolio);
 
         expect(cancelOrder).not.toHaveBeenCalled();
+      });
+
+      // Nothing was canceled: the portfolio of the candle has no read to be late
+      it('says nothing of when its balances were read: the line, then the grid', () => {
+        givenUp();
+
+        expect(linesOf(() => closeAt([101], unbalancedPortfolio))).toEqual([
+          'info GridBot: Price 101 closed above grid range [95, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, no order is open, a new grid is built around 101',
+          'info GridBot: Grid built around 101 with 1 buy / 0 sell levels, qty=10.41',
+        ]);
+      });
+
+      // Its BUY 95 lost on the network instead, which stopped the run as well: the rebuild refuses a grid beside it
+      it('says that the run stops instead over an order that may be live untracked, then stops it', () => {
+        startStrategy(100, { buyLevels: 1, sellLevels: 0, resetMode: 'up' }, unbalancedPortfolio);
+        untilStopped(() => settle('errored', 95, 'BUY', lost));
+
+        expect(linesOf(() => closeAt([101], unbalancedPortfolio))).toEqual([
+          'info GridBot: Price 101 closed above grid range [95, 100] for 1 consecutive timeframe candle (resetConfirmCandles): reset 1, no order is open, and the run stops: BUY 10.52 at 95 may be live on the exchange without GridBot tracking it, and no grid is built over it',
+          'error GridBot: BUY 10.52 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange',
+        ]);
       });
     });
   });

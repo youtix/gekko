@@ -64,13 +64,14 @@ import {
  * - Sell levels are placed above the center price
  * - Spacing between adjacent prices is configurable: fixed (in price units), percent (of the center price, the same between any two
  *   adjacent prices, as fixed spacing) or logarithmic (a ratio between adjacent prices). One under the round-trip fee, two maker fees,
- *   is warned of once
+ *   is warned of when the grid starts or is reset
  * - With atr spacing, the step is spacingValue × the ATR of atrPeriod timeframe candles on the candle the grid is built around, a fixed
  *   step from then on, until a reset resolves it again from the ATR of the last candle: rounded to the tick, and raised to the smallest
  *   step at which every level breaks even on the maker fee, one tick at least, with a warning (see resolveSpacing). The run stops on the
  *   first candle after the warmup when the ATR has no value yet: warmup.candleCount must be at least atrPeriod
  * - A grid whose lowest BUY would be at or below 0, or whose spacing rounds two adjacent prices to the same tick, stops the run: around
- *   the close it starts on, and again around the price a rebalance ended at, before it is placed again and when the grid is built
+ *   the close it starts on, or the price it is reset around, and again around the price a rebalance ended at, before it is placed
+ *   again and when the grid is built
  * - Prices are rounded to the tick of the market (precision.price) as they are written, in decimal, a tie upwards, or to the tick at the
  *   price where it is coarser, on a market whose tick depends on the price (precision.priceSignificantDigits, Hyperliquid's). A market
  *   that states no tick has them rounded to 8 decimals, with a warning
@@ -88,15 +89,17 @@ import {
  *   placed again: a grid order is left out with a warning, the run stopping once more than retryOnError orders are in that case or no
  *   level holds an order, and a rebalance stops the run
  * - The grid stays in place when the price leaves its range, unless resetMode arms a reset on that side: a timeframe candle that
- *   closes out of the range is warned of once, until one closes back at the grid's price next to the bound it left, where the grid
- *   trades again, logged once at info, or out on the other side. A fill that leaves orders on one side of the grid only is warned of
- *   once, until a fill gives it both sides again
+ *   closes out of the range is warned of once, unless it starts a reset, which says so in its own line, until one closes back at the
+ *   grid's price next to the bound it left, where the grid trades again, logged once at info, or out on the other side. A fill that
+ *   leaves orders on one side of the grid only is warned of once, until a fill gives it both sides again
  * - With resetMode 'up', 'down' or 'both', resetConfirmCandles timeframe candles closing in a row beyond the grid on a side it arms
  *   reset the grid: its open orders are canceled, and once the last has ended the grid is placed again around the price of that last
- *   event, as at the start, the free balances rebalanced first, which realizes what the breakout lost, and an atr step resolved again.
- *   Meanwhile a fill turns no level and a canceled or refused order is not placed again: the new grid replaces every level. An order
- *   that may be live untracked, from before the reset or during it, stops the run where the new grid would be built over it. The
- *   resetCooldownCandles timeframe candles of the new grid are not counted towards another reset
+ *   event, on its portfolio, as at the start: the free balances rebalanced first, which realizes what the breakout lost, and an atr
+ *   step resolved again. A portfolio the Trader read before the reset, its read after the cancels having failed, is built on all the
+ *   same, with a warning (see rebuildOnceEnded). Meanwhile a fill turns no level and a canceled or refused order is not placed again:
+ *   the new grid replaces every level. An order that may be live untracked, from before the reset or during it, stops the run where
+ *   the new grid would be built over it, which the line that starts the reset says of one from before it. The resetCooldownCandles
+ *   timeframe candles of the new grid are not counted towards another reset
  */
 export class GridBot implements Strategy<GridBotStrategyParams> {
   /** Parses the strategy block before the strategy is created: tools.strategyParams is its output */
@@ -119,7 +122,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private reentryPrices?: Record<OutOfRangeSide, number>;
   /** Quantity per level */
   private quantity = 0;
-  /** The spacing the grid is built with, resolved when it starts (see resolveSpacing): undefined until then */
+  /** The spacing the grid is built with, resolved when it starts or is reset (see resolveSpacing): undefined until it starts */
   private spacing?: GridSpacing;
   /** With atr spacing, the ATR of the last timeframe candle: null until the indicator has its period, and without atr spacing */
   private atr: number | null = null;
@@ -153,6 +156,11 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private cooldownLeft = 0;
   /** The resets started in the run: the number of the last one, which its lines name */
   private resetCount = 0;
+  /**
+   * When the last reset started, on the wall clock the Trader dates its reads of the balances with (see ExchangeEvent.portfolioReadAt),
+   * in a backtest too: a read dated before it may still count as used what the orders the reset canceled reserved (see rebuildOnceEnded)
+   */
+  private resetStartedAt = 0;
 
   // Cached price precision
   private priceDecimals = 2;
@@ -374,6 +382,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.outOfRange = null;
     this.cooldownLeft = 0;
     this.resetCount = 0;
+    this.resetStartedAt = 0;
   }
 
   /** The levels and the spacing the grid is built with (see GridLayout): the parameters, their spacing resolved (see resolveSpacing) */
@@ -444,35 +453,55 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
   /**
    * Starts a reset once the closes counted towards it complete the count (see countTowardsReset): every open order of the grid is
-   * canceled, and the new grid is placed once the last has ended (see rebuildOnceEnded), at once around the close when none is open
+   * canceled, and the new grid is placed once the last has ended (see rebuildOnceEnded), at once around the close when none is open.
+   * Over an order that may be live untracked, the line says that the run stops instead, where the new grid would be built (see rebuild).
    */
   private startReset(close: number, range: string, portfolio: Portfolio, tools: Tools<GridBotStrategyParams>): void {
     const { side, count } = this.outOfRange!;
     this.awaitingReset = true;
     this.resetCount++;
+    this.resetStartedAt = Date.now();
     this.outOfRange = null;
 
     const candles = `${count} consecutive timeframe ${pluralize('candle', count)}`;
     const closed = `Price ${close} closed ${side} ${range} for ${candles} (resetConfirmCandles): reset ${this.resetCount}`;
     const open = this.levels.filter(({ orderId }) => orderId);
+    // Over an order that may be live untracked, the rebuild refuses the new grid (see rebuild): the line used to announce it all the
+    // same, relayed to Telegram, and the run then stopped with every order of the grid canceled. It names the stop to come instead.
+    const stop = this.untrackedOrders.length ? this.describeUntrackedStop() : undefined;
     // Kept for completeness: a grid whose levels all gave up on their orders, or left them untracked, stopped the run before
     if (!open.length) {
-      tools.log('info', `GridBot: ${closed}, no order is open, a new grid is built around ${close}`);
+      const next = stop ? `and ${stop}` : `a new grid is built around ${close}`;
+      tools.log('info', `GridBot: ${closed}, no order is open, ${next}`);
       return this.rebuild(close, portfolio, tools);
     }
 
     const canceled = `its ${open.length} open ${pluralize('order', open.length)} ${open.length === 1 ? 'is' : 'are'} canceled`;
     const ended = `once ${open.length === 1 ? 'it has' : 'they have'} ended`;
-    tools.log('info', `GridBot: ${closed}, ${canceled} and a new grid is built around the price ${ended}`);
+    const next = stop ? `, then ${stop}` : ` and a new grid is built around the price ${ended}`;
+    tools.log('info', `GridBot: ${closed}, ${canceled}${next}`);
     for (const { orderId } of open) tools.cancelOrder(orderId!);
   }
 
   /**
    * Places the grid of a reset once the last order it canceled has ended, canceled, filled or in error (see rebuild): around the price
-   * of that last event, on the portfolio it carries, which holds what the canceled orders filled first
+   * of that last event, on the portfolio it carries, which holds what the canceled orders filled first. The Trader reads that portfolio
+   * after the order ended, best effort: when the read fails, the event carries the read before it, in which what the canceled orders
+   * reserved may still count as used, left out of the new grid (see prepareGrid). A read dated before the reset started, or not dated,
+   * is warned of, and the grid built on the rest all the same: the warning gives its cause to a smaller grid, or to a stop for an
+   * insufficient portfolio.
    */
-  private rebuildOnceEnded({ price, portfolio }: ExchangeEvent, tools: Tools<GridBotStrategyParams>): void {
-    if (this.orderToLevel.size === 0) this.rebuild(price, portfolio, tools);
+  private rebuildOnceEnded({ price, portfolio, portfolioReadAt }: ExchangeEvent, tools: Tools<GridBotStrategyParams>): void {
+    if (this.orderToLevel.size > 0) return;
+    // Not over an order that may be live untracked, which stops the run instead (see rebuild): no grid is built on any balance then
+    const isReadBeforeReset = portfolioReadAt === undefined || portfolioReadAt < this.resetStartedAt;
+    if (isReadBeforeReset && !this.untrackedOrders.length) {
+      const unread = `The Trader could not read the balances after the cancels of reset ${this.resetCount}`;
+      const locked = 'what the canceled orders held may still count as locked in other orders, and the grid is built on the rest';
+      const restart = 'a restart builds it on the balances as they are';
+      tools.log('warn', `GridBot: ${unread}, its last read predating the reset: ${locked}; ${restart}`);
+    }
+    this.rebuild(price, portfolio, tools);
   }
 
   /**
@@ -896,6 +925,12 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     return { untracked: `${this.untrackedOrders.join(', ')} may be live on the exchange without GridBot tracking ${them}`, them };
   }
 
+  /** The stop a reset comes to over the orders that may be live untracked (see rebuild), as the line that starts it says it */
+  private describeUntrackedStop(): string {
+    const { untracked, them } = this.describeUntracked();
+    return `the run stops: ${untracked}, and no grid is built over ${them}`;
+  }
+
   /**
    * Stops the run on the orders open on the pair at start-up (see init), naming each one, as the exchange lists them, for the user to
    * find it there and cancel it: its type, side, the amount it has left to execute, its price and its id
@@ -913,7 +948,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
 
   /**
    * Stops the run with the message, logged and relayed at error level: tools.log('error') throws a GekkoError. GridBot places its
-   * grid once, so a grid it cannot place, or one without any order left, would leave it idle for the rest of the run.
+   * grid when it starts, and again only when it is reset (see resetMode), so a grid it cannot place, or one without any order left,
+   * would leave it idle, for the rest of the run or until a reset.
    */
   private stopRun(message: string, tools: Tools<GridBotStrategyParams>): never {
     tools.log('error', `GridBot: ${message}`);
