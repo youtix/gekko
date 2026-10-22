@@ -1,6 +1,8 @@
 import { ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { afterEach, describe, expect, it, jest } from 'bun:test';
-import { advanceClock, minuteOf, REALTIME_START, startFakeClock } from './clock.helper';
+import { advanceClock, disableTestTimeouts, minuteOf, REALTIME_START, startFakeClock } from './clock.helper';
+
+disableTestTimeouts();
 
 describe('clock.helper', () => {
   afterEach(() => jest.useRealTimers());

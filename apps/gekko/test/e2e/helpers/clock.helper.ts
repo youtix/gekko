@@ -1,5 +1,5 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
-import { jest } from 'bun:test';
+import { jest, setDefaultTimeout } from 'bun:test';
 
 /**
  * The instant the realtime flows start at, on the fake clock: 30 s into a minute, as a start-up can be, on a fixed day, so that a run
@@ -31,6 +31,20 @@ export const minuteOf = (timestamp: number) => timestamp - (timestamp % ONE_MINU
  */
 export const startFakeClock = (now = REALTIME_START) => {
   jest.useFakeTimers({ now });
+};
+
+/**
+ * Turns Bun's test timeout off for the tests and hooks the file declares after the call, to be called at the top of a file whose tests
+ * move the fake clock. Bun 1.3.14 checks the timeout against the fake clock: under fake timers it compares the deadline of a test, the
+ * machine's monotonic clock plus the timeout, with the fake monotonic time, which startFakeClock sets back to 0. On a machine up for days
+ * the timeout never fires while the clock is fake; on one booted minutes before, as a CI runner is, a session that moves the fake clock
+ * past the uptime plus the timeout makes it look due, and Bun re-arms it at the same deadline in a loop that holds the event loop until
+ * real time reaches that deadline, then fails the test with a timeout (Bun 1.4.0 compares it with the real clock, PR #33896). Without a
+ * timeout, a test that awaits a promise that never settles hangs, as it did already while the clock was fake: the runRealtime…
+ * functions bound every wait in fake time, and the CI step's timeout bounds the run.
+ */
+export const disableTestTimeouts = () => {
+  setDefaultTimeout(0);
 };
 
 /**
