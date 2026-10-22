@@ -10,7 +10,8 @@ vi.mock('fs', () => ({
 }));
 
 describe('Configuration Service', () => {
-  let Configuration: any;
+  // The configuration GEKKO_CONFIG_FILE_PATH names, as the executable reads it: the file loaded, checked and given to the class
+  let loadConfiguration: () => any;
 
   const mockConfig = {
     showLogo: true,
@@ -63,8 +64,9 @@ describe('Configuration Service', () => {
   beforeAll(async () => {
     process.env.GEKKO_CONFIG_FILE_PATH = 'setup.json';
     vi.mocked(readFileSync).mockReturnValue(JSON.stringify(mockConfig));
-    const mod = await import('./configuration');
-    Configuration = mod.Configuration;
+    const { Configuration } = await import('./configuration');
+    const { readConfigurationFromEnvironment } = await import('../configuration/configuration.helper');
+    loadConfiguration = () => new Configuration(readConfigurationFromEnvironment());
   });
 
   beforeEach(() => {
@@ -74,7 +76,7 @@ describe('Configuration Service', () => {
   describe('Initialization', () => {
     it('should throw error if GEKKO_CONFIG_FILE_PATH is missing', () => {
       setConfigFile(undefined, mockConfig);
-      expect(() => new Configuration()).toThrow('Missing GEKKO_CONFIG_FILE_PATH environment variable');
+      expect(() => loadConfiguration()).toThrow('Missing GEKKO_CONFIG_FILE_PATH environment variable');
     });
 
     it.each([
@@ -82,7 +84,7 @@ describe('Configuration Service', () => {
       ['config.json5', JSON.stringify(mockConfig)],
     ])('should load valid JSON/JSON5 config from %s', (path, content) => {
       setConfigFile(path, content);
-      const config = new Configuration();
+      const config = loadConfiguration();
       expect(config.getWatch()).toEqual(parsedWatch);
     });
 
@@ -97,7 +99,7 @@ describe('Configuration Service', () => {
       ],
     ])('should load valid YAML config from %s', (path, content) => {
       setConfigFile(path, content);
-      const config = new Configuration();
+      const config = loadConfiguration();
       expect(config.getWatch()).toEqual(parsedWatch);
     });
 
@@ -110,7 +112,7 @@ describe('Configuration Service', () => {
       ${'config.Yaml'}  | ${dump(mockConfig)}
     `('should load $path whatever the case of its extension', ({ path, content }) => {
       setConfigFile(path, content);
-      const config = new Configuration();
+      const config = loadConfiguration();
       expect(config.getWatch()).toEqual(parsedWatch);
     });
 
@@ -124,11 +126,11 @@ describe('Configuration Service', () => {
       });
 
       it('should throw a GekkoError', () => {
-        expect(() => new Configuration()).toThrow(GekkoError);
+        expect(() => loadConfiguration()).toThrow(GekkoError);
       });
 
       it('should name the file, then give each problem on its own line with the path of the option at fault', () => {
-        expect(() => new Configuration()).toThrow(
+        expect(() => loadConfiguration()).toThrow(
           expect.objectContaining({ message: `[CONFIGURATION] Invalid configuration file ./config/gekko.json:\n${issues}` }),
         );
       });
@@ -174,7 +176,7 @@ describe('Configuration Service', () => {
       /** What loading the configuration throws, to read more of it than its message */
       const loadError = () => {
         try {
-          new Configuration();
+          loadConfiguration();
         } catch (error) {
           return error as Error;
         }
@@ -198,11 +200,11 @@ describe('Configuration Service', () => {
         });
 
         it('should throw a GekkoError', () => {
-          expect(() => new Configuration()).toThrow(GekkoError);
+          expect(() => loadConfiguration()).toThrow(GekkoError);
         });
 
         it('should name the format and the file, then what the parser found wrong and where', () => {
-          expect(() => new Configuration()).toThrow(expect.objectContaining({ message }));
+          expect(() => loadConfiguration()).toThrow(expect.objectContaining({ message }));
         });
 
         it('should quote none of the credentials around the fault', () => {
@@ -217,7 +219,7 @@ describe('Configuration Service', () => {
 
     it('should throw error for empty content', () => {
       vi.mocked(readFileSync).mockReturnValue('');
-      expect(() => new Configuration()).toThrow();
+      expect(() => loadConfiguration()).toThrow();
     });
 
     it.each`
@@ -227,7 +229,7 @@ describe('Configuration Service', () => {
       ${'myjson'}
     `('should reject $path because its extension is not supported', ({ path }) => {
       setConfigFile(path, mockConfig);
-      expect(() => new Configuration()).toThrow(
+      expect(() => loadConfiguration()).toThrow(
         `[CONFIGURATION] Unsupported file extension: ${path} (expected .json, .json5, .yml or .yaml)`,
       );
     });
@@ -239,7 +241,7 @@ describe('Configuration Service', () => {
       ${'an empty document'} | ${'---\n'}
     `('should throw an empty file error when the YAML file is $description', ({ content }) => {
       setConfigFile('config.yml', content);
-      expect(() => new Configuration()).toThrow('[CONFIGURATION] Empty configuration file: config.yml');
+      expect(() => loadConfiguration()).toThrow('[CONFIGURATION] Empty configuration file: config.yml');
     });
 
     // js-yaml's default schema loaded an unquoted timestamp as a Date, rolled over when the day did not exist (2023-02-29 as March 1st),
@@ -271,7 +273,7 @@ describe('Configuration Service', () => {
         ${'a quoted date and time with an offset'}    | ${quoted('2023-01-01T02:00:00+02:00')}
       `('should read $form, $start, as 2023-01-01T00:00:00.000Z', ({ start }) => {
         setConfigFile('config.yml', importerYaml(start));
-        expect(new Configuration().getWatch().daterange).toEqual({ start: Date.UTC(2023, 0, 1), end: Date.UTC(2023, 0, 2) });
+        expect(loadConfiguration().getWatch().daterange).toEqual({ start: Date.UTC(2023, 0, 1), end: Date.UTC(2023, 0, 2) });
       });
 
       it.each`
@@ -283,7 +285,7 @@ describe('Configuration Service', () => {
         ${'2023-01-01T00:00:00+25:00'}
       `('should refuse $start, a date that does not exist, unquoted, naming it and its path', ({ start }) => {
         setConfigFile('config.yml', importerYaml(start));
-        expect(() => new Configuration()).toThrow(
+        expect(() => loadConfiguration()).toThrow(
           expect.objectContaining({
             message: `[CONFIGURATION] Invalid configuration file config.yml:\n✖ watch.daterange.start '${start}' must be a date that exists, in ISO 8601: a day (2024-01-01, from its midnight UTC), or a day and a time with Z or an offset (2024-01-01T00:00:00Z, 2024-01-01T02:00:00+02:00)\n  → at watch.daterange.start`,
           }),
@@ -297,17 +299,12 @@ describe('Configuration Service', () => {
 
     beforeEach(() => {
       setConfigFile('config.json', mockConfig);
-      configInstance = new Configuration();
+      configInstance = loadConfiguration();
     });
 
     describe('showLogo', () => {
       it('should return showLogo value', () => {
         expect(configInstance.showLogo()).toBe(true);
-      });
-
-      it('should throw if configuration is missing (simulated)', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.showLogo()).toThrow('Empty configuration file');
       });
     });
 
@@ -315,21 +312,11 @@ describe('Configuration Service', () => {
       it('should return plugins', () => {
         expect(configInstance.getPlugins()).toEqual(mockConfig.plugins);
       });
-
-      it('should throw if configuration is missing', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.getPlugins()).toThrow('Empty configuration file');
-      });
     });
 
     describe('getStrategy', () => {
       it('should return strategy', () => {
         expect(configInstance.getStrategy()).toEqual(mockConfig.strategy);
-      });
-
-      it('should throw if configuration is missing', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.getStrategy()).toThrow('Empty configuration file');
       });
     });
 
@@ -341,21 +328,11 @@ describe('Configuration Service', () => {
         expect(exchange.simulationBalance.get('BTC')).toBe(1);
         expect(exchange.simulationBalance.get('USDT')).toBe(10000);
       });
-
-      it('should throw if configuration is missing', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.getExchange()).toThrow('Empty configuration file');
-      });
     });
 
     describe('getWatch', () => {
       it('should return watch config', () => {
         expect(configInstance.getWatch()).toEqual(parsedWatch);
-      });
-
-      it('should throw if configuration is missing', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.getWatch()).toThrow('Empty configuration file');
       });
 
       it('should validate daterange in importer mode', () => {
@@ -369,7 +346,7 @@ describe('Configuration Service', () => {
           },
         };
         setConfigFile('config.json', importerConfig);
-        const config = new Configuration();
+        const config = loadConfiguration();
 
         expect(config.getWatch()).toEqual({
           ...importerConfig.watch,
@@ -390,7 +367,7 @@ describe('Configuration Service', () => {
           exchange: importerExchange,
           watch: { ...mockConfig.watch, mode: 'importer', daterange },
         });
-        expect(new Configuration().getWatch().daterange).toEqual({
+        expect(loadConfiguration().getWatch().daterange).toEqual({
           start: Date.UTC(2023, 0, 1, 10, 23),
           end: Date.UTC(2023, 0, 1, 10, 23),
         });
@@ -405,7 +382,7 @@ describe('Configuration Service', () => {
         ({ mode, exchange, storage }) => {
           const daterange = { start: '2023-01-02T00:00:00Z', end: '2023-01-01T00:00:00Z' };
           setConfigFile('config.json', { ...mockConfig, exchange, storage, watch: { ...mockConfig.watch, mode, daterange } });
-          expect(() => new Configuration()).toThrow(
+          expect(() => loadConfiguration()).toThrow(
             expect.objectContaining({
               message:
                 '[CONFIGURATION] Invalid configuration file config.json:\n✖ watch.daterange must end in the minute of its start or later: it starts at 2023-01-02T00:00:00.000Z and ends at 2023-01-01T00:00:00.000Z\n  → at watch.daterange',
@@ -420,11 +397,6 @@ describe('Configuration Service', () => {
         expect(configInstance.getStorage()).toBeUndefined();
       });
 
-      it('should throw if configuration is missing', () => {
-        (configInstance as any).configuration = undefined;
-        expect(() => configInstance.getStorage()).toThrow('Empty configuration file');
-      });
-
       it('should return storage when in backtest mode', () => {
         const backtestConfig = {
           ...mockConfig,
@@ -437,7 +409,7 @@ describe('Configuration Service', () => {
           storage: { type: 'sqlite', database: 'gekko.db' },
         };
         setConfigFile('config.json', backtestConfig);
-        const config = new Configuration();
+        const config = loadConfiguration();
         expect(config.getStorage()).toEqual(backtestConfig.storage);
       });
 
@@ -448,7 +420,7 @@ describe('Configuration Service', () => {
           storage: { type: 'sqlite', database: 'gekko.db' },
         };
         setConfigFile('config.json', writerConfig);
-        const config = new Configuration();
+        const config = loadConfiguration();
         expect(config.getStorage()).toEqual(writerConfig.storage);
       });
     });

@@ -1,4 +1,5 @@
 import type { Plugin } from '../../plugin/plugin';
+import type { RunContext } from '../../run/runContext.types';
 import { z } from 'zod';
 
 /**
@@ -14,7 +15,7 @@ export type PluginParameters = { name: string; [option: string]: unknown };
  * Plugin and to declare its static configuration.
  */
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-export type PluginClass = (new (parameters: any) => Plugin) & { getStaticConfiguration(): PluginStaticConfiguration };
+export type PluginClass = (new (parameters: any, context: RunContext) => Plugin) & { getStaticConfiguration(): PluginStaticConfiguration };
 
 /** What a plugin class declares of itself, read by the pipeline before any plugin is built */
 export type PluginStaticConfiguration = {
@@ -37,6 +38,11 @@ export type PluginRegistry = Record<string, PluginClass>;
 export type GekkoPipelineOptions = {
   /** The plugin classes the configuration's `plugins[].name` entries pick from */
   plugins: PluginRegistry;
+  /**
+   * The run's configuration and services (createRunContext). Optional during the monorepo wave only: without it the pipeline runs on
+   * the transitional `config` and `inject` singletons, the configuration GEKKO_CONFIG_FILE_PATH names.
+   */
+  context?: RunContext;
   /** Ends the run once aborted (see gekkoPipeline) */
   signal?: AbortSignal;
 };

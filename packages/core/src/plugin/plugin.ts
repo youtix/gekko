@@ -1,7 +1,8 @@
 import { Timeframe, Watch } from '@gekko/schemas/configuration/configuration.types';
 import { CandleBucket } from '@gekko/shared/models/event.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
-import { config } from '../configuration/configuration';
+import type { RunContext } from '../run/runContext.types';
+import { transitionalContext } from './plugin.helper';
 import { Exchange } from '@gekko/shared/models/exchange.types';
 import { Storage } from '../storage/storage';
 import { SequentialEventEmitter } from './sequentialEventEmitter';
@@ -18,12 +19,16 @@ export abstract class Plugin extends SequentialEventEmitter {
   protected readonly pairs: TradingPair[];
   protected readonly assets: Asset[];
   protected readonly currency: Asset;
+  /** The run's configuration and services, which a plugin hands to what it builds (the Trader to its orders) */
+  protected readonly context: RunContext;
 
-  constructor(pluginName: string) {
+  // `context` is optional during the monorepo wave only: a plugin not yet converted runs on the transitional singletons
+  constructor(pluginName: string, context?: RunContext) {
     super(pluginName);
-    const { timeframe, warmup, mode, pairs, assets, currency } = config.getWatch();
+    this.context = context ?? transitionalContext();
+    const { timeframe, warmup, mode, pairs, assets, currency } = this.context.configuration.getWatch();
 
-    this.strategySettings = config.getStrategy();
+    this.strategySettings = this.context.configuration.getStrategy();
 
     this.pluginName = pluginName;
     this.timeframe = timeframe;

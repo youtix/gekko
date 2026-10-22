@@ -43,9 +43,7 @@ describe('Injecter', () => {
   const getWatchMock = vi.mocked(config.getWatch);
 
   beforeEach(() => {
-    // Reset singleton state (accessing private property for testing)
-    (inject as any).storageInstance = undefined;
-    (inject as any).exchangeInstance = undefined;
+    inject.reset();
     getStorageMock.mockClear();
     getExchangeMock.mockClear();
     getWatchMock.mockClear();
@@ -103,12 +101,13 @@ describe('Injecter', () => {
     });
 
     it('closes the storage that was created, once', () => {
-      const close = vi.fn();
-      (inject as any).storageInstance = { close };
+      getStorageMock.mockReturnValue({ type: 'sqlite', database: '' });
+      getWatchMock.mockReturnValue({ pairs: [{ symbol: 'BTC/USDT' }] } as unknown as Watch);
+      const storage = inject.storage();
 
       inject.closeStorage();
 
-      expect(close).toHaveBeenCalledOnce();
+      expect(storage.close).toHaveBeenCalledOnce();
     });
   });
 

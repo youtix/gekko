@@ -8,6 +8,8 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { GekkoPipelineOptions, PipelineContext } from './pipeline.types';
 import { config } from '../../configuration/configuration';
 import { inject } from '../../injecter/injecter';
+import { setCurrentRunContext } from '../../run/currentRun.helper';
+import type { RunContext } from '../../run/runContext.types';
 import { debug, warning } from '../../logger/logger';
 import { keepDuplicates } from '@gekko/shared/utils/collection/array.utils';
 import { startOfMinuteUTC } from '@gekko/shared/utils/date/date.utils';
@@ -49,12 +51,15 @@ export const wirePlugins = async (context: PipelineContext) => {
   });
 };
 
-export const createPlugins = async (context: PipelineContext, { plugins }: Pick<GekkoPipelineOptions, 'plugins'>) =>
+export const createPlugins = async (
+  context: PipelineContext,
+  { plugins, context: run }: Pick<GekkoPipelineOptions, 'plugins' | 'context'>,
+) =>
   map(context, pluginCtx => {
     const { name, parameters } = pluginCtx;
-    // The output of its own schema, paired with the class by name (see PluginClass)
+    // The output of its own schema, paired with the class by name (see PluginClass), and the run's configuration and services
     const PluginClass = plugins[name];
-    const plugin = new PluginClass(parameters);
+    const plugin = new PluginClass(parameters, run as RunContext);
     debug('pipeline', `${name} plugin created !`);
     return { ...pluginCtx, plugin };
   });
@@ -190,8 +195,12 @@ export const checkDateRange = async (context: PipelineContext) => {
  * `plugins` is the registry the configuration's `plugins[].name` entries pick their class from: the namespace of `@gekko/plugins/index`
  * for the executable. An entry naming no class of it is refused with the list of its names.
  */
-export const gekkoPipeline = (options: GekkoPipelineOptions) =>
-  [
+export const gekkoPipeline = (options: GekkoPipelineOptions) => {
+  // Transitional (the monorepo wave): a caller without a context runs on the configuration GEKKO_CONFIG_FILE_PATH names and the
+  // services built from it, through the `config` and `inject` singletons; one with a context makes it theirs too
+  if (options.context) setCurrentRunContext(options.context);
+  const context: RunContext = options.context ?? { configuration: config, services: inject };
+  return [
     checkDateRange,
     getPluginsStaticConfiguration,
     checkPluginsModesCompatibility,
@@ -204,4 +213,5 @@ export const gekkoPipeline = (options: GekkoPipelineOptions) =>
     wirePlugins,
     injectServices,
     launchStream,
-  ].reduce(async (context, step) => step(await context, options), Promise.resolve(config.getPlugins()));
+  ].reduce(async (pipeline, step) => step(await pipeline, { ...options, context }), Promise.resolve(context.configuration.getPlugins()));
+};
