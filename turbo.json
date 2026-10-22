@@ -60,10 +60,8 @@
     // Writes dist/<name> at the root, outside the workspace, where turbo restores nothing from its cache
     "build:exec": {
       "cache": false
-    },
-    "dev": {
-      "cache": false,
-      "persistent": true
     }
+    // No dev task: the root's dev and dev:fox run the apps from source at the root, where .env, config/ and db/ are. A task of turbo
+    // runs a workspace's script in the workspace's directory, where Bun reads no .env and a relative path leads nowhere
   }
 }

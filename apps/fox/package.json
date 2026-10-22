@@ -10,8 +10,7 @@
     "test": "vitest --run",
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
-    "build:exec": "bun build --compile src/fox.ts src/worker/gekko.worker.ts --outfile ../../dist/fox",
-    "dev": "bun src/fox.ts"
+    "build:exec": "bun build --compile src/fox.ts src/worker/gekko.worker.ts --outfile ../../dist/fox"
   },
   "dependencies": {
     "@gekko/core": "workspace:*",

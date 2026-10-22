@@ -11,8 +11,7 @@
     "test:coverage": "vitest run --coverage",
     "test:watch": "vitest",
     "build:exec": "bun build src/gekko.ts --compile --outfile ../../dist/gekko",
-    "test:e2e": "bun test --isolate test/e2e",
-    "dev": "bun src/gekko.ts"
+    "test:e2e": "bun test --isolate test/e2e"
   },
   "dependencies": {
     "@gekko/core": "workspace:*",
