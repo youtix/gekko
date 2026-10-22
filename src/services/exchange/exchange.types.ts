@@ -56,7 +56,8 @@ export interface MarketData {
   cost?: MarketLimitRange;
   /**
    * The amount limits of a market order, which narrow the amount range for it (see getMarketOrderLimits): Binance's MARKET_LOT_SIZE
-   * filter, which it applies to a MARKET order on top of LOT_SIZE (the amount range), with a far lower maximum on a liquid pair.
+   * filter, which it applies to a MARKET order on top of LOT_SIZE (the amount range), with a far lower maximum on a liquid pair. A
+   * dummy-cex configuration states it as `market` in a marketData entry, either bound optional, for a backtest to rehearse it.
    */
   market?: MarketLimitRange;
   /**

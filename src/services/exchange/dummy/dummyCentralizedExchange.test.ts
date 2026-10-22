@@ -321,7 +321,7 @@ describe('DummyCentralizedExchange', () => {
       );
     });
 
-    // The MARKET_LOT_SIZE of Binance, which paper trading carries from the real market (a dummy-cex configuration has no market range):
+    // The MARKET_LOT_SIZE of Binance, which paper trading carries from the real market and a dummy-cex configuration states as `market`:
     // amounts up to 5 in a market order, up to 100 in a limit order. The simulator used to fill a market order that Binance refuses.
     describe('with a market range narrowing the amounts of a market order', () => {
       const marketData = { ...defaultMarketData, market: { min: 0, max: 5 } };

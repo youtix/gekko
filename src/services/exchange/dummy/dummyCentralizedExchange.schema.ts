@@ -40,6 +40,15 @@ const significantDigitsSchema = (field: string) => {
 };
 
 /**
+ * Whether the min of a range does not exceed its max. A bound left out compares nothing, nor does a max of 0 or below: one that sets no
+ * maximum (see limitRangeSchema), or a negative one, already reported.
+ */
+const isMinAtMostMax = ({ min, max }: { min?: number; max?: number }) => min === undefined || max === undefined || max <= 0 || min <= max;
+
+/** The issue of a range whose min exceeds its max, worded for its field */
+const minAboveMaxMessage = (field: string) => `${field}.min must not exceed ${field}.max (leave max out for no maximum)`;
+
+/**
  * The lowest and highest order price, amount or cost of a pair. A max left out, or set to 0 as Binance reports a disabled
  * filter, sets no maximum (market.helper counts a bound of 0 as absent), so min is only compared with a max above 0.
  * Zod still runs the refinement after a failed bound: a negative max, already reported, is not compared either.
@@ -50,9 +59,21 @@ const limitRangeSchema = (field: string) =>
       min: nonNegativeNumberSchema(`${field}.min`),
       max: nonNegativeNumberSchema(`${field}.max`).optional(),
     })
-    .refine(({ min, max }) => max === undefined || max <= 0 || min <= max, {
-      message: `${field}.min must not exceed ${field}.max (leave max out for no maximum)`,
-    });
+    .refine(isMinAtMostMax, { message: minAboveMaxMessage(field) });
+
+/**
+ * The amounts of a market order, which narrow the amount range for a MARKET order (see MarketData.market and getMarketOrderLimits):
+ * Binance's MARKET_LOT_SIZE, which paper trading carries from the real market, tens of BTC on BTC/USDT where the amount range goes up to
+ * 9000, so that a backtest caps and refuses a MARKET order as Binance does. Left out, a MARKET order takes the amount range. Either bound
+ * may be left out, as MarketData states them (Binance leaves the minimum at 0, which sets none), and each is checked as those of the
+ * other ranges are (see limitRangeSchema).
+ */
+const marketOrderRangeSchema = z
+  .strictObject({
+    min: nonNegativeNumberSchema('market.min').optional(),
+    max: nonNegativeNumberSchema('market.max').optional(),
+  })
+  .refine(isMinAtMostMax, { message: minAboveMaxMessage('market') });
 
 /**
  * The quote of a pair until its first candle. Zod still runs the refinement after a failed bound: an ask of 0 or below,
@@ -73,6 +94,7 @@ const marketDataSchema = z
         price: limitRangeSchema('price'),
         amount: limitRangeSchema('amount'),
         cost: limitRangeSchema('cost'),
+        market: marketOrderRangeSchema.optional(),
         precision: z.strictObject({
           price: decimalsToStepSchema('precision.price'),
           amount: decimalsToStepSchema('precision.amount'),

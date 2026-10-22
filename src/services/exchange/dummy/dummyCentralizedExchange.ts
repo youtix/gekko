@@ -202,7 +202,8 @@ export class DummyCentralizedExchange implements Exchange {
 
   public async createMarketOrder(symbol: TradingPair, side: OrderSide, amount: number): Promise<OrderState> {
     return this.mutex.runExclusive(() => {
-      // Narrowed to the amounts of a market order, the MARKET_LOT_SIZE of Binance that paper trading carries (see getMarketOrderLimits)
+      // Narrowed to the amounts of a market order (see getMarketOrderLimits): the MARKET_LOT_SIZE of Binance that paper trading carries, or
+      // the `market` range of a backtest's marketData entry
       const marketData = getMarketOrderLimits(this.getPairMarketData(symbol));
 
       // The limits are checked as CCXTExchange checks them, at the price the order executes at: the ask for a BUY, the bid for a SELL,

@@ -105,6 +105,7 @@ describe('dummyExchangeSchema', () => {
     ${'a marketData entry'}     | ${['marketData', 0]}                            | ${'fees'}
     ${'the market data'}        | ${['marketData', 0, 'marketData']}              | ${'maker'}
     ${'a limit range'}          | ${['marketData', 0, 'marketData', 'price']}     | ${'maximum'}
+    ${'a market order range'}   | ${['marketData', 0, 'marketData', 'market']}    | ${'maxQty'}
     ${'the precision'}          | ${['marketData', 0, 'marketData', 'precision']} | ${'cost'}
     ${'the fees'}               | ${['marketData', 0, 'marketData', 'fee']}       | ${'tierBased'}
     ${'an initialTicker entry'} | ${['initialTicker', 0]}                         | ${'last'}
@@ -126,6 +127,9 @@ describe('dummyExchangeSchema', () => {
       ${['cost', 'max']}                         | ${-1}      | ${'cost.max must be a number of at least 0'}
       ${['cost', 'min']}                         | ${'5'}     | ${'cost.min must be a number of at least 0'}
       ${['price', 'min']}                        | ${NaN}     | ${'price.min must be a number of at least 0'}
+      ${['market', 'min']}                       | ${-1}      | ${'market.min must be a number of at least 0'}
+      ${['market', 'max']}                       | ${-1}      | ${'market.max must be a number of at least 0'}
+      ${['market', 'max']}                       | ${'100'}   | ${'market.max must be a number of at least 0'}
       ${['precision', 'price']}                  | ${-2}      | ${precisionMessage('precision.price')}
       ${['precision', 'amount']}                 | ${-2}      | ${precisionMessage('precision.amount')}
       ${['precision', 'price']}                  | ${0.01}    | ${precisionMessage('precision.price')}
@@ -149,6 +153,7 @@ describe('dummyExchangeSchema', () => {
       ${'price'}
       ${'amount'}
       ${'cost'}
+      ${'market'}
     `('rejects a $range min above its max', ({ range }) => {
       const result = dummyExchangeSchema.safeParse(withMarketData([range], { min: 10, max: 5 }));
       expect(result.error?.issues).toMatchObject([
@@ -164,6 +169,7 @@ describe('dummyExchangeSchema', () => {
       ${'price'}
       ${'amount'}
       ${'cost'}
+      ${'market'}
     `('$range', ({ range }) => {
       it.each`
         scenario                             | limits
@@ -175,6 +181,23 @@ describe('dummyExchangeSchema', () => {
         const result = dummyExchangeSchema.parse(withMarketData([range], limits));
         expect(get(result.marketData.get('BTC/USDT'), range)).toEqual(limits);
       });
+    });
+
+    // The amounts of a market order may leave either bound out, as MarketData states them: Binance leaves the minimum at 0
+    it.each`
+      scenario           | market
+      ${'a max alone'}   | ${{ max: 86.27382215 }}
+      ${'a min alone'}   | ${{ min: 0.001 }}
+      ${'neither bound'} | ${{}}
+    `('hands on a market range of $scenario as it is', ({ market }) => {
+      const result = dummyExchangeSchema.parse(withMarketData(['market'], market));
+      expect(result.marketData.get('BTC/USDT')?.market).toStrictEqual(market);
+    });
+
+    // Without one, a MARKET order takes the amount range (see getMarketOrderLimits)
+    it('leaves market out of the market data when the configuration does', () => {
+      const result = dummyExchangeSchema.parse(createConfig());
+      expect(result.marketData.get('BTC/USDT')).not.toHaveProperty('market');
     });
 
     // Configured in decimals, a precision is handed on as the step MarketData.precision holds in every mode, as ccxt gives it
@@ -265,6 +288,7 @@ describe('dummyExchangeSchema', () => {
       scenario                          | exchange                                                                 | path
       ${'a negative max'}               | ${withMarketData(['price', 'max'], -1)}                                  | ${['exchange', 'marketData', 0, 'marketData', 'price', 'max']}
       ${'a min above its max'}          | ${withMarketData(['cost'], { min: 10, max: 5 })}                         | ${['exchange', 'marketData', 0, 'marketData', 'cost']}
+      ${'a market min above its max'}   | ${withMarketData(['market'], { min: 10, max: 5 })}                       | ${['exchange', 'marketData', 0, 'marketData', 'market']}
       ${'a fee of 150 %'}               | ${withMarketData(['fee', 'taker'], 1.5)}                                 | ${['exchange', 'marketData', 0, 'marketData', 'fee', 'taker']}
       ${'a precision given as a step'}  | ${withMarketData(['precision', 'price'], 0.01)}                          | ${['exchange', 'marketData', 0, 'marketData', 'precision', 'price']}
       ${'a bid above the ask'}          | ${withTicker({ bid: 101, ask: 100 })}                                    | ${['exchange', 'initialTicker', 0, 'ticker']}

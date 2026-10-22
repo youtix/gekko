@@ -73,7 +73,7 @@ const checkOrder = (
  * a misleading "order amount should be evenly divisible by lot size" (-1013), and filled by the simulator of paper trading.
  * The amount range is narrowed to the higher of the two minimums and the lower of the two maximums (lodash's max and min skip the
  * bounds left undefined), a bound that is not a finite number above 0 setting nothing, as in toBound: the MARKET_LOT_SIZE minQty of
- * 0 on BTCUSDT. Market data without a market range, a dummy-cex configuration for one, is returned as it is.
+ * 0 on BTCUSDT. Market data without a market range, a dummy-cex marketData entry without `market` for one, is returned as it is.
  */
 export const getMarketOrderLimits = (marketData: MarketData): MarketData => {
   const { amount, market } = marketData;
