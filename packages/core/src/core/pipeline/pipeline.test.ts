@@ -16,7 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { z } from 'zod';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
 import * as pipelineModule from './pipeline';
-import { PluginsEmitSameEventError } from './pipeline.error';
+import { PluginModeNotSupportedError, PluginsEmitSameEventError, UnknownPluginError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
 
 vi.mock('../../logger/logger', () => ({
@@ -231,6 +231,18 @@ describe('Pipeline Service', () => {
       await expect(pipelineModule.checkPluginsDuplicateEvents(context)).rejects.toThrow(PluginsEmitSameEventError);
     });
 
+    it('should name every plugin that emits an event another emits, and those events', async () => {
+      const context: PipelineContext = [
+        { name: 'A', eventsEmitted: ['event1', 'event2'] },
+        { name: 'B', eventsEmitted: ['event3'] },
+        { name: 'C', eventsEmitted: ['event2', 'event1'] },
+      ];
+
+      await expect(pipelineModule.checkPluginsDuplicateEvents(context)).rejects.toThrow(
+        '[PIPELINE] Plugins A and C are broadcasting the same events: event2 and event1. This behavior is unsupported.',
+      );
+    });
+
     it('should return context if no duplicates found', async () => {
       const context: PipelineContext = [
         { name: 'A', eventsEmitted: ['event1'] },
@@ -396,10 +408,18 @@ describe('Pipeline Service', () => {
       const promise = pipelineModule.checkPluginsModesCompatibility(plugins, { context });
 
       if (shouldThrow) {
-        await expect(promise).rejects.toThrow(/does not support/);
+        await expect(promise).rejects.toThrow(new PluginModeNotSupportedError('P', currentMode, allowedModes));
       } else {
         await expect(promise).resolves.not.toThrow();
       }
+    });
+
+    it('should refuse a plugin that declares no mode, naming none', async () => {
+      configuration.getWatch.mockReturnValue({ mode: 'backtest' });
+
+      await expect(pipelineModule.checkPluginsModesCompatibility([{ name: 'P' }], { context })).rejects.toThrow(
+        /^\[PIPELINE\] Plugin P does not support backtest mode$/,
+      );
     });
   });
 
@@ -431,18 +451,19 @@ describe('Pipeline Service', () => {
       ]);
     });
 
+    // The plugins listed in alphabetical order, whatever the order of the registry
     it.each`
       name                     | message
-      ${'PerformanceAnalyzer'} | ${/^\[PIPELINE\] Unknown plugin 'PerformanceAnalyzer'\. Available plugins: /}
-      ${'RoundtripAnalyzer'}   | ${/^\[PIPELINE\] Unknown plugin 'RoundtripAnalyzer'\. Did you mean 'RoundTripAnalyzer'\? Available plugins: /}
-      ${'constructor'}         | ${/^\[PIPELINE\] Unknown plugin 'constructor'\. Available plugins: /}
-    `('should reject the unknown plugin $name', async ({ name, message }) => {
+      ${'PerformanceAnalyzer'} | ${'[PIPELINE] No plugin is named "PerformanceAnalyzer": the plugins are RoundTripAnalyzer and Trader'}
+      ${'RoundtripAnalyzer'}   | ${'[PIPELINE] No plugin is named "RoundtripAnalyzer" (did you mean "RoundTripAnalyzer"?): the plugins are RoundTripAnalyzer and Trader'}
+      ${'constructor'}         | ${'[PIPELINE] No plugin is named "constructor": the plugins are RoundTripAnalyzer and Trader'}
+    `('should reject the unknown plugin $name, naming the registered plugins', async ({ name, message }) => {
       await expect(pipelineModule.getPluginsStaticConfiguration([{ name }], { plugins })).rejects.toThrow(message);
     });
 
-    it('should list the registered plugins in alphabetical order', async () => {
+    it('should reject an unknown plugin with an UnknownPluginError', async () => {
       await expect(pipelineModule.getPluginsStaticConfiguration([{ name: 'PerformanceAnalyzer' }], { plugins })).rejects.toThrow(
-        /Available plugins: (.+, )?RoundTripAnalyzer, (.+, )?Trader(, .+)?\.$/,
+        UnknownPluginError,
       );
     });
   });
@@ -801,7 +822,7 @@ describe('Pipeline Service', () => {
 
     describe.each`
       failure                                   | breakIt                                                                                   | error                                                                  | lastStep
-      ${'a plugin does not support the mode'}   | ${changeReceiver({ modes: ['realtime'] })}                                                | ${'Plugin Receiver does not support backtest mode.'}                   | ${'getPluginsStaticConfiguration: Receiver'}
+      ${'a plugin does not support the mode'}   | ${changeReceiver({ modes: ['realtime'] })}                                                | ${'Plugin Receiver does not support backtest mode, only realtime'}     | ${'getPluginsStaticConfiguration: Receiver'}
       ${'the entry of a plugin is invalid'}     | ${changeReceiverEntry({ threshold: '2' })}                                                | ${'Invalid options for plugin Receiver (plugins[1]):'}                 | ${'validatePluginsSchema: Sender'}
       ${'a dependency is missing'}              | ${changeReceiver({ dependencies: ['non-existent-dep-xyz'] })}                             | ${'Dependency non-existent-dep-xyz not installed for plugin Receiver'} | ${'validatePluginsSchema: Receiver'}
       ${'two plugins emit the same event'}      | ${changeReceiver({ eventsEmitted: ['myEvent'] })}                                         | ${PluginsEmitSameEventError}                                           | ${'validatePluginsSchema: Receiver'}

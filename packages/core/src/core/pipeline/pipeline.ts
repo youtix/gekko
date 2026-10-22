@@ -13,7 +13,7 @@ import { toCamelCase } from '@gekko/shared/utils/string/string.utils';
 import { compact, each, filter, flatMap, map, some } from 'lodash-es';
 import { z } from 'zod';
 import { MissingCandlesError } from '../stream/backtest/backtest.error';
-import { PluginsEmitSameEventError } from './pipeline.error';
+import { PluginModeNotSupportedError, PluginsEmitSameEventError, UnknownPluginError } from './pipeline.error';
 import { streamPipelines } from './pipeline.helper';
 
 export const launchStream = async (
@@ -154,19 +154,16 @@ export const checkPluginsModesCompatibility = async (
 ) => {
   const { mode } = configuration.getWatch();
   return each(context, ({ name, modes }) => {
-    if (!modes?.includes(mode)) throw new GekkoError('pipeline', `Plugin ${name} does not support ${mode} mode.`);
+    if (!modes?.includes(mode)) throw new PluginModeNotSupportedError(name, mode, modes ?? []);
   });
 };
 
 export const getPluginsStaticConfiguration = async (context: PipelineContext, { plugins }: Pick<GekkoPipelineOptions, 'plugins'>) => {
-  // Bundled by `bun build`, the namespace is a plain object: arbitrary key order, and inherited keys such as 'constructor'
-  const pluginNames = Object.keys(plugins).sort();
+  // Its own keys only: bundled by `bun build`, the namespace is a plain object, which inherits keys such as 'constructor' (the error
+  // lists them in alphabetical order, the namespace's being arbitrary)
+  const pluginNames = Object.keys(plugins);
   return map(context, plugin => {
-    if (!pluginNames.includes(plugin.name)) {
-      const suggestion = pluginNames.find(pluginName => pluginName.toLowerCase() === plugin.name.toLowerCase());
-      const didYouMean = suggestion ? ` Did you mean '${suggestion}'?` : '';
-      throw new GekkoError('pipeline', `Unknown plugin '${plugin.name}'.${didYouMean} Available plugins: ${pluginNames.join(', ')}.`);
-    }
+    if (!pluginNames.includes(plugin.name)) throw new UnknownPluginError(plugin.name, pluginNames);
     const PluginClass = plugins[plugin.name];
     const { modes, schema, dependencies, eventsEmitted, name, eventsHandlers, inject } = PluginClass.getStaticConfiguration();
     return { modes, schema, dependencies, eventsEmitted, name, eventsHandlers, inject };
