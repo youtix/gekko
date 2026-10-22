@@ -1036,7 +1036,9 @@ describe('DummyCentralizedExchange', () => {
       async ({ execute, price, delay, rate }) => {
         const exchange = await createStartedExchange();
         const id = await execute(exchange);
-        expect(await exchange.fetchMyTrades(SYMBOL)).toEqual([{ id, amount: 1, price, timestamp: Date.now() + delay, fee: { rate } }]);
+        expect(await exchange.fetchMyTrades(SYMBOL)).toEqual([
+          { id, amount: 1, price, timestamp: Date.now() + delay, fee: { rate, currency: 'USDT' } },
+        ]);
       },
     );
 
@@ -1049,6 +1051,14 @@ describe('DummyCentralizedExchange', () => {
       await execute(exchange);
       const [trade] = await exchange.fetchMyTrades(SYMBOL);
       expect(trade.fee.rate).toBe(0);
+    });
+
+    // The simulator takes every fee in the currency of the pair, on top of a BUY and out of a SELL's proceeds: the execution names it
+    it('names the currency of the pair as the currency the fee was taken in, a fee of 0 included', async () => {
+      const exchange = await createStartedExchange({ marketData: createMarketData(omit(defaultMarketData, 'fee')) });
+      await executeMarketOrder(exchange);
+      const [trade] = await exchange.fetchMyTrades(SYMBOL);
+      expect(trade.fee).toEqual({ rate: 0, currency: 'USDT' });
     });
 
     // Multiplied by 100 in binary, a fee of 0.0007 was journaled as 0.06999999999999999 % and one of 0.00035 as 0.034999999999999996 %

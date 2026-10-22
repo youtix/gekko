@@ -111,8 +111,8 @@ export type OrderErroredEvent = OrderInitiatedEvent & {
 };
 /**
  * The fill of an order, as the Trader summarizes it: from the trades of the order, or estimated from what the order and the Trader know
- * when the exchange cannot give them (see Trader.summarizeCompletedOrder). Every figure is a finite number, but the fee rate, undefined
- * when unknown.
+ * when the exchange cannot give them (see Trader.summarizeCompletedOrder). Every figure is a finite number, but the fee rate and the
+ * asset the fee was taken in, undefined when unknown.
  */
 export type OrderCompletedEvent = OrderInitiatedEvent & {
   order: OrderEvent & {
@@ -132,6 +132,14 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
     fee: number;
     /** The fee rate in % (0.1 for 0.1 %), undefined when unknown */
     feePercent?: number;
+    /**
+     * The asset the exchange took the fee in, as the trades of the order name it (see OrderSummary.feeAsset): the asset bought for a
+     * BUY on Binance unless the fees are paid in BNB, the currency for a SELL there and for every order on the simulators, BNB with
+     * the discount. `fee` is in currency whatever the asset: converted through its rate for a fee taken in the asset of the pair, 0
+     * for one taken in a third asset, whose rate is unknown. Undefined when no trade names the currency of its fee, when they name
+     * several, or for a summary the Trader estimated.
+     */
+    feeAsset?: Asset;
   };
 };
 

@@ -157,6 +157,10 @@ export type ExecutedTrade = CCXTTrade & { amount: number; price: number };
 export const isExecutedTrade = (trade: CCXTTrade): trade is ExecutedTrade =>
   isFiniteNumber(trade.amount) && trade.amount > 0 && isFiniteNumber(trade.price) && trade.price > 0;
 
+/** The token of the base of a hyperliquid market (baseName, UBTC for the BTC of BTC/USDC), undefined on a market that names none */
+const getBaseName = (market: MarketInterface) =>
+  'baseName' in market && typeof market.baseName === 'string' ? market.baseName : undefined;
+
 /**
  * The fee rate of a ccxt trade in %, the unit of Trade.fee.rate and of the simulated exchange (0.1 for 0.1 %), or undefined when it
  * cannot be known. Never 0 by default: 0 is a trade without fees, and only an unknown rate makes the Trader warn about it.
@@ -179,23 +183,37 @@ const getFeePercent = (trade: ExecutedTrade, market: MarketInterface): number | 
   const currency = trade.fee?.currency;
   if (!isFiniteNumber(cost) || !currency) return undefined;
 
-  const baseName = 'baseName' in market && typeof market.baseName === 'string' ? market.baseName : undefined;
   const percentOf = (whole: number) => toSignificantDigits(shiftDecimalPoint(cost, 2) / whole);
   if (currency === market.quote || currency === market.quoteId) return percentOf(multiplyPrecise(trade.amount, trade.price));
-  if (currency === market.base || currency === baseName) return percentOf(trade.amount);
+  if (currency === market.base || currency === getBaseName(market)) return percentOf(trade.amount);
   return undefined;
 };
 
 /**
+ * The currency a ccxt trade paid its fee in, as Gekko names it: the base or the quote of the market for a fee taken in one of them,
+ * which hyperliquid names by its token (feeToken, UBTC for the BTC of BTC/USDC, USDT0 for a market quoted in USDT: see getFeePercent),
+ * a name the summary of the order could not match with the asset of its pair; any other currency as the exchange names it (BNB with
+ * Binance's fee discount); undefined when the trade names none.
+ */
+const getFeeCurrency = (trade: ExecutedTrade, market: MarketInterface): string | undefined => {
+  const currency = trade.fee?.currency;
+  if (!currency) return undefined;
+  if (currency === market.quote || currency === market.quoteId) return market.quote;
+  if (currency === market.base || currency === getBaseName(market)) return market.base;
+  return currency;
+};
+
+/**
  * Maps a ccxt trade of the market given, one that says what it executed (see isExecutedTrade), onto a Gekko trade. Its fee rate is in
- * % (see getFeePercent); the cost and the currency of the fee are kept as ccxt gives them, for information.
+ * % (see getFeePercent), the cost of its fee is kept as ccxt gives it, for information, and the currency of its fee is named as Gekko
+ * names it (see getFeeCurrency): the asset the summary of the order says the fee was taken in.
  */
 export const mapCcxtTradeToTrade = (trade: ExecutedTrade, market: MarketInterface): Trade => ({
   id: trade.order ?? '',
   amount: trade.amount,
   price: trade.price,
   timestamp: trade.timestamp ?? Date.now(),
-  fee: { rate: getFeePercent(trade, market), cost: trade.fee?.cost, currency: trade.fee?.currency },
+  fee: { rate: getFeePercent(trade, market), cost: trade.fee?.cost, currency: getFeeCurrency(trade, market) },
 });
 
 /**

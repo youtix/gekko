@@ -122,21 +122,32 @@ describe('DebugOrderScript', () => {
     const order = (id: UUID) => ({ id, symbol: BTC, side: 'BUY' as const, type: 'MARKET' as const, amount: 1, orderCreationDate: 0 });
     const exchange = { portfolio: new Map(), price: 100 };
 
-    it('logs what a completed order reports: its amount, its price, its fee and the date of its execution', () => {
-      play(1, scriptOf([{ candle: 0, side: 'BUY', type: 'MARKET' }]));
-      const completed: OrderCompletedEvent['order'] = {
-        ...order(orders.ids[0]),
-        price: 100,
-        fee: 0.1,
-        feePercent: 0.1,
-        effectivePrice: 100.1,
-        orderExecutionDate: Date.UTC(2024, 0, 1, 12, 1, 2),
-      };
-      strategy.onOrderCompleted({ order: completed, exchange, tools });
-      expect(logs.at(-1)).toEqual(
-        infoLine('Order 0 completed: 1 at 100, fee 0.1 (0.1 %), effective price 100.1, executed at 2024-01-01T12:01:02.000Z'),
-      );
-    });
+    // The asset the fee was taken in is named when the event names one and it is not the currency: the BTC bought, or BNB
+    it.each`
+      feeAsset     | fee
+      ${undefined} | ${'fee 0.1 (0.1 %)'}
+      ${'USDT'}    | ${'fee 0.1 (0.1 %)'}
+      ${'BTC'}     | ${'fee 0.1 (0.1 %, taken in BTC)'}
+      ${'BNB'}     | ${'fee 0.1 (0.1 %, taken in BNB)'}
+    `(
+      'logs what a completed order reports: its amount, its price, its fee, taken in $feeAsset, and its execution date',
+      ({ feeAsset, fee }) => {
+        play(1, scriptOf([{ candle: 0, side: 'BUY', type: 'MARKET' }]));
+        const completed: OrderCompletedEvent['order'] = {
+          ...order(orders.ids[0]),
+          price: 100,
+          fee: 0.1,
+          feePercent: 0.1,
+          feeAsset,
+          effectivePrice: 100.1,
+          orderExecutionDate: Date.UTC(2024, 0, 1, 12, 1, 2),
+        };
+        strategy.onOrderCompleted({ order: completed, exchange, tools });
+        expect(logs.at(-1)).toEqual(
+          infoLine(`Order 0 completed: 1 at 100, ${fee}, effective price 100.1, executed at 2024-01-01T12:01:02.000Z`),
+        );
+      },
+    );
 
     it.each`
       filled       | remaining    | expected

@@ -146,6 +146,8 @@ plugins:
 
 A partial fill or a status change of an order is only logged (`info` level), not emitted. Each order ends in one of `OrderCompleted`, `OrderCanceled` and `OrderErrored`, which no other plugin emits: a built-in strategy waits for that end before it advises again (see the TradingAdvisor).
 
+An `OrderCompleted` payload carries the fill as the Trader summarizes it from the trades of the order: the `amount` executed, the `price` (the mean of the trades' prices, weighted by their amounts), the `effectivePrice` (that price with the fee in), the `fee` in the currency, the `feePercent`, and the `feeAsset`, the asset the exchange took the fee in as the trades name it: the asset bought for a BUY on Binance unless the fees are paid in BNB, the currency for its SELL and for every order of a backtest or of `paper-binance`, BNB with the discount (a fee the Trader does not convert: `fee` 0, `feePercent` unknown), `undefined` when the trades name none or several assets, or when the summary is estimated. The `fee` is in the currency whatever the asset. The summary line of the Trader names the asset when it is not the currency (`[<id>] BUY MARKET order summary for BTC/USDT: Completed at: 2024-01-01T12:01:02.000Z Order amount: 1, Effective price: 100.1, Fee: 0.1, Fee percent: 0.1, Fee taken in: BTC,`), and so does the `order_complete` message of the EventSubscriber; a strategy reads it as `order.feeAsset` in its `onOrderCompleted` hook (see [Custom Strategies](./custom-strategies.md#onordercompleted--order-filled)).
+
 ### Sizing
 
 The Trader sizes an order from the balances it read at its last synchronization, less what the orders it placed since take from them. The strategy gives each order at most one of an `amount`, in the asset, a `cost`, in the currency, and an `allocation`, a percentage of the balance read; an order given none of them is all-in (see [Order Parameters](./custom-strategies.md#order-parameters)):
@@ -582,7 +584,7 @@ Current portfolio: 0.5 BTC / 47,500 USDT
 ------
 ```
 
-`Price` includes the fee. When no trade of the order reported a fee rate, it reads `Price (excluding fee): 42,500 USDT`, with `Fee percent: unknown` and `Fee: unknown`.
+`Price` includes the fee. When no trade of the order reported a fee rate, it reads `Price (excluding fee): 42,500 USDT`, with `Fee percent: unknown` and `Fee: unknown`. A fee the exchange took in another asset than the currency says so, as Binance takes a BUY's fee in the asset bought unless the fees are paid in BNB: `Fee: 21.25 USDT (taken in BTC)`, or `Fee: unknown (taken in BNB)` for one the Trader does not convert.
 
 **Roundtrip Completed** (a BUY of 1 BTC at 40,000 and its SELL at 41,000, a 0.1 % fee each, from a portfolio worth 100,000 USDT before the BUY, the price down to 39,500 in between: a PnL of 41,000 − 40,000 − 40 − 41):
 ```

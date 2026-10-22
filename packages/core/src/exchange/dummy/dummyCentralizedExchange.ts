@@ -498,17 +498,20 @@ export class DummyCentralizedExchange implements Exchange {
   /**
    * Journals the execution of an order that just filled. There is no partial fill: an order executes once, for its whole amount at
    * its own price, with the fee of its type (see getFeeRate), recorded in % as a Trade carries it: its decimal point moved two places,
-   * where multiplied by 100 in binary a fee of 0.0007 was journaled as 0.06999999999999999 %.
+   * where multiplied by 100 in binary a fee of 0.0007 was journaled as 0.06999999999999999 %. The fee is taken in the currency of the
+   * pair, on top of a BUY and out of a SELL's proceeds (see getCurrencyAmount), which the execution names as the currency of its fee,
+   * as a trade of Binance names its commissionAsset: the Trader reports the asset the fee of the order was taken in from it.
    * Executions come in timestamp order (see currentTimestamp), so each one lands at the end of its journal; inserting it with
    * sortedLastIndexBy, O(log n), keeps the journal sorted for the bisection in fetchMyTrades even if the clock ever went back.
    */
   private recordExecution(order: DummyInternalOrder) {
+    const [, currency] = order.symbol.split('/');
     const execution: Trade = {
       id: order.id,
       amount: order.filled ?? 0,
       price: order.price ?? 0,
       timestamp: order.timestamp,
-      fee: { rate: shiftDecimalPoint(this.getFeeRate(order.symbol, order.type), 2) },
+      fee: { rate: shiftDecimalPoint(this.getFeeRate(order.symbol, order.type), 2), currency },
     };
 
     const executions = this.executions.get(order.symbol);

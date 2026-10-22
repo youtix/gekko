@@ -3,12 +3,12 @@ import { ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Trade } from '@gekko/shared/models/trade.types';
-import { TradingPair } from '@gekko/shared/models/utility.types';
+import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
 import { Exchange } from '@gekko/shared/models/exchange.types';
 import { debug } from '../../logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
-import { filter, isNil, last, map, min, sortBy } from 'lodash-es';
+import { compact, filter, isNil, last, map, min, sortBy, uniq } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { OrderSummary, Transaction } from './order.types';
 
@@ -65,6 +65,17 @@ const getFeePercent = (trades: Trade[]) => {
   return Number.isFinite(feePercent) ? feePercent : undefined;
 };
 
+/**
+ * The asset the fee of an order was taken in: the one that every trade of the order which names the currency of its fee names (see
+ * Trade.fee.currency), whatever its rate. Undefined when none names one, or when they name several, as the trades of an order filled
+ * as the BNB that paid the fees of the first ones ran out. The Trader relays it beside the fee, which it reports in currency whatever
+ * the asset (see Trader.checkOrderSummary).
+ */
+const getFeeAsset = (trades: Trade[]): Asset | undefined => {
+  const assets = uniq(compact(trades.map(({ fee }) => fee?.currency)));
+  return assets.length === 1 ? assets[0] : undefined;
+};
+
 export const createOrderSummary = async ({
   id,
   symbol,
@@ -97,6 +108,7 @@ export const createOrderSummary = async ({
     amount: trades.reduce((sum, { amount }) => addPrecise(sum, amount), 0),
     price: getWeightedAverage(map(trades, 'price'), map(trades, 'amount')),
     feePercent: getFeePercent(trades),
+    feeAsset: getFeeAsset(trades),
     side,
     orderExecutionDate,
   };

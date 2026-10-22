@@ -1,4 +1,5 @@
 import { OrderSide } from '@gekko/shared/models/order.types';
+import { Asset } from '@gekko/shared/models/utility.types';
 
 export type OrderStatus =
   | 'canceled' // Order was succesfully canceled
@@ -23,6 +24,12 @@ export type OrderSummary = {
   side: OrderSide;
   /** Fee rate in % (0.1 for 0.1 %), weighted by the amounts of the trades whose rate is known; undefined when none is */
   feePercent?: number;
+  /**
+   * The asset the fee was taken in: the one that every trade of the order which names the currency of its fee names (see
+   * Trade.fee.currency), the asset bought for a BUY at Binance unless the fees are paid in BNB, the currency for its SELL and for every
+   * order of the simulator, BNB with the discount; undefined when no trade names one, or when they name several
+   */
+  feeAsset?: Asset;
   orderExecutionDate: EpochTimeStamp;
 };
 export type OrderCancelDetails = {

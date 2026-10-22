@@ -351,13 +351,16 @@ export class EventSubscriber extends Plugin {
     this.keepRead(payloads);
     this.notify('order_complete', payloads, ({ order, exchange }) => {
       const { portfolio } = exchange;
-      const { id, amount, side, type, orderExecutionDate, effectivePrice, feePercent, fee, symbol } = order;
+      const { id, amount, side, type, orderExecutionDate, effectivePrice, feePercent, fee, feeAsset, symbol } = order;
       const [asset, currency] = symbol.split('/');
       const assetBalance = getAssetBalance(portfolio, asset);
       const currencyBalance = getAssetBalance(portfolio, currency);
       // Without a fee rate (no trade of the order reported one), the Trader assumes no fee (computeOrderPricing): it sends a fee of 0
       // and the bare trade price as the effective price, which must not read as a free trade at a price fee included
       const isFeeKnown = isFiniteNumber(feePercent);
+      // The fee is written in the currency whatever the asset the exchange took it in, named when it is another one: the asset bought,
+      // which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee the Trader does not convert
+      const takenIn = feeAsset !== undefined && feeAsset !== currency ? ` (taken in ${feeAsset})` : '';
       return [
         `${side} ${type} order completed (${id}) for ${symbol}`,
         `Amount: ${formatAmount(amount)} ${asset}`,
@@ -366,7 +369,7 @@ export class EventSubscriber extends Plugin {
           : `Price (excluding fee): ${formatAmount(effectivePrice)} ${currency}`,
         // A rate keeps its decimals, as the amounts do: 0.075 % rounded to 2 decimals would read 0.07 %
         `Fee percent: ${isFeeKnown ? `${formatAmount(feePercent)}%` : 'unknown'}`,
-        `Fee: ${isFeeKnown ? `${formatAmount(fee)} ${currency}` : 'unknown'}`,
+        `Fee: ${isFeeKnown ? `${formatAmount(fee)} ${currency}` : 'unknown'}${takenIn}`,
         `At time: ${toISOString(orderExecutionDate)}`,
         `Current portfolio: ${formatAmount(assetBalance.total)} ${asset} / ${formatAmount(currencyBalance.total)} ${currency}`,
         '------',

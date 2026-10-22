@@ -253,6 +253,24 @@ describe('exchange.helper', () => {
       });
     });
 
+    // The currency of a fee is named as Gekko names the base and the quote of the market when it is one of them: hyperliquid names it
+    // by its token, which an order summary could not match with the asset of its pair; any other currency keeps the exchange's name
+    it.each`
+      description                                  | market                    | fee                                  | expected
+      ${'the quote of binance'}                    | ${binanceMarket}          | ${{ cost: 60, currency: 'USDT' }}    | ${'USDT'}
+      ${'the base of binance'}                     | ${binanceMarket}          | ${{ cost: 0.001, currency: 'BTC' }}  | ${'BTC'}
+      ${'the token of the base of hyperliquid'}    | ${hyperliquidMarket}      | ${{ cost: 0.001, currency: 'UBTC' }} | ${'BTC'}
+      ${'the quote of hyperliquid'}                | ${hyperliquidMarket}      | ${{ cost: 60, currency: 'USDC' }}    | ${'USDC'}
+      ${'the token of the quote of hyperliquid'}   | ${hyperliquidUsdt0Market} | ${{ cost: 0.04, currency: 'USDT0' }} | ${'USDT'}
+      ${'another currency, BNB with the discount'} | ${binanceMarket}          | ${{ cost: 0.0001, currency: 'BNB' }} | ${'BNB'}
+      ${'no fee'}                                  | ${binanceMarket}          | ${undefined}                         | ${undefined}
+      ${'a fee without currency'}                  | ${binanceMarket}          | ${{ cost: 60 }}                      | ${undefined}
+      ${'a fee whose currency is empty'}           | ${binanceMarket}          | ${{ cost: 60, currency: '' }}        | ${undefined}
+    `('names the currency of a fee taken in $description as $expected', ({ market, fee, expected }) => {
+      const trade: any = { id: '1', order: 'ord1', amount: 1, price: 60000, timestamp, fee };
+      expect(utils.mapCcxtTradeToTrade(trade, market).fee.currency).toBe(expected);
+    });
+
     it('maps a trade without an order id to an empty id', () => {
       const trade: any = { amount: 1, price: 60000, timestamp };
       expect(utils.mapCcxtTradeToTrade(trade, binanceMarket)).toMatchObject({ id: '', amount: 1, price: 60000 });

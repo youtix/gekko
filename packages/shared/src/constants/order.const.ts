@@ -20,12 +20,14 @@ export const ORDER_SIDES = ['BUY', 'SELL'] as const;
 export const ORDER_TYPES = ['MARKET', 'STICKY', 'LIMIT'] as const;
 /**
  * The summary of an order none of whose trades was found (see createOrderSummary): its figures unknown, NaN, which the Trader replaces
- * with an estimate (see Trader.summarizeCompletedOrder), and the fee rate undefined, as OrderSummary says an unknown one
+ * with an estimate (see Trader.summarizeCompletedOrder), and the fee rate and the asset the fee was taken in undefined, as
+ * OrderSummary says unknown ones
  */
 export const EMPTY_ORDER_SUMMARY = {
   amount: NaN,
   price: NaN,
   feePercent: undefined,
+  feeAsset: undefined,
   orderExecutionDate: NaN,
 } as const;
 /**

@@ -3082,6 +3082,7 @@ describe('Trader', () => {
             amount: 0.98,
             price: 105,
             feePercent: undefined,
+            feeAsset: undefined,
             fee: 0,
             effectivePrice: 105,
           },
@@ -3096,6 +3097,22 @@ describe('Trader', () => {
       it('forgets the order', () => {
         expect(getOrdersMap().has(advice.id)).toBe(false);
       });
+    });
+
+    it('relays the asset the fee of a completed order was taken in, as the trades of the order name it', async () => {
+      vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+      const order = await prepareOrder('creation', buildAdvice({ type: 'MARKET', amount: 1 }));
+      order.createSummary.mockResolvedValue({
+        amount: 1,
+        price: 100,
+        feePercent: 0.1,
+        feeAsset: 'BTC',
+        side: 'BUY',
+        orderExecutionDate: 1_700_000_111_000,
+      });
+      trader['prices'].set('BTC/USDT', 105);
+      await order.emitAndSettle(ORDER_COMPLETED_EVENT);
+      expect(getCompletedEvent()?.order).toEqual(expect.objectContaining({ fee: 0.1, feeAsset: 'BTC' }));
     });
 
     it('relays the summary of a completed order as the exchange gave it when its figures are usable', async () => {
@@ -3152,6 +3169,7 @@ describe('Trader', () => {
             amount: 0.98,
             price: 105,
             feePercent: undefined,
+            feeAsset: undefined,
             fee: 0,
             effectivePrice: 105,
           },
@@ -3919,17 +3937,21 @@ describe('Trader', () => {
     });
 
     // Every figure written with every decimal: String wrote a fill of dust, a pair priced under a millionth or a fee rate under a
-    // millionth of a percent with an exponent, 5e-7. A fee rate none of the trades gave is written as it always was.
+    // millionth of a percent with an exponent, 5e-7. A fee rate none of the trades gave is written as it always was. The asset the fee
+    // was taken in is named when it is known and not the currency: the BTC bought, or BNB, whose fee no rate converts.
     it.each`
-      description                            | amount       | price         | feePercent   | figures
-      ${'2 BTC at 100, fee 0.5 %'}           | ${2}         | ${100}        | ${0.5}       | ${'Order amount: 2, Effective price: 100.5, Fee: 1, Fee percent: 0.5,'}
-      ${'0.0000005 BTC at 100, fee 0.1 %'}   | ${0.0000005} | ${100}        | ${0.1}       | ${'Order amount: 0.0000005, Effective price: 100.1, Fee: 0.00000005, Fee percent: 0.1,'}
-      ${'1000 BTC at 0.00000045, fee 0.1 %'} | ${1000}      | ${0.00000045} | ${0.1}       | ${'Order amount: 1000, Effective price: 0.00000045045, Fee: 0.00000045, Fee percent: 0.1,'}
-      ${'2 BTC at 100, fee 0.0000005 %'}     | ${2}         | ${100}        | ${0.0000005} | ${'Order amount: 2, Effective price: 100.0000005, Fee: 0.000001, Fee percent: 0.0000005,'}
-      ${'2 BTC at 100, no fee rate'}         | ${2}         | ${100}        | ${undefined} | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined,'}
-    `('logs the summary of a BUY of $description, each figure in full', ({ amount, price, feePercent, figures }) => {
+      description                                  | amount       | price         | feePercent   | feeAsset     | figures
+      ${'2 BTC at 100, fee 0.5 %'}                 | ${2}         | ${100}        | ${0.5}       | ${undefined} | ${'Order amount: 2, Effective price: 100.5, Fee: 1, Fee percent: 0.5,'}
+      ${'0.0000005 BTC at 100, fee 0.1 %'}         | ${0.0000005} | ${100}        | ${0.1}       | ${undefined} | ${'Order amount: 0.0000005, Effective price: 100.1, Fee: 0.00000005, Fee percent: 0.1,'}
+      ${'1000 BTC at 0.00000045, fee 0.1 %'}       | ${1000}      | ${0.00000045} | ${0.1}       | ${undefined} | ${'Order amount: 1000, Effective price: 0.00000045045, Fee: 0.00000045, Fee percent: 0.1,'}
+      ${'2 BTC at 100, fee 0.0000005 %'}           | ${2}         | ${100}        | ${0.0000005} | ${undefined} | ${'Order amount: 2, Effective price: 100.0000005, Fee: 0.000001, Fee percent: 0.0000005,'}
+      ${'2 BTC at 100, no fee rate'}               | ${2}         | ${100}        | ${undefined} | ${undefined} | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined,'}
+      ${'2 BTC at 100, fee 0.1 % taken in USDT'}   | ${2}         | ${100}        | ${0.1}       | ${'USDT'}    | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1,'}
+      ${'2 BTC at 100, fee 0.1 % taken in BTC'}    | ${2}         | ${100}        | ${0.1}       | ${'BTC'}     | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1, Fee taken in: BTC,'}
+      ${'2 BTC at 100, no fee rate, taken in BNB'} | ${2}         | ${100}        | ${undefined} | ${'BNB'}     | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined, Fee taken in: BNB,'}
+    `('logs the summary of a BUY of $description, each figure in full', ({ amount, price, feePercent, feeAsset, figures }) => {
       const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
-      const summary: OrderSummary = { amount, price, feePercent, side: 'BUY', orderExecutionDate: 1_700_000_111_000 };
+      const summary: OrderSummary = { amount, price, feePercent, feeAsset, side: 'BUY', orderExecutionDate: 1_700_000_111_000 };
       trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
       expect(logger.info).toHaveBeenCalledExactlyOnceWith(
         'trader',

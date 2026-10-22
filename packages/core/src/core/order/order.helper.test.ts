@@ -108,7 +108,7 @@ describe('createOrderSummary', () => {
       trade('ex-0', 1, 100, 1_100_000, { rate: 0.1 }),
     ]);
     const summary = await summarize([transaction('ex-1', 2_000_000), transaction('ex-0', 1_000_000)]);
-    expect(summary).toEqual({ amount: 4, price: 107.5, feePercent: 0.4, side: 'BUY', orderExecutionDate: 2_500_000 });
+    expect(summary).toEqual({ amount: 4, price: 107.5, feePercent: 0.4, feeAsset: undefined, side: 'BUY', orderExecutionDate: 2_500_000 });
   });
 
   // Only the trades with a known rate weigh in, each by its own amount: 1 for the first trade, 3 for the second
@@ -132,6 +132,34 @@ describe('createOrderSummary', () => {
     fetchMyTrades.mockResolvedValue([trade('ex-0', 0, 100, 1_100_000, { rate: 0.1 }), trade('ex-1', 3, 110, 2_500_000, {})]);
     const summary = await summarize([transaction('ex-0', 1_000_000), transaction('ex-1', 2_000_000)]);
     expect(summary.feePercent).toBeUndefined();
+  });
+
+  // The asset the fee was taken in is the one every trade that names the currency of its fee names, whatever its rate: Binance takes
+  // a BUY's fee in the asset bought, a SELL's in the currency, either in BNB with its discount, which no rate converts
+  it.each`
+    case                                              | fees                                                                      | feeAsset
+    ${'every trade paid in the asset bought'}         | ${[{ cost: 0.001, currency: 'BTC' }, { cost: 0.003, currency: 'BTC' }]}   | ${'BTC'}
+    ${'every trade paid in the currency'}             | ${[{ rate: 0.1, currency: 'USDT' }, { rate: 0.1, currency: 'USDT' }]}     | ${'USDT'}
+    ${'every trade paid in BNB, their rates unknown'} | ${[{ cost: 0.0001, currency: 'BNB' }, { cost: 0.0003, currency: 'BNB' }]} | ${'BNB'}
+    ${'a trade names no currency'}                    | ${[{ rate: 0.1 }, { cost: 0.003, currency: 'BTC' }]}                      | ${'BTC'}
+    ${'a trade has no fee'}                           | ${[undefined, { cost: 0.003, currency: 'BTC' }]}                          | ${'BTC'}
+    ${'the trades paid in two assets'}                | ${[{ cost: 0.0001, currency: 'BNB' }, { cost: 0.003, currency: 'BTC' }]}  | ${undefined}
+    ${'no trade names a currency'}                    | ${[{ rate: 0.1 }, { rate: 0.5 }]}                                         | ${undefined}
+    ${'a currency is empty'}                          | ${[{ cost: 0.001, currency: '' }, { rate: 0.5 }]}                         | ${undefined}
+    ${'no trade has a fee'}                           | ${[undefined, undefined]}                                                 | ${undefined}
+  `('gives a fee asset of $feeAsset when $case', async ({ fees, feeAsset }) => {
+    fetchMyTrades.mockResolvedValue([trade('ex-0', 1, 100, 1_100_000, fees[0]), trade('ex-1', 3, 110, 2_500_000, fees[1])]);
+    const summary = await summarize([transaction('ex-0', 1_000_000), transaction('ex-1', 2_000_000)]);
+    expect(summary.feeAsset).toBe(feeAsset);
+  });
+
+  it('gives the fee asset of the trades of the order alone, not of those of another order', async () => {
+    fetchMyTrades.mockResolvedValue([
+      trade('another-order', 10, 90, 1_200_000, { cost: 0.0001, currency: 'BNB' }),
+      trade('ex-0', 1, 100, 1_100_000, { cost: 0.001, currency: 'BTC' }),
+    ]);
+    const summary = await summarize([transaction('ex-0', 1_000_000)]);
+    expect(summary.feeAsset).toBe('BTC');
   });
 
   // Worked out in binary, the figures of a summary came out an ulp or two off the decimals the trades were made at: a LIMIT order

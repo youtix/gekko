@@ -242,19 +242,25 @@ describe('E2E: Realtime Live Trader Flow', () => {
           ...opened.buy,
           '[#1] BUY MARKET order fill, total filled: 1',
           '[#1] Status changed: FILLED',
-          // The fee rate comes from the trade, 0.001 BTC on 1 BTC: 0.1 %, and the fee in USDT is 0.1 % of the cost, 100 × 0.001
-          summaryLine('[#1] BUY MARKET', buyFilledAt, 'Order amount: 1, Effective price: 100.1, Fee: 0.1, Fee percent: 0.1,'),
+          // The fee rate comes from the trade, 0.001 BTC on 1 BTC: 0.1 %, and the fee in USDT is 0.1 % of the cost, 100 × 0.001. The
+          // trade names the asset the fee was taken in, BTC, which the line names as it is not the currency
+          summaryLine(
+            '[#1] BUY MARKET',
+            buyFilledAt,
+            'Order amount: 1, Effective price: 100.1, Fee: 0.1, Fee percent: 0.1, Fee taken in: BTC,',
+          ),
           '[#2] SELL MARKET order of 1 BTC above the free balance: 0.999 BTC sent, all that can be sold',
           ...opened.sell,
           '[#2] SELL MARKET order fill, total filled: 0.999',
           '[#2] Status changed: FILLED',
-          // 0.10989 USDT on the 109.89 of 0.999 × 110: 0.1 %, and 110 less its 0.1 % is 109.89
+          // 0.10989 USDT on the 109.89 of 0.999 × 110: 0.1 %, and 110 less its 0.1 % is 109.89. Taken in USDT, the currency, which the
+          // line does not name
           summaryLine('[#2] SELL MARKET', sellFilledAt, 'Order amount: 0.999, Effective price: 109.89, Fee: 0.10989, Fee percent: 0.1,'),
         ],
         // The BUY is reported between the buckets of candles 0 and 1, and heard as candle 1's arrives, before that candle creates the SELL
         strategy: [
           'Order 0 created on candle 0: BUY MARKET of 1.0000004 on BTC/USDT',
-          `Order 0 completed: 1 at 100, fee 0.1 (0.1 %), effective price 100.1, executed at 2024-01-01T${buyFilledAt}.000Z`,
+          `Order 0 completed: 1 at 100, fee 0.1 (0.1 %, taken in BTC), effective price 100.1, executed at 2024-01-01T${buyFilledAt}.000Z`,
           'Order 1 created on candle 1: SELL MARKET of 1 on BTC/USDT',
           `Order 1 completed: 0.999 at 110, fee 0.10989 (0.1 %), effective price 109.89, executed at 2024-01-01T${sellFilledAt}.000Z`,
         ],

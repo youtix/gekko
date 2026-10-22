@@ -13,7 +13,12 @@ export type Trade = {
     rate?: number;
     /** Informative: what the fee cost, in its currency, as the exchange reports it */
     cost?: number;
-    /** Informative: the currency the fee was paid in, as the exchange names it */
+    /**
+     * The currency the fee was paid in: the asset or the currency of the pair, as Gekko names them, when it is one of them (ccxt's
+     * hyperliquid names a fee by its token, UBTC for the BTC of BTC/USDC: see mapCcxtTradeToTrade), any other as the exchange names it
+     * (BNB with Binance's fee discount); undefined when the exchange names none. The summary of an order reads it as the asset the
+     * fee was taken in (see OrderSummary.feeAsset). The simulator names the currency of the pair, which it takes every fee in.
+     */
     currency?: string;
   };
 };

@@ -594,11 +594,14 @@ export class Trader extends Plugin {
 
   /**
    * The completed event of an order from its summary, whose figures are usable numbers: the exchange's, checked, or an estimate (see
-   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing).
+   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing), and the asset the fee
+   * was taken in, which the line names when it is known and not the currency the fee is written in: the asset bought, which Binance
+   * takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee no rate converts.
    */
   private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent {
-    const { amount, price, feePercent, side, orderExecutionDate } = summary;
+    const { amount, price, feePercent, feeAsset, side, orderExecutionDate } = summary;
     const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent);
+    const [, currencyName] = symbol.split('/');
 
     if (!isFiniteNumber(feePercent)) warning('trader', 'Exchange did not provide fee information, assuming no fees.');
     info(
@@ -610,6 +613,7 @@ export class Trader extends Plugin {
         `Effective price: ${formatEveryDecimal(effectivePrice)},`,
         `Fee: ${formatEveryDecimal(fee)},`,
         `Fee percent: ${formatFigure(feePercent)},`,
+        ...(feeAsset !== undefined && feeAsset !== currencyName ? [`Fee taken in: ${feeAsset},`] : []),
       ].join(' '),
     );
 
@@ -648,7 +652,7 @@ export class Trader extends Plugin {
    * - amount: the fills the order recorded, as the exchange reported them. Without any, the amount ordered, which a filled order
    *   executed in full, up to the lot rounding of the exchange.
    * - price: see estimateExecutionPrice.
-   * - fee: unknown, which computeOrderPricing takes as no fee.
+   * - fee: unknown, which computeOrderPricing takes as no fee, and so is the asset it was taken in.
    * - execution date: the order does not know when it was filled: the end of the last minute processed.
    */
   private estimateOrderSummary(orderInstance: OrderInstance, order: RelayedOrder, reason: string, creationPrice: number): OrderSummary {
@@ -671,7 +675,7 @@ export class Trader extends Plugin {
         `executed at ${toISOString(this.currentTimestamp)} (the end of the last minute processed)`,
       ].join(' '),
     );
-    return { amount, price, side, feePercent: undefined, orderExecutionDate: this.currentTimestamp };
+    return { amount, price, side, feePercent: undefined, feeAsset: undefined, orderExecutionDate: this.currentTimestamp };
   }
 
   /**

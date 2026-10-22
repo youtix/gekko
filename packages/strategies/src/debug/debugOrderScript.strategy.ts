@@ -50,8 +50,11 @@ export class DebugOrderScript implements Strategy<DebugOrderScriptParams> {
   }
 
   onOrderCompleted({ order, tools }: OnOrderCompletedEventParams<DebugOrderScriptParams>, ..._indicators: unknown[]): void {
-    const { id, amount, price, fee, feePercent, effectivePrice, orderExecutionDate } = order;
-    const figures = `${amount} at ${price}, fee ${fee} (${feePercent} %), effective price ${effectivePrice}`;
+    const { id, symbol, amount, price, fee, feePercent, feeAsset, effectivePrice, orderExecutionDate } = order;
+    // The asset the fee was taken in, when the event names one and it is not the currency the fee is written in
+    const [, currency] = symbol.split('/');
+    const takenIn = feeAsset !== undefined && feeAsset !== currency ? `, taken in ${feeAsset}` : '';
+    const figures = `${amount} at ${price}, fee ${fee} (${feePercent} %${takenIn}), effective price ${effectivePrice}`;
     tools.log('info', `Order ${this.releaseOrder(id)} completed: ${figures}, executed at ${toISOString(orderExecutionDate)}`);
   }
 

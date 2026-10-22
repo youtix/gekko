@@ -1047,6 +1047,24 @@ describe('EventSubscriber', () => {
       expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
     });
 
+    // The fee is written in the currency whatever the asset the exchange took it in, which is named when it is another one: the asset
+    // bought (Binance takes a BUY's fee in it unless the fees are paid in BNB), or BNB, whose fee the Trader does not convert
+    it.each`
+      feePercent   | feeAsset     | line
+      ${0.1}       | ${'BTC'}     | ${'Fee: 0.1 USD (taken in BTC)'}
+      ${0.1}       | ${'USD'}     | ${'Fee: 0.1 USD'}
+      ${0.1}       | ${undefined} | ${'Fee: 0.1 USD'}
+      ${undefined} | ${'BNB'}     | ${'Fee: unknown (taken in BNB)'}
+    `(
+      'reports $line when an order completes with a fee percent of $feePercent, taken in $feeAsset',
+      async ({ feePercent, feeAsset, line }) => {
+        plugin['handleCommand']('/sub_order_complete');
+        onOrderCompleted(plugin, { order: { feePercent, feeAsset, fee: 0.1 } });
+        await settle();
+        expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
+      },
+    );
+
     // The amounts, prices and balances of a notification are written as those of the other outputs (see formatAmount): their thousands
     // grouped, up to 8 decimals, never with an exponent. Written by String, a dust amount read 1.2e-7, and a sum its binary noise. A fee
     // rate keeps its decimals too: rounded to 2 as the percentages of a report are, 0.075 % would read 0.07 %.
