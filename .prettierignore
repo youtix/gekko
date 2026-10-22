@@ -9,3 +9,6 @@
 /documentation
 # semantic-release writes it: its notes stay as the generator wrote them, as on the GitHub release
 /CHANGELOG.md
+# The worktrees the Claude desktop app checks out under .claude/worktrees/: copies of the checkout, whose guides the anchored
+# /documentation above does not reach, hidden from git by .git/info/exclude, which Prettier does not read
+/.claude

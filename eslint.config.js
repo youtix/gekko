@@ -6,8 +6,11 @@ import tseslint from 'typescript-eslint';
 /** @type {import('eslint').Linter.Config[]} */
 export default [
   // `eslint .` lints the whole checkout, but for what the tools write (the executable, an html or lcov coverage report), the candles
-  // the importer stores and the local notes of documentation/dev
-  { ignores: ['dist/', 'db/', 'coverage/', 'documentation/dev/'] },
+  // the importer stores, the local notes of documentation/dev and the worktrees the Claude desktop app checks out under
+  // .claude/worktrees/, which git hides through .git/info/exclude, a file eslint does not read. Each worktree is a copy of the
+  // checkout with an eslint.config.js of its own, which eslint 10 reads for the files under it: typescript-eslint then holds two
+  // candidate tsconfigRootDirs and refuses every file of the lint, the root's too
+  { ignores: ['dist/', 'db/', 'coverage/', 'documentation/dev/', '.claude/'] },
   // Node's globals, without CommonJS's (the .cjs files get them below): Bun has Node's globals, and the .js files are ES modules. With
   // the browser's, `status = 'x'` and `document.title` passed the lint
   { languageOptions: { globals: globals.nodeBuiltin } },

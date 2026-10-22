@@ -15,7 +15,7 @@ bun install
 bun run dev              # run the bot from source (src/gekko.ts)
 bun run build:exec       # compile a standalone binary to dist/gekko
 bun run type:check       # tsc --noEmit, incremental (node_modules/.cache/tsc): src/, test/, scripts/, vitest.config.ts
-bun run lint:check       # eslint . (all but dist/, db/, coverage/, documentation/dev/; bun run lint autofixes)
+bun run lint:check       # eslint . (all but dist/, db/, coverage/, documentation/dev/, .claude/; bun run lint autofixes)
 bun run format:check     # prettier --check . (all but what .gitignore and .prettierignore list; bun run format writes)
 bun run test             # unit tests: vitest over src/**/*.test.ts and scripts/**/*.test.ts
 bun run test src/helpers/collection/ringBuffer.test.ts                       # one file
@@ -24,6 +24,8 @@ bun run test:coverage    # what CI and the pre-push hook run; fails below 95% li
 bun run test:e2e         # test/e2e on Bun's test runner, --isolate (a fresh global per file, or the module mocks leak)
 bun run bench            # vitest benchmarks (src/**/*.bench.ts)
 ```
+
+`lint:check` and `format:check` both skip `.claude/`, where the Claude desktop app checks out its worktrees (`git worktree list`; `.git/info/exclude` hides them from git, which neither tool reads): a worktree is a copy of the checkout, whose guides `.prettierignore`'s `/documentation` does not reach, and whose own `eslint.config.js` ESLint 10 reads for the files under it, so that typescript-eslint, holding two candidate `tsconfigRootDir`s, refused every file of the lint, the root's too; `type:check` reads none of it, as tsc's `**` enters no directory whose name starts with a dot.
 
 `bun test` without `run` is Bun's test runner, not vitest. Only `test/e2e` is written for it, and `bun run test` finds none of its files; CI runs `test:e2e` in its `build` job, after `test:coverage`, and no git hook does. Its realtime flows run real minutes under Bun's fake timers (see Testing).
 
