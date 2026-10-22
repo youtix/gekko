@@ -1,3 +1,4 @@
+import { MAX_WATCHED_ASSETS } from '@constants/watch.const';
 import { TradingPair } from '@models/utility.types';
 import { keepDuplicates } from '@utils/collection/array.utils';
 import { z } from 'zod';
@@ -35,7 +36,7 @@ export const currencySchema = tickerSchema('Currency');
 export const assetsSchema = z
   .array(tickerSchema('Asset'))
   .min(1, 'At least one asset is required')
-  .max(5, 'Maximum 5 assets allowed')
+  .max(MAX_WATCHED_ASSETS, `Maximum ${MAX_WATCHED_ASSETS} assets allowed`)
   .superRefine((assets, ctx) => {
     const repeatedAssets = keepDuplicates(assets);
     if (repeatedAssets.length) {

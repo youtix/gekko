@@ -1,3 +1,5 @@
+import { MAX_WATCHED_ASSETS } from '@constants/watch.const';
+import { range } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { assetsSchema, currencySchema, symbolSchema } from './pairConfig.schema';
 
@@ -5,6 +7,8 @@ const symbolMessage = (symbol: string) =>
   `Symbol '${symbol}' must be an asset and a currency in upper-case letters and digits, joined by one slash, as in BTC/USDT`;
 const tickerMessage = (name: 'Asset' | 'Currency', ticker: string) =>
   `${name} '${ticker}' must be written in upper-case letters and digits, as in BTC or 1INCH`;
+/** That many distinct assets, A1 to An */
+const tickers = (count: number) => range(1, count + 1).map(n => `A${n}`);
 
 describe('symbolSchema', () => {
   it.each`
@@ -82,30 +86,30 @@ describe('currencySchema', () => {
 
 describe('assetsSchema', () => {
   it.each`
-    scenario                          | assets
-    ${'one asset'}                    | ${['BTC']}
-    ${'two assets'}                   | ${['BTC', 'ETH']}
-    ${'5 assets, the most allowed'}   | ${['BTC', 'ETH', 'SOL', 'AVAX', 'LINK']}
-    ${'assets starting with a digit'} | ${['1INCH', '1000SATS']}
+    scenario                                            | assets
+    ${'one asset'}                                      | ${['BTC']}
+    ${'two assets'}                                     | ${['BTC', 'ETH']}
+    ${`${MAX_WATCHED_ASSETS} assets, the most allowed`} | ${tickers(MAX_WATCHED_ASSETS)}
+    ${'assets starting with a digit'}                   | ${['1INCH', '1000SATS']}
   `('accepts $scenario', ({ assets }) => {
     expect(assetsSchema.parse(assets)).toEqual(assets);
   });
 
   // Accepted, a lower-case asset would read the candles of its capitals: the storage upper-cases the table names
   it.each`
-    scenario                                         | assets                                          | issue
-    ${'no asset'}                                    | ${[]}                                           | ${{ path: [], message: 'At least one asset is required' }}
-    ${'6 assets, reported once'}                     | ${['BTC', 'ETH', 'SOL', 'AVAX', 'LINK', 'DOT']} | ${{ path: [], message: 'Maximum 5 assets allowed' }}
-    ${'an empty asset'}                              | ${['']}                                         | ${{ path: [0], message: 'Asset must not be empty' }}
-    ${'a pair for an asset'}                         | ${['BTC/USDT']}                                 | ${{ path: [0], message: 'Asset must not contain a slash' }}
-    ${'a blank asset'}                               | ${[' ']}                                        | ${{ path: [0], message: tickerMessage('Asset', ' ') }}
-    ${'a tab'}                                       | ${['\t']}                                       | ${{ path: [0], message: tickerMessage('Asset', '\t') }}
-    ${'a trailing space'}                            | ${['BTC ']}                                     | ${{ path: [0], message: tickerMessage('Asset', 'BTC ') }}
-    ${'a lower-case asset'}                          | ${['btc']}                                      | ${{ path: [0], message: tickerMessage('Asset', 'btc') }}
-    ${'btc beside BTC'}                              | ${['BTC', 'btc']}                               | ${{ path: [1], message: tickerMessage('Asset', 'btc') }}
-    ${'a numeric asset'}                             | ${['BTC', 1000]}                                | ${{ path: [1], code: 'invalid_type' }}
-    ${'a duplicated asset'}                          | ${['BTC', 'ETH', 'BTC']}                        | ${{ path: [], message: 'assets must not contain duplicates (repeated: BTC)' }}
-    ${'duplicated assets, in the order they repeat'} | ${['BTC', 'ETH', 'ETH', 'BTC', 'BTC']}          | ${{ path: [], message: 'assets must not contain duplicates (repeated: ETH, BTC)' }}
+    scenario                                             | assets                                 | issue
+    ${'no asset'}                                        | ${[]}                                  | ${{ path: [], message: 'At least one asset is required' }}
+    ${`${MAX_WATCHED_ASSETS + 1} assets, reported once`} | ${tickers(MAX_WATCHED_ASSETS + 1)}     | ${{ path: [], message: `Maximum ${MAX_WATCHED_ASSETS} assets allowed` }}
+    ${'an empty asset'}                                  | ${['']}                                | ${{ path: [0], message: 'Asset must not be empty' }}
+    ${'a pair for an asset'}                             | ${['BTC/USDT']}                        | ${{ path: [0], message: 'Asset must not contain a slash' }}
+    ${'a blank asset'}                                   | ${[' ']}                               | ${{ path: [0], message: tickerMessage('Asset', ' ') }}
+    ${'a tab'}                                           | ${['\t']}                              | ${{ path: [0], message: tickerMessage('Asset', '\t') }}
+    ${'a trailing space'}                                | ${['BTC ']}                            | ${{ path: [0], message: tickerMessage('Asset', 'BTC ') }}
+    ${'a lower-case asset'}                              | ${['btc']}                             | ${{ path: [0], message: tickerMessage('Asset', 'btc') }}
+    ${'btc beside BTC'}                                  | ${['BTC', 'btc']}                      | ${{ path: [1], message: tickerMessage('Asset', 'btc') }}
+    ${'a numeric asset'}                                 | ${['BTC', 1000]}                       | ${{ path: [1], code: 'invalid_type' }}
+    ${'a duplicated asset'}                              | ${['BTC', 'ETH', 'BTC']}               | ${{ path: [], message: 'assets must not contain duplicates (repeated: BTC)' }}
+    ${'duplicated assets, in the order they repeat'}     | ${['BTC', 'ETH', 'ETH', 'BTC', 'BTC']} | ${{ path: [], message: 'assets must not contain duplicates (repeated: ETH, BTC)' }}
   `('reports $scenario as its only issue', ({ assets, issue }) => {
     expect(assetsSchema.safeParse(assets).error?.issues).toMatchObject([issue]);
   });

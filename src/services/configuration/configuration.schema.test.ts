@@ -1,7 +1,12 @@
 import { useTimeZone } from '@utils/date/date.mock';
-import { cloneDeep, get, set } from 'lodash-es';
+import { MAX_WATCHED_ASSETS } from '@constants/watch.const';
+import { cloneDeep, get, range, set } from 'lodash-es';
 import { describe, expect, it } from 'vitest';
 import { configurationSchema, watchSchema } from './configuration.schema';
+
+/** That many distinct assets, A1 to An */
+const tickers = (count: number) => range(1, count + 1).map(n => `A${n}`);
+const TOO_MANY_ASSETS = `Maximum ${MAX_WATCHED_ASSETS} assets allowed`;
 
 const BATCH_SIZE_MESSAGE =
   'batchSize must be an integer between 1 and 44640 (minutes, 31 days at most: each batch is read into memory at once)';
@@ -311,25 +316,25 @@ describe('watchSchema', () => {
 
   describe('assets and currency', () => {
     it.each`
-      scenario                            | assets                                          | currency      | issue
-      ${'a duplicated asset'}             | ${['BTC', 'ETH', 'BTC']}                        | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain duplicates (repeated: BTC)' }}
-      ${'several duplicated assets'}      | ${['BTC', 'ETH', 'ETH', 'BTC', 'BTC']}          | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain duplicates (repeated: ETH, BTC)' }}
-      ${'an asset equal to the currency'} | ${['BTC', 'USDT']}                              | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain the currency (USDT)' }}
-      ${'a numeric asset'}                | ${['BTC', 1000]}                                | ${'USDT'}     | ${{ path: ['assets', 1], code: 'invalid_type' }}
-      ${'an empty asset'}                 | ${['']}                                         | ${'USDT'}     | ${{ path: ['assets', 0], message: 'Asset must not be empty' }}
-      ${'a numeric currency'}             | ${['BTC']}                                      | ${1000}       | ${{ path: ['currency'], code: 'invalid_type' }}
-      ${'an empty currency'}              | ${['BTC']}                                      | ${''}         | ${{ path: ['currency'], message: 'Currency must not be empty' }}
-      ${'no asset'}                       | ${[]}                                           | ${'USDT'}     | ${{ path: ['assets'], message: 'At least one asset is required' }}
-      ${'6 assets'}                       | ${['BTC', 'ETH', 'SOL', 'AVAX', 'LINK', 'DOT']} | ${'USDT'}     | ${{ path: ['assets'], message: 'Maximum 5 assets allowed' }}
-      ${'an asset with a slash'}          | ${['BTC/USDT']}                                 | ${'USDT'}     | ${{ path: ['assets', 0], message: 'Asset must not contain a slash' }}
-      ${'a currency with a slash'}        | ${['BTC']}                                      | ${'BTC/USDT'} | ${{ path: ['currency'], message: 'Currency must not contain a slash' }}
+      scenario                              | assets                                 | currency      | issue
+      ${'a duplicated asset'}               | ${['BTC', 'ETH', 'BTC']}               | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain duplicates (repeated: BTC)' }}
+      ${'several duplicated assets'}        | ${['BTC', 'ETH', 'ETH', 'BTC', 'BTC']} | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain duplicates (repeated: ETH, BTC)' }}
+      ${'an asset equal to the currency'}   | ${['BTC', 'USDT']}                     | ${'USDT'}     | ${{ path: ['assets'], message: 'assets must not contain the currency (USDT)' }}
+      ${'a numeric asset'}                  | ${['BTC', 1000]}                       | ${'USDT'}     | ${{ path: ['assets', 1], code: 'invalid_type' }}
+      ${'an empty asset'}                   | ${['']}                                | ${'USDT'}     | ${{ path: ['assets', 0], message: 'Asset must not be empty' }}
+      ${'a numeric currency'}               | ${['BTC']}                             | ${1000}       | ${{ path: ['currency'], code: 'invalid_type' }}
+      ${'an empty currency'}                | ${['BTC']}                             | ${''}         | ${{ path: ['currency'], message: 'Currency must not be empty' }}
+      ${'no asset'}                         | ${[]}                                  | ${'USDT'}     | ${{ path: ['assets'], message: 'At least one asset is required' }}
+      ${`${MAX_WATCHED_ASSETS + 1} assets`} | ${tickers(MAX_WATCHED_ASSETS + 1)}     | ${'USDT'}     | ${{ path: ['assets'], message: TOO_MANY_ASSETS }}
+      ${'an asset with a slash'}            | ${['BTC/USDT']}                        | ${'USDT'}     | ${{ path: ['assets', 0], message: 'Asset must not contain a slash' }}
+      ${'a currency with a slash'}          | ${['BTC']}                             | ${'BTC/USDT'} | ${{ path: ['currency'], message: 'Currency must not contain a slash' }}
     `('reports $scenario as an issue', ({ assets, currency, issue }) => {
       const result = watchSchema.safeParse({ ...baseWatch, mode: 'realtime', assets, currency });
       expect(result.error?.issues).toMatchObject([issue]);
     });
 
-    it('accepts 5 assets, the most allowed', () => {
-      const result = watchSchema.safeParse({ ...baseWatch, mode: 'realtime', assets: ['BTC', 'ETH', 'SOL', 'AVAX', 'LINK'] });
+    it(`accepts ${MAX_WATCHED_ASSETS} assets, the most allowed`, () => {
+      const result = watchSchema.safeParse({ ...baseWatch, mode: 'realtime', assets: tickers(MAX_WATCHED_ASSETS) });
       expect(result.error?.issues).toBeUndefined();
     });
   });
@@ -732,17 +737,17 @@ describe('configurationSchema', () => {
       const coveredConfig = createBacktestConfig(['BTC'], ['BTC/USDT']);
 
       it.each`
-        scenario                                 | path                                       | value                             | issue
-        ${'a tickrate below 100'}                | ${['watch', 'tickrate']}                   | ${50}                             | ${{ path: ['watch', 'tickrate'], message: 'tickrate must be an integer of at least 100' }}
-        ${'a negative warmup candleCount'}       | ${['watch', 'warmup', 'candleCount']}      | ${-1}                             | ${{ path: ['watch', 'warmup', 'candleCount'], message: 'warmup.candleCount must be an integer of at least 0' }}
-        ${'a batchSize of 0'}                    | ${['watch', 'batchSize']}                  | ${0}                              | ${{ path: ['watch', 'batchSize'], message: BATCH_SIZE_MESSAGE }}
-        ${'a duplicated asset'}                  | ${['watch', 'assets']}                     | ${['BTC', 'BTC']}                 | ${{ path: ['watch', 'assets'], message: 'assets must not contain duplicates (repeated: BTC)' }}
-        ${'an asset with a slash'}               | ${['watch', 'assets']}                     | ${['BTC/USDT']}                   | ${{ path: ['watch', 'assets', 0], message: 'Asset must not contain a slash' }}
-        ${'6 assets'}                            | ${['watch', 'assets']}                     | ${['A', 'B', 'C', 'D', 'E', 'F']} | ${{ path: ['watch', 'assets'], message: 'Maximum 5 assets allowed' }}
-        ${'a daterange start that is not ISO'}   | ${['watch', 'daterange', 'start']}         | ${'yesterday'}                    | ${{ path: ['watch', 'daterange', 'start'], message: boundMessage('start', 'yesterday') }}
-        ${'an asset equal to the currency'}      | ${['watch', 'assets']}                     | ${['USDT']}                       | ${{ path: ['watch', 'assets'], message: 'assets must not contain the currency (USDT)' }}
-        ${'a marketData symbol without a slash'} | ${['exchange', 'marketData', 0, 'symbol']} | ${'BTCUSDT'}                      | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: 'Symbol must contain a slash' }}
-        ${'a lowercase marketData symbol'}       | ${['exchange', 'marketData', 0, 'symbol']} | ${'btc/usdt'}                     | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: malformedSymbolMessage('btc/usdt') }}
+        scenario                                 | path                                       | value                              | issue
+        ${'a tickrate below 100'}                | ${['watch', 'tickrate']}                   | ${50}                              | ${{ path: ['watch', 'tickrate'], message: 'tickrate must be an integer of at least 100' }}
+        ${'a negative warmup candleCount'}       | ${['watch', 'warmup', 'candleCount']}      | ${-1}                              | ${{ path: ['watch', 'warmup', 'candleCount'], message: 'warmup.candleCount must be an integer of at least 0' }}
+        ${'a batchSize of 0'}                    | ${['watch', 'batchSize']}                  | ${0}                               | ${{ path: ['watch', 'batchSize'], message: BATCH_SIZE_MESSAGE }}
+        ${'a duplicated asset'}                  | ${['watch', 'assets']}                     | ${['BTC', 'BTC']}                  | ${{ path: ['watch', 'assets'], message: 'assets must not contain duplicates (repeated: BTC)' }}
+        ${'an asset with a slash'}               | ${['watch', 'assets']}                     | ${['BTC/USDT']}                    | ${{ path: ['watch', 'assets', 0], message: 'Asset must not contain a slash' }}
+        ${`${MAX_WATCHED_ASSETS + 1} assets`}    | ${['watch', 'assets']}                     | ${tickers(MAX_WATCHED_ASSETS + 1)} | ${{ path: ['watch', 'assets'], message: TOO_MANY_ASSETS }}
+        ${'a daterange start that is not ISO'}   | ${['watch', 'daterange', 'start']}         | ${'yesterday'}                     | ${{ path: ['watch', 'daterange', 'start'], message: boundMessage('start', 'yesterday') }}
+        ${'an asset equal to the currency'}      | ${['watch', 'assets']}                     | ${['USDT']}                        | ${{ path: ['watch', 'assets'], message: 'assets must not contain the currency (USDT)' }}
+        ${'a marketData symbol without a slash'} | ${['exchange', 'marketData', 0, 'symbol']} | ${'BTCUSDT'}                       | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: 'Symbol must contain a slash' }}
+        ${'a lowercase marketData symbol'}       | ${['exchange', 'marketData', 0, 'symbol']} | ${'btc/usdt'}                      | ${{ path: ['exchange', 'marketData', 0, 'symbol'], message: malformedSymbolMessage('btc/usdt') }}
       `('reports $scenario as the only issue', ({ path, value, issue }) => {
         const result = configurationSchema.safeParse(set(cloneDeep(coveredConfig), path, value));
         expect(result.error?.issues).toMatchObject([issue]);
