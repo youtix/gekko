@@ -4,13 +4,14 @@ import { getAllInBuyAmount } from '@gekko/shared/helpers/order/sizing.helper';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { addPrecise, isFinitePositive, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
-import { BuyOrder } from './positionBook.types';
+import { eq } from 'lodash-es';
+import { BuyOrder, CurrencyRead } from './positionBook.types';
 
 /**
  * The currency a BUY of the book is estimated from, as the line of its skip names it (see PositionBook.buy): all of the currency free for
  * an all-in BUY, `allocation` % of it for a share, or, for a share while BUYs of the book's own hold some of the currency (`held`, what
- * the exchange holds for the orders open at the read), `allocation` % of the two added up, each named in the words of the Trader's
- * sizing lines. Without a part held, the line reads as it always did.
+ * the Trader adds back for its own BUYs open at the read, as the book estimates it, see PositionBook.isSkipped), `allocation` % of the
+ * two added up, each named in the words of the Trader's sizing lines. Without a part held, the line reads as it always did.
  */
 export const describeShare = (allocation: number | undefined, free: number, held: number, currency: string): string => {
   if (allocation === undefined) return `all of the ${formatEveryDecimal(free)} ${currency} free`;
@@ -65,3 +66,11 @@ export const getBuyRefusal = (
     return `${keptBack}, ${amountSent}, a cost of ${formatEveryDecimal(cost)} ${currency}, ${belowCost(minimumCost)}`;
   }
 };
+
+/**
+ * Whether two balances of the currency come from one read of it, as far as the book can tell (see PositionBook.getHeldByOpenBuys): the
+ * same currency free and the same currency held for the orders open. A read taken after a BUY reached the exchange shows it, the
+ * currency it reserves moved from free to used, or spent on its fills. Compared as SameValueZero compares them (see eq): two reads of
+ * NaN are one, and so are 0 and -0.
+ */
+export const isSameRead = (read: CurrencyRead, other: CurrencyRead): boolean => eq(read.free, other.free) && eq(read.used, other.used);

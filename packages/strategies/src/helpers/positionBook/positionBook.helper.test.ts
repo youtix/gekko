@@ -1,6 +1,6 @@
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { describe, expect, it } from 'vitest';
-import { describeShare, getBuyRefusal } from './positionBook.helper';
+import { describeShare, getBuyRefusal, isSameRead } from './positionBook.helper';
 
 const STEP = { precision: { amount: 0.00001 } } satisfies MarketData;
 
@@ -51,6 +51,21 @@ describe('positionBook.helper', () => {
       ${'a share, a part held that is no sum'} | ${50}        | ${20}        | ${NaN}       | ${'50 % of the 20 USDT free'}
     `('names the currency of $case: $expected', ({ allocation, free, held, expected }) => {
       expect(describeShare(allocation, free, held, 'USDT')).toBe(expected);
+    });
+  });
+
+  describe('isSameRead', () => {
+    // A read taken after a BUY reached the exchange shows it: the currency it reserves moved from free to used, or spent on its fills
+    it.each`
+      case                                    | read                      | other                           | expected
+      ${'the same currency free and held'}    | ${{ free: 30, used: 0 }}  | ${{ free: 30, used: 0 }}        | ${true}
+      ${'a BUY reserving 14.25 since'}        | ${{ free: 30, used: 0 }}  | ${{ free: 15.75, used: 14.25 }} | ${false}
+      ${'a BUY filled since, nothing held'}   | ${{ free: 30, used: 0 }}  | ${{ free: 15.75, used: 0 }}     | ${false}
+      ${'the same currency free, more held'}  | ${{ free: 20, used: 10 }} | ${{ free: 20, used: 12 }}       | ${false}
+      ${'0 and -0, one amount'}               | ${{ free: 0, used: 0 }}   | ${{ free: -0, used: -0 }}       | ${true}
+      ${'a currency free of NaN, read twice'} | ${{ free: NaN, used: 0 }} | ${{ free: NaN, used: 0 }}       | ${true}
+    `('says whether two balances of the currency are one read, $case: $expected', ({ read, other, expected }) => {
+      expect(isSameRead(read, other)).toBe(expected);
     });
   });
 });

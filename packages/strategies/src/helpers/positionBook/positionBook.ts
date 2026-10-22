@@ -1,15 +1,17 @@
+import { BUY_COST_SHARE } from '@gekko/shared/constants/order.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { getAllocatedShare } from '@gekko/shared/helpers/order/sizing.helper';
 import { PositionTracker } from '../positionTracker/positionTracker';
+import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams } from '../../strategy.types';
-import { addPrecise, isFinitePositive } from '@gekko/shared/utils/math/math.utils';
+import { addPrecise, isFinitePositive, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
 import { round } from '@gekko/shared/utils/math/round.utils';
 import { formatEveryDecimal, listInWords } from '@gekko/shared/utils/string/string.utils';
 import { UUID } from 'node:crypto';
 import { SHARE_DECIMALS } from './positionBook.const';
-import { describeShare, getBuyRefusal } from './positionBook.helper';
-import { BuyOrder, OrderParams, SellOrder, TrackParams } from './positionBook.types';
+import { describeShare, getBuyRefusal, isSameRead } from './positionBook.helper';
+import { BuyEstimate, BuyOrder, CurrencyRead, OrderParams, PendingBuy, SellOrder, TrackParams } from './positionBook.types';
 
 /**
  * The positions of a strategy that trades every pair it watches: one PositionTracker per pair, flat or long, with its own orders whose
@@ -30,6 +32,12 @@ export class PositionBook {
   private trackedPairs?: readonly TradingPair[];
   /** The pairs whose BUY was skipped with a warning, none of their BUYs placed since: their next skips are logged at debug level */
   private readonly warnedSkips = new Set<TradingPair>();
+  /**
+   * The BUYs of the book's own whose outcome has not come yet, by id, each with what the Trader holds of the currency for it and the read
+   * of the currency it was sized from (see getHeldByOpenBuys): those a book of several pairs placed from a portfolio that lists the
+   * currency, holding some of it (see buy), each forgotten once its outcome comes
+   */
+  private readonly pendingBuys = new Map<UUID, PendingBuy>();
 
   /** The pairs tracked, in the order of watch.assets: none before track */
   get pairs(): readonly TradingPair[] {
@@ -104,9 +112,18 @@ export class PositionBook {
   buy(order: BuyOrder, params: OrderParams): UUID | undefined {
     const tracker = this.getTracker(order.symbol, `place the BUY ${order.type} order`);
     const allocation = this.getAllocation(order.symbol);
-    if (this.isSkipped(tracker, order, allocation, params)) return;
+    const estimate = this.estimateBuy(order.symbol, allocation, params.portfolio);
+    if (estimate && this.isSkipped(tracker, order, allocation, estimate, params)) return;
     this.warnedSkips.delete(order.symbol);
-    return tracker.buy(params.tools.createOrder, allocation === undefined ? order : { ...order, allocation });
+    const id = tracker.buy(params.tools.createOrder, allocation === undefined ? order : { ...order, allocation });
+    if (estimate) {
+      // What the Trader holds for it at the reads after it, its amount at the price it was created with: its budget less the share
+      // DEFAULT_FEE_BUFFER keeps back for the fee, to 15 significant digits (see getAllInBuyAmount). Nothing for a BUY sized from no
+      // currency, nor from a balance that is no number, as the Trader counts none (see Trader.readHeldByOpenBuys).
+      const held = multiplyPrecise(estimate.budget, BUY_COST_SHARE);
+      if (isFinitePositive(held)) this.pendingBuys.set(id, { held, sizedFrom: estimate.read });
+    }
+    return id;
   }
 
   /**
@@ -127,26 +144,31 @@ export class PositionBook {
   }
 
   /**
-   * Settles an order that completed, on the tracker of its pair (see PositionTracker.onOrderCompleted); returns whether it was an order
-   * of that tracker's own, false for an order of a pair not tracked
+   * Settles an order that completed, on the tracker of its pair (see PositionTracker.onOrderCompleted), and forgets what a BUY of the
+   * book's own held (see getHeldByOpenBuys); returns whether it was an order of that tracker's own, false for an order of a pair not
+   * tracked
    */
   onOrderCompleted(params: OnOrderCompletedEventParams<unknown>): boolean {
+    this.pendingBuys.delete(params.order.id);
     return this.trackers.get(params.order.symbol)?.onOrderCompleted(params) ?? false;
   }
 
   /**
-   * Settles an order that was canceled, on the tracker of its pair (see PositionTracker.onOrderCanceled); returns whether it was an order
-   * of that tracker's own, false for an order of a pair not tracked
+   * Settles an order that was canceled, on the tracker of its pair (see PositionTracker.onOrderCanceled), and forgets what a BUY of the
+   * book's own held (see getHeldByOpenBuys); returns whether it was an order of that tracker's own, false for an order of a pair not
+   * tracked
    */
   onOrderCanceled(params: OnOrderCanceledEventParams<unknown>): boolean {
+    this.pendingBuys.delete(params.order.id);
     return this.trackers.get(params.order.symbol)?.onOrderCanceled(params) ?? false;
   }
 
   /**
-   * Settles an order that errored, on the tracker of its pair (see PositionTracker.onOrderErrored); returns whether it was an order of
-   * that tracker's own, false for an order of a pair not tracked
+   * Settles an order that errored, on the tracker of its pair (see PositionTracker.onOrderErrored), and forgets what a BUY of the book's
+   * own held (see getHeldByOpenBuys); returns whether it was an order of that tracker's own, false for an order of a pair not tracked
    */
   onOrderErrored(params: OnOrderErroredEventParams<unknown>): boolean {
+    this.pendingBuys.delete(params.order.id);
     return this.trackers.get(params.order.symbol)?.onOrderErrored(params) ?? false;
   }
 
@@ -159,12 +181,31 @@ export class PositionBook {
   }
 
   /**
-   * Whether a pair other than `symbol` is flat with an order of its own pending: a BUY, a SELL being placed only while long. The
-   * currency the exchange holds then may be that BUY's, which the Trader adds back to the base of a share (see isSkipped); the
-   * orders of another strategy, or placed by hand, hold some of it too, which it does not
+   * What the Trader adds back to the currency free of `read` for its own BUYs open at that read, as the book estimates it (see
+   * isSkipped): what each BUY of the book's own still pending holds (see buy), but those sized from that very read, placed after it,
+   * which the Trader leaves out too. A BUY sized from another read was placed before this one, which shows it: the currency it reserves
+   * moved to used, or spent on its fills.
    */
-  private isBuyPendingBeside(symbol: TradingPair): boolean {
-    return [...this.trackers].some(([pair, tracker]) => pair !== symbol && !tracker.isLong && tracker.isPendingOrder);
+  private getHeldByOpenBuys(read: CurrencyRead): number {
+    return [...this.pendingBuys.values()]
+      .filter(({ sizedFrom }) => !isSameRead(sizedFrom, read))
+      .reduce((sum, { held }) => addPrecise(sum, held), 0);
+  }
+
+  /**
+   * What a BUY of `symbol`, allocated `allocation` % of the currency (all-in when undefined), is estimated from (see isSkipped), from the
+   * balance of the currency in `portfolio`, that of the hook. Undefined in a book that tracks one pair, which never skips, and when the
+   * portfolio does not list the currency (no balance read yet): the Trader and the exchange then say what they make of the BUY.
+   */
+  private estimateBuy(symbol: TradingPair, allocation: number | undefined, portfolio: Portfolio): BuyEstimate | undefined {
+    if (this.pairs.length < 2) return;
+    const [, currency] = symbol.split('/');
+    const balance = portfolio.get(currency);
+    if (!balance) return;
+    const read = { free: balance.free, used: balance.used };
+    if (allocation === undefined) return { currency, read, held: 0, budget: read.free };
+    const held = this.getHeldByOpenBuys(read);
+    return { currency, read, held, budget: getAllocatedShare(held > 0 ? addPrecise(read.free, held) : read.free, allocation) };
   }
 
   /**
@@ -184,17 +225,31 @@ export class PositionBook {
    * its pair, and the refusals stop the bot once maxConsecutiveErrors of them follow one another, though the currency would fund the
    * BUYs of fewer pairs. Every BUY is checked then, that of the last pair not invested, all-in, included. Without the currency in the
    * portfolio (no balance read yet), or without a minimum cost or amount on the market, nothing is skipped: the Trader and the exchange
-   * say what they make of the BUY.
+   * say what they make of the BUY (see estimateBuy).
    *
-   * A share is estimated from the currency free, plus, while a BUY of the book's own is pending on another pair, what the exchange holds
-   * for the orders open at the read (`used`): the Trader adds back to the base of a share what its own BUYs open at its read held (see
-   * buy), the currency read showing less what a resting BUY holds. Estimated from the currency free alone, a share depended on whether a
-   * synchronization fell between the two BUYs, and was skipped though the Trader sized it above the minimum: on 30 USDT, BTC's BUY of
-   * 50 % resting across a read of 15.75 USDT free and 14.25 USDT held, ETH's came out at 7.48125 USDT, under a minimum cost of 10, where
-   * the Trader sized it at 14.25. What the exchange holds equals what the Trader adds back for a BUY resting unfilled at its price on an
-   * exchange that holds its notional (Binance); it is less once the BUY has partly filled, the Trader counting what it filled too, and
-   * more by the maker fee the simulator holds with it, by the move of a STICKY BUY above the price it was created at, or by an order
-   * Gekko did not place. An all-in BUY is estimated from the currency free alone, as the Trader sizes it from what is left of it.
+   * A share is estimated from the currency free, plus what the Trader adds back to it for its own BUYs open at its read (see buy). The
+   * book records with each BUY it places what the Trader holds for it, its budget less the share DEFAULT_FEE_BUFFER keeps back for the
+   * fee: what the Trader counts, its amount at the price it was created with, to 15 significant digits (see getAllInBuyAmount). It adds
+   * that of each BUY still pending that was sized from another read of the currency, one before the read of the hook, which shows it,
+   * reserved or spent on its fills (see getHeldByOpenBuys); not that of a BUY sized from the read of the hook, placed after it, which the
+   * Trader does not add back either: two BUYs of one candle are sized from one read. Estimated from the currency free alone, a share
+   * depended on whether a synchronization fell between the two BUYs, and was skipped though the Trader sized it above the minimum: on 30
+   * USDT, BTC's BUY of 50 % resting across a read of 15.75 USDT free and 14.25 USDT held, ETH's came out at 7.48125 USDT, under a minimum
+   * cost of 10, where the Trader sized it at 14.25. Estimated from what the exchange holds for the orders open at the read (`used`), it
+   * went by another figure than the Trader's: less once that BUY had partly filled, or once the exchange had truncated its amount to the
+   * amount step, more by the maker fee the simulator holds with it, by the move of a STICKY BUY above the price it was created at, or by
+   * the orders Gekko did not place. The book skipped a BUY the Trader sized above the minimum of the market (BTC's BUY half filled, ETH's
+   * share came out at 10.865625 USDT, under a minimum cost of 12, where the Trader sized it at 14.25), or sent one the Trader sized under
+   * it, which the market refused, a refusal counting towards the circuit breaker.
+   *
+   * The figure still differs from the Trader's where the Trader caps the budget of a BUY, at what the BUYs it placed since its read leave
+   * of the currency or at the most the market takes in one order, and for a BUY the strategy canceled before the read, of which the Trader
+   * counts what it had filled: the Trader sizes a BUY once the book has placed it, from its own read, and the strategy hears nothing of
+   * that sizing before the outcome of the BUY, while a cancelation goes to the Trader through tools.cancelOrder, which the book does not
+   * see. It differs too when the read is not the Trader's last: the portfolio of the hook is the last one the Trader sent, which its
+   * portfolioUpdates filter may hold back, and a read taken after a BUY that does not show it yet, its creation not on the exchange by
+   * then, is taken for the read the BUY was sized from. An all-in BUY is estimated from the currency free alone, as the Trader sizes it
+   * from what is left of it.
    *
    * A book that tracks one pair never skips: its all-in BUY is sent as a single-pair strategy always sent it, and refused when the
    * currency is too little, the Trader warning of it first when it is below a minimum of the market (see Trader.warnOfMarketMinimums).
@@ -212,25 +267,24 @@ export class PositionBook {
    * skips, until a BUY of that pair is placed. A strategy whose signal holds over many candles (TMA, EMARibbon) asks for its BUY again on
    * each, and the same warning would come on every candle until the currency or the pairs watched changed.
    */
-  private isSkipped(tracker: PositionTracker, order: BuyOrder, allocation: number | undefined, params: OrderParams): boolean {
-    if (this.pairs.length < 2) return false;
-    const { candle, portfolio, tools } = params;
+  private isSkipped(
+    tracker: PositionTracker,
+    order: BuyOrder,
+    allocation: number | undefined,
+    { currency, read, held, budget }: BuyEstimate,
+    { candle, portfolio, tools }: OrderParams,
+  ): boolean {
     const { symbol, type } = order;
-    const [asset, currency] = symbol.split('/');
-    const balance = portfolio.get(currency);
-    if (!balance) return false;
-    const { free, used } = balance;
-    const heldByBuys = allocation !== undefined && this.isBuyPendingBeside(symbol) && isFinitePositive(used) ? used : 0;
-    const budget = allocation === undefined ? free : getAllocatedShare(heldByBuys > 0 ? addPrecise(free, heldByBuys) : free, allocation);
+    const [asset] = symbol.split('/');
     const marketData = tools.marketData.get(symbol);
     const close = candle.get(symbol)?.close;
     const refusal = getBuyRefusal(order, budget, close, marketData);
     if (refusal === undefined) return false;
 
-    const share = describeShare(allocation, free, heldByBuys, currency);
-    const held = portfolio.get(asset)?.free;
-    if (held !== undefined && isFinitePositive(close) && tracker.adoptHolding(held, close, type, marketData)) {
-      const holding = `${formatEveryDecimal(held)} ${asset} is free in the portfolio, enough to sell`;
+    const share = describeShare(allocation, read.free, held, currency);
+    const assetFree = portfolio.get(asset)?.free;
+    if (assetFree !== undefined && isFinitePositive(close) && tracker.adoptHolding(assetFree, close, type, marketData)) {
+      const holding = `${formatEveryDecimal(assetFree)} ${asset} is free in the portfolio, enough to sell`;
       tools.log('info', `[${symbol}] BUY skipped: ${share}, ${refusal}, but ${holding}: the strategy is long`);
       return true;
     }
