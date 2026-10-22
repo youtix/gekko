@@ -178,20 +178,21 @@ Fox's own options are read wherever they are, a value that starts like one of th
 
 ## Values: Lists and Ranges
 
-| Written         | Values tried                                                          |
-|-----------------|-----------------------------------------------------------------------|
-| `14`            | 14 alone, in every variant                                            |
-| `12,24`         | 12 and 24, a variant each                                             |
-| `12..24`        | every number from 12 to 24, both included, a step of 1                |
-| `12..24:4`      | 12, 16, 20 and 24, a step of 4                                        |
-| `12..24:5`      | 12, 17, 22 and 24: the end is always tried                            |
-| `0.5..0.75`     | 0.5, 0.51, … 0.75: without a step, a unit of the bounds' last decimal |
-| `12..12`        | 12 alone                                                              |
-| `10,20..30:5`   | a list holding a range: 10, 20, 25 and 30                             |
-| `close,ohlc4`   | two texts                                                             |
-| `true`, `false` | the booleans `true` and `false`                                       |
+| Written             | Values tried                                                          |
+|---------------------|-----------------------------------------------------------------------|
+| `14`                | 14 alone, in every variant                                            |
+| `12,24`             | 12 and 24, a variant each                                             |
+| `12..24`            | every number from 12 to 24, both included, a step of 1                |
+| `12..24:4`          | 12, 16, 20 and 24, a step of 4                                        |
+| `12..24:5`          | 12, 17, 22 and 24: the end is always tried                            |
+| `0.5..0.75`         | 0.5, 0.51, … 0.75: without a step, a unit of the bounds' last decimal |
+| `12..12`            | 12 alone                                                              |
+| `10,20..30:5`       | a list holding a range: 10, 20, 25 and 30                             |
+| `1..10:3,10..30:10` | 1, 4, 7, 10, 20 and 30: a value two items give is tried once          |
+| `close,ohlc4`       | two texts                                                             |
+| `true`, `false`     | the booleans `true` and `false`                                       |
 
-A value that reads as a number (digits, a minus sign before them, a decimal point between them) is a number, `true` and `false` are booleans, and anything else is a text, `1e3` and `.5` included. A value holding a `/` or a `\` is a text whatever its dots, so that a path such as `../db/x.sql` is not read as a range. The values of a range are added up in decimal: `0.1..0.3` holds 0.3.
+A value that reads as a number (digits, a minus sign before them, a decimal point between them) is a number, `true` and `false` are booleans, and anything else is a text, `1e3` and `.5` included. A value is a range when it holds `..` and starts like a number, with a digit, or a minus sign and a digit: `run..2`, `..` and `../db/x.sql` are texts, and so is a value holding a `/` or a `\` whatever its dots, so that a path such as `2024..old/x.sql` is not read as a range either. The values of a range are worked out in decimal: `0.1..0.3` holds 0.3. A value given twice, by an item and a range (`10,10..30:10`) or by two ranges sharing a bound, is tried once, at its first place, rather than make two variants of one backtest.
 
 Fox refuses before anything runs, with a line saying why:
 
@@ -201,7 +202,7 @@ Fox refuses before anything runs, with a line saying why:
 - a key named `__proto__`, `constructor` or `prototype`, which names no key of a configuration;
 - a key that names an item of a list of the template otherwise than by its index (`--plugins.Trader.portfolioUpdates.threshold`, see [Variants](#variants));
 - a range without both bounds (`12..`), whose start is above its end (`24..12`), or whose step is not a number above 0 (`12..24:0`);
-- a range whose step leaves a value as it is, which would never reach its end: bounds of 17 significant digits (`0.30000000000000004..0.5`, whose step by default is 0.00000000000000001), a step below what its start can change by (`1..2:0.0000000000000001`), bounds at 9007199254740992 and above, where a number no longer changes by 1: `Invalid range "0.30000000000000004..0.5" of --x: its step of 0.00000000000000001 leaves 0.30000000000000004 as it is, …`;
+- a number that no number holds as it is written, which Fox would otherwise try in place of the one written: a number keeps some 15 significant digits, so that `9007199254740993` would be read as 9007199254740992 (`Invalid value "9007199254740993" of --x: it holds more digits than a number keeps, which reads it as 9007199254740992: write it with fewer digits`). In a range, that is a bound so written (`9007199254740990..9007199254740993`), or a value its step makes: from bounds of 17 significant digits (`0.30000000000000004..0.5`, whose step by default is 0.00000000000000001), from a step below what its values can change by (`1..2:0.0000000000000001`), or from whole numbers beyond 9007199254740992, where a number no longer changes by 1: `Invalid range "0.30000000000000004..0.5" of --x: its step of 0.00000000000000001 makes 0.30000000000000005, more digits than a number keeps, which reads it as 0.30000000000000004: write the bounds with fewer digits, or give a larger step`;
 - a range of more than 10 000 values, the most variants Fox makes: `Invalid range "2..100001" of --strategy.period: it holds 100000 values, more than the 10000 variants Fox makes at most: narrow it, or give it a larger step`.
 
 ---
@@ -286,9 +287,9 @@ Fox needs the template: give `--template-path` (`-t`), or set `FOX_TEMPLATE_PATH
 
 A variant was refused before any backtest (see [Checked Before the First Backtest](#checked-before-the-first-backtest)): the line under each `✖` names the key, and the problem is either in the template, which every variant shares, or in a value Fox set. Check the template alone first, with Gekko (`GEKKO_CONFIG_FILE_PATH=<template> ./dist/gekko`, which runs its whole backtest and adds its row to the CSV file), then the values: a period below the strategy's minimum, a key misspelt on the command line (`--strategy.perod`), which the strategy refuses as an unknown parameter.
 
-### "Unexpected argument …", "… has no value" or "Invalid range …"
+### "Unexpected argument …", "… has no value", "Invalid value …" or "Invalid range …"
 
-The command line itself was refused (see [Values: Lists and Ranges](#values-lists-and-ranges)): a value written after the first (`--strategy.period 12 24`, write `12,24`), an option without its value (a value that starts with `-t`, `-w` or `-h` is taken for one of Fox's options: write it `--strategy.src=-tma`), or a range that is not `<from>..<to>` or `<from>..<to>:<step>`, of numbers, its start at most its end and its step above 0, a step that changes its values and 10 000 values at most.
+The command line itself was refused (see [Values: Lists and Ranges](#values-lists-and-ranges)): a value written after the first (`--strategy.period 12 24`, write `12,24`), an option without its value (a value that starts with `-t`, `-w` or `-h` is taken for one of Fox's options: write it `--strategy.src=-tma`), a number of more digits than a number keeps, or a range that is not `<from>..<to>` or `<from>..<to>:<step>`, of numbers, its start at most its end and its step above 0, each of its values a number as written and 10 000 values at most.
 
 ### "… is a list, name its item by its index"
 

@@ -1,10 +1,8 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { addPrecise } from '@gekko/shared/utils/math/math.utils';
-import { countDecimals, shiftDecimalPoint } from '@gekko/shared/utils/math/round.utils';
 import { showValue } from '@gekko/shared/utils/object/object.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
-import { Command, type CommanderError } from 'commander';
-import { setWith } from 'lodash-es';
+import { Command, CommanderError } from 'commander';
+import { setWith, uniq } from 'lodash-es';
 import { availableParallelism } from 'node:os';
 import { FORBIDDEN_KEYS, MAX_VARIANTS, MAX_WORKERS_VARIABLE, PROGRAM_DESCRIPTION, TEMPLATE_PATH_VARIABLE, VALUES_HELP } from '../fox.const';
 import type { FoxOptions, OverrideValue, Overrides } from '../fox.types';
@@ -16,78 +14,131 @@ const NUMBER = /^-?\d+(\.\d+)?$/;
 const WHOLE_NUMBER = /^\d+$/;
 
 /**
- * Whether an item of a value is a range: it holds `..`, but no path separator, so that a path such as ../db/x.sql stays a text.
+ * A number as the command line or String writes it, as the integer of its digits and the decimals that integer is scaled by: 12.50 is
+ * 125 at 1 decimal, the trailing zeros of its decimals left out as String leaves them out, 1.5e-7 is 15 at 8 and 1e21 is 1 at -21.
  */
-const isRange = (item: string) => item.includes('..') && !/[/\\]/.test(item);
+type Decimal = { digits: bigint; decimals: number };
 
-/** A single value as the command line writes it: true and false are booleans, a number is a number, anything else is a text */
-const toValue = (text: string): OverrideValue => {
-  if (text === 'true') return true;
-  if (text === 'false') return false;
-  return NUMBER.test(text) ? Number(text) : text;
+/**
+ * Whether an item of a value is a range: it starts like a number, with a digit or a minus sign then a digit, and holds `..`, but no
+ * path separator. So `run..2`, `..` and `../db/x.sql` are texts, a path such as `2024..old/x.sql` too, and `12..`, which starts like
+ * a range, is refused as one.
+ */
+const isRange = (item: string) => /^-?\d/.test(item) && item.includes('..') && !/[/\\]/.test(item);
+
+/** A number as the command line (`-12.50`) or String (`1.5e-7`, `1e+21`) writes it, as a Decimal: exactly, whatever its digits */
+const parseDecimal = (text: string): Decimal => {
+  const [mantissa, exponent = '0'] = text.split('e');
+  const [integer, fraction = ''] = mantissa.split('.');
+  const decimals = fraction.replace(/0+$/, '');
+  return { digits: BigInt(`${integer}${decimals}`), decimals: decimals.length - Number(exponent) };
+};
+
+/** The integer `value` makes scaled to `decimals` decimals, which must be at least its own: 1.5 is 15 at 1 decimal, 1500 at 3 */
+const scaleTo = ({ digits, decimals: own }: Decimal, decimals: number) => digits * 10n ** BigInt(decimals - own);
+
+/** Whether two Decimals are one number, whatever their scales: 15 at 1 decimal and 150 at 2 are both 1.5 */
+const isSameNumber = (a: Decimal, b: Decimal) => {
+  const decimals = Math.max(a.decimals, b.decimals);
+  return scaleTo(a, decimals) === scaleTo(b, decimals);
 };
 
 /**
- * How many values the range from `start` to `end` holds at `increment`: those its steps reach below its end, then its end. Counted in
- * BigInt on the integers the three make once scaled to their decimals, as addPrecise adds them: in binary, 0.6..3000.3:0.3 would count
- * 10001 values for its 10000. The count is exact up to 2 ** 53, the nearest double beyond. Infinity when the bounds, scaled to the
- * decimals of a step so small (1e-320), are past the largest double, or are themselves.
+ * The number `value` stands for: the double nearest to it, and whether that double holds it as it is written, String writing it
+ * back. A number keeps some 15 significant digits: 9007199254740993 is read as 9007199254740992 and 0.30000000000000005 as
+ * 0.30000000000000004, which the command line would have set in its place without a word.
  */
-const countRangeValues = (start: number, end: number, increment: number): number => {
-  const decimals = Math.max(0, countDecimals(start), countDecimals(end), countDecimals(increment));
-  const [from, to, step] = [start, end, increment].map(value => shiftDecimalPoint(value, decimals));
-  if (![from, to, step].every(Number.isFinite)) return Infinity;
-  // The steps below the end, rounded up (a step that goes past the end leaves the end to be tried on its own), then the end
-  return Number((BigInt(to) - BigInt(from) + BigInt(step) - 1n) / BigInt(step) + 1n);
+const toNumber = (value: Decimal) => {
+  const number = Number(`${value.digits}e${-value.decimals}`);
+  return { number, isHeld: Number.isFinite(number) && isSameNumber(parseDecimal(String(number)), value) };
+};
+
+/** Why a number of the command line is refused when no number holds it as written, and what it would have been read as */
+const describeUnheld = (number: number) => `more digits than a number keeps, which reads it as ${formatEveryDecimal(number)}`;
+
+/**
+ * A single value as the command line writes it at `option`: true and false are booleans, a number is a number, anything else is a
+ * text. A number that no number holds as it is written is refused, rather than set as another.
+ */
+const toValue = (option: string, text: string): OverrideValue => {
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+  if (!NUMBER.test(text)) return text;
+  const { number, isHeld } = toNumber(parseDecimal(text));
+  if (isHeld) return number;
+  throw new GekkoError(
+    'fox',
+    `Invalid value ${showValue(text)} of ${option}: it holds ${describeUnheld(number)}: write it with fewer digits`,
+  );
+};
+
+/** `scaled`, a number scaled to `decimals` decimals, written as the command line writes a number: -5 at 2 decimals is -0.05 */
+const writeScaled = (scaled: bigint, decimals: number) => {
+  const digits = (scaled < 0n ? -scaled : scaled).toString().padStart(decimals + 1, '0');
+  const point = digits.length - decimals;
+  const fraction = digits.slice(point).replace(/0+$/, '');
+  return `${scaled < 0n ? '-' : ''}${digits.slice(0, point)}${fraction && `.${fraction}`}`;
 };
 
 /**
  * The values of a range, `<from>..<to>` or `<from>..<to>:<step>`: from its start, a step at a time, up to its end, both bounds included
  * (`12..24:5` is 12, 17, 22 and 24). Without a step, it is a unit of the last decimal of the bounds: 1 for `12..24`, 0.01 for
- * `0.5..0.75`. Each value is added up in decimal (addPrecise), so that `0.1..0.3` holds 0.3, which binary sums would miss. Refused,
- * before any value is made: a step that leaves a value as it is (bounds of 17 significant digits, which take a step of 1e-17 by
- * default, or of 2 ** 53 and above, where a number cannot change by 1), whose range would never end, and a range of more than
- * MAX_VARIANTS values.
+ * `0.5..0.75`. The range is counted and its values worked out in integers, the bounds and the step scaled to their decimals, so that
+ * each value is the decimal written, not a binary sum (`0.1..0.3` holds 0.3, `0.6..3000.3:0.3` its 10000 values). Refused before any
+ * value is made: a range of more than MAX_VARIANTS values, and a range holding a value that no number holds as it is written, which Fox
+ * would have tried in place of another, a bound (9007199254740993, read as 9007199254740992) or a value its step makes (bounds of 17
+ * significant digits, which take a step of 1e-17 by default; a step below what its values can change by; whole numbers beyond 2 ** 53,
+ * where a number no longer changes by 1).
  */
 const parseRange = (option: string, range: string): number[] => {
   const refuse = (reason: string) => new GekkoError('fox', `Invalid range ${showValue(range)} of ${option}: ${reason}`);
-  const [bounds, step, ...afterStep] = range.split(':');
-  const [from, to, ...afterEnd] = bounds.split('..');
-  if (afterEnd.length || afterStep.length || !NUMBER.test(from) || !NUMBER.test(to))
+  const [bounds, stepText, ...afterStep] = range.split(':');
+  const [fromText, toText, ...afterEnd] = bounds.split('..');
+  if (afterEnd.length || afterStep.length || !NUMBER.test(fromText) || !NUMBER.test(toText))
     throw refuse('a range is written <from>..<to> or <from>..<to>:<step>, of numbers');
-  const start = Number(from);
-  const end = Number(to);
-  if (start > end) throw refuse(`its start, ${from}, is above its end, ${to}`);
-  if (step !== undefined && !(NUMBER.test(step) && Number(step) > 0))
-    throw refuse(`its step must be a number above 0, got ${showValue(step)}`);
-  // countDecimals is negative for a whole number ending in zeros (-1 for 20): a range of whole numbers steps by 1, not by 10. The unit
-  // is written in decimal, not raised in binary: under Node, 10 ** -4 is 0.00009999999999999999
-  const increment = step === undefined ? shiftDecimalPoint(1, -Math.max(0, countDecimals(start), countDecimals(end))) : Number(step);
-  /** The value after `value`, which must be above it: a step that leaves a value as it is would never reach the end */
-  const next = (value: number) => {
-    const following = addPrecise(value, increment);
-    if (following > value) return following;
+  const [from, to] = [fromText, toText].map(parseDecimal);
+  const boundDecimals = Math.max(from.decimals, to.decimals);
+  if (scaleTo(from, boundDecimals) > scaleTo(to, boundDecimals)) throw refuse(`its start, ${fromText}, is above its end, ${toText}`);
+  const step = stepText !== undefined && NUMBER.test(stepText) ? parseDecimal(stepText) : undefined;
+  if (stepText !== undefined && !(step && step.digits > 0n)) throw refuse(`its step must be a number above 0, got ${showValue(stepText)}`);
+  // A range of whole numbers steps by 1, those ending in zeros too (20..30): the integer part of a number counts no decimal
+  const decimals = Math.max(boundDecimals, step?.decimals ?? 0);
+  const [start, end] = [from, to].map(bound => scaleTo(bound, decimals));
+  const increment = step ? scaleTo(step, decimals) : 1n;
+  /** The number of a bound, refused when no number holds it as written */
+  const boundNumber = (value: bigint, name: string, text: string) => {
+    const { number, isHeld } = toNumber({ digits: value, decimals });
+    if (isHeld) return number;
+    throw refuse(`its ${name}, ${text}, holds ${describeUnheld(number)}: write it with fewer digits`);
+  };
+  /** The number of a value the step makes, refused when no number holds it as written */
+  const steppedNumber = (value: bigint) => {
+    const { number, isHeld } = toNumber({ digits: value, decimals });
+    if (isHeld) return number;
     throw refuse(
-      `its step of ${formatEveryDecimal(increment)} leaves ${formatEveryDecimal(value)} as it is, a number holding too many digits for so small a step: write the bounds with fewer digits, or give a larger step`,
+      `its step of ${writeScaled(increment, decimals)} makes ${writeScaled(value, decimals)}, ${describeUnheld(number)}: write the bounds with fewer digits, or give a larger step`,
     );
   };
-  // The start first: a step that cannot move it would count values without end
-  if (start < end) next(start);
-  const count = countRangeValues(start, end, increment);
-  if (count > MAX_VARIANTS)
-    throw refuse(
-      `it holds ${formatEveryDecimal(count)} values, more than the ${MAX_VARIANTS} variants Fox makes at most: narrow it, or give it a larger step`,
-    );
-  const values: number[] = [];
-  for (let value = start; value < end; value = next(value)) values.push(value);
+  const first = boundNumber(start, 'start', fromText);
+  const last = boundNumber(end, 'end', toText);
+  // The value after the start before the count: a step too small for the digits of the bounds (0.30000000000000004..0.5, whose step
+  // is 1e-17 by default) makes values no number holds, of which the count would only say that they are too many
+  if (start + increment < end) steppedNumber(start + increment);
+  // The steps below the end, rounded up (a step that goes past the end leaves the end to be tried on its own), then the end
+  const count = (end - start + increment - 1n) / increment + 1n;
+  if (count > BigInt(MAX_VARIANTS))
+    throw refuse(`it holds ${count} values, more than the ${MAX_VARIANTS} variants Fox makes at most: narrow it, or give it a larger step`);
+  const values = [first];
+  for (let value = start + increment; value < end; value += increment) values.push(steppedNumber(value));
   // The end is always tried, also when the step goes past it
-  values.push(end);
+  if (end > start) values.push(last);
   return values;
 };
 
 /**
  * The values `text` sets at `option`: a single value as itself, a list (items separated by commas) or a range as the array of their
- * values. An item of a list can be a range (`10,20..30:5`).
+ * values. An item of a list can be a range (`10,20..30:5`). A value that two items give (`10,10..12`, `1..10:3,10..30:10`) is tried
+ * once, at its first place: twice, it made two variants of one backtest, labelled alike.
  */
 const parseValues = (option: string, text: string): OverrideValue | OverrideValue[] => {
   const items = text.split(',').map(item => item.trim());
@@ -97,8 +148,8 @@ const parseValues = (option: string, text: string): OverrideValue | OverrideValu
       items.length === 1 ? `${option} has no value` : `${option} has an empty item in its values ${showValue(text)}`,
     );
   }
-  if (items.length === 1 && !isRange(items[0])) return toValue(items[0]);
-  return items.flatMap(item => (isRange(item) ? parseRange(option, item) : [toValue(item)]));
+  if (items.length === 1 && !isRange(items[0])) return toValue(option, items[0]);
+  return uniq(items.flatMap(item => (isRange(item) ? parseRange(option, item) : [toValue(option, item)])));
 };
 
 /** The key of an override, `strategy.period` for `--strategy.period` and `--strategy.period=12`, checked */
@@ -204,10 +255,10 @@ export const parseCommandLine = (
     program.parse(argv, { from: 'user' });
   } catch (err) {
     // Under exitOverride, commander throws a CommanderError where it would have exited: with code 0 once it printed the help, 1 for
-    // what it refuses (it has no action handler or argument parser to throw anything else)
-    const { exitCode, message } = err as CommanderError;
-    if (exitCode === 0) return undefined;
-    throw new GekkoError('fox', message.replace(/^error: /, ''));
+    // what it refuses. Anything else is no refusal of the command line, and passes on as it is, for its stack to be reported
+    if (!(err instanceof CommanderError)) throw err;
+    if (err.exitCode === 0) return undefined;
+    throw new GekkoError('fox', err.message.replace(/^error: /, ''));
   }
   const { templatePath, maxWorkers } = program.opts<{ templatePath?: string; maxWorkers?: string }>();
   const template = templatePath || env[TEMPLATE_PATH_VARIABLE];
