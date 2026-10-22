@@ -1,14 +1,17 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
-import { beforeEach, describe, expect, it, mock } from 'bun:test';
+import { beforeEach, describe, expect, it, mock, setDefaultTimeout } from 'bun:test';
 import { createFlowContext, rawDaterange, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
 import { MockWinston } from '../mocks/winston.mock';
+import { BACKTEST_TEST_TIMEOUT } from './backtestRun.helper';
 
 mock.module('winston', () => MockWinston);
 // Not ccxt, on purpose: the pipeline imports it, and this flow is the only test that loads the real ccxt under Bun, the runtime of the
-// executable (the unit tests load it under Node, CI and the release build the executable without running it)
+// executable (the unit tests load it under Node, CI and the release build the executable without running it). Nor mockBacktestModules,
+// which mocks it: the timeout of the other backtest flows is set here, the real ccxt making this flow the slowest to start
+setDefaultTimeout(BACKTEST_TEST_TIMEOUT);
 
 const start = Date.parse('2024-01-01T00:00:00Z');
 /** One candle a minute from 00:00 to 00:09, except the missing minutes */

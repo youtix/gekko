@@ -1,4 +1,4 @@
-import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
+import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import type { Candle } from '@gekko/shared/models/candle.types';
 import type { OrderSide, OrderState } from '@gekko/shared/models/order.types';
@@ -8,7 +8,7 @@ import type { DummyCentralizedExchange } from '@gekko/core/exchange/dummy/dummyC
 import type { MarketData } from '@gekko/shared/models/exchange.types';
 import type { RunContext } from '@gekko/core/run/runContext.types';
 import type { SQLiteStorage } from '@gekko/core/storage/sqlite.storage';
-import { mock } from 'bun:test';
+import { mock, setDefaultTimeout } from 'bun:test';
 import { mapValues, range } from 'lodash-es';
 import { createFlowContext, type RawConfiguration } from '../helpers/configuration.helper';
 import { seedDatabaseWithCandles } from '../helpers/database.helper';
@@ -54,10 +54,19 @@ export const flatCandles = (price: number): Candle[] =>
   range(9).map(n => ({ start: minute(n), open: price, high: price * 1.001, low: price * 0.999, close: price, volume: 10 }));
 
 /**
+ * The wall clock a test or a hook of a backtest flow may take. The first scenario of a file takes about 100 ms, as it imports the
+ * pipeline, the next ones 3 to 20 ms, and backtestMissingCandles.flow.test.ts's, which loads the real ccxt, 300 to 450 ms, which a core
+ * shared with eleven busy loops stretched to 2.5 s: Bun's default of 5 s left a slower host under load little room, and would fail a
+ * scenario with a timeout rather than with what it asserts. As the realtime flows' (REALTIME_TEST_TIMEOUT): a backtest that froze fails
+ * after it, runBacktest catching its end rather than awaiting it through `rejects`.
+ */
+export const BACKTEST_TEST_TIMEOUT = 30 * ONE_SECOND;
+
+/**
  * Mocks what the backtest flows mock, to be called at the top of the file, before anything imports the pipeline: winston, whose lines
  * the flows read; and ccxt, which the run's services load with CCXTExchange though a backtest builds no exchange client (the mock spares
  * the load of the real one, which backtestMissingCandles.flow.test.ts keeps). Not the configuration: runBacktest builds the context of
- * each run from the configuration it is given (createFlowContext).
+ * each run from the configuration it is given (createFlowContext). Also gives the tests and hooks of the file BACKTEST_TEST_TIMEOUT.
  *
  * It also sets the log level of the flows, info. The logger reads GEKKO_LOG_LEVEL once, as the pipeline loads it, and hands winston a
  * debug line only when the level lets it through: inherited from the shell, a level of debug exported for a run of the bot added lines
@@ -69,6 +78,7 @@ export const mockBacktestModules = () => {
   process.env.GEKKO_LOG_LEVEL = 'info';
   mock.module('winston', () => MockWinston);
   mock.module('ccxt', () => createCcxtModuleMock());
+  setDefaultTimeout(BACKTEST_TEST_TIMEOUT);
 };
 
 /** A balance read from the simulated exchange, dated by its clock: the close of the last candle it had processed */
