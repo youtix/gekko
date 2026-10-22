@@ -4,6 +4,7 @@ export type Tag =
   | 'configuration'
   | 'core'
   | 'fetcher'
+  | 'fox'
   | 'gekko'
   | 'order'
   | 'injecter'
