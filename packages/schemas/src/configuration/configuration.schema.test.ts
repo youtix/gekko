@@ -807,6 +807,57 @@ describe('configurationSchema', () => {
     });
   });
 
+  // An analyzer refuses a benchmarkAsset that is not watched as it is built, after the loader and the checks of the plugin entries: Fox,
+  // which checks its variants with this schema, started a worker for each such variant to refuse it there
+  describe('benchmarkAsset of an analyzer', () => {
+    const createBenchmarkConfig = (plugins: object[], assets = ['BTC', 'ETH']) => ({
+      ...createBaseConfig(),
+      watch: { ...createBaseConfig().watch, assets },
+      plugins,
+    });
+    const benchmarkIssue = (index: number, benchmarkAsset: string, watched = 'BTC and ETH') => ({
+      path: ['plugins', index, 'benchmarkAsset'],
+      message: `benchmarkAsset must be one of the watched assets (${watched}), got "${benchmarkAsset}"`,
+    });
+
+    it.each`
+      scenario                                      | plugins                                                                                                         | assets            | issues
+      ${'a PortfolioAnalyzer'}                      | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'SOL' }]}                                                       | ${['BTC', 'ETH']} | ${[benchmarkIssue(0, 'SOL')]}
+      ${'a RoundTripAnalyzer after another plugin'} | ${[{ name: 'Trader' }, { name: 'RoundTripAnalyzer', benchmarkAsset: 'SOL' }]}                                   | ${['BTC', 'ETH']} | ${[benchmarkIssue(1, 'SOL')]}
+      ${'the currency'}                             | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'USDT' }]}                                                      | ${['BTC', 'ETH']} | ${[benchmarkIssue(0, 'USDT')]}
+      ${'one asset watched'}                        | ${[{ name: 'RoundTripAnalyzer', benchmarkAsset: 'ETH' }]}                                                       | ${['BTC']}        | ${[benchmarkIssue(0, 'ETH', 'BTC')]}
+      ${'each of two analyzers, at its own path'}   | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'SOL' }, { name: 'RoundTripAnalyzer', benchmarkAsset: 'XRP' }]} | ${['BTC', 'ETH']} | ${[benchmarkIssue(0, 'SOL'), benchmarkIssue(1, 'XRP')]}
+    `('refuses an asset that is not watched as the benchmark of $scenario, at its path', ({ plugins, assets, issues }) => {
+      const result = configurationSchema.safeParse(createBenchmarkConfig(plugins, assets));
+      expect(result.error?.issues).toStrictEqual(issues.map((issue: object) => ({ code: 'custom', ...issue })));
+    });
+
+    // A benchmarkAsset that is not written as an asset is the analyzer schema's to refuse, which the pipeline applies to the entry
+    it.each`
+      scenario                                        | plugins
+      ${'a watched asset'}                            | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'ETH' }]}
+      ${'no benchmarkAsset'}                          | ${[{ name: 'RoundTripAnalyzer' }]}
+      ${'an asset in lower case'}                     | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'sol' }]}
+      ${'a symbol'}                                   | ${[{ name: 'PortfolioAnalyzer', benchmarkAsset: 'SOL/USDT' }]}
+      ${'an empty benchmarkAsset'}                    | ${[{ name: 'RoundTripAnalyzer', benchmarkAsset: '' }]}
+      ${'a number'}                                   | ${[{ name: 'RoundTripAnalyzer', benchmarkAsset: 1000 }]}
+      ${'an unwatched asset given to another plugin'} | ${[{ name: 'Trader', benchmarkAsset: 'SOL' }]}
+      ${'an analyzer named in another case'}          | ${[{ name: 'portfolioAnalyzer', benchmarkAsset: 'SOL' }]}
+    `('reports no issue for $scenario', ({ plugins }) => {
+      const result = configurationSchema.safeParse(createBenchmarkConfig(plugins));
+      expect(result.error?.issues).toBeUndefined();
+    });
+
+    // Like the marketData rule: watch.assets may then hold an asset its schema refuses
+    it('stands down when a section has an issue', () => {
+      const config = set(createBenchmarkConfig([{ name: 'PortfolioAnalyzer', benchmarkAsset: 'BTC' }], ['btc']), ['watch', 'tickrate'], 50);
+      expect(configurationSchema.safeParse(config).error?.issues.map(issue => issue.path)).toEqual([
+        ['watch', 'assets', 0],
+        ['watch', 'tickrate'],
+      ]);
+    });
+  });
+
   // The warmup takes warmup.candleCount timeframe candles and the strategy trades from the next one. A backtest whose range held no
   // more ended normally, without a trade. The candles are counted as the batcher makes them from the minutes the backtest reads: from a
   // timeframe boundary (2024-01-01 is a Monday), whole ones only, the seconds of the range dropped.

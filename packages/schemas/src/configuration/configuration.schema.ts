@@ -1,6 +1,6 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
-import { assetsSchema, currencySchema } from './pairConfig.schema';
+import { assetSchema, assetsSchema, currencySchema } from './pairConfig.schema';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { CandleSize } from '@gekko/shared/models/candleSize.types';
 import { binanceExchangeSchema } from '../exchange/binance.schema';
@@ -9,6 +9,8 @@ import { hyperliquidExchangeSchema } from '../exchange/hyperliquid.schema';
 import { paperBinanceExchangeSchema } from '../exchange/paperTradingBinanceExchange.schema';
 import { getCandleStart, getCandleTimeOffset } from '@gekko/shared/helpers/candle/candle.helper';
 import { startOfMinuteUTC, toISOString, toTimestamp } from '@gekko/shared/utils/date/date.utils';
+import { showValue } from '@gekko/shared/utils/object/object.utils';
+import { listInWords } from '@gekko/shared/utils/string/string.utils';
 import { difference, find, some } from 'lodash-es';
 import { z } from 'zod';
 import { TIMEFRAMES } from './configuration.const';
@@ -64,7 +66,8 @@ const integerBetween = (field: string, min: number, max: number, reason: string)
   return z.number(message).int(message).min(min, message).max(max, message);
 };
 
-// A backtest reads each batch of candles into memory at once, for every pair: 31 days of 1-minute candles is ample.
+// A backtest reads each batch of candles into memory at once, for every pair: 31 days of 1-minute candles, which is ample, are 44 640
+// candles a pair, 892 800 at the 20 pairs a watch takes at most (MAX_WATCHED_ASSETS), in each worker of Fox as well.
 const MAX_BATCH_SIZE = 31 * 24 * 60;
 
 const warmupSchema = z
@@ -139,11 +142,14 @@ const getBacktestCandles = (candleSize: CandleSize, { start, end }: { start: Epo
   return { firstCandleStart, count, endOfCandle };
 };
 
-// Storage holds insertThreshold minutes of candles in memory (about 1.6 KB a minute for 5 pairs), then writes them in one
-// synchronous transaction per pair, which blocks the event loop (with 5 pairs: 0.1 s for a day, 0.6 to 1.2 s for a week), and a
-// process killed before the storage is closed (SIGKILL, a power cut) loses all it holds. A day is the most, above the importer's
-// default of 1000.
+// Storage holds insertThreshold minutes of candles in memory (about 320 bytes a minute for each pair: 6.4 KB at the 20 pairs a watch
+// takes at most, MAX_WATCHED_ASSETS, some 9 MB for a day), then writes them in one synchronous transaction per pair, which blocks the
+// event loop (about 0.02 s a pair for a day and 0.12 to 0.24 s for a week: 0.4 s and 2.4 to 4.8 s at 20 pairs), and a process killed
+// before the storage is closed (SIGKILL, a power cut) loses all it holds. A day is the most, above the importer's default of 1000.
 const MAX_INSERT_THRESHOLD = 24 * 60;
+
+// The plugins that take a benchmarkAsset option: the asset whose closes give the market return of their report, one of watch.assets
+const BENCHMARKED_PLUGINS = ['PortfolioAnalyzer', 'RoundTripAnalyzer'];
 
 export const storageSchema = z.strictObject({
   type: z.literal('sqlite'),
@@ -285,6 +291,24 @@ export const configurationSchema = z
             message: `simulationBalance assetName '${assetName}' must name a watched asset or the currency (${watchedAssets.join(', ')}), the only balances the simulator holds`,
           });
         }
+      });
+    }
+
+    // An analyzer refuses a benchmarkAsset that is not watched as it is built, after the loader and the checks of the plugin entries, so
+    // that Fox, which checks its variants with this schema before any runs, started a worker for each such variant: refused here, at its
+    // path, before any run. A benchmarkAsset not written as an asset (btc, a number) is left to the analyzer schema, which the pipeline
+    // applies to the entry. Like the marketData rule, this one only checks a configuration whose sections have no issue: watch.assets may
+    // then hold an asset its schema refuses.
+    if (!hasSectionIssues) {
+      data.plugins.forEach(({ name, benchmarkAsset }, index) => {
+        if (!BENCHMARKED_PLUGINS.includes(name)) return;
+        const benchmark = assetSchema.safeParse(benchmarkAsset);
+        if (!benchmark.success || data.watch.assets.includes(benchmark.data)) return;
+        ctx.addIssue({
+          code: 'custom',
+          path: ['plugins', index, 'benchmarkAsset'],
+          message: `benchmarkAsset must be one of the watched assets (${listInWords(data.watch.assets)}), got ${showValue(benchmark.data)}`,
+        });
       });
     }
 
