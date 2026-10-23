@@ -272,11 +272,12 @@ class MyStrategy implements Strategy<MyParams> {
   // The methods of the next sections
 
   // Whether the portfolio after an order holds enough of the asset to sell at the minimums of the market, its free balance cut to the
-  // amount step; undefined when no balance was read yet. Worked out in decimal, as the Complete Example explains
+  // amount step; undefined when no balance was read yet, or when the Trader read it before the order ended (its read after the end
+  // failed), which tells nothing of what the order left. Worked out in decimal, as the Complete Example explains
   private holdsSellable({ order, exchange, tools }: EndedOrderParams): boolean | undefined {
     const [asset] = order.symbol.split('/');
     const free = exchange.portfolio.get(asset)?.free;
-    if (free === undefined) return undefined;
+    if (free === undefined || exchange.portfolioReadAfterOrder === false) return undefined;
     const { amount, cost, precision } = tools.marketData.get(order.symbol) ?? {};
     const step = precision?.amount;
     const decimal = (value: number) => Number(value.toPrecision(15));
@@ -357,8 +358,8 @@ onOrderCompleted(params: OnOrderCompletedEventParams<MyParams>): void {
   if (order.id !== this.pendingOrderId) return;
   this.pendingOrderId = undefined;
   // A BUY makes it long. A SELL may have sold less than the position (the Trader caps a SELL at the most the market takes in one
-  // order): the strategy is still long when the portfolio after it holds enough to sell
-  this.isLong = order.side === 'BUY' || this.holdsSellable(params) === true;
+  // order): the strategy is still long when the portfolio after it holds enough to sell, and stays as it was when that tells nothing
+  this.isLong = order.side === 'BUY' || (this.holdsSellable(params) ?? this.isLong);
 }
 ```
 
@@ -377,7 +378,7 @@ onOrderCanceled(params: OnOrderCanceledEventParams<MyParams>): void {
   if (order.id !== this.pendingOrderId) return;
   // No longer pending: the next candle that calls for it sends the order again
   this.pendingOrderId = undefined;
-  // It may have filled part of its amount first: the portfolio after it tells, once a balance was read
+  // It may have filled part of its amount first: the portfolio after it tells, once the Trader read a balance after it
   this.isLong = this.holdsSellable(params) ?? this.isLong;
 }
 ```
@@ -401,7 +402,8 @@ onOrderErrored(params: OnOrderErroredEventParams<MyParams>): void {
   if (order.id !== this.pendingOrderId) return;
   // No longer pending: a BUY refused is sent again on the next candle of the uptrend, each refusal counting towards maxConsecutiveErrors
   this.pendingOrderId = undefined;
-  // It may have executed before its error: the portfolio after it tells (see Tracking Your Position)
+  // It may have executed before its error: the portfolio after it tells, once the Trader read a balance after it (see Tracking Your
+  // Position)
   this.isLong = this.holdsSellable(params) ?? this.isLong;
 }
 ```
@@ -571,6 +573,7 @@ A `trailing` on a BUY asks Gekko to protect what the BUY buys: a stop follows th
 - it buys only when flat and sells only when long, never while an order of its own is pending;
 - a completed BUY makes it long, a completed SELL flat, unless it sold less than it asked for (an all-in SELL asks for all of the asset free, and the Trader caps a SELL at the most the market takes in one order): the portfolio after it then tells, long when what is left free is enough to sell;
 - an order canceled or errored may have executed before it ended, in part or in full: the position is read from what its event reports, rather than left as it was. The portfolio after the order (`exchange.portfolio`) tells what is left of the asset, a position when it is enough to sell at the minimums of the market (`tools.marketData`);
+- a portfolio the Trader read before the order ended (`exchange.portfolioReadAfterOrder` is `false`: its read after the end failed) is not the state after it: read before a SELL was placed, it still shows free what the SELL sold. The order's own figures settle the position when they can, and it stays as it was otherwise, until the end of the next order;
 - the SELL a trailing stop sends is the strategy's own from `onTrailingStopTriggered` on: it adopts that id as a pending SELL;
 - it starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that ended without completing while the account held the asset, or, on several pairs, a BUY the PositionBook skipped while the portfolio showed the asset free, enough to sell.
 
@@ -626,7 +629,7 @@ export class MyTrackedStrategy implements Strategy<MyParams> {
 }
 ```
 
-For an order canceled or errored, the tracker reads what a canceled BUY filled, what a canceled SELL of an `amount` sent for all of it left unsold (that amount is the position, as when such a SELL completes), and otherwise the free balance of the asset in the portfolio after the order, a SELL canceled after a fill included, whose fill tells what is left of the order, not of the holding, though never less than what it left unsold, which the cancelation released (a portfolio read before it, or never, leaves that out), truncated to the lot step of the market and checked against its minimum amount and cost, the cost worked out in decimal, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. It reads a completed SELL from that free balance too when the SELL sold less than it asked for, as it reads every SELL without an `amount`, all-in or by `cost` or `allocation`, and every adopted one, which ask for all of the asset free or for an amount it does not know: long when enough is left to sell, logged then. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. `adoptHolding(held, price, type, marketData)` takes a holding that no order of the tracker's own brought for the position: long when the tracker is flat with nothing pending and `held` is enough to sell at `price`, returning whether it went long; the PositionBook calls it for a BUY it skips, which a refusal would have taught the position. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` and `playSteps` helpers of `packages/strategies/src/helpers/positionTracker/positionTracker.mock.ts`.
+For an order canceled or errored, the tracker reads what a canceled BUY filled, what a canceled SELL of an `amount` sent for all of it left unsold (that amount is the position, as when such a SELL completes), and otherwise the free balance of the asset in the portfolio after the order, a SELL canceled after a fill included, whose fill tells what is left of the order, not of the holding, though never less than what it left unsold, which the cancelation released (a portfolio read before it, or never, leaves that out), truncated to the lot step of the market and checked against its minimum amount and cost, the cost worked out in decimal, as the exchange checks a SELL; a position it reads that way and that differs from the one it held is logged at info level, through `tools.log`. It reads a completed SELL from that free balance too when the SELL sold less than it asked for, as it reads every SELL without an `amount`, all-in or by `cost` or `allocation`, and every adopted one, which ask for all of the asset free or for an amount it does not know: long when enough is left to sell, logged then. So an account that holds the asset but too little currency to buy has its first all-in BUY refused; the tracker then takes the asset's free balance, in the portfolio after that refusal, as the position, and the strategy sells it at its next SELL signal. A portfolio the Trader read before the order ended (`exchange.portfolioReadAfterOrder` is `false`) is not read: the tracker goes by the order's own figures, a completed BUY long, a completed SELL that sold all it asked for flat, a canceled BUY's fill and what a canceled SELL of an `amount` sent for all of it left unsold as above, and what any other SELL canceled after a fill left unsold, which the cancelation released, or what a BUY that errored filled, long when enough to sell. Anything else keeps the position as it was, logged at warn level through `tools.log` until the end of the next order reads it again: any other completed SELL, a cancelation without its fill, a SELL that errored, whose rest the error does not show held, and an unsold rest or an errored BUY's fill too little to sell (`[<id>] SELL order completed after selling 1 BTC, and the Trader could not read the balances after it: the strategy stays long until the end of its next order`). A `portfolioReadAfterOrder` of `true`, or left out (before the Trader's first read), reads the portfolio as above. `adoptHolding(held, price, type, marketData)` takes a holding that no order of the tracker's own brought for the position: long when the tracker is flat with nothing pending and `held` is enough to sell at `price`, returning whether it went long; the PositionBook calls it for a BUY it skips, which a refusal would have taught the position. The tests of such a strategy can drive it as the built-in suites do, with the `OrderRecorder`, `relayOrderOutcome` (the end of an order, with the facts its event reports: a fill, an error's `mayBeLive`, the portfolio after it and `portfolioReadAfterOrder`) and `playSteps` helpers of `packages/strategies/src/helpers/positionTracker/positionTracker.mock.ts`.
 
 **The PositionBook, for several pairs.** The built-in signal strategies trade every watched pair through a `PositionBook` (`packages/strategies/src/helpers/positionBook/positionBook.ts`), which keeps one `PositionTracker` per pair and gives each BUY its pair's share of the currency (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital) for the share, and for the BUYs it skips). A strategy of your checkout's `packages/strategies/src/custom/` can trade through it as they do:
 
@@ -910,8 +913,8 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
     if (!side) return;
     this.pendingOrders.delete(params.order.id);
     // A SELL, all-in here, may have sold less than the position: the Trader caps a SELL at the most the market takes in one order. The
-    // strategy is still long when the portfolio after it holds enough of the asset to sell
-    this.isLong = side === 'BUY' || this.holdsSellable(params) === true;
+    // strategy is still long when the portfolio after it holds enough of the asset to sell, and stays as it was when that tells nothing
+    this.isLong = side === 'BUY' || (this.holdsSellable(params) ?? this.isLong);
   }
 
   onOrderCanceled(params: OnOrderCanceledEventParams<EMACrossoverParams>): void {
@@ -931,18 +934,19 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
   // Canceled or errored, an order may have executed first, in part or in full: the position is read from the portfolio after it
   private settleUnfinished(params: UnfinishedOrderParams): void {
     if (!this.pendingOrders.delete(params.order.id)) return;
-    // undefined without a balance read yet: nothing tells, the position stays as it was
+    // undefined without a balance read after the order: nothing tells, the position stays as it was
     this.isLong = this.holdsSellable(params) ?? this.isLong;
   }
 
   // Whether the free balance of the asset in the portfolio after an order, cut to the amount step of the market, passes its minimum
-  // amount and minimum cost; undefined when no balance was read yet. Worked out in decimal, as the exchange works it out: rounded to
-  // 15 significant digits, a quotient or a product loses the noise of binary arithmetic (0.29 / 0.01 is 28.999999999999996, which
-  // would cut 0.29 to 0.28, and 0.00007 × 100000 is 6.999999999999999, under a minimum cost of 7)
+  // amount and minimum cost; undefined when no balance was read yet, or when the Trader read it before the order ended (its read after
+  // the end failed: exchange.portfolioReadAfterOrder is false), which tells nothing of what the order left. Worked out in decimal, as
+  // the exchange works it out: rounded to 15 significant digits, a quotient or a product loses the noise of binary arithmetic (0.29 /
+  // 0.01 is 28.999999999999996, which would cut 0.29 to 0.28, and 0.00007 × 100000 is 6.999999999999999, under a minimum cost of 7)
   private holdsSellable({ order, exchange, tools }: EndedOrderParams): boolean | undefined {
     const [asset] = order.symbol.split('/');
     const free = exchange.portfolio.get(asset)?.free;
-    if (free === undefined) return undefined;
+    if (free === undefined || exchange.portfolioReadAfterOrder === false) return undefined;
     const { amount, cost, precision } = tools.marketData.get(order.symbol) ?? {};
     const step = precision?.amount;
     const decimal = (value: number) => Number(value.toPrecision(15));
@@ -955,7 +959,7 @@ export class EMACrossover implements Strategy<EMACrossoverParams> {
 }
 ```
 
-`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. Live, an order hook runs as the bucket after the order's end arrives, before that bucket's candle hooks; in a backtest, after the candle hooks of the bucket the order filled in. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)). So it trades the first watched pair alone, warning of the others: a strategy that trades every pair lives in `packages/strategies/src/custom/`, where it can trade through the [PositionBook](#tracking-your-position).
+`createOrder` returns before the exchange has seen the order: `onOrderCompleted`, `onOrderCanceled` or `onOrderErrored` tells later what became of it, with the id `createOrder` returned. Live, an order hook runs as the bucket after the order's end arrives, before that bucket's candle hooks; in a backtest, after the candle hooks of the bucket the order filled in. This is why the example keeps that id, and only moves `isLong` once the order has ended: a completed BUY makes it long; a completed SELL, which may have sold less than the position, and a canceled or errored order, which may have executed first, are read from the portfolio after them, unless the Trader read it before the order ended, which leaves the position as it was. The SELL a trailing stop sends is adopted in `onTrailingStopTriggered`, so that its outcome settles the position too. The two EMAs are compared with a copy of Gekko's `compareWithTolerance`, within whose tolerance they are equal and cross neither way (see [Validate Indicator Values](#2-validate-indicator-values)). The file imports Gekko's types only, and `zod`, which has to be installed next to it (see [Validating Your Parameters](#validating-your-parameters)). So it trades the first watched pair alone, warning of the others: a strategy that trades every pair lives in `packages/strategies/src/custom/`, where it can trade through the [PositionBook](#tracking-your-position).
 
 ### Configuration File: `config/emaCrossover.local.yml`
 
