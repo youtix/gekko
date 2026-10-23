@@ -11,6 +11,7 @@ import {
 import { EMPTY_ORDER_SUMMARY } from '@gekko/shared/constants/order.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { AdviceCancelOrder, AdviceOrder } from '@gekko/shared/models/advice.types';
+import { ExchangeEvent } from '@gekko/shared/models/event.types';
 import { Configuration, Watch } from '@gekko/schemas/configuration/configuration.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { createPluginContext } from '@gekko/core/plugin/plugin.mock';
@@ -2542,11 +2543,11 @@ describe('Trader', () => {
         expect(logger.warning).toHaveBeenCalledWith('trader', `[${advice.id}] Impossible to create the BUY STICKY order: ${reason}`);
       });
 
-      // Never placed, it filled nothing, and nothing of it is live
+      // Never placed, it filled nothing, and nothing of it is live: the portfolio known was read before it, and no read follows it
       it('emits a deferred ORDER_ERRORED_EVENT with the reason, nothing filled nor live, the portfolio and the price known', () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_ERRORED_EVENT, {
           order: { ...advice, amount: 0, reason, orderErrorDate: 1_700_000_000_000, filled: 0, mayBeLive: false },
-          exchange: { price: marketPrice ?? 0, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
+          exchange: { price: marketPrice ?? 0, portfolio: trader['portfolio'], portfolioReadAt: READ_AT, portfolioReadAfterOrder: false },
         });
       });
 
@@ -2590,11 +2591,12 @@ describe('Trader', () => {
       expect(getOrdersMap().size).toBe(0);
       expect(synchronizeSpy).toHaveBeenCalled();
 
+      // The synchronization reads nothing here: the event carries the read made before the order, and says so
       expect(trader['addDeferredEmit']).toHaveBeenCalledWith(
         ORDER_ERRORED_EVENT,
         expect.objectContaining({
           order: expect.objectContaining({ id: advice.id, reason: 'boom' }),
-          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT, portfolioReadAfterOrder: false },
         }),
       );
     });
@@ -2664,10 +2666,11 @@ describe('Trader', () => {
         await order.emitAndSettle(ORDER_CANCELED_EVENT, { status: 'canceled', timestamp: 123_456, filled: 2, remaining: 7.5 });
       });
 
+      // The synchronization reads nothing here: the event carries the read made before the order, and says so
       it('emits a deferred ORDER_CANCELED_EVENT with what the order filled', () => {
         expect(trader['addDeferredEmit']).toHaveBeenCalledWith(ORDER_CANCELED_EVENT, {
           order: expect.objectContaining({ id: advice.id, orderCancelationDate: 123_456, filled: 2, remaining: 7.5 }),
-          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT },
+          exchange: { price: 100, portfolio: trader['portfolio'], portfolioReadAt: READ_AT, portfolioReadAfterOrder: false },
         });
       });
 
@@ -3691,6 +3694,189 @@ describe('Trader', () => {
     });
   });
 
+  // Whether the Trader read the balances the end of an order carries after that end (see ExchangeEvent.portfolioReadAfterOrder): a read
+  // that fails leaves the event with an earlier one, which may still count what the order reserved as used, or miss what it filled.
+  // GridBot told one from the other by the time of the read and the start of its reset: a read sent between two of its cancels, or a
+  // periodic one sent before it and answered after, passed while it missed the last cancel, and a fresh one failed under a clock set back.
+  describe('whether the balances the end of an order carries were read after it', () => {
+    const FIRST_ID = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
+    const SECOND_ID = '6c8f1d2e-3b4a-4c5d-8e9f-0a1b2c3d4e5f';
+    const THIRD_ID = '9e8d7c6b-5a4f-4e3d-9c2b-1a0f9e8d7c6b';
+    const NETWORK_DOWN = new Error('network down');
+    const CANCELED = { timestamp: 1_700_000_100_000, filled: 0, remaining: 1 };
+    /** What the reads below answer */
+    const READ = new Map<string, BalanceDetail>([
+      ['BTC', { free: 1, used: 0, total: 1 }],
+      ['USDT', { free: 905, used: 95, total: 1000 }],
+    ]);
+    /** A LIMIT BUY of 1 BTC at 95, with its own id */
+    const adviceOf = (id: string) => buildAdvice({ id: id as AdviceOrder['id'], type: 'LIMIT', amount: 1, price: 95 });
+    /** The exchange part of the `event` of order `id` the Trader queued: throws when it queued none, rather than read it as undefined */
+    const exchangeOf = (event: string, id = FIRST_ID): ExchangeEvent => {
+      const calls = (trader['addDeferredEmit'] as unknown as Mock).mock.calls;
+      const queued = calls.find(([name, payload]) => name === event && payload.order.id === id);
+      if (!queued) throw new Error(`No ${event} queued for ${id}`);
+      return queued[1].exchange;
+    };
+
+    beforeEach(() => {
+      trader['prices'].set('BTC/USDT', 100);
+    });
+
+    // Every end is followed by a read of the balance (see relayError)
+    describe.each`
+      end              | event                    | payload                                                       | relayed
+      ${'is filled'}   | ${ORDER_COMPLETED_EVENT} | ${undefined}                                                  | ${ORDER_COMPLETED_EVENT}
+      ${'is canceled'} | ${ORDER_CANCELED_EVENT}  | ${CANCELED}                                                   | ${ORDER_CANCELED_EVENT}
+      ${'errors'}      | ${ORDER_ERRORED_EVENT}   | ${{ reason: 'exchange timeout', mayBeLive: false }}           | ${ORDER_ERRORED_EVENT}
+      ${'is refused'}  | ${ORDER_INVALID_EVENT}   | ${{ reason: 'too small', status: 'rejected', filled: false }} | ${ORDER_ERRORED_EVENT}
+    `('in the $relayed of an order that $end', ({ event, payload, relayed }) => {
+      it('is true once the read after the end succeeded', async () => {
+        await trader['synchronize']();
+        const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+        await order.emitAndSettle(event, payload);
+        expect(exchangeOf(relayed).portfolioReadAfterOrder).toBe(true);
+      });
+
+      it('is false when the read after the end failed, the event carrying the read before it', async () => {
+        await trader['synchronize']();
+        const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+        fakeExchange.fetchBalance.mockRejectedValueOnce(NETWORK_DOWN);
+        await order.emitAndSettle(event, payload);
+        expect(exchangeOf(relayed).portfolioReadAfterOrder).toBe(false);
+      });
+
+      // The portfolio is then the empty one the Trader starts with, read at no time
+      it('is undefined before any read', async () => {
+        const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+        fakeExchange.fetchBalance.mockRejectedValueOnce(NETWORK_DOWN);
+        await order.emitAndSettle(event, payload);
+        expect(exchangeOf(relayed)).toStrictEqual({
+          price: 100,
+          portfolio: new Map(),
+          portfolioReadAt: undefined,
+          portfolioReadAfterOrder: undefined,
+        });
+      });
+    });
+
+    // What it says is of the balances: read after the end, they show it, whatever became of the tickers the synchronization read next
+    it('is true when the read after the end got the balances and failed on the tickers', async () => {
+      await trader['synchronize']();
+      const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+      fakeExchange.fetchTickers.mockRejectedValueOnce(NETWORK_DOWN);
+      await order.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED);
+      expect(exchangeOf(ORDER_CANCELED_EVENT).portfolioReadAfterOrder).toBe(true);
+    });
+
+    it('is left out of the ORDER_INITIATED_EVENT, which ends nothing', async () => {
+      await trader['synchronize']();
+      await prepareOrder('creation', adviceOf(FIRST_ID));
+      expect(exchangeOf(ORDER_INITIATED_EVENT)).not.toHaveProperty('portfolioReadAfterOrder');
+    });
+
+    // Never placed, it changed nothing on the exchange: it ends at once, with the read made before it
+    it('is false in the ORDER_ERRORED_EVENT of an order without price', async () => {
+      await trader['synchronize']();
+      trader['prices'].clear();
+      await trader.onStrategyCreateOrder([buildAdvice({ id: FIRST_ID, type: 'MARKET', amount: 1 })]);
+      expect(exchangeOf(ORDER_ERRORED_EVENT).portfolioReadAfterOrder).toBe(false);
+    });
+
+    // A reset of GridBot cancels its orders one after the other: the report of the first cancel sends a read, the second cancel comes
+    // while that read is in flight, waits for it to end, then reads again
+    describe('when an order ends while the read after the end of another is in flight', () => {
+      /** Cancels two orders, the second while the read the first sent is in flight, then answers that read */
+      const cancelBoth = async (secondRead: 'succeeds' | 'fails') => {
+        await trader['synchronize']();
+        const first = await prepareOrder('creation', adviceOf(FIRST_ID));
+        const second = await prepareOrder('creation', adviceOf(SECOND_ID));
+        const firstRead = deferred<Portfolio>();
+        fakeExchange.fetchBalance.mockReturnValueOnce(firstRead.promise);
+        if (secondRead === 'fails') fakeExchange.fetchBalance.mockRejectedValueOnce(NETWORK_DOWN);
+        const reported = [first.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED), second.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED)];
+        await tick(10); // The second report reaches its synchronization while the read of the first is in flight
+        firstRead.resolve(READ);
+        await Promise.all(reported);
+      };
+
+      it.each`
+        id           | secondRead    | expected | description
+        ${FIRST_ID}  | ${'fails'}    | ${true}  | ${'the first, read after its end'}
+        ${SECOND_ID} | ${'fails'}    | ${false} | ${'the second, its own read failing: the read the first sent before it ended'}
+        ${SECOND_ID} | ${'succeeds'} | ${true}  | ${'the second, its own read succeeding'}
+      `('says whether the balances of $description were read after it: $expected', async ({ id, secondRead, expected }) => {
+        await cancelBoth(secondRead);
+        expect(exchangeOf(ORDER_CANCELED_EVENT, id).portfolioReadAfterOrder).toBe(expected);
+      });
+    });
+
+    // Sent before the end of the order and answered after it, the read is dated after the moment a strategy waited on
+    it('is false in the end of an order that came while a periodic read was in flight, its own read failing', async () => {
+      const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+      const periodicRead = deferred<Portfolio>();
+      fakeExchange.fetchBalance.mockReturnValueOnce(periodicRead.promise).mockRejectedValueOnce(NETWORK_DOWN);
+      const periodic = trader['synchronize']();
+      const reported = order.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED);
+      await tick(10);
+      periodicRead.resolve(READ);
+      await Promise.all([periodic, reported]);
+      expect(exchangeOf(ORDER_CANCELED_EVENT).portfolioReadAfterOrder).toBe(false);
+    });
+
+    // A completion waits for its summary before its read: the end of an order that ended after it can be relayed first, and the read the
+    // completion carries can follow its own end and miss that one
+    describe('when a completion is relayed after the end of an order that ended after it, both reads after them failing', () => {
+      beforeEach(async () => {
+        await trader['synchronize']();
+        const filled = await prepareOrder('creation', adviceOf(FIRST_ID));
+        const summary = deferred<OrderSummary>();
+        filled.createSummary.mockReturnValueOnce(summary.promise);
+        const completion = filled.emitAndSettle(ORDER_COMPLETED_EVENT);
+        // A periodic read sent after the fill, then the reads after the cancelation and after the completion, which fail
+        const periodicRead = deferred<Portfolio>();
+        fakeExchange.fetchBalance
+          .mockReturnValueOnce(periodicRead.promise)
+          .mockRejectedValueOnce(NETWORK_DOWN)
+          .mockRejectedValueOnce(NETWORK_DOWN);
+        const periodic = trader['synchronize']();
+        const canceled = await prepareOrder('creation', adviceOf(SECOND_ID));
+        const cancelation = canceled.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED);
+        await tick(10);
+        periodicRead.resolve(READ);
+        await Promise.all([periodic, cancelation]);
+        summary.resolve({ amount: 1, price: 95, feePercent: 0.1, side: 'BUY', orderExecutionDate: 1_700_000_050_000 });
+        await completion;
+      });
+
+      it('says the cancelation carries a read sent before it ended', () => {
+        expect(exchangeOf(ORDER_CANCELED_EVENT, SECOND_ID).portfolioReadAfterOrder).toBe(false);
+      });
+
+      // The periodic read followed the fill, not the cancelation relayed before it
+      it('says the completion carries a read that misses the cancelation relayed before it', () => {
+        expect(exchangeOf(ORDER_COMPLETED_EVENT, FIRST_ID).portfolioReadAfterOrder).toBe(false);
+      });
+
+      it('says the end of the next order, whose read succeeds, was read after them all', async () => {
+        const next = await prepareOrder('creation', adviceOf(THIRD_ID));
+        await next.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED);
+        expect(exchangeOf(ORDER_CANCELED_EVENT, THIRD_ID).portfolioReadAfterOrder).toBe(true);
+      });
+    });
+
+    // The time of a read says nothing of the end: a clock set back between the end and the read after it dated a fresh read before the
+    // moment a strategy waited on
+    it('is true for a read after the end that a clock set back dates before the read before it', async () => {
+      vi.setSystemTime(Date.parse('2024-01-01T12:00:30Z'));
+      await trader['synchronize']();
+      const order = await prepareOrder('creation', adviceOf(FIRST_ID));
+      vi.setSystemTime(Date.parse('2024-01-01T11:59:00Z'));
+      await order.emitAndSettle(ORDER_CANCELED_EVENT, CANCELED);
+      expect(exchangeOf(ORDER_CANCELED_EVENT).portfolioReadAfterOrder).toBe(true);
+    });
+  });
+
   // The price the strategy asked for, if any, in both flows. The cancelation flow relayed the price the order was created with: for
   // an order without one, the market price of its creation, which the strategy and the EventSubscriber read as a requested limit price.
   describe.each`
@@ -3957,7 +4143,8 @@ describe('Trader', () => {
   });
 
   describe('checkOrderSummary', () => {
-    it('returns completion summary with computed pricing', () => {
+    // The order of the completed event, its report adding the exchange part (see Trader.reportCompleted)
+    it('returns the completed order with computed pricing', () => {
       const summary: OrderSummary = {
         amount: 2,
         price: 100,
@@ -3980,20 +4167,13 @@ describe('Trader', () => {
       // effective price = 100 + 100 * 0.5% = 100.5
 
       expect(result).toEqual({
-        order: {
-          ...summary,
-          id: '20a7abd2-546b-4c65-b04d-900b84fa5fe6',
-          symbol: 'BTC/USDT',
-          type: 'STICKY',
-          orderCreationDate: 1_700_000_051_000,
-          fee: 1,
-          effectivePrice: 100.5,
-        },
-        exchange: {
-          price: 100,
-          portfolio: trader['portfolio'],
-          portfolioReadAt: undefined,
-        },
+        ...summary,
+        id: '20a7abd2-546b-4c65-b04d-900b84fa5fe6',
+        symbol: 'BTC/USDT',
+        type: 'STICKY',
+        orderCreationDate: 1_700_000_051_000,
+        fee: 1,
+        effectivePrice: 100.5,
       });
     });
 

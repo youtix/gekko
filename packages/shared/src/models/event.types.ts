@@ -52,9 +52,22 @@ export type ExchangeEvent = {
    * When the Trader read these balances, in epoch milliseconds: the wall clock once the exchange answered the read, in a backtest too,
    * whose orders are dated on the clock of the simulated exchange. Undefined for the empty portfolio it starts with, before any read; an
    * end whose read failed carries the last read and its time. The EventSubscriber dates the balances of /portfolio with it. Only the
-   * events of the orders carry it: portfolioChange is a bare Portfolio, queued as the Trader reads it.
+   * events of the orders carry it: portfolioChange is a bare Portfolio, queued as the Trader reads it. It says when, not whether the
+   * balances show the end of the order: see portfolioReadAfterOrder.
    */
   portfolioReadAt?: EpochTimeStamp;
+  /**
+   * Whether the Trader read these balances after the end of the order (see Trader.getExchangeEvent): true when it sent the read once
+   * the order had ended, and once the orders whose ends it relayed before had ended too; false when the read it sent after the end
+   * failed, the event then carrying an earlier one, in which what the order reserved may still count as used and what it filled be
+   * missing, and so for the ends it relays next until a read sent after them all succeeds. A completion, which waits for its summary
+   * before its read, can be relayed after the end of an order that ended after it: its own read can follow its end and miss that one.
+   * GridBot warns before it builds the grid of a reset on balances not read so, and the RoundTripAnalyzer holds no round trip to them.
+   * Not a time: a read that failed leaves one that can be dated after the start of what a strategy waits on (a reset of GridBot) and
+   * predate the end of its last order, and a clock set back dates a fresh read before the end. Undefined before any read, the portfolio
+   * then the empty one the Trader starts with, and in an orderInitiated event, which ends nothing.
+   */
+  portfolioReadAfterOrder?: boolean;
 };
 
 export type OrderInitiatedEvent = {

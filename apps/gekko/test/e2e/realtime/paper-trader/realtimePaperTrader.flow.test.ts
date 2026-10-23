@@ -75,12 +75,14 @@ type OrderEventSummary = {
   executedAt?: EpochTimeStamp;
   exchangePrice: number;
   readAt?: EpochTimeStamp;
+  readAfterOrder?: boolean;
 };
 
 /**
  * The order events the Trader queued, oldest first: when, which one, the order (its side, type and amount, then the price the strategy
  * asked for, none for a MARKET order, or once completed the price it executed at), when it executed, once completed, the last price of
- * its pair, which the event carries, and when the Trader read the balances the event carries (see ExchangeEvent.portfolioReadAt)
+ * its pair, which the event carries, when the Trader read the balances the event carries (see ExchangeEvent.portfolioReadAt) and, for
+ * the end of an order, whether it read them after that end (see ExchangeEvent.portfolioReadAfterOrder), left out of its creation
  */
 const orderEvents = () =>
   traderEvents
@@ -90,6 +92,7 @@ const orderEvents = () =>
       const { side, type, amount, price } = order;
       const described = `${side} ${type} ${amount}${isNil(price) ? '' : ` at ${price}`}`;
       const execution = 'orderExecutionDate' in order && { executedAt: order.orderExecutionDate };
+      const readAfterOrder = 'portfolioReadAfterOrder' in exchange && { readAfterOrder: exchange.portfolioReadAfterOrder };
       return {
         at: event.at,
         name: event.name,
@@ -97,6 +100,7 @@ const orderEvents = () =>
         ...execution,
         exchangePrice: exchange.price,
         readAt: exchange.portfolioReadAt,
+        ...readAfterOrder,
       };
     });
 
@@ -195,12 +199,29 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       // ticker quoted a price of its own, about 10,000, which the BUY was priced at and all but the SELL's first event carried, while
       // these candles traded at 100 and 110. Each MARKET order fills as it is sent, at the clock of the simulator, the close of its
       // candle, and is reported before the next tick. Each event carries the balances the Trader read last, and when: the BUY is placed
-      // after the read of the end of the warmup, each end comes with the read after it, and the SELL goes out with the BUY's.
+      // after the read of the end of the warmup, each end comes with the read after it, which it says it made after that end, and the
+      // SELL goes out with the BUY's.
       orderEvents: [
         { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 100, readAt: at(1, 2) },
-        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 100', executedAt: at(1), exchangePrice: 100, readAt: at(1, 2) },
+        {
+          at: at(1, 2),
+          name: 'orderCompleted',
+          order: 'BUY MARKET 1 at 100',
+          executedAt: at(1),
+          exchangePrice: 100,
+          readAt: at(1, 2),
+          readAfterOrder: true,
+        },
         { at: at(2, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 110, readAt: at(1, 2) },
-        { at: at(2, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 110', executedAt: at(2), exchangePrice: 110, readAt: at(2, 2) },
+        {
+          at: at(2, 2),
+          name: 'orderCompleted',
+          order: 'SELL MARKET 1 at 110',
+          executedAt: at(2),
+          exchangePrice: 110,
+          readAt: at(2, 2),
+          readAfterOrder: true,
+        },
       ],
       roundTrips: [
         {
@@ -321,9 +342,25 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       // the balances read after the BUY, three minutes before: nothing read them again since.
       orderEvents: [
         { at: at(1, 2), name: 'orderInitiated', order: 'BUY MARKET 1', exchangePrice: 9500, readAt: at(1, 2) },
-        { at: at(1, 2), name: 'orderCompleted', order: 'BUY MARKET 1 at 9500', executedAt: at(1), exchangePrice: 9500, readAt: at(1, 2) },
+        {
+          at: at(1, 2),
+          name: 'orderCompleted',
+          order: 'BUY MARKET 1 at 9500',
+          executedAt: at(1),
+          exchangePrice: 9500,
+          readAt: at(1, 2),
+          readAfterOrder: true,
+        },
         { at: at(4, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 9800, readAt: at(1, 2) },
-        { at: at(4, 2), name: 'orderCompleted', order: 'SELL MARKET 1 at 9800', executedAt: at(4), exchangePrice: 9800, readAt: at(4, 2) },
+        {
+          at: at(4, 2),
+          name: 'orderCompleted',
+          order: 'SELL MARKET 1 at 9800',
+          executedAt: at(4),
+          exchangePrice: 9800,
+          readAt: at(4, 2),
+          readAfterOrder: true,
+        },
       ],
     });
   });
@@ -365,7 +402,15 @@ describe('E2E: Realtime Paper Trader Flow', () => {
       // at 10000, and brings 10000 × 0.999 = 9990. It goes out with the balances the periodic read of 12:04:30 read.
       orderEvents: [
         { at: at(1, 2), name: 'orderInitiated', order: 'BUY LIMIT 1 at 9500', exchangePrice: 10000, readAt: at(1, 2) },
-        { at: at(3, 22), name: 'orderCompleted', order: 'BUY LIMIT 1 at 9500', executedAt: at(3), exchangePrice: 10000, readAt: at(3, 22) },
+        {
+          at: at(3, 22),
+          name: 'orderCompleted',
+          order: 'BUY LIMIT 1 at 9500',
+          executedAt: at(3),
+          exchangePrice: 10000,
+          readAt: at(3, 22),
+          readAfterOrder: true,
+        },
         { at: at(5, 2), name: 'orderInitiated', order: 'SELL MARKET 1', exchangePrice: 10000, readAt: at(4, 30) },
         {
           at: at(5, 2),
@@ -374,6 +419,7 @@ describe('E2E: Realtime Paper Trader Flow', () => {
           executedAt: at(5),
           exchangePrice: 10000,
           readAt: at(5, 2),
+          readAfterOrder: true,
         },
       ],
       // The Trader reads the balance at its start, at the end of the warmup, after each order and every two minutes, and queues each read

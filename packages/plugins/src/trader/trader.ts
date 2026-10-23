@@ -77,6 +77,11 @@ export class Trader extends Plugin {
    */
   private portfolioReadAt?: EpochTimeStamp;
   /**
+   * The number of the synchronization that read the portfolio (see synchronizationCount), 0 before any read: a read numbered above the
+   * count noted when an order ended was sent after that end, and shows it (see getExchangeEvent)
+   */
+  private portfolioReadNumber = 0;
+  /**
    * What the Trader's own BUYs held of each currency at the last balance read, by currency: what that read shows taken from it, reserved
    * or spent (see readHeldByOpenBuys). A BUY by its allocation asks for its share of the currency read and of this (see getBudget).
    */
@@ -89,6 +94,13 @@ export class Trader extends Plugin {
   private synchronization: Promise<void> | null = null;
   /** How many synchronizations have started: whoever notes the count knows which ones read the exchange after that moment */
   private synchronizationCount = 0;
+  /**
+   * The count of synchronizations started when the last of the orders whose end the Trader relayed ended: the greatest of the counts
+   * noted at those ends, which a read must be numbered above to show them all (see getExchangeEvent). The ends are not always relayed
+   * in the order they happened: a completion waits for its summary before its read, and the end of an order that ended after it can be
+   * relayed first.
+   */
+  private relayedEndCount = 0;
   /**
    * What may still queue the end of an order: the reports in flight (see relayTerminalEvents), and the launches and cancelations
    * sent, whose answer may end the order and so start a report. Each one leaves the set once settled. None rejects: each catches
@@ -125,7 +137,8 @@ export class Trader extends Plugin {
    * Unless it started too early for the caller. An order that ended filled or canceled changed the portfolio (a fill, the release of
    * what the order reserved), and so may one that ended in error or refused (see relayError): its event carries the portfolio after
    * that change. `startedAfter` is then the count of synchronizations started when the order ended, and one started before may have
-   * read the exchange too early. The caller waits for it to end, then joins the next one, which all such callers share.
+   * read the exchange too early. The caller waits for it to end, then joins the next one, which all such callers share. Should that one
+   * fail, the event carries an earlier read, and says so (see getExchangeEvent).
    *
    * Not async, so that the promise returned is the synchronization itself, and a caller resumes right after it ends.
    */
@@ -163,6 +176,7 @@ export class Trader extends Plugin {
     // Update portfolio, balance and prices
     this.portfolio = await exchange.fetchBalance();
     this.portfolioReadAt = Date.now();
+    this.portfolioReadNumber = synchronizationNumber;
     // A balance that shows the orders placed before this synchronization started: they take nothing more from it (see unreadOrders)
     for (const [id, { synchronizationCount }] of this.unreadOrders) {
       if (synchronizationCount < synchronizationNumber) this.unreadOrders.delete(id);
@@ -586,21 +600,32 @@ export class Trader extends Plugin {
 
   /**
    * What the events of an order of `symbol` say of the exchange (see ExchangeEvent): the last price of the pair, the portfolio the
-   * Trader read last, and when it read it, undefined before any read
+   * Trader read last, and when it read it, undefined before any read. The end of an order, given `endCount`, the count of
+   * synchronizations started when it ended (see synchronize), also says whether that read was sent after it and after the ends of the
+   * orders relayed before it (see relayedEndCount), undefined before any read (see ExchangeEvent.portfolioReadAfterOrder). Told from the
+   * numbers of the synchronizations, not from times: GridBot compared the time of a read with the start of a reset, and missed a read
+   * sent between two of its cancels, or a periodic one sent before it and answered after, both dated after that start while the last
+   * order the reset canceled had not ended yet, and took a fresh read for a stale one under a clock set back.
    */
-  private getExchangeEvent(symbol: TradingPair): ExchangeEvent {
-    return { price: this.getLastPrice(symbol), portfolio: this.portfolio, portfolioReadAt: this.portfolioReadAt };
+  private getExchangeEvent(symbol: TradingPair, endCount?: number): ExchangeEvent {
+    const { portfolio, portfolioReadAt } = this;
+    const exchange = { price: this.getLastPrice(symbol), portfolio, portfolioReadAt };
+    if (isNil(endCount)) return exchange;
+    this.relayedEndCount = Math.max(this.relayedEndCount, endCount);
+    const portfolioReadAfterOrder = isNil(portfolioReadAt) ? undefined : this.portfolioReadNumber > this.relayedEndCount;
+    return { ...exchange, portfolioReadAfterOrder };
   }
 
   /**
-   * The completed event of an order from its summary, whose figures are usable numbers: the exchange's, checked, or an estimate (see
-   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing), the asset the fee
-   * was taken in and what it took of the asset of the pair. The line names the asset the fee was taken in when it is known and not the
-   * currency the fee is written in: the asset bought, which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose
-   * fee no rate converts. Trades that took their fees in the asset and in another currency, as a BUY whose BNB ran out partway, name
-   * none: the line names what they took of the asset instead (`Fee taken in: 0.0005 BTC and another currency,`).
+   * The order of the completed event of an order, from its summary, whose figures are usable numbers: the exchange's, checked, or an
+   * estimate (see summarizeCompletedOrder), the report adding the exchange part (see reportCompleted). Only the fee rate may be unknown,
+   * the fee then taken as 0 (see computeOrderPricing), the asset the fee was taken in and what it took of the asset of the pair. The line
+   * names the asset the fee was taken in when it is known and not the currency the fee is written in: the asset bought, which Binance
+   * takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee no rate converts. Trades that took their fees in the asset and
+   * in another currency, as a BUY whose BNB ran out partway, name none: the line names what they took of the asset instead (`Fee taken
+   * in: 0.0005 BTC and another currency,`).
    */
-  private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent {
+  private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent['order'] {
     const { amount, price, feePercent, feeAsset, feeTakenInAsset, side, orderExecutionDate } = summary;
     const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent);
     const [assetName, currencyName] = symbol.split('/');
@@ -620,8 +645,7 @@ export class Trader extends Plugin {
       ].join(' '),
     );
 
-    const order = { ...summary, id, orderCreationDate, type, fee, effectivePrice, symbol };
-    return { order, exchange: this.getExchangeEvent(symbol) };
+    return { ...summary, id, orderCreationDate, type, fee, effectivePrice, symbol };
   }
 
   /**
@@ -714,7 +738,7 @@ export class Trader extends Plugin {
    * filled, a poll can fail for good after a fill, a creation whose outcome is unknown may be live), and the relaunch of a STICKY
    * order is refused once its move has canceled the transaction before, releasing what it reserved. The synchronization is best
    * effort, here as in every report: a failure is logged, and the event leaves with the portfolio known, since the strategy waits
-   * for it whatever happens.
+   * for it whatever happens, and says that it was not read after the end (see getExchangeEvent).
    * The event carries what the order had filled (`filled`, see Order.getFilledAmount): only a STICKY order's reason told it, in words,
    * and a BUY that errored after a fill lost the trailing stop of the coins it had bought (see StrategyManager.onOrderErrored). It
    * carries `mayBeLive` as the order said it (see Order.orderErrored), false for a refusal: GridBot could only read it from the words of
@@ -737,7 +761,7 @@ export class Trader extends Plugin {
     }
     this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, {
       order: { ...order, reason, orderErrorDate: this.currentTimestamp, filled, mayBeLive, ...(!isNil(fillPrice) && { fillPrice }) },
-      exchange: this.getExchangeEvent(order.symbol),
+      exchange: this.getExchangeEvent(order.symbol, startedAfter),
     });
   }
 
@@ -819,7 +843,8 @@ export class Trader extends Plugin {
       } catch (err) {
         error('trader', `[${id}] Impossible to synchronize: ${describeError(err)}`);
       }
-      const { order: completed, exchange } = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
+      const completed = this.checkOrderSummary({ id, symbol, type, orderCreationDate, summary });
+      const exchange = this.getExchangeEvent(symbol, startedAfter);
       this.addDeferredEmit<OrderCompletedEvent>(ORDER_COMPLETED_EVENT, { order: { ...order, ...completed }, exchange });
       this.orders.delete(id);
     } catch (err) {
@@ -851,7 +876,7 @@ export class Trader extends Plugin {
       const fillPrice = this.getFillPrice(orderInstance, type);
       this.addDeferredEmit<OrderCanceledEvent>(ORDER_CANCELED_EVENT, {
         order: { ...order, orderCancelationDate: timestamp, filled, remaining, ...(!isNil(fillPrice) && { fillPrice }) },
-        exchange: this.getExchangeEvent(symbol),
+        exchange: this.getExchangeEvent(symbol, startedAfter),
       });
     } catch (err) {
       error('trader', `[${id}] Impossible to report the cancelation of the ${side} ${type} order: ${describeError(err)}`);
@@ -982,7 +1007,7 @@ export class Trader extends Plugin {
         // Unknown (a pair not watched), 0, negative or NaN: the order can be neither sized nor placed. The strategy already holds its
         // id and waits for a terminal event of it: it hears of it as an error, like an order the exchange refused. Nothing was
         // initiated and nothing changed on the exchange: no ORDER_INITIATED_EVENT, no synchronization, the event leaves with the
-        // portfolio known.
+        // portfolio known, saying that no read followed the end of the order (see getExchangeEvent).
         if (!price || price <= 0) {
           const reason = isNil(advice.price)
             ? `no price known for ${symbol}`
@@ -999,7 +1024,8 @@ export class Trader extends Plugin {
             filled: 0,
             mayBeLive: false,
           };
-          this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, { order, exchange: this.getExchangeEvent(symbol) });
+          const exchange = this.getExchangeEvent(symbol, this.synchronizationCount);
+          this.addDeferredEmit<OrderErroredEvent>(ORDER_ERRORED_EVENT, { order, exchange });
           return;
         }
 
