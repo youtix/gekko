@@ -29,12 +29,22 @@ type RelayedOrder = Pick<AdviceOrder, 'id'> & Partial<Omit<AdviceOrder, 'id' | '
  * (0), on a market without minimums.
  */
 export type OutcomeFacts = {
-  /** What a cancelation reports filled; left out, or given as undefined, the event misses it, as the order leaves out a fill unknown */
+  /**
+   * What a cancelation, or an error, reports filled; left out, or given as undefined, the event misses it, as the order leaves out a
+   * fill unknown
+   */
   filled?: number;
   /** What a cancelation reports remaining; left out, or given as undefined, the event misses it */
   remaining?: number;
+  /** Whether an order that errored may still be live on the exchange (OrderErroredEvent.mayBeLive); left out, the event misses it */
+  mayBeLive?: boolean;
   /** The portfolio after the order */
   portfolio?: Portfolio;
+  /**
+   * Whether the Trader read that portfolio after the order ended (ExchangeEvent.portfolioReadAfterOrder); left out, the event misses
+   * it, as before the Trader's first read
+   */
+  portfolioReadAfterOrder?: boolean;
   /** The price of the order's pair */
   price?: number;
   /** tools.marketData */
@@ -85,7 +95,7 @@ export const relayOrderOutcome = <T>(
   facts: OutcomeFacts = {},
 ): unknown => {
   const { portfolio = new Map(), price = 0, marketData = new Map(), log = noop } = facts;
-  const exchange = { portfolio, price };
+  const exchange = { portfolio, price, ...pick(facts, 'portfolioReadAfterOrder') };
   const tools = { marketData, log };
   switch (outcome) {
     case 'completed':
@@ -94,8 +104,10 @@ export const relayOrderOutcome = <T>(
       const params = { order: { ...order, ...pick(facts, 'filled', 'remaining') }, exchange, tools };
       return target.onOrderCanceled?.(params as unknown as OnOrderCanceledEventParams<T>);
     }
-    case 'errored':
-      return target.onOrderErrored?.({ order, exchange, tools } as unknown as OnOrderErroredEventParams<T>);
+    case 'errored': {
+      const params = { order: { ...order, ...pick(facts, 'filled', 'mayBeLive') }, exchange, tools };
+      return target.onOrderErrored?.(params as unknown as OnOrderErroredEventParams<T>);
+    }
     default:
       throw new Error(`Unknown order outcome: ${outcome}`);
   }

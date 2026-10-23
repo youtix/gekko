@@ -2,7 +2,15 @@ import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { describe, expect, it } from 'vitest';
-import { coversAmountAsked, getHolding, isSellable, pickTradedPair } from './positionTracker.helper';
+import {
+  coversAmountAsked,
+  describeUnfinishedEnd,
+  getHolding,
+  getUnreadHolding,
+  isReadBeforeEnd,
+  isSellable,
+  pickTradedPair,
+} from './positionTracker.helper';
 import { ETH_IGNORED_WARNING, holding, LoggedLine } from './positionTracker.mock';
 import { UnfinishedOrderParams } from './positionTracker.types';
 
@@ -76,6 +84,59 @@ describe('getHolding', () => {
     ${'SELL'}
   `('knows nothing held after a $side without a fill, the portfolio not read', ({ side }) => {
     expect(getHolding({ side }, outcomeOf(1, notRead))).toBeUndefined();
+  });
+});
+
+describe('isReadBeforeEnd', () => {
+  // Undefined: before the Trader's first read, and in events built without the flag
+  it.each`
+    portfolioReadAfterOrder | expected
+    ${true}                 | ${false}
+    ${false}                | ${true}
+    ${undefined}            | ${false}
+  `('is $expected when the Trader says $portfolioReadAfterOrder of a read after the end', ({ portfolioReadAfterOrder, expected }) => {
+    expect(isReadBeforeEnd({ portfolioReadAfterOrder })).toBe(expected);
+  });
+});
+
+describe('getUnreadHolding', () => {
+  /** What the end of an order of BTC/USDT placed for `amount` carries that getUnreadHolding reads: what an error reports filled */
+  const endOf = (amount: number, filled?: number) =>
+    ({ order: { symbol: 'BTC/USDT', amount, filled } }) as unknown as UnfinishedOrderParams;
+
+  // The balances of the event, read before its end, are not read: a BUY canceled and a SELL of an amount sent for all of it are settled
+  // as after any read, what a BUY that errored filled and what any other SELL canceled left unsold are only the least held
+  it.each`
+    case                                                | outcome       | pending                        | amount | filled       | fill                               | expected
+    ${'a BUY canceled after filling 0.9'}               | ${'canceled'} | ${{ side: 'BUY' }}             | ${1}   | ${undefined} | ${{ filled: 0.9, remaining: 0.1 }} | ${{ held: 0.9, fact: 'filled' }}
+    ${'a BUY errored after filling 0.5'}                | ${'errored'}  | ${{ side: 'BUY' }}             | ${1}   | ${0.5}       | ${undefined}                       | ${{ held: 0.5, fact: 'filled', least: true }}
+    ${'a BUY errored, its fill missing from the event'} | ${'errored'}  | ${{ side: 'BUY' }}             | ${1}   | ${undefined} | ${undefined}                       | ${{ held: 0, fact: 'filled', least: true }}
+    ${'a SELL of 2 sent for 2, 0.5 left unsold'}        | ${'canceled'} | ${{ side: 'SELL', amount: 2 }} | ${2}   | ${undefined} | ${{ filled: 1.5, remaining: 0.5 }} | ${{ held: 0.5, fact: 'left unsold' }}
+    ${'a SELL of 2 sent for 1, 0.5 left unsold'}        | ${'canceled'} | ${{ side: 'SELL', amount: 2 }} | ${1}   | ${undefined} | ${{ filled: 0.5, remaining: 0.5 }} | ${{ held: 0.5, fact: 'left unsold', least: true }}
+    ${'an all-in SELL, 0.5 left unsold'}                | ${'canceled'} | ${{ side: 'SELL' }}            | ${1}   | ${undefined} | ${{ filled: 0.5, remaining: 0.5 }} | ${{ held: 0.5, fact: 'left unsold', least: true }}
+    ${'a BUY canceled without its fill'}                | ${'canceled'} | ${{ side: 'BUY' }}             | ${1}   | ${undefined} | ${undefined}                       | ${undefined}
+    ${'a SELL canceled without its fill'}               | ${'canceled'} | ${{ side: 'SELL' }}            | ${1}   | ${undefined} | ${undefined}                       | ${undefined}
+    ${'a SELL errored after selling 0.5'}               | ${'errored'}  | ${{ side: 'SELL' }}            | ${1}   | ${0.5}       | ${undefined}                       | ${undefined}
+  `('reads what $case leaves held', ({ outcome, pending, amount, filled, fill, expected }) => {
+    expect(getUnreadHolding(outcome, pending, endOf(amount, filled), fill)).toEqual(expected);
+  });
+});
+
+describe('describeUnfinishedEnd', () => {
+  /** What the end of an order of BTC/USDT carries that describeUnfinishedEnd reads: what it reports filled */
+  const endOf = (filled?: number) => ({ order: { symbol: 'BTC/USDT', filled } }) as unknown as UnfinishedOrderParams;
+
+  // A cancelation tells its fill with its rest, or tells none; an error reports 0 filled when it reports no fill
+  it.each`
+    case                                          | outcome       | filled       | fill                                     | expected
+    ${'a cancelation after a fill of 0.9999'}     | ${'canceled'} | ${0.9999}    | ${{ filled: 0.9999, remaining: 0.0001 }} | ${'canceled after 0.9999 BTC filled'}
+    ${'a cancelation after a fill of 0'}          | ${'canceled'} | ${0}         | ${{ filled: 0, remaining: 1 }}           | ${'canceled after 0 BTC filled'}
+    ${'a cancelation without its fill'}           | ${'canceled'} | ${undefined} | ${undefined}                             | ${'canceled, no fill reported'}
+    ${'a cancelation without the rest of a fill'} | ${'canceled'} | ${0.5}       | ${undefined}                             | ${'canceled, no fill reported'}
+    ${'an error after a fill of 0.0000001'}       | ${'errored'}  | ${1e-7}      | ${undefined}                             | ${'errored after 0.0000001 BTC filled'}
+    ${'an error that reports no fill'}            | ${'errored'}  | ${0}         | ${undefined}                             | ${'errored, no fill reported'}
+  `('words $case: $expected', ({ outcome, filled, fill, expected }) => {
+    expect(describeUnfinishedEnd(outcome, endOf(filled), fill)).toBe(expected);
   });
 });
 

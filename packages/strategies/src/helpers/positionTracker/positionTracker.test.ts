@@ -148,10 +148,11 @@ describe('PositionTracker', () => {
 
       // A SELL of 50 % and one of 50 USDT at 100 USDT are each sent for 0.5 BTC, an all-in SELL capped at a maximum of 0.6 BTC for 0.6,
       // a SELL of 2 BTC capped at a maximum of 1 BTC for 1, a stop's SELL for the 0.5 BTC its BUY filled: each leaves the rest of the
-      // asset held. A SELL of 2 sent as asked is the position, whatever else is held. A portfolio known from before the order, its read
-      // after it having failed, still shows what the order sold: an all-in SELL is then read long, as when it completes, the position
-      // settled by the next SELL, refused for lack of anything to sell. 0 filled and 0 remaining used to stand for no fill reported,
-      // which the order now leaves out: reported, it is a fact, nothing left unsold.
+      // asset held. A SELL of 2 sent as asked is the position, whatever else is held. A portfolio that still shows what the order sold,
+      // in an event that does not say when it was read, is read so: an all-in SELL is then long, as when it completes, the position
+      // settled by the next SELL, refused for lack of anything to sell (a read the Trader says it made before the end is not read: see
+      // 'position after an order whose balances the Trader read before its end'). 0 filled and 0 remaining used to stand for no fill
+      // reported, which the order now leaves out: reported, it is a fact, nothing left unsold.
       it.each`
         case                                                                                      | steps    | sent   | filled    | remaining | free         | isLong
         ${'a SELL of 50 %, 0.0001 left unsold, 0.5001 BTC free: long'}                            | ${HALF}  | ${0.5} | ${0.4999} | ${0.0001} | ${0.5001}    | ${true}
@@ -290,11 +291,12 @@ describe('PositionTracker', () => {
       });
 
       it.each`
-        case                                  | steps    | outcome       | facts                                    | message
-        ${'a SELL errored, no BTC left'}      | ${LONG}  | ${'errored'}  | ${{ portfolio: holding(symbol, 0) }}     | ${'[00000000-0000-0000-0000-000000000002] SELL order errored: 0 BTC free in the portfolio after it, too little to sell: the strategy is flat'}
-        ${'a BUY errored, 0.5 BTC bought'}    | ${'buy'} | ${'errored'}  | ${{ portfolio: holding(symbol, 0.5) }}   | ${'[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
-        ${'a BUY canceled after filling 0.9'} | ${'buy'} | ${'canceled'} | ${{ filled: 0.9, remaining: 0.1 }}       | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.9 BTC filled, enough to sell: the strategy is long'}
-        ${'a SELL canceled with 0.0001 left'} | ${LONG}  | ${'canceled'} | ${{ filled: 0.9999, remaining: 0.0001 }} | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat'}
+        case                                  | steps    | outcome       | facts                                                            | message
+        ${'a SELL errored, no BTC left'}      | ${LONG}  | ${'errored'}  | ${{ portfolio: holding(symbol, 0) }}                             | ${'[00000000-0000-0000-0000-000000000002] SELL order errored: 0 BTC free in the portfolio after it, too little to sell: the strategy is flat'}
+        ${'a BUY errored, 0.5 BTC bought'}    | ${'buy'} | ${'errored'}  | ${{ portfolio: holding(symbol, 0.5) }}                           | ${'[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+        ${'a BUY canceled after filling 0.9'} | ${'buy'} | ${'canceled'} | ${{ filled: 0.9, remaining: 0.1 }}                               | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.9 BTC filled, enough to sell: the strategy is long'}
+        ${'a SELL canceled with 0.0001 left'} | ${LONG}  | ${'canceled'} | ${{ filled: 0.9999, remaining: 0.0001 }}                         | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat'}
+        ${'a BUY that filled 0.0000005'}      | ${'buy'} | ${'canceled'} | ${{ filled: 5e-7, remaining: 0.9999995, marketData: new Map() }} | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.0000005 BTC filled, enough to sell: the strategy is long'}
       `('logs the position read from $case, which changes it', ({ steps, outcome, facts, message }) => {
         play(steps);
         relayLast(outcome, { ...facts, log });
@@ -352,9 +354,10 @@ describe('PositionTracker', () => {
     });
 
     it.each`
-      case                         | steps    | sold | free   | message
-      ${'an all-in SELL capped'}   | ${LONG}  | ${1} | ${0.5} | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 BTC: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
-      ${'a SELL of 2 capped at 1'} | ${SELL2} | ${1} | ${1}   | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 of the 2 BTC it asked for: 1 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+      case                         | steps    | sold    | free   | message
+      ${'an all-in SELL capped'}   | ${LONG}  | ${1}    | ${0.5} | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 BTC: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+      ${'a SELL of 2 capped at 1'} | ${SELL2} | ${1}    | ${1}   | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 1 of the 2 BTC it asked for: 1 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+      ${'an all-in SELL of 1e-7'}  | ${LONG}  | ${1e-7} | ${0.5} | ${'[00000000-0000-0000-0000-000000000002] SELL order completed after selling 0.0000001 BTC: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
     `('logs the position it reads long after $case', ({ steps, sold, free, message }) => {
       play(steps);
       completeLast(sold, free);
@@ -377,6 +380,129 @@ describe('PositionTracker', () => {
       completeLast(1, 0.5);
       expect(tracker.canSell()).toBe(true);
     });
+  });
+
+  // The Trader reads the balances once an order has ended, best effort: when that read fails, the event carries the read before it, and
+  // says so (ExchangeEvent.portfolioReadAfterOrder false). That read may still show free what a SELL sold, count as used what a canceled
+  // order held, or miss what a BUY bought: the portfolio of each row would give the other position, or none, were it read.
+  describe('position after an order whose balances the Trader read before its end', () => {
+    const SELL2 = 'buy completed:1 sell2';
+    const HALF = 'buy completed:1 sellHalf';
+    const ID1: UUID = '00000000-0000-0000-0000-000000000001';
+    const ID2: UUID = '00000000-0000-0000-0000-000000000002';
+    let log: Mock<LoggerFn>;
+
+    /**
+     * Relays the end of the last order placed, of `amount` when given (sent, or executed for a completion), its event reporting the
+     * facts given, at 100 USDT
+     */
+    const endLast = (outcome: OrderOutcome, amount: number | undefined, facts: OutcomeFacts) =>
+      relayOrderOutcome(
+        tracker,
+        outcome,
+        { ...orders.created(orders.ids.length)!, ...(amount !== undefined && { amount }) },
+        { price: PRICE, marketData, log, ...facts },
+      );
+
+    /** endLast, the balances of its event read before the end */
+    const endUnread = (outcome: OrderOutcome, amount: number | undefined, facts: OutcomeFacts) =>
+      endLast(outcome, amount, { portfolioReadAfterOrder: false, ...facts });
+
+    /** The warning of a position kept after the order `id` ended (see PositionTracker.keepPosition) */
+    const kept = (id: UUID, ended: string, position: string) =>
+      `[${id}] ${ended}, and the Trader could not read the balances after it: the strategy stays ${position} until the end of its next order`;
+
+    beforeEach(() => {
+      log = vi.fn();
+    });
+
+    // A SELL that sold all it asked for, the fill of a BUY canceled, and what a SELL of an amount sent for all of it left unsold settle
+    // the position, as after any read. What any other SELL canceled after a fill left unsold, and what a BUY that errored filled, are the
+    // least held, which makes it long when enough to sell. Anything else keeps the position: the end of the next order reads it again.
+    it.each`
+      case                                                                                    | steps    | outcome        | amount       | facts                                                                        | isLong
+      ${'an all-in SELL completed, no BTC free in the read: kept long'}                       | ${LONG}  | ${'completed'} | ${1}         | ${{ portfolio: holding(symbol, 0) }}                                         | ${true}
+      ${'a SELL of 2 capped at 1, completed, no BTC free in the read: kept long'}             | ${SELL2} | ${'completed'} | ${1}         | ${{ portfolio: holding(symbol, 0) }}                                         | ${true}
+      ${'a SELL of 50 % completed, no BTC free in the read: kept long'}                       | ${HALF}  | ${'completed'} | ${0.5}       | ${{ portfolio: holding(symbol, 0) }}                                         | ${true}
+      ${'an adopted stop SELL completed, no BTC free in the read: kept long'}                 | ${STOP}  | ${'completed'} | ${1}         | ${{ portfolio: holding(symbol, 0) }}                                         | ${true}
+      ${'a SELL of 2 that sold 2, 1 BTC free in the read: flat'}                              | ${SELL2} | ${'completed'} | ${2}         | ${{ portfolio: holding(symbol, 1) }}                                         | ${false}
+      ${'a BUY completed, no BTC in the read: long'}                                          | ${'buy'} | ${'completed'} | ${1}         | ${{ portfolio: holding(symbol, 0) }}                                         | ${true}
+      ${'a BUY canceled after filling 0.9, no BTC in the read: long'}                         | ${'buy'} | ${'canceled'}  | ${1}         | ${{ filled: 0.9, remaining: 0.1, portfolio: holding(symbol, 0) }}            | ${true}
+      ${'a BUY canceled after filling 0.01, 1 BTC free in the read: flat'}                    | ${'buy'} | ${'canceled'}  | ${1}         | ${{ filled: 0.01, remaining: 0.99, portfolio: holding(symbol, 1) }}          | ${false}
+      ${'a BUY canceled without its fill, 0.4 BTC free in the read: kept flat'}               | ${'buy'} | ${'canceled'}  | ${1}         | ${{ portfolio: holding(symbol, 0.4) }}                                       | ${false}
+      ${'a SELL canceled without its fill, its BTC used in the read: kept long'}              | ${LONG}  | ${'canceled'}  | ${1}         | ${{ portfolio: holding(symbol, 0, 1) }}                                      | ${true}
+      ${'a SELL of 2 sent for 2, 0.0001 left unsold, 1 BTC free in the read: flat'}           | ${SELL2} | ${'canceled'}  | ${2}         | ${{ filled: 1.9999, remaining: 0.0001, portfolio: holding(symbol, 1) }}      | ${false}
+      ${'an all-in SELL, 0.5 left unsold, its BTC used in the read: long'}                    | ${LONG}  | ${'canceled'}  | ${1}         | ${{ filled: 0.5, remaining: 0.5, portfolio: holding(symbol, 0, 1) }}         | ${true}
+      ${'an all-in SELL, 0.0001 left unsold, as much free in the read: kept long'}            | ${LONG}  | ${'canceled'}  | ${1}         | ${{ filled: 0.9999, remaining: 0.0001, portfolio: holding(symbol, 0.0001) }} | ${true}
+      ${'a SELL of 50 %, 0.0001 left unsold, no BTC in the read: kept long'}                  | ${HALF}  | ${'canceled'}  | ${0.5}       | ${{ filled: 0.4999, remaining: 0.0001 }}                                     | ${true}
+      ${'a SELL errored, no fill reported, no BTC free in the read: kept long'}               | ${LONG}  | ${'errored'}   | ${1}         | ${{ filled: 0, mayBeLive: true, portfolio: holding(symbol, 0) }}             | ${true}
+      ${'a SELL errored after selling 0.5, nothing live, no BTC free in the read: kept long'} | ${LONG}  | ${'errored'}   | ${1}         | ${{ filled: 0.5, mayBeLive: false, portfolio: holding(symbol, 0) }}          | ${true}
+      ${'a BUY errored after filling 0.5, no BTC in the read: long'}                          | ${'buy'} | ${'errored'}   | ${1}         | ${{ filled: 0.5, mayBeLive: true, portfolio: holding(symbol, 0) }}           | ${true}
+      ${'a BUY refused, 0.5 BTC free in the read: kept flat'}                                 | ${'buy'} | ${'errored'}   | ${1}         | ${{ filled: 0, mayBeLive: false, portfolio: holding(symbol, 0.5) }}          | ${false}
+      ${'a BUY errored after filling 0.01, 1 BTC free in the read: kept flat'}                | ${'buy'} | ${'errored'}   | ${1}         | ${{ filled: 0.01, mayBeLive: true, portfolio: holding(symbol, 1) }}          | ${false}
+      ${'a BUY errored, its fill missing from the event, 1 BTC free in the read: kept flat'}  | ${'buy'} | ${'errored'}   | ${undefined} | ${{ portfolio: holding(symbol, 1) }}                                         | ${false}
+    `('reads $case', ({ steps, outcome, amount, facts, isLong }) => {
+      play(steps);
+      endUnread(outcome, amount, facts);
+      expect({ isLong: tracker.isLong, isPendingOrder: tracker.isPendingOrder }).toEqual({ isLong, isPendingOrder: false });
+    });
+
+    it.each`
+      case                                             | steps     | outcome        | amount  | facts                                    | level     | message
+      ${'an all-in SELL completed'}                    | ${LONG}   | ${'completed'} | ${1}    | ${{}}                                    | ${'warn'} | ${kept(ID2, 'SELL order completed after selling 1 BTC', 'long')}
+      ${'a SELL of 2 capped at 1, completed'}          | ${SELL2}  | ${'completed'} | ${1}    | ${{}}                                    | ${'warn'} | ${kept(ID2, 'SELL order completed after selling 1 of the 2 BTC it asked for', 'long')}
+      ${'a SELL of 2 capped at 1e-7, completed'}       | ${SELL2}  | ${'completed'} | ${1e-7} | ${{}}                                    | ${'warn'} | ${kept(ID2, 'SELL order completed after selling 0.0000001 of the 2 BTC it asked for', 'long')}
+      ${'a stop SELL adopted while flat, completed'}   | ${'stop'} | ${'completed'} | ${1}    | ${{}}                                    | ${'warn'} | ${kept(ID1, 'SELL order completed after selling 1 BTC', 'flat')}
+      ${'a SELL canceled without its fill'}            | ${LONG}   | ${'canceled'}  | ${1}    | ${{}}                                    | ${'warn'} | ${kept(ID2, 'SELL order canceled, no fill reported', 'long')}
+      ${'an all-in SELL canceled, 0.0001 left unsold'} | ${LONG}   | ${'canceled'}  | ${1}    | ${{ filled: 0.9999, remaining: 0.0001 }} | ${'warn'} | ${kept(ID2, 'SELL order canceled after 0.9999 BTC filled', 'long')}
+      ${'a BUY canceled without its fill'}             | ${'buy'}  | ${'canceled'}  | ${1}    | ${{}}                                    | ${'warn'} | ${kept(ID1, 'BUY order canceled, no fill reported', 'flat')}
+      ${'a SELL errored without a fill'}               | ${LONG}   | ${'errored'}   | ${1}    | ${{ filled: 0, mayBeLive: true }}        | ${'warn'} | ${kept(ID2, 'SELL order errored, no fill reported', 'long')}
+      ${'a SELL errored after selling 0.5'}            | ${LONG}   | ${'errored'}   | ${1}    | ${{ filled: 0.5, mayBeLive: false }}     | ${'warn'} | ${kept(ID2, 'SELL order errored after 0.5 BTC filled', 'long')}
+      ${'a BUY refused'}                               | ${'buy'}  | ${'errored'}   | ${1}    | ${{ filled: 0, mayBeLive: false }}       | ${'warn'} | ${kept(ID1, 'BUY order errored, no fill reported', 'flat')}
+      ${'a BUY errored after filling 0.01'}            | ${'buy'}  | ${'errored'}   | ${1}    | ${{ filled: 0.01, mayBeLive: true }}     | ${'warn'} | ${kept(ID1, 'BUY order errored after 0.01 BTC filled', 'flat')}
+      ${'a BUY errored after filling 0.5'}             | ${'buy'}  | ${'errored'}   | ${1}    | ${{ filled: 0.5, mayBeLive: true }}      | ${'info'} | ${`[${ID1}] BUY order errored: 0.5 BTC filled, enough to sell: the strategy is long`}
+      ${'a BUY canceled after filling 0.9'}            | ${'buy'}  | ${'canceled'}  | ${1}    | ${{ filled: 0.9, remaining: 0.1 }}       | ${'info'} | ${`[${ID1}] BUY order canceled: 0.9 BTC filled, enough to sell: the strategy is long`}
+      ${'a SELL of 2 sent for 2, 0.0001 left unsold'}  | ${SELL2}  | ${'canceled'}  | ${2}    | ${{ filled: 1.9999, remaining: 0.0001 }} | ${'info'} | ${`[${ID2}] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat`}
+    `('logs at $level after $case', ({ steps, outcome, amount, facts, level, message }) => {
+      play(steps);
+      endUnread(outcome, amount, facts);
+      expect(log.mock.calls).toEqual([[level, message]]);
+    });
+
+    // Settled by its figures, a position that does not change is not logged, as after any read
+    it.each`
+      case                                          | steps    | outcome        | amount | facts
+      ${'a SELL of 2 that sold 2'}                  | ${SELL2} | ${'completed'} | ${2}   | ${{}}
+      ${'a BUY completed'}                          | ${'buy'} | ${'completed'} | ${1}   | ${{}}
+      ${'an all-in SELL canceled, 0.5 left unsold'} | ${LONG}  | ${'canceled'}  | ${1}   | ${{ filled: 0.5, remaining: 0.5 }}
+      ${'a BUY canceled after filling 0.01'}        | ${'buy'} | ${'canceled'}  | ${1}   | ${{ filled: 0.01, remaining: 0.99 }}
+    `('logs nothing after $case, which its figures settle', ({ steps, outcome, amount, facts }) => {
+      play(steps);
+      endUnread(outcome, amount, facts);
+      expect(log).not.toHaveBeenCalled();
+    });
+
+    // Only a read the Trader says it made before the end changes the reading: one it made after the end, or one it says nothing of (the
+    // empty portfolio before its first read, events built without the flag), is the state after the order
+    it.each`
+      end                                                | steps    | outcome        | amount | portfolio               | portfolioReadAfterOrder | isLong
+      ${'an all-in SELL completed, no BTC free'}         | ${LONG}  | ${'completed'} | ${1}   | ${holding(symbol, 0)}   | ${true}                 | ${false}
+      ${'an all-in SELL completed, no BTC free'}         | ${LONG}  | ${'completed'} | ${1}   | ${holding(symbol, 0)}   | ${undefined}            | ${false}
+      ${'an all-in SELL completed, no BTC free'}         | ${LONG}  | ${'completed'} | ${1}   | ${holding(symbol, 0)}   | ${false}                | ${true}
+      ${'a BUY canceled without its fill, 0.4 BTC free'} | ${'buy'} | ${'canceled'}  | ${1}   | ${holding(symbol, 0.4)} | ${true}                 | ${true}
+      ${'a BUY canceled without its fill, 0.4 BTC free'} | ${'buy'} | ${'canceled'}  | ${1}   | ${holding(symbol, 0.4)} | ${undefined}            | ${true}
+      ${'a BUY canceled without its fill, 0.4 BTC free'} | ${'buy'} | ${'canceled'}  | ${1}   | ${holding(symbol, 0.4)} | ${false}                | ${false}
+      ${'a SELL errored without a fill, no BTC free'}    | ${LONG}  | ${'errored'}   | ${1}   | ${holding(symbol, 0)}   | ${true}                 | ${false}
+      ${'a SELL errored without a fill, no BTC free'}    | ${LONG}  | ${'errored'}   | ${1}   | ${holding(symbol, 0)}   | ${undefined}            | ${false}
+      ${'a SELL errored without a fill, no BTC free'}    | ${LONG}  | ${'errored'}   | ${1}   | ${holding(symbol, 0)}   | ${false}                | ${true}
+    `(
+      'reads $end as long ($isLong) when the Trader read it after the end: $portfolioReadAfterOrder',
+      ({ steps, outcome, amount, portfolio, portfolioReadAfterOrder, isLong }) => {
+        play(steps);
+        endLast(outcome, amount, { portfolio, portfolioReadAfterOrder });
+        expect(tracker.isLong).toBe(isLong);
+      },
+    );
   });
 
   describe('canBuy and canSell', () => {
