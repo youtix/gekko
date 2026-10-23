@@ -133,8 +133,8 @@ describe('GridBot', () => {
   /**
    * Delivers the outcome of the live order at that price and side, as the Trader reports it: a cancel with nothing filled and an
    * error 'Test error' that filled nothing and is not live, a refusal, unless `details` say otherwise. The event carries the price of
-   * the order and the balanced portfolio, read as it is delivered, after what the strategy did before (a reset that canceled the order),
-   * unless `event` says otherwise.
+   * the order and the balanced portfolio, read after the order ended (see ExchangeEvent.portfolioReadAfterOrder), after what the
+   * strategy did before (a reset that canceled the order), unless `event` says otherwise.
    */
   const settle = (
     outcome: 'completed' | 'canceled' | 'errored',
@@ -145,7 +145,7 @@ describe('GridBot', () => {
   ) => {
     const { id, amount } = liveOrder(price, side) ?? {};
     const order = { id, symbol: 'BTC/USDT', side, type: 'LIMIT', amount, price } as any;
-    const exchange: ExchangeEvent = { price, portfolio: balancedPortfolio, portfolioReadAt: Date.now(), ...event };
+    const exchange: ExchangeEvent = { price, portfolio: balancedPortfolio, portfolioReadAfterOrder: true, ...event };
     settledIds.add(order.id);
     if (outcome === 'completed') strategy.onOrderCompleted({ order, exchange, tools });
     if (outcome === 'canceled')
@@ -2228,21 +2228,26 @@ describe('GridBot', () => {
       });
     });
 
-    // The Trader reads the balances after each order has ended, best effort: a read that fails leaves the event with the one before, and
-    // one from before the cancels counts what the grid's orders reserved as used, which the new grid left out without a word, smaller,
-    // or refused for an insufficient portfolio
-    describe('on balances the Trader read before the reset', () => {
+    // The Trader reads the balances after each order has ended, best effort: a read that fails leaves the event with the one before,
+    // which may count what the grid's orders reserved as used, which the new grid left out without a word, smaller, or refused for an
+    // insufficient portfolio. The event says whether its read followed the ends (ExchangeEvent.portfolioReadAfterOrder), which the time of
+    // the read did not: a read sent between two cancels, or a periodic one sent before the reset and answered after it, is dated after
+    // the start of the reset, and a clock set back dated a fresh read before it
+    describe('on balances the Trader did not read after the cancels', () => {
       // The reset starts at 12:01, on the close at 111
       const RESET_AT = Date.parse('2024-01-01T12:01:00Z');
-      const READ_BEFORE_RESET =
-        'warn GridBot: The Trader could not read the balances after the cancels of reset 1, its last read predating the reset: what the canceled orders held may still count as locked in other orders, and the grid is built on the rest; a restart builds it on the balances as they are';
+      const NOT_READ_AFTER =
+        "warn GridBot: The Trader could not read the balances after the cancels of reset 1, the last order's event carrying no read made after them: what the canceled orders held may still count as locked in other orders, and the grid is built on the rest; a restart builds it on the balances as they are";
       const BUILT_AT_111 = 'info GridBot: Grid built around 111 with 2 buy / 2 sell levels, qty=2.5';
       // Read before the cancels, the grid's orders reserving all of it: 5 BTC for its SELLs, 462.5 USDT for its BUYs at 90 and 95
       const reservedByTheGrid: Portfolio = new Map<string, BalanceDetail>([
         ['BTC', { free: 0, used: 5, total: 5 }],
         ['USDT', { free: 0, used: 462.5, total: 462.5 }],
       ]);
+      /** The last event of the reset, its read made before the last cancel ended */
+      const readBefore = { ...at111, portfolioReadAfterOrder: false };
 
+      // Should the reset read the clock again, it would start at 12:01
       beforeEach(() => {
         vi.spyOn(Date, 'now').mockReturnValue(RESET_AT);
       });
@@ -2254,41 +2259,55 @@ describe('GridBot', () => {
       };
 
       it.each`
-        read                            | portfolioReadAt
-        ${'a minute before it started'} | ${RESET_AT - ONE_MINUTE}
-        ${'never, none known'}          | ${undefined}
-      `('warns that they predate the reset, before the lines of the grid it builds on them: read $read', ({ portfolioReadAt }) => {
-        resetting();
+        read                                                                 | portfolioReadAt          | portfolioReadAfterOrder
+        ${'before the last cancel ended, dated a minute before the reset'}   | ${RESET_AT - ONE_MINUTE} | ${false}
+        ${'before the last cancel ended, dated a second after the reset'}    | ${RESET_AT + ONE_SECOND} | ${false}
+        ${'never, none known, the portfolio the empty one the Trader holds'} | ${undefined}             | ${undefined}
+      `(
+        'warns that they were not read after the cancels, before the lines of the grid it builds on them: read $read',
+        ({ portfolioReadAt, portfolioReadAfterOrder }) => {
+          resetting();
 
-        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt }))).toEqual([READ_BEFORE_RESET, BUILT_AT_111]);
-      });
+          expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt, portfolioReadAfterOrder }))).toEqual([NOT_READ_AFTER, BUILT_AT_111]);
+        },
+      );
 
       it('builds the grid on them all the same: around 111, on the portfolio of the last event', () => {
         resetting();
-        cancelOpen({ ...at111, portfolioReadAt: RESET_AT - ONE_MINUTE });
+        cancelOpen(readBefore);
 
         expect(sentAfter(4)).toEqual(gridAt111);
       });
 
       it('gives its cause to the stop that follows on balances its orders reserve: none free for the grid', () => {
         resetting();
-        const readBefore = { price: 111, portfolio: reservedByTheGrid, portfolioReadAt: RESET_AT - ONE_MINUTE };
 
-        expect(linesOf(() => cancelOpen(readBefore))).toEqual([
-          READ_BEFORE_RESET,
+        expect(linesOf(() => cancelOpen({ ...readBefore, portfolio: reservedByTheGrid }))).toEqual([
+          NOT_READ_AFTER,
           'info GridBot: 5 BTC and 462.5 USDT locked in other orders, left out: the rebalance and the grid use the free balances only, 0 BTC and 0 USDT',
           'error GridBot: Insufficient portfolio for any grid levels: 0 BTC and 0 USDT free fund no order the market takes',
         ]);
       });
 
+      // A clock set back since the reset started dates a fresh read before it
       it.each`
-        read                   | portfolioReadAt
-        ${'as it started'}     | ${RESET_AT}
-        ${'a second after it'} | ${RESET_AT + ONE_SECOND}
-      `('logs the lines of the grid it builds alone on balances read $read', ({ portfolioReadAt }) => {
+        read                                                         | portfolioReadAt
+        ${'a second after the reset'}                                | ${RESET_AT + ONE_SECOND}
+        ${'a minute before the reset, by a clock set back since it'} | ${RESET_AT - ONE_MINUTE}
+      `('logs the lines of the grid it builds alone on balances read after the cancels, dated $read', ({ portfolioReadAt }) => {
         resetting();
 
-        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt }))).toEqual([BUILT_AT_111]);
+        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt, portfolioReadAfterOrder: true }))).toEqual([BUILT_AT_111]);
+      });
+
+      // The Trader says of the last end whether its read followed every end it relayed before: the reads that failed before it no longer
+      // matter once one after them all succeeded
+      it('logs the lines of the grid it builds alone when the last event alone was read after the cancels', () => {
+        resetting();
+
+        expect(linesOf(() => cancelOpen(at111, { price: 111, portfolio: balancedPortfolio, portfolioReadAfterOrder: false }))).toEqual([
+          BUILT_AT_111,
+        ]);
       });
 
       // No grid is built over an order that may be live untracked, on any balance: the stop alone says why
@@ -2297,7 +2316,7 @@ describe('GridBot', () => {
         settle('errored', 95, 'BUY', lost);
         closeAt([111]);
 
-        expect(linesOf(() => cancelOpen({ ...at111, portfolioReadAt: RESET_AT - ONE_MINUTE }))).toEqual([
+        expect(linesOf(() => cancelOpen(readBefore))).toEqual([
           'error GridBot: BUY 2.5 at 95 may be live on the exchange without GridBot tracking it: the grid of reset 1 is not built over it. Check it on the exchange',
         ]);
       });

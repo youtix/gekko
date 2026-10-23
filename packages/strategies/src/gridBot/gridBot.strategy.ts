@@ -97,7 +97,7 @@ import {
  * - With resetMode 'up', 'down' or 'both', resetConfirmCandles timeframe candles closing in a row beyond the grid on a side it arms
  *   reset the grid: its open orders are canceled, and once the last has ended the grid is placed again around the price of that last
  *   event, on its portfolio, as at the start: the free balances rebalanced first, which realizes what the breakout lost, and an atr
- *   step resolved again. A portfolio the Trader read before the reset, its read after the cancels having failed, is built on all the
+ *   step resolved again. A portfolio the Trader did not read after the cancels, its read after them having failed, is built on all the
  *   same, with a warning (see rebuildOnceEnded). Meanwhile a fill turns no level and a canceled or refused order is not placed again:
  *   the new grid replaces every level. An order that may be live untracked, from before the reset or during it, stops the run where
  *   the new grid would be built over it, which the line that starts the reset says of one from before it. The resetCooldownCandles
@@ -158,11 +158,6 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private cooldownLeft = 0;
   /** The resets started in the run: the number of the last one, which its lines name */
   private resetCount = 0;
-  /**
-   * When the last reset started, on the wall clock the Trader dates its reads of the balances with (see ExchangeEvent.portfolioReadAt),
-   * in a backtest too: a read dated before it may still count as used what the orders the reset canceled reserved (see rebuildOnceEnded)
-   */
-  private resetStartedAt = 0;
 
   // Cached price precision
   private priceDecimals = 2;
@@ -436,7 +431,6 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     const { side, count } = this.outOfRange!;
     this.awaitingReset = true;
     this.resetCount++;
-    this.resetStartedAt = Date.now();
     this.outOfRange = null;
 
     const candles = `${count} consecutive timeframe ${pluralize('candle', count)}`;
@@ -463,19 +457,22 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
    * Places the grid of a reset once the last order it canceled has ended, canceled, filled or in error (see rebuild): around the price
    * of that last event, on the portfolio it carries, which holds what the canceled orders filled first. The Trader reads that portfolio
    * after the order ended, best effort: when the read fails, the event carries the read before it, in which what the canceled orders
-   * reserved may still count as used, left out of the new grid (see prepareGrid). A read dated before the reset started, or not dated,
-   * is warned of, and the grid built on the rest all the same: the warning gives its cause to a smaller grid, or to a stop for an
-   * insufficient portfolio.
+   * reserved may still count as used, left out of the new grid (see prepareGrid). The event says whether its read followed the ends of
+   * the orders (see ExchangeEvent.portfolioReadAfterOrder): one that did not, or no read at all, is warned of, and the grid built on the
+   * rest all the same: the warning gives its cause to a smaller grid, or to a stop for an insufficient portfolio. Compared with the start
+   * of the reset, the time of the read did not tell: a read sent between two cancels, or a periodic one sent before the reset and
+   * answered after it, is dated after that start and still counts what the last canceled order held, and a clock set back dated a fresh
+   * read before it.
    */
-  private rebuildOnceEnded({ price, portfolio, portfolioReadAt }: ExchangeEvent, tools: Tools<GridBotStrategyParams>): void {
+  private rebuildOnceEnded({ price, portfolio, portfolioReadAfterOrder }: ExchangeEvent, tools: Tools<GridBotStrategyParams>): void {
     if (this.orderToLevel.size > 0) return;
     // Not over an order that may be live untracked, which stops the run instead (see rebuild): no grid is built on any balance then
-    const isReadBeforeReset = portfolioReadAt === undefined || portfolioReadAt < this.resetStartedAt;
-    if (isReadBeforeReset && !this.untrackedOrders.length) {
+    if (!portfolioReadAfterOrder && !this.untrackedOrders.length) {
       const unread = `The Trader could not read the balances after the cancels of reset ${this.resetCount}`;
+      const event = "the last order's event carrying no read made after them";
       const locked = 'what the canceled orders held may still count as locked in other orders, and the grid is built on the rest';
       const restart = 'a restart builds it on the balances as they are';
-      tools.log('warn', `GridBot: ${unread}, its last read predating the reset: ${locked}; ${restart}`);
+      tools.log('warn', `GridBot: ${unread}, ${event}: ${locked}; ${restart}`);
     }
     this.rebuild(price, portfolio, tools);
   }
