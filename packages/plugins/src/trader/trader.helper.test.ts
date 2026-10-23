@@ -27,6 +27,7 @@ describe('trader.helper', () => {
       ${'handle zero fee without warning'}  | ${'SELL'} | ${250} | ${3}   | ${0}         | ${{ effectivePrice: 250, base: 750, fee: 0, total: 750 }}
       ${'handle no fee (undefined)'}        | ${'BUY'}  | ${150} | ${3}   | ${undefined} | ${{ effectivePrice: 150, base: 450, fee: 0, total: 450 }}
       ${'handle no fee (negative)'}         | ${'BUY'}  | ${150} | ${3}   | ${-1}        | ${{ effectivePrice: 150, base: 450, fee: 0, total: 450 }}
+      ${'apply no fee for an unknown side'} | ${'HOLD'} | ${100} | ${2}   | ${0.5}       | ${{ effectivePrice: 100, base: 200, fee: 1, total: 200 }}
     `('should $description', ({ side, price, amount, feePercent, expected }) => {
       const result = computeOrderPricing(side, price, amount, feePercent);
       expect(result).toEqual(expected);
@@ -47,6 +48,23 @@ describe('trader.helper', () => {
         expect(computeOrderPricing(side, price, amount, feePercent)).toEqual(expected);
       },
     );
+
+    // The fees of the trades added up exactly (see OrderSummary.fee) are the fee, given with a rate, and the effective price follows them,
+    // the price plus or minus the fee over the amount. Worked back from the rate, rounded to 15 significant digits, the fee of 0.5 at 100
+    // and 0.5 at 100.02 that paid 0.05001, the first in BNB, came out at 0.050010000000000006, and that of a SELL of 0.1 at 100 at 0.02 %
+    // and 0.2 at 100.03 at 0.05 % at 0.012003000000000005. With a trade that says nothing of its fee left out of the rate (1 at 100, then 3
+    // at 110 at 0.5 %), the price times the rate made an effective price of 108.0375, as for a fee of 2.15, where the fees known make 1.65.
+    it.each`
+      description                                    | side      | price     | amount | feePercent          | tradesFee   | expected
+      ${'a BUY of two trades at two rates'}          | ${'BUY'}  | ${100.01} | ${1}   | ${0.05000499950005} | ${0.05001}  | ${{ effectivePrice: 100.06001, base: 100.01, fee: 0.05001, total: 100.06001 }}
+      ${'a SELL of two trades at two rates'}         | ${'SELL'} | ${100.02} | ${0.3} | ${0.04000199960008} | ${0.012003} | ${{ effectivePrice: 99.97999, base: 30.006, fee: 0.012003, total: 29.993997 }}
+      ${'a trade left out of the rate'}              | ${'BUY'}  | ${107.5}  | ${4}   | ${0.5}              | ${1.65}     | ${{ effectivePrice: 107.9125, base: 430, fee: 1.65, total: 431.65 }}
+      ${'a fee that is not a number, from the rate'} | ${'BUY'}  | ${100}    | ${2}   | ${0.75}             | ${NaN}      | ${{ effectivePrice: 100.75, base: 200, fee: 1.5, total: 201.5 }}
+      ${'a fee without a rate, as no fee'}           | ${'BUY'}  | ${100}    | ${2}   | ${undefined}        | ${1}        | ${{ effectivePrice: 100, base: 200, fee: 0, total: 200 }}
+      ${'a fee below 0, as no fee'}                  | ${'SELL'} | ${150}    | ${3}   | ${-1}               | ${-4.5}     | ${{ effectivePrice: 150, base: 450, fee: 0, total: 450 }}
+    `('takes the fees of the trades given for $description', ({ side, price, amount, feePercent, tradesFee, expected }) => {
+      expect(computeOrderPricing(side, price, amount, feePercent, tradesFee)).toEqual(expected);
+    });
 
     it.each`
       description                   | price | amount

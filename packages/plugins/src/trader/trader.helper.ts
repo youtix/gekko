@@ -5,20 +5,19 @@ import { Timeframe } from '@gekko/schemas/configuration/configuration.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import { addPrecise, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
+import { addPrecise, isFiniteNumber, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
 import { shiftDecimalPoint } from '@gekko/shared/utils/math/round.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
-import { isNil } from 'lodash-es';
 import { FreeBalanceLeft } from './trader.types';
 
 type OrderPricing = {
-  /** per unit, post-fee */
+  /** The price plus the fee over the amount for a BUY, less it for a SELL: per unit, the fee in */
   effectivePrice: number;
-  /** amount * price */
+  /** amount × price */
   base: number;
-  /** base * feeRate */
+  /** The fee in currency: the fees of the trades when given, else base × the rate; 0 without a rate, or for a fee below 0 */
   fee: number;
-  /** BUY: base+fee, SELL: base-fee */
+  /** BUY: base + fee, SELL: base − fee */
   total: number;
 };
 
@@ -28,32 +27,37 @@ type ComputeOrderPricingFn = (
   amount: number,
   /** in % */
   feePercent?: number,
+  /** in currency: the fees of the trades of the order added up (see OrderSummary.fee) */
+  tradesFee?: number,
 ) => OrderPricing;
 
 /**
- * Worked out in decimal (see multiplyPrecise and addPrecise), the effective price as the price plus or minus its share of the fee: in
- * binary, and as the total over the amount, a BUY of 4.99825 at 100.01 with a fee of 0.04 % came out at 100.05000400000002, where it
- * is 100.050004.
+ * The figures of a filled order, worked out in decimal (see multiplyPrecise and addPrecise). Its fee is `tradesFee`, the fees of its
+ * trades added up exactly, when it is a finite number, else its cost times `feePercent`, for a summary without it; none without a rate
+ * (the exchange gave no fee information, as the Trader warns), nor below 0. The effective price is the price plus or minus the fee over
+ * the amount, that one quotient to 15 significant digits (see toSignificantDigits): in binary, and as the total over the amount, a BUY of
+ * 4.99825 at 100.01 with a fee of 0.04 % came out at 100.05000400000002, where it is 100.050004.
+ *
+ * Worked back from the rate, a quotient rounded to 15 significant digits (see OrderSummary.feePercent), the fee missed the fees of the
+ * trades: 0.050010000000000006 for 0.5 at 100 and 0.5 at 100.02 that paid 0.05001, the first in BNB. The effective price follows the
+ * fee, not the rate: once a trade that says nothing of its fee is left out of both, the price times the rate misses the fee over the
+ * amount (108.0375 for 1 at 100, its fee unknown, and 3 at 110 at 0.5 %, as if they paid 2.15, where their fee of 1.65 makes 107.9125).
  */
-export const computeOrderPricing: ComputeOrderPricingFn = (side, price, amount, feePercent) => {
+export const computeOrderPricing: ComputeOrderPricingFn = (side, price, amount, feePercent, tradesFee) => {
   // Invalid price or amount due to exchange returning invalid data or order not filled correctly
   if (Number.isNaN(price) || Number.isNaN(amount) || !(price > 0) || !(amount > 0))
     return { effectivePrice: NaN, base: NaN, fee: NaN, total: NaN };
 
   const base = multiplyPrecise(amount, price);
-
-  if (!isNil(feePercent) && Number.isFinite(feePercent)) {
-    const feeRate = shiftDecimalPoint(Math.max(0, feePercent), -2);
-    const fee = multiplyPrecise(base, feeRate);
-    // A BUY pays its fee on top of the price, a SELL has it taken off
-    const sign = side === 'BUY' ? 1 : side === 'SELL' ? -1 : 0;
-    const total = addPrecise(base, sign * fee);
-    const effectivePrice = addPrecise(price, sign * multiplyPrecise(price, feeRate));
-    return { effectivePrice, base, fee, total };
-  }
-
   // Exchange did not provide fee information, assuming no fees.
-  return { effectivePrice: price, base, fee: 0, total: base };
+  if (!isFiniteNumber(feePercent)) return { effectivePrice: price, base, fee: 0, total: base };
+
+  const fee = Math.max(0, isFiniteNumber(tradesFee) ? tradesFee : multiplyPrecise(base, shiftDecimalPoint(feePercent, -2)));
+  // A BUY pays its fee on top of the price, a SELL has it taken off
+  const sign = side === 'BUY' ? 1 : side === 'SELL' ? -1 : 0;
+  const total = addPrecise(base, sign * fee);
+  const effectivePrice = addPrecise(price, sign * toSignificantDigits(fee / amount));
+  return { effectivePrice, base, fee, total };
 };
 
 /**

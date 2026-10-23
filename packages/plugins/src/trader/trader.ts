@@ -618,16 +618,17 @@ export class Trader extends Plugin {
 
   /**
    * The order of the completed event of an order, from its summary, whose figures are usable numbers: the exchange's, checked, or an
-   * estimate (see summarizeCompletedOrder), the report adding the exchange part (see reportCompleted). Only the fee rate may be unknown,
-   * the fee then taken as 0 (see computeOrderPricing), the asset the fee was taken in and what it took of the asset of the pair. The line
-   * names the asset the fee was taken in when it is known and not the currency the fee is written in: the asset bought, which Binance
-   * takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee no rate converts. Trades that took their fees in the asset and
-   * in another currency, as a BUY whose BNB ran out partway, name none: the line names what they took of the asset instead (`Fee taken
-   * in: 0.0005 BTC and another currency,`).
+   * estimate (see summarizeCompletedOrder), the report adding the exchange part (see reportCompleted). Its fee is that of the summary,
+   * the fees of its trades added up exactly (see OrderSummary.fee), and its effective price follows it (see computeOrderPricing), a
+   * summary without one having its fee worked out of the rate. Only the fee rate may be unknown, the fee then taken as 0, the asset the
+   * fee was taken in and what it took of the asset of the pair. The line names the asset the fee was taken in when it is known and not
+   * the currency the fee is written in: the asset bought, which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB,
+   * whose fee no rate converts. Trades that took their fees in the asset and in another currency, as a BUY whose BNB ran out partway,
+   * name none: the line names what they took of the asset instead (`Fee taken in: 0.0005 BTC and another currency,`).
    */
   private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent['order'] {
     const { amount, price, feePercent, feeAsset, feeTakenInAsset, side, orderExecutionDate } = summary;
-    const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent);
+    const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent, summary.fee);
     const [assetName, currencyName] = symbol.split('/');
     const takenIn = feeAsset ?? (feeTakenInAsset && `${formatEveryDecimal(feeTakenInAsset.amount)} ${assetName} and another currency`);
 
@@ -679,7 +680,7 @@ export class Trader extends Plugin {
    * - amount: the fills the order recorded, as the exchange reported them. Without any, the amount ordered, which a filled order
    *   executed in full, up to the lot rounding of the exchange.
    * - price: see estimateExecutionPrice.
-   * - fee: unknown, which computeOrderPricing takes as no fee, and so is the asset it was taken in.
+   * - fee: unknown, the fee and its rate, which computeOrderPricing takes as no fee, and so is the asset it was taken in.
    * - execution date: the order does not know when it was filled: the end of the last minute processed.
    */
   private estimateOrderSummary(orderInstance: OrderInstance, order: RelayedOrder, reason: string, creationPrice: number): OrderSummary {
@@ -702,7 +703,7 @@ export class Trader extends Plugin {
         `executed at ${toISOString(this.currentTimestamp)} (the end of the last minute processed)`,
       ].join(' '),
     );
-    return { amount, price, side, feePercent: undefined, feeAsset: undefined, orderExecutionDate: this.currentTimestamp };
+    return { amount, price, side, fee: undefined, feePercent: undefined, feeAsset: undefined, orderExecutionDate: this.currentTimestamp };
   }
 
   /**

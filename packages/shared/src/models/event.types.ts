@@ -162,9 +162,9 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
     /** The price plus its share of the fee for a BUY, less it for a SELL, in currency */
     effectivePrice: number;
     /**
-     * The fee, in currency: the cost times the fee rate, which makes it the fees of its trades added up, one taken in the currency as it
-     * is, one taken in the asset of the pair at the price of its trade, and one taken in a third asset without a rate (BNB with
-     * Binance's discount) 0; 0 when the rate is unknown
+     * The fee, in currency: the fees of its trades added up in decimal, as the exchange reports each (see OrderSummary.fee), one taken
+     * in the currency as it is, one taken in the asset of the pair at the price of its trade, and one taken in a third asset without a
+     * rate (BNB with Binance's discount) 0; 0 when the rate is unknown
      */
     fee: number;
     /**

@@ -4214,6 +4214,59 @@ describe('Trader', () => {
         );
       },
     );
+
+    // The fee of the summary, the fees of its trades added up exactly (see OrderSummary.fee), is the fee of the order, and its effective
+    // price follows it. Worked back from the rate of the order, rounded to 15 significant digits, it came out at 0.050010000000000006 for
+    // 0.5 BTC at 100, its fee paid in BNB, and 0.5 at 100.02 that paid 0.0005 BTC.
+    it('returns the completed order with the fee of its summary', () => {
+      const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
+      const summary: OrderSummary = {
+        amount: 1,
+        price: 100.01,
+        fee: 0.05001,
+        feePercent: 0.05000499950005,
+        side: 'BUY',
+        orderExecutionDate: 1_700_000_111_000,
+      };
+      const result = trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
+      expect(result).toEqual({
+        ...summary,
+        id,
+        symbol: 'BTC/USDT',
+        type: 'STICKY',
+        orderCreationDate: 1_700_000_051_000,
+        fee: 0.05001,
+        effectivePrice: 100.06001,
+      });
+    });
+
+    // The line writes the fee of the summary: worked back from the rate, it wrote 0.050010000000000006 for the BUY whose BNB ran out
+    // partway above, and 7.5600187776000105 for a commission of 0.00012346 BTC, rounded to 8 decimals, on 0.12345678 BTC at 61234.56
+    it.each`
+      description                                          | amount        | price       | fee             | feePercent           | feeAsset     | feeTakenInAsset                                | figures
+      ${'1 BTC at 100.01, its BNB run out partway'}        | ${1}          | ${100.01}   | ${0.05001}      | ${0.05000499950005}  | ${undefined} | ${{ amount: 0.0005, value: 0.05001 }}          | ${'Order amount: 1, Effective price: 100.06001, Fee: 0.05001, Fee percent: 0.05000499950005, Fee taken in: 0.0005 BTC and another currency,'}
+      ${'0.12345678 BTC at 61234.56, a commission in BTC'} | ${0.12345678} | ${61234.56} | ${7.5600187776} | ${0.100002608200214} | ${'BTC'}     | ${{ amount: 0.00012346, value: 7.5600187776 }} | ${'Order amount: 0.12345678, Effective price: 61295.79615711992, Fee: 7.5600187776, Fee percent: 0.100002608200214, Fee taken in: BTC,'}
+    `(
+      'logs the summary of a BUY of $description with the fee of its trades, in full',
+      ({ amount, price, fee, feePercent, feeAsset, feeTakenInAsset, figures }) => {
+        const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
+        const summary: OrderSummary = {
+          amount,
+          price,
+          fee,
+          feePercent,
+          feeAsset,
+          feeTakenInAsset,
+          side: 'BUY',
+          orderExecutionDate: 1_700_000_111_000,
+        };
+        trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
+        expect(logger.info).toHaveBeenCalledExactlyOnceWith(
+          'trader',
+          `[${id}] BUY STICKY order summary for BTC/USDT: Completed at: 2023-11-14T22:15:11.000Z ${figures}`,
+        );
+      },
+    );
   });
 
   describe('getStaticConfiguration', () => {
