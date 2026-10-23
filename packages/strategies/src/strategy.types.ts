@@ -296,7 +296,9 @@ export interface Strategy<T> {
    * rest, 0.0001 BTC, is too little to sell at the minimums of the market`). Nor when the portfolio after that SELL shows too little
    * of the asset free to sell at those minimums, while no SELL the strategy created is pending on the pair: nothing is left to
    * protect, and the stop is over, said at info level after a SELL that completed, with a warning after one that errored or was
-   * canceled.
+   * canceled. A portfolio the Trader read before that SELL ended (`exchange.portfolioReadAfterOrder` false in the SELL's order hook)
+   * ends no stop: the stop is active again for the rest, or kept, its warning adding that the Trader could not read the balances after
+   * that SELL, and if the rest is gone, the next SELL of the stop is refused and the portfolio read after that refusal removes it.
    *
    * A SELL that errored while it may still be live on the exchange (`order.mayBeLive` in onOrderErrored) makes the stop active again
    * all the same for a rest it can sell, with a warning to check that SELL there: a MARKET SELL rests on no book, it may only have
