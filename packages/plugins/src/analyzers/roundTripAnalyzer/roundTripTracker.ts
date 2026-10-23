@@ -21,7 +21,6 @@ import {
   toSignificantDigits,
 } from '@gekko/shared/utils/math/math.utils';
 import { formatAmount, formatEveryDecimal, formatPercent } from '@gekko/shared/utils/string/string.utils';
-import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
 import { DUST_TOLERANCE, PERCENT_ROUNDING } from '../analyzer.const';
 import { calculatePeriodExposurePct } from '../analyzer.helper';
@@ -269,7 +268,7 @@ export class RoundTripTracker {
       return this.registerTrade({ id, side, date, price, amount: filled, fee: NaN }, read);
     }
     if (side === 'SELL' && this.openRoundTrip) {
-      return this.reconcileWithBalance(this.openRoundTrip, this.heldAfter(read, date), { id, side, date });
+      return this.reconcileWithBalance(this.openRoundTrip, this.heldAfter(read), { id, side, date });
     }
   }
 
@@ -303,7 +302,7 @@ export class RoundTripTracker {
     const isTakenKnown = isFiniteNumber(feeTakenInAsset?.amount) && isFiniteNumber(feeTakenInAsset?.value);
     const taken = isTakenKnown ? feeTakenInAsset : undefined;
     const fill: Fill = { id, date, price, amount, fee: isFiniteNumber(fee) ? fee : 0, feeTakenInAsset: taken };
-    const held = this.heldAfter(read, date);
+    const held = this.heldAfter(read);
     if (side === 'BUY') return this.registerBuy(fill, read, held);
     // A SELL after a round trip has ended, or after a BUY skipped for its price, sells nothing a round trip bought
     if (!this.openRoundTrip) {
@@ -314,16 +313,17 @@ export class RoundTripTracker {
   }
 
   /**
-   * What the account holds of the asset of its pair after a fill dated `date`, as the event of the fill carries it, or Infinity when
-   * that read cannot tell: the empty portfolio of a Trader that had read none yet (see isFetchedPortfolio), which ended the round trip
-   * at any SELL; a read the Trader dates before the fill, its synchronization after the fill having failed, the event carrying the read
-   * before; or a read that may already show the fill of another SELL of its pair, initiated and not yet heard to end (see
-   * pendingSells). Two SELLs of one candle share the read after both: taken for what the account held after the first, it ended the
-   * round trip with the proceeds of the first alone, and the second was skipped as sold while flat.
+   * What the account holds of the asset of its pair after an order, as the event of the order carries it, or Infinity when that read
+   * cannot tell: the empty portfolio of a Trader that had read none yet (see isFetchedPortfolio), which ended the round trip at any SELL;
+   * a read the Trader says it did not make after the order (ExchangeEvent.portfolioReadAfterOrder false), its read after the order having
+   * failed, the event carrying the read before, which may not show the fill; or a read that may already show the fill of another SELL
+   * of its pair, initiated and not yet heard to end (see pendingSells). Two SELLs of one candle share the read after both: taken for what
+   * the account held after the first, it ended the round trip with the proceeds of the first alone, and the second was skipped as sold
+   * while flat. The time of the read told it from the date of the fill, wrongly: live, the exchange dates the fill on its own clock and
+   * the Trader the read on the host's, and a host's clock behind the exchange's dated fresh reads before their fills.
    */
-  private heldAfter({ portfolio, portfolioReadAt }: BalanceRead, date: EpochTimeStamp): number {
-    if (!isFetchedPortfolio(portfolio) || this.pendingSells.size > 0) return Infinity;
-    if (!isNil(portfolioReadAt) && portfolioReadAt < date) return Infinity;
+  private heldAfter({ portfolio, portfolioReadAfterOrder }: BalanceRead): number {
+    if (!isFetchedPortfolio(portfolio) || portfolioReadAfterOrder === false || this.pendingSells.size > 0) return Infinity;
     return getAssetBalance(portfolio, this.asset).total;
   }
 

@@ -1,6 +1,13 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
-import { FeeTakenInAsset, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import {
+  ExchangeEvent,
+  FeeTakenInAsset,
+  OrderCanceledEvent,
+  OrderCompletedEvent,
+  OrderErroredEvent,
+  RoundTrip,
+} from '@gekko/shared/models/event.types';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { debug, info, warning } from '@gekko/core/logger/logger';
@@ -979,20 +986,34 @@ describe('RoundTripTracker', () => {
       expect(openRoundTrip()).toEqual(expect.objectContaining({ bought: 2, sold: 0.5, position: 1.5, proceeds: 55, cost: 205 }));
     });
 
-    // Its synchronization after the fill failed: the event carries the read before, which tells nothing of the fill
+    // Its read after the fill failed: the event carries the read before, which tells nothing of the fill, and says so (see
+    // ExchangeEvent.portfolioReadAfterOrder)
     it.each`
-      readAt | closes   | description
-      ${2}   | ${false} | ${'before the SELL, which it does not show'}
-      ${3}   | ${true}  | ${'as the SELL filled'}
-      ${4}   | ${true}  | ${'after the SELL'}
-    `('should hold the round trip to a read dated $description ($closes)', ({ readAt, closes }) => {
-      tracker.registerCompleted(completed('SELL', 3, 110, 0.5), { portfolio: READ, portfolioReadAt: readAt * ONE_MINUTE });
+      portfolioReadAfterOrder | closes   | description
+      ${false}                | ${false} | ${'made before the SELL, which it does not show'}
+      ${true}                 | ${true}  | ${'made after the SELL'}
+      ${undefined}            | ${true}  | ${'its event says nothing of'}
+    `('should hold the round trip to a read $description ($closes)', ({ portfolioReadAfterOrder, closes }) => {
+      tracker.registerCompleted(completed('SELL', 3, 110, 0.5), { portfolio: READ, portfolioReadAfterOrder });
       expect(tracker.closedRoundTrips).toHaveLength(closes ? 1 : 0);
     });
 
-    it('should not hold the round trip to a read dated before a BUY, which does not show its coins', () => {
-      tracker.registerCompleted(completed('BUY', 3, 105, 1), { portfolio: holding(0), portfolioReadAt: 2 * ONE_MINUTE });
+    // Live, the exchange dates the fill on its own clock and the Trader the read on the host's: a host's clock behind the exchange's
+    // dated a fresh read before the fill, which was not held to it, and the unseen sales went unseen
+    it("should hold the round trip to a read made after the SELL that the host's clock dates before the fill", () => {
+      const behind: ExchangeEvent = { price: 110, portfolio: READ, portfolioReadAt: 2 * ONE_MINUTE, portfolioReadAfterOrder: true };
+      tracker.registerCompleted(completed('SELL', 3, 110, 0.5), behind);
+      expect(tracker.closedRoundTrips).toHaveLength(1);
+    });
+
+    it('should not hold the round trip to a read made before a BUY, which does not show its coins', () => {
+      tracker.registerCompleted(completed('BUY', 3, 105, 1), { portfolio: holding(0), portfolioReadAfterOrder: false });
       expect(openRoundTrip()).toEqual(expect.objectContaining({ bought: 2, position: 2, sold: 0 }));
+    });
+
+    it('should not hold the round trip to a read made before a SELL ended in error without a fill reported', () => {
+      tracker.registerErrored({ ...errored('SELL', 2, 0), mayBeLive: true }, { portfolio: READ, portfolioReadAfterOrder: false });
+      expect(openRoundTrip()?.position).toBe(1);
     });
 
     // What a fee taken in the asset that the BUY did not report so leaves, or an amount rounded to the step of the exchange

@@ -173,10 +173,10 @@ export type OrderFill = {
 };
 
 /**
- * What the event of an order says of the account after it: the balances the Trader read, and when it read them (see ExchangeEvent).
- * The RoundTripTracker reads what the account holds of the asset of its pair from them (see RoundTripTracker.heldAfter).
+ * What the event of an order says of the account after it: the balances the Trader read, and whether it read them after the order (see
+ * ExchangeEvent). The RoundTripTracker reads what the account holds of the asset of its pair from them (see RoundTripTracker.heldAfter).
  */
-export type BalanceRead = Pick<ExchangeEvent, 'portfolio' | 'portfolioReadAt'>;
+export type BalanceRead = Pick<ExchangeEvent, 'portfolio' | 'portfolioReadAfterOrder'>;
 
 /** An order fill with a valid price and amount (see RoundTripTracker.registerRoundtripPart) */
 export type Fill = {
