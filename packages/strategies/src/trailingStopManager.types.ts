@@ -22,9 +22,9 @@ export type TrailingStopState = {
    *   completed for all the stop sells, or errored or canceled after a reported fill of all of it (said at info level under the
    *   'trailing stop' tag), the stop is over; completed, errored or canceled for less, it is active again, from the peak and the stop
    *   price it triggered at, for what that SELL left unsold. The StrategyManager ends it instead when that rest is too little to sell
-   *   at the minimums of the market (at info level), or when the portfolio after that SELL shows too little of the asset free while
-   *   no SELL the strategy created is pending on the pair (at info level after a completed SELL, with a warning after an errored or
-   *   canceled one).
+   *   at the minimums of the market (at info level), or when the portfolio read after that SELL (not one the Trader read before its
+   *   end) shows too little of the asset free while no SELL the strategy created is pending on the pair (at info level after a
+   *   completed SELL, with a warning after an errored or canceled one).
    */
   status: 'dormant' | 'active' | 'selling';
   /**

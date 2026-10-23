@@ -204,8 +204,9 @@ type OrderEventParams<Order, T> = {
    * order had ended, and once every order whose end it relayed before had ended too; false when its read after the end failed, the
    * event then carrying an earlier read, which may still show free what a SELL sold, count as used what the order reserved, or miss
    * what it filled; undefined before its first read, the portfolio then the empty one it starts with (and in orderInitiated, which no
-   * hook gets). The PositionTracker takes no portfolio flagged false for the state after the order, and GridBot warns before it builds
-   * the grid of a reset on balances not read after the cancels (see ExchangeEvent.portfolioReadAfterOrder).
+   * hook gets). The PositionTracker takes no portfolio flagged false for the state after the order, the StrategyManager ends no
+   * trailing stop on one the end of the stop's SELL carries, and GridBot warns before it builds the grid of a reset on balances not
+   * read after the cancels (see ExchangeEvent.portfolioReadAfterOrder).
    */
   exchange: ExchangeEvent;
   tools: Tools<T>;
