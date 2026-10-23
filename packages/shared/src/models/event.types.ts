@@ -62,8 +62,10 @@ export type ExchangeEvent = {
    * failed, the event then carrying an earlier one, in which what the order reserved may still count as used and what it filled be
    * missing, and so for the ends it relays next until a read sent after them all succeeds. A completion, which waits for its summary
    * before its read, can be relayed after the end of an order that ended after it: its own read can follow its end and miss that one.
-   * GridBot warns before it builds the grid of a reset on balances not read so, the RoundTripAnalyzer holds no round trip to them, and
-   * the StrategyManager ends no trailing stop on those the end of the stop's SELL carries (see StrategyManager.isNothingFreeToSell).
+   * GridBot warns before it builds the grid of a reset on balances not read so, the RoundTripAnalyzer holds no round trip to them, the
+   * PositionTracker reads the position from the order's own figures instead, or keeps it, with a warning, when they do not tell it
+   * (see getUnreadHolding and PositionTracker.keepPosition), and the StrategyManager ends no trailing stop on those the end of the
+   * stop's SELL carries (see StrategyManager.isNothingFreeToSell).
    * Not a time: a read that failed leaves one that can be dated after the start of what a strategy waits on (a reset of GridBot) and
    * predate the end of its last order, and a clock set back dates a fresh read before the end. Undefined before any read, the portfolio
    * then the empty one the Trader starts with, and in an orderInitiated event, which ends nothing.
