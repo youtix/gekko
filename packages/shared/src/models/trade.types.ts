@@ -12,8 +12,9 @@ export type Trade = {
     /** Rate in % (0.1 for 0.1 %), undefined when unknown. Never 0 by default: 0 is a trade without fees */
     rate?: number;
     /**
-     * What the fee cost, in its currency, as the exchange reports it: the summary of an order adds up those taken in the asset of the
-     * pair (see OrderSummary.feeTakenInAsset)
+     * What the fee cost, in its currency, as the exchange reports it: the summary of an order takes it for the fee of its trade when it
+     * was taken in the currency of the pair, as it is, or in the asset, at the price of the trade (see OrderSummary.fee), and adds up
+     * those taken in the asset (see OrderSummary.feeTakenInAsset)
      */
     cost?: number;
     /**

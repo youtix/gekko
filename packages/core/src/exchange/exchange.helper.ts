@@ -227,8 +227,9 @@ const getFeeCurrency = (trade: ExecutedTrade, market: MarketInterface, symbol: T
 /**
  * Maps a ccxt trade, one that says what it executed (see isExecutedTrade), onto a Gekko trade, given the market of the trade and the
  * symbol configured for it, which ccxt resolved to that market (UBTC/USDC to BTC/USDC on Hyperliquid). Its fee rate is in % (see
- * getFeePercent), the cost of its fee is kept as ccxt gives it, for information, and the currency of its fee is named as the run names
- * the asset and the currency of the pair (see getFeeCurrency): the asset the summary of the order says the fee was taken in.
+ * getFeePercent), the cost of its fee is kept as ccxt gives it, the fee of the trade its order's summary reads (see OrderSummary.fee),
+ * and the currency of its fee is named as the run names the asset and the currency of the pair (see getFeeCurrency): the asset the
+ * summary of the order says the fee was taken in.
  */
 export const mapCcxtTradeToTrade = (trade: ExecutedTrade, market: MarketInterface, symbol: TradingPair): Trade => ({
   id: trade.order ?? '',
