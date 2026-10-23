@@ -43,7 +43,7 @@ The end-to-end tests in `apps/gekko/test/e2e` run on Bun's own test runner (`bun
 - Reach 100% coverage for all statements, functions, branches, and lines.
 - Validate types using `bun run type:check` for every change.
 - Target tests using `bun run --filter <package> test <path_to_file>` (or `bun run test <path_to_file>` in the workspace's directory) for speed.
-- Set mock return values and create spies in `beforeEach` or in the test itself: `vitest.shared.ts`, which every workspace's `vitest.config.ts` and the root's read, sets `mockReset` and `restoreMocks`, which reset every mock and restore every spy before each test, ahead of the `beforeEach` hooks.
+- Set mock return values and create spies in `beforeEach` or in the test itself: every vitest configuration sets `mockReset` and `restoreMocks` (each workspace's through `workspaceVitestConfig` of `vitest.shared.ts`, the root's in its own `vitest.config.ts`), which reset every mock and restore every spy before each test, ahead of the `beforeEach` hooks.
 - Ensure performance by keeping execution turnaround under 100ms.
 
 ## DONTs
