@@ -27,8 +27,8 @@ export const describeRequestedAmount = ({ symbol, side, amount, cost, allocation
  * does. The Trader places an order of any type at the price of its advice, or without one at the market price (see
  * Trader.onStrategyCreateOrder): a LIMIT one with a price requests it as its limit, any other is placed or sized at that price, its
  * target, `marketPrice` without one (unknown before any close of its pair). A MARKET or a STICKY order executes at the market whatever
- * its price, which only sizes a BUY by a cost or an allocation, or a SELL by a cost: order_init read "Requested limit price" for any
- * order with a price, while strat_create, of the same order, read "Target price".
+ * its price, which only sizes a BUY without an amount, all-in or by a cost or an allocation, or a SELL by a cost: order_init read
+ * "Requested limit price" for any order with a price, while strat_create, of the same order, read "Target price".
  */
 export const describeTargetPrice = ({ type, price, symbol }: Pick<AdviceOrder, 'type' | 'price' | 'symbol'>, marketPrice?: number) => {
   const [, currency] = symbol.split('/');
