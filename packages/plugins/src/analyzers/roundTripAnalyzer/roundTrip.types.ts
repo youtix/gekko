@@ -1,5 +1,5 @@
 import { Candle } from '@gekko/shared/models/candle.types';
-import { ExchangeEvent, Report } from '@gekko/shared/models/event.types';
+import { ExchangeEvent, FeeTakenInAsset, Report } from '@gekko/shared/models/event.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
@@ -98,10 +98,10 @@ export type OpenRoundTrip = {
    */
   sold: number;
   /**
-   * The amount of the asset it holds: what its BUYs bought, less the part of their fees the exchange took in the asset (see
-   * RoundTripTracker.assetTakenByFee), less what its SELLs have sold, in decimal. A SELL counts for no more than it: what a SELL sells
-   * beyond is an asset held before the round trip (see RoundTripTracker.registerSell). Its value at the last close is the unrealized
-   * P&L of a round trip still open at the end (see RoundTripTracker.logOpenPosition).
+   * The amount of the asset it holds: what its BUYs bought, less what their fees took of the asset (see FeeTakenInAsset), less what its
+   * SELLs have sold, in decimal. A SELL counts for no more than it: what a SELL sells beyond is an asset held before the round trip (see
+   * RoundTripTracker.registerSell). Its value at the last close is the unrealized P&L of a round trip still open at the end (see
+   * RoundTripTracker.logOpenPosition).
    */
   position: number;
   /** What its BUYs cost, in currency, in decimal: their amounts times their prices, fees left out (see RoundTrip.cost) */
@@ -112,8 +112,8 @@ export type OpenRoundTrip = {
    */
   proceeds: number;
   /**
-   * The fees of its BUYs and SELLs so far, in currency, in decimal: an unknown one counts as 0, and a BUY fee taken in the asset of the
-   * pair is left out (see RoundTrip.fees)
+   * The fees of its BUYs and SELLs so far, in currency, in decimal: an unknown one counts as 0, and the part of a BUY fee taken in the
+   * asset of the pair is left out (see RoundTrip.fees)
    */
   fees: number;
   /** Mean price of its SELLs so far, weighted by their amounts (0 before the first one) */
@@ -166,10 +166,10 @@ export type OrderFill = {
    */
   fee: number;
   /**
-   * The asset the exchange took its fee in, as the event of a completed order names it (see OrderCompletedEvent); undefined when the
-   * event names none, and for an order that did not complete
+   * What the fees of a completed order took of the asset of the pair, as its event says it (see OrderCompletedEvent.feeTakenInAsset);
+   * undefined when they took none, and for an order that did not complete
    */
-  feeAsset?: Asset;
+  feeTakenInAsset?: FeeTakenInAsset;
 };
 
 /**
@@ -187,10 +187,10 @@ export type Fill = {
   /** Its fee in currency, 0 when unknown */
   fee: number;
   /**
-   * The asset the fee was taken in, undefined when unknown: the fee of a BUY taken in the asset of the pair is left out of the fees of
-   * its round trip, and the part of the amount bought it took out of its position (see RoundTripTracker.countBuyFee)
+   * What its fees took of the asset of the pair, each figure a finite number, undefined when none or unknown: a BUY's round trip holds
+   * that much less of the asset, and leaves its value out of its fees (see RoundTripTracker.countBuyFee)
    */
-  feeAsset?: Asset;
+  feeTakenInAsset?: FeeTakenInAsset;
 };
 
 export type DateRange = {

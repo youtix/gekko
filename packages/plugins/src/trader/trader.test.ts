@@ -3115,6 +3115,26 @@ describe('Trader', () => {
       expect(getCompletedEvent()?.order).toEqual(expect.objectContaining({ fee: 0.1, feeAsset: 'BTC' }));
     });
 
+    // A BUY on Binance whose BNB ran out partway: what its trades took of the BTC bought, which the RoundTripAnalyzer leaves out of its fees
+    it('relays what the fees of a completed order took of the asset, as its summary gives it', async () => {
+      vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
+      const order = await prepareOrder('creation', buildAdvice({ type: 'MARKET', amount: 1 }));
+      order.createSummary.mockResolvedValue({
+        amount: 1,
+        price: 100,
+        feePercent: 0.05,
+        feeAsset: undefined,
+        feeTakenInAsset: { amount: 0.0005, value: 0.05 },
+        side: 'BUY',
+        orderExecutionDate: 1_700_000_111_000,
+      });
+      trader['prices'].set('BTC/USDT', 105);
+      await order.emitAndSettle(ORDER_COMPLETED_EVENT);
+      expect(getCompletedEvent()?.order).toEqual(
+        expect.objectContaining({ fee: 0.05, feeAsset: undefined, feeTakenInAsset: { amount: 0.0005, value: 0.05 } }),
+      );
+    });
+
     it('relays the summary of a completed order as the exchange gave it when its figures are usable', async () => {
       vi.spyOn(trader as any, 'synchronize').mockResolvedValue(undefined);
       const order = await prepareOrder('creation', buildAdvice({ type: 'MARKET', amount: 1 }));
@@ -3979,26 +3999,41 @@ describe('Trader', () => {
 
     // Every figure written with every decimal: String wrote a fill of dust, a pair priced under a millionth or a fee rate under a
     // millionth of a percent with an exponent, 5e-7. A fee rate none of the trades gave is written as it always was. The asset the fee
-    // was taken in is named when it is known and not the currency: the BTC bought, or BNB, whose fee no rate converts.
+    // was taken in is named when it is known and not the currency: the BTC bought, or BNB, whose fee no rate converts. Trades that took
+    // their fees in the asset and in another currency name none, a BUY whose BNB ran out partway: the line names what they took of the
+    // asset, with every decimal too.
     it.each`
-      description                                  | amount       | price         | feePercent   | feeAsset     | figures
-      ${'2 BTC at 100, fee 0.5 %'}                 | ${2}         | ${100}        | ${0.5}       | ${undefined} | ${'Order amount: 2, Effective price: 100.5, Fee: 1, Fee percent: 0.5,'}
-      ${'0.0000005 BTC at 100, fee 0.1 %'}         | ${0.0000005} | ${100}        | ${0.1}       | ${undefined} | ${'Order amount: 0.0000005, Effective price: 100.1, Fee: 0.00000005, Fee percent: 0.1,'}
-      ${'1000 BTC at 0.00000045, fee 0.1 %'}       | ${1000}      | ${0.00000045} | ${0.1}       | ${undefined} | ${'Order amount: 1000, Effective price: 0.00000045045, Fee: 0.00000045, Fee percent: 0.1,'}
-      ${'2 BTC at 100, fee 0.0000005 %'}           | ${2}         | ${100}        | ${0.0000005} | ${undefined} | ${'Order amount: 2, Effective price: 100.0000005, Fee: 0.000001, Fee percent: 0.0000005,'}
-      ${'2 BTC at 100, no fee rate'}               | ${2}         | ${100}        | ${undefined} | ${undefined} | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined,'}
-      ${'2 BTC at 100, fee 0.1 % taken in USDT'}   | ${2}         | ${100}        | ${0.1}       | ${'USDT'}    | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1,'}
-      ${'2 BTC at 100, fee 0.1 % taken in BTC'}    | ${2}         | ${100}        | ${0.1}       | ${'BTC'}     | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1, Fee taken in: BTC,'}
-      ${'2 BTC at 100, no fee rate, taken in BNB'} | ${2}         | ${100}        | ${undefined} | ${'BNB'}     | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined, Fee taken in: BNB,'}
-    `('logs the summary of a BUY of $description, each figure in full', ({ amount, price, feePercent, feeAsset, figures }) => {
-      const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
-      const summary: OrderSummary = { amount, price, feePercent, feeAsset, side: 'BUY', orderExecutionDate: 1_700_000_111_000 };
-      trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
-      expect(logger.info).toHaveBeenCalledExactlyOnceWith(
-        'trader',
-        `[${id}] BUY STICKY order summary for BTC/USDT: Completed at: 2023-11-14T22:15:11.000Z ${figures}`,
-      );
-    });
+      description                                        | amount       | price         | feePercent   | feeAsset     | feeTakenInAsset                          | figures
+      ${'2 BTC at 100, fee 0.5 %'}                       | ${2}         | ${100}        | ${0.5}       | ${undefined} | ${undefined}                             | ${'Order amount: 2, Effective price: 100.5, Fee: 1, Fee percent: 0.5,'}
+      ${'0.0000005 BTC at 100, fee 0.1 %'}               | ${0.0000005} | ${100}        | ${0.1}       | ${undefined} | ${undefined}                             | ${'Order amount: 0.0000005, Effective price: 100.1, Fee: 0.00000005, Fee percent: 0.1,'}
+      ${'1000 BTC at 0.00000045, fee 0.1 %'}             | ${1000}      | ${0.00000045} | ${0.1}       | ${undefined} | ${undefined}                             | ${'Order amount: 1000, Effective price: 0.00000045045, Fee: 0.00000045, Fee percent: 0.1,'}
+      ${'2 BTC at 100, fee 0.0000005 %'}                 | ${2}         | ${100}        | ${0.0000005} | ${undefined} | ${undefined}                             | ${'Order amount: 2, Effective price: 100.0000005, Fee: 0.000001, Fee percent: 0.0000005,'}
+      ${'2 BTC at 100, no fee rate'}                     | ${2}         | ${100}        | ${undefined} | ${undefined} | ${undefined}                             | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined,'}
+      ${'2 BTC at 100, fee 0.1 % taken in USDT'}         | ${2}         | ${100}        | ${0.1}       | ${'USDT'}    | ${undefined}                             | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1,'}
+      ${'2 BTC at 100, fee 0.1 % taken in BTC'}          | ${2}         | ${100}        | ${0.1}       | ${'BTC'}     | ${{ amount: 0.002, value: 0.2 }}         | ${'Order amount: 2, Effective price: 100.1, Fee: 0.2, Fee percent: 0.1, Fee taken in: BTC,'}
+      ${'2 BTC at 100, no fee rate, taken in BNB'}       | ${2}         | ${100}        | ${undefined} | ${'BNB'}     | ${undefined}                             | ${'Order amount: 2, Effective price: 100, Fee: 0, Fee percent: undefined, Fee taken in: BNB,'}
+      ${'1 BTC at 100, its BNB run out partway'}         | ${1}         | ${100}        | ${0.05}      | ${undefined} | ${{ amount: 0.0005, value: 0.05 }}       | ${'Order amount: 1, Effective price: 100.05, Fee: 0.05, Fee percent: 0.05, Fee taken in: 0.0005 BTC and another currency,'}
+      ${'0.001 BTC at 100, its BNB run out on its dust'} | ${0.001}     | ${100}        | ${0.00005}   | ${undefined} | ${{ amount: 0.0000005, value: 0.00005 }} | ${'Order amount: 0.001, Effective price: 100.00005, Fee: 0.00000005, Fee percent: 0.00005, Fee taken in: 0.0000005 BTC and another currency,'}
+    `(
+      'logs the summary of a BUY of $description, each figure in full',
+      ({ amount, price, feePercent, feeAsset, feeTakenInAsset, figures }) => {
+        const id = '20a7abd2-546b-4c65-b04d-900b84fa5fe6';
+        const summary: OrderSummary = {
+          amount,
+          price,
+          feePercent,
+          feeAsset,
+          feeTakenInAsset,
+          side: 'BUY',
+          orderExecutionDate: 1_700_000_111_000,
+        };
+        trader['checkOrderSummary']({ id, symbol: 'BTC/USDT', type: 'STICKY', orderCreationDate: 1_700_000_051_000, summary });
+        expect(logger.info).toHaveBeenCalledExactlyOnceWith(
+          'trader',
+          `[${id}] BUY STICKY order summary for BTC/USDT: Completed at: 2023-11-14T22:15:11.000Z ${figures}`,
+        );
+      },
+    );
   });
 
   describe('getStaticConfiguration', () => {

@@ -12,7 +12,14 @@ import {
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
 import { debug, info, warning } from '@gekko/core/logger/logger';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
-import { addPrecise, isFiniteNumber, isFinitePositive, multiplyPrecise, toSignificantDigits } from '@gekko/shared/utils/math/math.utils';
+import {
+  addPrecise,
+  compareWithTolerance,
+  isFiniteNumber,
+  isFinitePositive,
+  multiplyPrecise,
+  toSignificantDigits,
+} from '@gekko/shared/utils/math/math.utils';
 import { formatAmount, formatEveryDecimal, formatPercent } from '@gekko/shared/utils/string/string.utils';
 import { isNil } from 'lodash-es';
 import { UUID } from 'node:crypto';
@@ -159,9 +166,9 @@ export class RoundTripTracker {
    * round trip it closed, if any
    */
   registerCompleted(order: OrderCompletedEvent['order'], read: BalanceRead): RoundTrip | undefined {
-    const { id, side, price, amount, fee, feeAsset, orderExecutionDate } = order;
+    const { id, side, price, amount, fee, feeTakenInAsset, orderExecutionDate } = order;
     this.pendingSells.delete(id);
-    return this.registerTrade({ id, side, date: orderExecutionDate, price, amount, fee, feeAsset }, read);
+    return this.registerTrade({ id, side, date: orderExecutionDate, price, amount, fee, feeTakenInAsset }, read);
   }
 
   /** Counts an order of its pair canceled, and what it filled before, if anything (see registerUncompleted) */
@@ -281,7 +288,7 @@ export class RoundTripTracker {
    * profit of a round trip a BUY opens (see registerBuy).
    */
   private registerRoundtripPart(orderFill: OrderFill, read: BalanceRead): RoundTrip | undefined {
-    const { id, side, date, price, amount, fee, feeAsset } = orderFill;
+    const { id, side, date, price, amount, fee, feeTakenInAsset } = orderFill;
     // The Trader sets the price and the amount of every fill it reports, estimating those of an order whose trades it cannot read: what
     // is skipped here is a fill priced at the last close before any bucket (0), a price the event type leaves optional, or a figure that
     // is not a finite number, which would make the round trip Infinity or NaN
@@ -291,9 +298,11 @@ export class RoundTripTracker {
     }
 
     // An unknown fee counts as 0, as the Trader reports it when the exchange gives no fee rate, for a fee taken in a third asset (BNB)
-    // too, which no rate converts: the P&L is then too high by the fee the order paid. A fee that is not a number would make the round
-    // trip NaN.
-    const fill: Fill = { id, date, price, amount, fee: isFiniteNumber(fee) ? fee : 0, feeAsset };
+    // too, which no rate converts, and for the part of an order's trades that paid theirs so: the P&L is then too high by the fee the
+    // order paid. A fee that is not a number would make the round trip NaN, and so would what it took of the asset.
+    const isTakenKnown = isFiniteNumber(feeTakenInAsset?.amount) && isFiniteNumber(feeTakenInAsset?.value);
+    const taken = isTakenKnown ? feeTakenInAsset : undefined;
+    const fill: Fill = { id, date, price, amount, fee: isFiniteNumber(fee) ? fee : 0, feeTakenInAsset: taken };
     const held = this.heldAfter(read, date);
     if (side === 'BUY') return this.registerBuy(fill, read, held);
     // A SELL after a round trip has ended, or after a BUY skipped for its price, sells nothing a round trip bought
@@ -319,12 +328,12 @@ export class RoundTripTracker {
   }
 
   /**
-   * A BUY opens a round trip while flat, and adds to the position of the open one otherwise (scale-in): its amount, its cost and its fee,
-   * but a fee taken in the asset of the pair, which the position carries (see countBuyFee and assetTakenByFee). The round trip it opens
-   * enters with the whole portfolio's value before it: the portfolio the Trader read after it, its pair valued at its price, plus its
-   * fee, whatever the asset it was taken in, which the BUY took from the portfolio (see RoundTrip.entryEquity). Unknown (NaN) when the
-   * Trader had read no portfolio yet: valued, its empty one made the entry equity the fee alone, 0.1 for a BUY of 1 BTC at 100, and its
-   * round trip, sold at 110, +9,790 %.
+   * A BUY opens a round trip while flat, and adds to the position of the open one otherwise (scale-in): its amount, less what its fees
+   * took of the asset of the pair, its cost and its fee, but the part of it taken in the asset, which the position carries (see
+   * countBuyFee). The round trip it opens enters with the whole portfolio's value before it: the portfolio the Trader read after it, its
+   * pair valued at its price, plus its fee, whatever the asset it was taken in, which the BUY took from the portfolio (see
+   * RoundTrip.entryEquity). Unknown (NaN) when the Trader had read no portfolio yet: valued, its empty one made the entry equity the fee
+   * alone, 0.1 for a BUY of 1 BTC at 100, and its round trip, sold at 110, +9,790 %.
    *
    * Before a BUY adds to the round trip in progress, what the account held besides it (`held`, less what the BUY added) must hold the
    * position of that round trip: what it lacks was sold by a fill no event reported, and a round trip left with no more than dust is
@@ -332,11 +341,10 @@ export class RoundTripTracker {
    * an order ended in error had sold booked as lost. Returns the round trip it closed so, if any.
    */
   private registerBuy(fill: Fill, { portfolio }: BalanceRead, held: number): RoundTrip | undefined {
-    const { id, date, price, amount, fee } = fill;
+    const { id, date, price, amount, fee, feeTakenInAsset } = fill;
     const cost = multiplyPrecise(amount, price);
-    const takenInAsset = this.assetTakenByFee(fill);
-    const countedFee = this.countBuyFee(fill, takenInAsset);
-    const position = addPrecise(amount, -takenInAsset);
+    const countedFee = this.countBuyFee(fill);
+    const position = addPrecise(amount, -(feeTakenInAsset?.amount ?? 0));
     const before = this.openRoundTrip;
     const heldBefore = Number.isFinite(held) ? addPrecise(held, -position) : held;
     const closed = before ? this.reconcileWithBalance(before, heldBefore, { id, side: 'BUY', date }) : undefined;
@@ -370,28 +378,23 @@ export class RoundTripTracker {
   }
 
   /**
-   * The part of the amount a BUY bought that its fee took, in the asset of the pair: its fee over its price, to 15 significant digits
-   * (see toSignificantDigits), when the exchange took the fee in that asset, 0 otherwise. The Trader reports the fee in currency,
-   * converted at the price of the BUY through the fee rate (see computeOrderPricing), which this works back: 0.001 BTC for a fee of 0.1
-   * USDT on a BUY of 1 BTC at 100, at Binance's 0.1 %.
+   * What of the fee of a BUY counts in the fees of its round trip: the fee, in currency as the Trader reports it, less the part the
+   * exchange took in the asset of the pair, out of the amount bought (`feeTakenInAsset`, its value in currency, the part of the fee it
+   * is: all of it at Binance unless the fees are paid in BNB, the part its trades paid in the asset once its BNB ran out, 0.0005 BTC
+   * worth 0.05 USDT of a BUY of 1 BTC at 100 half paid in BNB). The round trip holds that much less of the asset, its SELLs count that
+   * much less, and the smaller proceeds carry it already: added here too, it counted twice, and the P&L was understated by it (see
+   * RoundTrip.fees). What is left is the part taken in the currency, none when the rest went in a third asset (BNB), which the Trader
+   * counts 0; the two figures, worked out apart, are taken as equal within the noise of their arithmetic (see compareWithTolerance). A
+   * value below 0, a rebate, leaves the fee whole. The entry equity counts the whole fee all the same, whatever the asset: the BUY took it
+   * from the portfolio.
    */
-  private assetTakenByFee({ price, fee, feeAsset }: Fill): number {
-    return feeAsset === this.asset ? toSignificantDigits(fee / price) : 0;
-  }
-
-  /**
-   * What of the fee of a BUY counts in the fees of its round trip: the fee, in currency as the Trader reports it, unless the exchange took
-   * it in the asset of the pair, out of the amount bought, as Binance does unless the fees are paid in BNB. The round trip then holds
-   * that much less of the asset (`takenInAsset`, see assetTakenByFee), its SELLs count that much less, and the smaller proceeds carry it
-   * already: added here too, it counted twice, and the P&L was understated by it (see RoundTrip.fees). The entry equity counts it all the
-   * same, whatever the asset: the BUY took it from the portfolio.
-   */
-  private countBuyFee({ id, fee, feeAsset }: Fill, takenInAsset: number): number {
-    if (feeAsset !== this.asset) return fee;
-    const fromAmount = `${formatEveryDecimal(takenInAsset)} ${this.asset} out of the amount bought`;
-    const taken = `its fee of ${formatEveryDecimal(fee)} ${this.currency} was taken in ${this.asset}, ${fromAmount}`;
-    debug('roundtrip analyzer', `BUY order ${id}: ${taken}: left out of the fees, its round trip holding that much less.`);
-    return 0;
+  private countBuyFee({ id, fee, feeTakenInAsset }: Fill): number {
+    if (!feeTakenInAsset) return fee;
+    const value = Math.max(feeTakenInAsset.value, 0);
+    const taken = `its fee took ${formatEveryDecimal(feeTakenInAsset.amount)} ${this.asset} out of the amount bought`;
+    const worth = `${formatEveryDecimal(value)} ${this.currency} of the ${formatEveryDecimal(fee)} ${this.currency} reported`;
+    debug('roundtrip analyzer', `BUY order ${id}: ${taken}, ${worth}: left out of the fees, its round trip holding that much less.`);
+    return compareWithTolerance(fee, value) <= 0 ? 0 : addPrecise(fee, -value);
   }
 
   /**

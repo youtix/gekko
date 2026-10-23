@@ -116,9 +116,23 @@ export type OrderErroredEvent = OrderInitiatedEvent & {
   };
 };
 /**
+ * What the fees of an order took of the asset of its pair: Binance takes a BUY's fee so, out of the amount bought, unless the fees are
+ * paid in BNB, and Hyperliquid in the token bought. The account then holds that much less of the asset than the BUY bought.
+ */
+export type FeeTakenInAsset = {
+  /**
+   * In the asset: the fees of the trades that name the asset as the currency of their fee, added up in decimal, each its cost as the
+   * exchange reports it, else its rate of the amount of its trade (a fee of neither counting 0)
+   */
+  amount: number;
+  /** Its value in currency, each trade's at the price of that trade, added up in decimal: its part of the fee of the order */
+  value: number;
+};
+
+/**
  * The fill of an order, as the Trader summarizes it: from the trades of the order, or estimated from what the order and the Trader know
- * when the exchange cannot give them (see Trader.summarizeCompletedOrder). Every figure is a finite number, but the fee rate and the
- * asset the fee was taken in, undefined when unknown.
+ * when the exchange cannot give them (see Trader.summarizeCompletedOrder). Every figure is a finite number, but the fee rate, the asset
+ * the fee was taken in and what it took of the asset of the pair, undefined when unknown.
  */
 export type OrderCompletedEvent = OrderInitiatedEvent & {
   order: OrderEvent & {
@@ -134,27 +148,42 @@ export type OrderCompletedEvent = OrderInitiatedEvent & {
     price?: number;
     /** The price plus its share of the fee for a BUY, less it for a SELL, in currency */
     effectivePrice: number;
-    /** The fee, in currency: the cost times the fee rate, 0 when the rate is unknown */
+    /**
+     * The fee, in currency: the cost times the fee rate, which makes it the fees of its trades added up, one taken in the currency as it
+     * is, one taken in the asset of the pair at the price of its trade, and one taken in a third asset without a rate (BNB with
+     * Binance's discount) 0; 0 when the rate is unknown
+     */
     fee: number;
-    /** The fee rate in % (0.1 for 0.1 %), undefined when unknown */
+    /**
+     * The fee rate in % (0.1 for 0.1 %): the fees of its trades over what they cost, a fee taken in a third asset without a rate counting
+     * 0 (see OrderSummary.feePercent); undefined when unknown, no trade with a rate having cost anything
+     */
     feePercent?: number;
     /**
      * The asset the exchange took the fee in, as the trades of the order name it (see OrderSummary.feeAsset): the asset bought for a
      * BUY on Binance unless the fees are paid in BNB, the currency for a SELL there and for every order on the simulators, BNB with
      * the discount. `fee` is in currency whatever the asset: converted through its rate for a fee taken in the asset of the pair, 0
      * for one taken in a third asset, whose rate is unknown. Undefined when no trade names the currency of its fee, when they name
-     * several, or for a summary the Trader estimated.
+     * several (a BUY whose BNB ran out partway, its first trades paying their fees in BNB and the others in the asset: see
+     * feeTakenInAsset), or for a summary the Trader estimated.
      */
     feeAsset?: Asset;
+    /**
+     * What the fees took of the asset of the pair, out of `amount` (see FeeTakenInAsset): its amount, in the asset, and its value, its
+     * part of `fee`. The account holds that much less of the asset than the order executed: all of a BUY's fee on Binance unless the fees
+     * are paid in BNB, the part its trades paid in the asset once its BNB ran out. Undefined when no trade took its fee in the asset, and
+     * for a summary the Trader estimated.
+     */
+    feeTakenInAsset?: FeeTakenInAsset;
   };
 };
 
 /**
  * A round trip the RoundTripAnalyzer closed (ROUNDTRIP_COMPLETED_EVENT) on one of the watched pairs: from the BUY that opened a position
  * on its pair while flat to the SELL that left it flat again, the BUYs and SELLs in between included. Its P&L comes from its own fills,
- * what its SELLs brought in less what its BUYs cost and the fees of all of them (but a BUY fee taken in the asset bought, which the
- * smaller amount it holds carries: see fees). A SELL counts for no more than the round trip still holds, its position: what its BUYs
- * bought, less the part of their fees taken in the asset, less what its SELLs sold, the proceeds and the fee of a SELL that sold more
+ * what its SELLs brought in less what its BUYs cost and the fees of all of them (but the part of a BUY's fee taken in the asset bought,
+ * which the smaller amount it holds carries: see fees). A SELL counts for no more than the round trip still holds, its position: what
+ * its BUYs bought, less what their fees took of the asset, less what its SELLs sold, the proceeds and the fee of a SELL that sold more
  * counted for that part alone, so that an asset held before it, or the fills of another pair, count in none of it. A fill no event
  * reported, which the balance read after an order shows gone from its position (an order ended in error, a sale made outside Gekko),
  * counts as sold at the last close of its pair, without a fee, with a warning. Its profit is that P&L in % of the whole portfolio's
@@ -191,16 +220,20 @@ export type RoundTrip = {
    * of the period, the position it held then, at the start price.
    */
   cost: number;
-  /** What its SELLs brought in, in currency, fees left out: their amounts times their prices, added up in decimal */
+  /**
+   * What its SELLs brought in, in currency, fees left out: the part of each amount the round trip held times its price, a fill no event
+   * reported at the last close, added up in decimal
+   */
   proceeds: number;
   /**
-   * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, but the fee of a BUY that the exchange
-   * took in the asset of the pair, out of the amount bought (`feeAsset` on the order event: Binance does so unless the fees are paid in
-   * BNB): the round trip holds that much less of the asset, its fee over the price of the BUY, which its SELLs count at most, and the
-   * smaller proceeds carry it already, so that added here too it counted twice, and the P&L was understated by it. A SELL that sold
-   * more than the round trip held counts the share of its fee of the part it held. An unknown fee counts as 0: that of the part a
-   * canceled order, or one ended in error, filled, that of a fill no event reported, and one the Trader does not convert, taken in a
-   * third asset (BNB), which it reports as 0 with its rate unknown, the P&L then overstated by it. Those of the warmup are left out for
+   * The fees of its BUYs and SELLs, in currency as the Trader reports them, added up in decimal, but the part of a BUY's fee that the
+   * exchange took in the asset of the pair, out of the amount bought (`feeTakenInAsset` on the order event, its value left out: all of
+   * the fee on Binance unless the fees are paid in BNB, the part its trades paid in the asset once its BNB ran out): the round trip holds
+   * that much less of the asset, which its SELLs count at most, and the smaller proceeds carry it already, so that added here too it
+   * counted twice, and the P&L was understated by it. A SELL that sold more than the round trip held counts the share of its fee of the
+   * part it held. An unknown fee counts as 0: that of the part a canceled order, or one ended in error, filled, that of a fill no event
+   * reported, and one the Trader does not convert, taken in a third asset (BNB) without a rate, which it reports as 0, whether the
+   * whole fee of an order or the part some of its trades paid so, the P&L then overstated by it. Those of the warmup are left out for
    * one rebased at the start of the period.
    */
   fees: number;

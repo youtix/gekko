@@ -594,14 +594,17 @@ export class Trader extends Plugin {
 
   /**
    * The completed event of an order from its summary, whose figures are usable numbers: the exchange's, checked, or an estimate (see
-   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing), and the asset the fee
-   * was taken in, which the line names when it is known and not the currency the fee is written in: the asset bought, which Binance
-   * takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee no rate converts.
+   * summarizeCompletedOrder). Only the fee rate may be unknown, the fee then taken as 0 (see computeOrderPricing), the asset the fee
+   * was taken in and what it took of the asset of the pair. The line names the asset the fee was taken in when it is known and not the
+   * currency the fee is written in: the asset bought, which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose
+   * fee no rate converts. Trades that took their fees in the asset and in another currency, as a BUY whose BNB ran out partway, name
+   * none: the line names what they took of the asset instead (`Fee taken in: 0.0005 BTC and another currency,`).
    */
   private checkOrderSummary({ id, symbol, type, orderCreationDate, summary }: CheckOrderSummaryParams): OrderCompletedEvent {
-    const { amount, price, feePercent, feeAsset, side, orderExecutionDate } = summary;
+    const { amount, price, feePercent, feeAsset, feeTakenInAsset, side, orderExecutionDate } = summary;
     const { effectivePrice, fee } = computeOrderPricing(side, price, amount, feePercent);
-    const [, currencyName] = symbol.split('/');
+    const [assetName, currencyName] = symbol.split('/');
+    const takenIn = feeAsset ?? (feeTakenInAsset && `${formatEveryDecimal(feeTakenInAsset.amount)} ${assetName} and another currency`);
 
     if (!isFiniteNumber(feePercent)) warning('trader', 'Exchange did not provide fee information, assuming no fees.');
     info(
@@ -613,7 +616,7 @@ export class Trader extends Plugin {
         `Effective price: ${formatEveryDecimal(effectivePrice)},`,
         `Fee: ${formatEveryDecimal(fee)},`,
         `Fee percent: ${formatFigure(feePercent)},`,
-        ...(feeAsset !== undefined && feeAsset !== currencyName ? [`Fee taken in: ${feeAsset},`] : []),
+        ...(takenIn !== undefined && takenIn !== currencyName ? [`Fee taken in: ${takenIn},`] : []),
       ].join(' '),
     );
 

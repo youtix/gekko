@@ -351,7 +351,7 @@ export class EventSubscriber extends Plugin {
     this.keepRead(payloads);
     this.notify('order_complete', payloads, ({ order, exchange }) => {
       const { portfolio } = exchange;
-      const { id, amount, side, type, orderExecutionDate, effectivePrice, feePercent, fee, feeAsset, symbol } = order;
+      const { id, amount, side, type, orderExecutionDate, effectivePrice, feePercent, fee, feeAsset, feeTakenInAsset, symbol } = order;
       const [asset, currency] = symbol.split('/');
       const assetBalance = getAssetBalance(portfolio, asset);
       const currencyBalance = getAssetBalance(portfolio, currency);
@@ -359,8 +359,11 @@ export class EventSubscriber extends Plugin {
       // and the bare trade price as the effective price, which must not read as a free trade at a price fee included
       const isFeeKnown = isFiniteNumber(feePercent);
       // The fee is written in the currency whatever the asset the exchange took it in, named when it is another one: the asset bought,
-      // which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee the Trader does not convert
-      const takenIn = feeAsset !== undefined && feeAsset !== currency ? ` (taken in ${feeAsset})` : '';
+      // which Binance takes a BUY's fee in unless the fees are paid in BNB, or BNB, whose fee the Trader does not convert. Trades that
+      // took their fees in the asset and in another currency, as those of a BUY whose BNB ran out partway, name none: what they took of
+      // the asset is named instead, as the Trader's summary line names it
+      const feeTakenIn = feeAsset ?? (feeTakenInAsset && `${formatAmount(feeTakenInAsset.amount)} ${asset} and another currency`);
+      const takenIn = feeTakenIn !== undefined && feeTakenIn !== currency ? ` (taken in ${feeTakenIn})` : '';
       return [
         `${side} ${type} order completed (${id}) for ${symbol}`,
         `Amount: ${formatAmount(amount)} ${asset}`,

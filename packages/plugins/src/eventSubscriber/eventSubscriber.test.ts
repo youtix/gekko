@@ -1048,18 +1048,22 @@ describe('EventSubscriber', () => {
     });
 
     // The fee is written in the currency whatever the asset the exchange took it in, which is named when it is another one: the asset
-    // bought (Binance takes a BUY's fee in it unless the fees are paid in BNB), or BNB, whose fee the Trader does not convert
+    // bought (Binance takes a BUY's fee in it unless the fees are paid in BNB), or BNB, whose fee the Trader does not convert. Trades
+    // that took their fees in the asset and in another currency name none, a BUY whose BNB ran out partway: what they took of the asset
+    // is named instead, written as an amount
     it.each`
-      feePercent   | feeAsset     | line
-      ${0.1}       | ${'BTC'}     | ${'Fee: 0.1 USD (taken in BTC)'}
-      ${0.1}       | ${'USD'}     | ${'Fee: 0.1 USD'}
-      ${0.1}       | ${undefined} | ${'Fee: 0.1 USD'}
-      ${undefined} | ${'BNB'}     | ${'Fee: unknown (taken in BNB)'}
+      feePercent   | fee     | feeAsset     | feeTakenInAsset                            | line
+      ${0.1}       | ${0.1}  | ${'BTC'}     | ${{ amount: 0.001, value: 0.1 }}           | ${'Fee: 0.1 USD (taken in BTC)'}
+      ${0.1}       | ${0.1}  | ${'USD'}     | ${undefined}                               | ${'Fee: 0.1 USD'}
+      ${0.1}       | ${0.1}  | ${undefined} | ${undefined}                               | ${'Fee: 0.1 USD'}
+      ${undefined} | ${0}    | ${'BNB'}     | ${undefined}                               | ${'Fee: unknown (taken in BNB)'}
+      ${0.05}      | ${0.05} | ${undefined} | ${{ amount: 0.0005, value: 0.05 }}         | ${'Fee: 0.05 USD (taken in 0.0005 BTC and another currency)'}
+      ${0.05}      | ${0.05} | ${undefined} | ${{ amount: 0.00000012, value: 0.000012 }} | ${'Fee: 0.05 USD (taken in 0.00000012 BTC and another currency)'}
     `(
       'reports $line when an order completes with a fee percent of $feePercent, taken in $feeAsset',
-      async ({ feePercent, feeAsset, line }) => {
+      async ({ feePercent, fee, feeAsset, feeTakenInAsset, line }) => {
         plugin['handleCommand']('/sub_order_complete');
-        onOrderCompleted(plugin, { order: { feePercent, feeAsset, fee: 0.1 } });
+        onOrderCompleted(plugin, { order: { feePercent, feeAsset, feeTakenInAsset, fee } });
         await settle();
         expect(fakeBot.sendMessage).toHaveBeenCalledWith(expect.stringContaining(`\n${line}\n`));
       },

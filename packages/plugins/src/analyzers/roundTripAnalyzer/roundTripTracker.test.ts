@@ -1,9 +1,8 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { Candle } from '@gekko/shared/models/candle.types';
-import { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
+import { FeeTakenInAsset, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent, RoundTrip } from '@gekko/shared/models/event.types';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
-import { Asset } from '@gekko/shared/models/utility.types';
 import { debug, info, warning } from '@gekko/core/logger/logger';
 import { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
@@ -13,6 +12,8 @@ import { RoundTripTracker } from './roundTripTracker';
 
 vi.mock('@gekko/core/logger/logger');
 
+/** Binance without BNB: the fee of a BUY of 1 BTC at 100 at its 0.1 %, taken out of the BTC bought, 0.001 BTC, worth 0.1 USDT */
+const FEE_IN_BTC: FeeTakenInAsset = { amount: 0.001, value: 0.1 };
 /** A portfolio the Trader read: what it holds of BTC is what the account holds after a SELL (see registerSell) */
 const holding = (btc: number): Portfolio =>
   new Map([
@@ -111,16 +112,16 @@ describe('RoundTripTracker', () => {
     tracker.registerCompleted(completed('BUY', minute, price, amount, fee), { portfolio });
   const sell = (minute: number, price: number | undefined, amount: number, fee?: number, portfolio = READ) =>
     tracker.registerCompleted(completed('SELL', minute, price, amount, fee), { portfolio });
-  /** A BUY or a SELL whose fee the exchange took in `feeAsset`, as its event names it */
-  const paidIn = (
-    feeAsset: Asset | undefined,
+  /** A BUY or a SELL whose fees took `feeTakenInAsset` of the asset, as its event says it (see OrderCompletedEvent.feeTakenInAsset) */
+  const takenIn = (
+    feeTakenInAsset: FeeTakenInAsset | undefined,
     side: OrderSide,
     minute: number,
     price: number,
     amount: number,
     fee: number,
     portfolio = READ,
-  ) => tracker.registerCompleted({ ...completed(side, minute, price, amount, fee), feeAsset }, { portfolio });
+  ) => tracker.registerCompleted({ ...completed(side, minute, price, amount, fee), feeTakenInAsset }, { portfolio });
   const openRoundTrip = () => tracker['openRoundTrip'];
 
   beforeEach(() => {
@@ -242,12 +243,12 @@ describe('RoundTripTracker', () => {
       });
     });
 
-    describe('fee taken in another asset than the currency', () => {
+    describe('what the fees of a BUY took of the asset', () => {
       // Binance takes a BUY's fee in the asset bought unless the fees are paid in BNB: 0.001 of the 1 BTC bought at 100, which the Trader
       // reports as 0.1 USDT at a rate of 0.1 %, and which the SELLs carry, selling the 0.999 BTC left
       describe('BUY whose fee the exchange took in the asset bought', () => {
         beforeEach(() => {
-          paidIn('BTC', 'BUY', 1, 100, 1, 0.1);
+          takenIn(FEE_IN_BTC, 'BUY', 1, 100, 1, 0.1);
         });
 
         it('should leave the fee out of the fees of the round trip', () => {
@@ -258,10 +259,10 @@ describe('RoundTripTracker', () => {
           expect(openRoundTrip()?.entryEquity).toBe(1000);
         });
 
-        it('should log at debug that the fee is left out, and what it took of the amount bought', () => {
+        it('should log at debug what the fee took of the amount bought, and its value left out of the fees', () => {
           expect(debug).toHaveBeenCalledExactlyOnceWith(
             'roundtrip analyzer',
-            'BUY order BUY-1: its fee of 0.1 USDT was taken in BTC, 0.001 BTC out of the amount bought: left out of the fees, its round trip holding that much less.',
+            'BUY order BUY-1: its fee took 0.001 BTC out of the amount bought, 0.1 USDT of the 0.1 USDT reported: left out of the fees, its round trip holding that much less.',
           );
         });
 
@@ -271,7 +272,7 @@ describe('RoundTripTracker', () => {
 
         describe('then a scale-in BUY whose fee the exchange took in the asset too', () => {
           beforeEach(() => {
-            paidIn('BTC', 'BUY', 2, 110, 1, 0.11, holding(1.998));
+            takenIn({ amount: 0.001, value: 0.11 }, 'BUY', 2, 110, 1, 0.11, holding(1.998));
           });
 
           it.each`
@@ -286,7 +287,7 @@ describe('RoundTripTracker', () => {
 
         // The round trip of the live-trader flow: the 0.999 BTC left sold at 110 for a fee of 0.10989 USDT, 0.1 % of 109.89
         it('should make the P&L the account made once the SELL of what the fee left closes it', () => {
-          paidIn('USDT', 'SELL', 2, 110, 0.999, 0.10989);
+          sell(2, 110, 0.999, 0.10989);
           expect(tracker.closedRoundTrips[0]).toEqual(expect.objectContaining({ fees: 0.10989, pnl: 9.78011, profit: 0.978011 }));
         });
 
@@ -294,7 +295,7 @@ describe('RoundTripTracker', () => {
         // exchange sells 1 of the 1.499 BTC free. Counted whole, its proceeds took the fee's worth of the other coins, 0.11 USDT, and the
         // fee left out of the fees counted nowhere: a P&L of 9.89 where the account made 9.78 (+9.89 USDT, -0.001 BTC at 110).
         it('should count a SELL of the amount the BUY reported for the 0.999 BTC the round trip holds, with that share of its fee', () => {
-          paidIn('USDT', 'SELL', 2, 110, 1, 0.11, holding(0.499));
+          sell(2, 110, 1, 0.11, holding(0.499));
           expect(tracker.closedRoundTrips[0]).toEqual(
             // 0.999 at 110, the fee of 0.11 for 0.999 of the 1 sold, and 109.89 - 100 - 0.10989
             expect.objectContaining({ proceeds: 109.89, fees: 0.10989, pnl: 9.78011, exitPrice: 110 }),
@@ -302,30 +303,71 @@ describe('RoundTripTracker', () => {
         });
       });
 
-      it.each`
-        feeAsset     | description
-        ${'USDT'}    | ${'the currency'}
-        ${'BNB'}     | ${'a third asset, BNB'}
-        ${undefined} | ${'an asset the event does not name'}
-      `('should count the fee of a BUY taken in $description, as the Trader reports it', ({ feeAsset }) => {
-        paidIn(feeAsset, 'BUY', 1, 100, 1, 0.1);
-        expect(openRoundTrip()?.fees).toBe(0.1);
+      // Binance with BNB, whose BNB ran out after the first of the two trades of a BUY of 1 BTC at 100: 0.0001 BNB for the first 0.5, its
+      // rate unknown, then 0.0005 BTC, 0.1 %, for the second. The Trader reports the BTC trade's fee alone, 0.05 USDT, the BNB counting
+      // 0, and the event names no one asset the fee was taken in. The account holds 0.9995 BTC, whose SELL at 100 brings in 99.95 for a
+      // fee of 0.09995: by the rules, a P&L of 99.95 - 100 - 0.09995, -0.14995 (the account made -0.18745, the BNB worth 375). The
+      // Trader reported 0.1 USDT, the rate of the BTC trade on the whole BUY, which the round trip counted whole, the asset named by no
+      // event, though the smaller SELL carried the BTC part: -0.24995.
+      describe('BUY whose BNB ran out partway, the rest of its fee taken in the asset bought', () => {
+        beforeEach(() => {
+          takenIn({ amount: 0.0005, value: 0.05 }, 'BUY', 1, 100, 1, 0.05, holding(0.9995));
+        });
+
+        it.each`
+          field            | expected  | description
+          ${'fees'}        | ${0}      | ${'the part taken in BTC left out, the part paid in BNB counting 0'}
+          ${'position'}    | ${0.9995} | ${'the 1 BTC bought less the 0.0005 the second fee took'}
+          ${'entryEquity'} | ${999.95} | ${'the portfolio after it, 999.9, plus the fee the Trader reports, 0.05'}
+        `('should open the round trip with $field $expected: $description', ({ field, expected }) => {
+          expect(openRoundTrip()?.[field as keyof OpenRoundTrip]).toBe(expected);
+        });
+
+        it('should make the P&L the rules give once the SELL of the 0.9995 BTC left closes it', () => {
+          sell(2, 100, 0.9995, 0.09995);
+          expect(tracker.closedRoundTrips[0]).toEqual(
+            expect.objectContaining({ cost: 100, proceeds: 99.95, fees: 0.09995, pnl: -0.14995 }),
+          );
+        });
       });
 
-      it('should log nothing of a BUY fee taken in the currency', () => {
-        paidIn('USDT', 'BUY', 1, 100, 1, 0.1);
+      // The same BUY filled at 100 then 100.02: the 0.0005 BTC of the second fee are worth 0.05001 USDT at its price, and the Trader
+      // reports 0.05000499950005 % of the 100.01 the BUY cost, 0.050010000000000006 USDT: equal but for the noise of their arithmetic
+      it('should leave out the value of what the fees took of the asset, worked out apart from the fee the Trader reports', () => {
+        takenIn({ amount: 0.0005, value: 0.05001 }, 'BUY', 1, 100.01, 1, 0.050010000000000006, holding(0.9995));
+        expect(openRoundTrip()?.fees).toBe(0);
+      });
+
+      // No exchange takes part of a BUY's fee in the asset and part in the currency: the part taken in the currency would count
+      it('should count the part of the fee of a BUY that its fees did not take of the asset', () => {
+        takenIn({ amount: 0.0005, value: 0.05 }, 'BUY', 1, 100, 1, 0.1);
+        expect(openRoundTrip()?.fees).toBe(0.05);
+      });
+
+      it.each`
+        feeTakenInAsset                      | position  | description
+        ${undefined}                         | ${1}      | ${'took none of the asset'}
+        ${{ amount: NaN, value: 0.1 }}       | ${1}      | ${'took an amount of the asset that is not a number'}
+        ${{ amount: 0.001, value: NaN }}     | ${1}      | ${'took of the asset a value that is not a number'}
+        ${{ amount: -0.0001, value: -0.01 }} | ${1.0001} | ${'gave some of the asset back, a rebate'}
+      `('should count the whole fee of a BUY whose fees $description, holding $position BTC', ({ feeTakenInAsset, position }) => {
+        takenIn(feeTakenInAsset, 'BUY', 1, 100, 1, 0.1);
+        expect({ fees: openRoundTrip()?.fees, position: openRoundTrip()?.position }).toEqual({ fees: 0.1, position });
+      });
+
+      it('should log nothing of a BUY whose fees took none of the asset', () => {
+        takenIn(undefined, 'BUY', 1, 100, 1, 0.1);
         expect(debug).not.toHaveBeenCalled();
       });
 
       // Only a BUY fee comes out of the amount bought: a SELL's comes out of what it brings in, which its proceeds leave out
       it.each`
-        feeAsset  | description
-        ${'USDT'} | ${'the currency'}
-        ${'BTC'}  | ${'the asset of the pair'}
-        ${'BNB'}  | ${'a third asset, BNB'}
-      `('should count the fee of a SELL taken in $description', ({ feeAsset }) => {
+        feeTakenInAsset                     | description
+        ${undefined}                        | ${'none of the asset'}
+        ${{ amount: 0.0005, value: 0.055 }} | ${'some of the asset'}
+      `('should count the whole fee of a SELL whose fees took $description', ({ feeTakenInAsset }) => {
         buy(1, 100, 1, 0.1);
-        paidIn(feeAsset, 'SELL', 2, 110, 0.5, 0.055, holding(0.5));
+        takenIn(feeTakenInAsset, 'SELL', 2, 110, 0.5, 0.055, holding(0.5));
         expect(openRoundTrip()?.fees).toBe(0.155);
       });
     });
@@ -1122,7 +1164,7 @@ describe('RoundTripTracker', () => {
     // Binance without BNB: the fee of 0.1 USDT taken in BTC, out of the 1 bought at 100. Rebased at the 1 BTC bought, its cost counted
     // the coins the fee took, 0.11 USDT at 110, which no SELL could sell.
     it('should rebase a round trip whose BUY fee the exchange took in the asset at what it holds then, net of that fee', () => {
-      paidIn('BTC', 'BUY', 1, 100, 1, 0.1, holding(0.999));
+      takenIn(FEE_IN_BTC, 'BUY', 1, 100, 1, 0.1, holding(0.999));
       tracker.readCandle(candleAt(9, 110), false);
       tracker.startPeriod(START);
       // 0.999 at 110
@@ -1261,7 +1303,7 @@ describe('RoundTripTracker', () => {
     // sell for 109.89. Valued at the 1 BTC bought, the line read 10 USDT (1 %), the fee counted nowhere.
     it('should value the position net of a BUY fee taken in the asset, as the SELL that would close it would sell it', () => {
       valuePortfolio.mockReturnValue(999.9);
-      paidIn('BTC', 'BUY', 4, 100, 1, 0.1, holding(0.999));
+      takenIn(FEE_IN_BTC, 'BUY', 4, 100, 1, 0.1, holding(0.999));
       tracker.readCandle(candleAt(6, 110), true);
       tracker.logOpenPosition();
       // 109.89 - 100, in % of 999.9 + 0.1: 0.989 %, 0.98 % rounded down
