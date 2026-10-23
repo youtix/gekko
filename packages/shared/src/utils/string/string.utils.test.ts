@@ -4,7 +4,6 @@ import {
   formatEveryDecimal,
   formatPercent,
   formatRatio,
-  formatSignedPercent,
   listInWords,
   pluralize,
   toCamelCase,
@@ -166,24 +165,5 @@ describe('formatPercent', () => {
     ${'a small loss rounded half to even, to 0'} | ${-0.001} | ${'halfEven'} | ${'0%'}
   `('should write $description: $value as $expected ($rounding)', ({ value, rounding, expected }) => {
     expect(formatPercent(value, rounding)).toBe(expected);
-  });
-});
-
-describe('formatSignedPercent', () => {
-  it.each`
-    value        | expected
-    ${null}      | ${'n/a'}
-    ${undefined} | ${'n/a'}
-    ${NaN}       | ${'n/a'}
-    ${Infinity}  | ${'n/a'}
-    ${-Infinity} | ${'n/a'}
-    ${0}         | ${'0%'}
-    ${0.004}     | ${'0%'}
-    ${1.234}     | ${'+1.23%'}
-    ${1.235}     | ${'+1.24%'}
-    ${-1.235}    | ${'-1.24%'}
-    ${-2.345}    | ${'-2.34%'}
-  `('formatSignedPercent($value) -> $expected', ({ value, expected }) => {
-    expect(formatSignedPercent(value)).toBe(expected);
   });
 });

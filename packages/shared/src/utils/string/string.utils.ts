@@ -104,12 +104,3 @@ export type PercentRounding = 'down' | 'halfEven';
  * output rounding in its own way, one figure read 0.01 apart from one to the other.
  */
 export const formatPercent = (value: number, rounding: PercentRounding): string => `${round(value, 2, rounding)}%`;
-
-export const formatSignedPercent = (value: number | null | undefined) => {
-  if (!isFiniteNumber(value)) return 'n/a';
-  const roundedValue = round(value, 2, 'halfEven');
-  const absolute = Math.abs(roundedValue);
-  if (roundedValue > 0) return `+${absolute}%`;
-  if (roundedValue < 0) return `-${absolute}%`;
-  return '0%';
-};
