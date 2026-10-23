@@ -2107,6 +2107,150 @@ describe('StrategyManager', () => {
           });
         });
 
+        // The Trader's read after the end of that SELL failed, and its event carries an earlier one (portfolioReadAfterOrder false):
+        // made while the SELL rested, as here, it counts as used what the SELL reserved, and made before the SELL was placed, it still
+        // shows free what the SELL sold. Not the state after the SELL, it ends no stop: removed on it, the stop of a SELL canceled while
+        // the position was still held left that position without protection. The SELL's own figures decide, and the warning of a stop
+        // active again, or kept, says that the Trader could not read the balances after that SELL. Read after the end (true), or with no
+        // word of it (undefined: before the Trader's first read, and in events built without the flag), the portfolio decides as before.
+        describe('by whether the Trader read the balances of its end after it, the 0.5 BTC reserved in them, none free', () => {
+          const CAPPED = 'completed after selling 0.3 of its 0.5 BTC';
+          const CAPPED_WHY = `${CAPPED} (the Trader caps a SELL to the free balance and to the maximum amount of the market)`;
+          const ALMOST_ALL = 'completed after selling 0.4999 of its 0.5 BTC';
+          const CANCELED = 'was canceled after selling 0.2 BTC';
+          const REFUSED = 'errored, no fill reported (Insufficient balance)';
+          const LOST = `errored, no fill reported (${CREATION_LOST})`;
+          const NOTHING_FREE = 'the portfolio after it shows 0 BTC free,';
+          const REST = 'the rest, 0.0001 BTC, is';
+
+          /** The stop active again for `amount`, what its SELL left unsold */
+          const activeFor = (amount: number) => expect.objectContaining({ status: 'active', amount });
+          /** The info line of the stop over once its SELL `ending`, `left` being too little to sell */
+          const over = (ending: string, left: string) =>
+            `Trailing stop of BUY ${BUY_ID} over: its SELL ${SELL_ID} ${ending}, and ${left} too little to sell at the minimums of the market`;
+          /** The warning of the stop removed once its SELL `ending`, the portfolio of that end showing no BTC free */
+          const removed = (ending: string) =>
+            `Trailing stop of BUY ${BUY_ID} removed: its SELL ${SELL_ID} ${ending}, and the portfolio after it shows 0 BTC free, too little to sell at the minimums of the market. Nothing is left for the stop to protect`;
+          /** The warning of the stop active again for `amount` once its SELL `ending`, the balances of that end read before it */
+          const activeAgainUnread = (ending: string, amount: number) =>
+            `Trailing stop of BUY ${BUY_ID} active again: its SELL ${SELL_ID} ${ending}, and the Trader could not read the balances after it. It sells ${amount} BTC once a price reaches its stop price, 49000, trailing from its peak, 50000`;
+          /** The warning of the stop kept once its SELL errored, its creation lost on the network, the balances of that end read before it */
+          const KEPT_UNREAD = `Trailing stop of BUY ${BUY_ID} kept: its SELL ${SELL_ID} ${LOST}, and may still have gone through on the exchange, where Gekko follows it no more, and the Trader could not read the balances after it. Check that SELL there. The stop stays armed, selling 0.5 BTC once a price reaches its stop price, 49000, trailing from its peak, 50000: if that SELL went through, the next one is refused for lack of free BTC and the stop removed, unless the account holds other BTC free, which it would sell`;
+
+          /**
+           * Ends the SELL of the stop as `outcome` says, after selling `sold` of its 0.5 BTC: completed for that amount, errored (refused,
+           * unless it may still be live on the exchange, its creation lost on the network) or canceled. The portfolio of that end holds
+           * the 0.5 BTC reserved, none free, and the Trader says whether it read it after the end as `readAfterOrder` says, the flag left
+           * out of the event when undefined.
+           */
+          const endSellRead = (outcome: string, sold: number, mayBeLive: boolean, readAfterOrder?: boolean) => {
+            const exchange: ExchangeEvent = {
+              price: 48000,
+              portfolio: new Map([['BTC', { free: 0, used: 0.5, total: 0.5 }]]),
+              ...(readAfterOrder !== undefined && { portfolioReadAfterOrder: readAfterOrder }),
+            };
+            const order = { id: SELL_ID, symbol, side: 'SELL', type: 'MARKET', orderCreationDate } as const;
+            if (outcome === 'completes')
+              manager.onOrderCompleted({
+                order: { ...order, amount: sold, orderExecutionDate: 61000, effectivePrice: 48000, fee: 0 },
+                exchange,
+              });
+            else if (outcome === 'errors')
+              manager.onOrderErrored({
+                order: {
+                  ...order,
+                  amount: 0.5,
+                  reason: mayBeLive ? CREATION_LOST : 'Insufficient balance',
+                  orderErrorDate: 61000,
+                  filled: sold,
+                  mayBeLive,
+                },
+                exchange,
+              });
+            else
+              manager.onOrderCanceled({
+                order: { ...order, amount: 0.5, filled: sold, remaining: 0.5 - sold, orderCancelationDate: 61000 },
+                exchange,
+              });
+          };
+
+          beforeEach(() => {
+            manager.setMarketData(MARKET_MINIMUMS);
+          });
+
+          // Each way the SELL of the stop ends, with the balances read after it, then without a word of when, then before its end
+          describe.each`
+            ends                                             | outcome          | sold      | mayBeLive | read                        | readAfterOrder | state             | level     | line
+            ${'completes after selling 0.3 of 0.5'}          | ${'completes'}   | ${0.3}    | ${false}  | ${'after it'}               | ${true}        | ${undefined}      | ${'info'} | ${over(CAPPED, NOTHING_FREE)}
+            ${'completes after selling 0.3 of 0.5'}          | ${'completes'}   | ${0.3}    | ${false}  | ${'without a word of when'} | ${undefined}   | ${undefined}      | ${'info'} | ${over(CAPPED, NOTHING_FREE)}
+            ${'completes after selling 0.3 of 0.5'}          | ${'completes'}   | ${0.3}    | ${false}  | ${'before its end'}         | ${false}       | ${activeFor(0.2)} | ${'warn'} | ${activeAgainUnread(CAPPED_WHY, 0.2)}
+            ${'completes after selling 0.4999 of 0.5'}       | ${'completes'}   | ${0.4999} | ${false}  | ${'after it'}               | ${true}        | ${undefined}      | ${'info'} | ${over(ALMOST_ALL, REST)}
+            ${'completes after selling 0.4999 of 0.5'}       | ${'completes'}   | ${0.4999} | ${false}  | ${'without a word of when'} | ${undefined}   | ${undefined}      | ${'info'} | ${over(ALMOST_ALL, REST)}
+            ${'completes after selling 0.4999 of 0.5'}       | ${'completes'}   | ${0.4999} | ${false}  | ${'before its end'}         | ${false}       | ${undefined}      | ${'info'} | ${over(ALMOST_ALL, REST)}
+            ${'is canceled after selling 0.2 of 0.5'}        | ${'is canceled'} | ${0.2}    | ${false}  | ${'after it'}               | ${true}        | ${undefined}      | ${'warn'} | ${removed(CANCELED)}
+            ${'is canceled after selling 0.2 of 0.5'}        | ${'is canceled'} | ${0.2}    | ${false}  | ${'without a word of when'} | ${undefined}   | ${undefined}      | ${'warn'} | ${removed(CANCELED)}
+            ${'is canceled after selling 0.2 of 0.5'}        | ${'is canceled'} | ${0.2}    | ${false}  | ${'before its end'}         | ${false}       | ${activeFor(0.3)} | ${'warn'} | ${activeAgainUnread(CANCELED, 0.3)}
+            ${'is canceled after selling 0.4999 of 0.5'}     | ${'is canceled'} | ${0.4999} | ${false}  | ${'before its end'}         | ${false}       | ${undefined}      | ${'info'} | ${over('was canceled after selling 0.4999 BTC', REST)}
+            ${'errors, refused, nothing sold'}               | ${'errors'}      | ${0}      | ${false}  | ${'after it'}               | ${true}        | ${undefined}      | ${'warn'} | ${removed(REFUSED)}
+            ${'errors, refused, nothing sold'}               | ${'errors'}      | ${0}      | ${false}  | ${'without a word of when'} | ${undefined}   | ${undefined}      | ${'warn'} | ${removed(REFUSED)}
+            ${'errors, refused, nothing sold'}               | ${'errors'}      | ${0}      | ${false}  | ${'before its end'}         | ${false}       | ${activeFor(0.5)} | ${'warn'} | ${activeAgainUnread(REFUSED, 0.5)}
+            ${'errors after selling 0.4999 of 0.5'}          | ${'errors'}      | ${0.4999} | ${false}  | ${'before its end'}         | ${false}       | ${undefined}      | ${'info'} | ${over('errored after selling 0.4999 BTC (Insufficient balance)', REST)}
+            ${'errors, nothing sold, and may still be live'} | ${'errors'}      | ${0}      | ${true}   | ${'after it'}               | ${true}        | ${undefined}      | ${'warn'} | ${removed(LOST)}
+            ${'errors, nothing sold, and may still be live'} | ${'errors'}      | ${0}      | ${true}   | ${'without a word of when'} | ${undefined}   | ${undefined}      | ${'warn'} | ${removed(LOST)}
+            ${'errors, nothing sold, and may still be live'} | ${'errors'}      | ${0}      | ${true}   | ${'before its end'}         | ${false}       | ${activeFor(0.5)} | ${'warn'} | ${KEPT_UNREAD}
+          `('when it $ends, the balances read $read', ({ outcome, sold, mayBeLive, readAfterOrder, state, level, line }) => {
+            beforeEach(() => {
+              endSellRead(outcome, sold, mayBeLive, readAfterOrder);
+            });
+
+            it(state ? 'makes the stop active again for what its SELL left unsold' : 'removes the stop', () => {
+              expect(stop()).toEqual(state);
+            });
+
+            it(`says why at ${level} level, in one line, and nothing at the other level`, () => {
+              expect({ info: stopInfos(), warn: stopWarnings() }).toEqual({ info: [], warn: [], [level]: [['strategy', line]] });
+            });
+          });
+
+          // Its rest gone after all (sold by hand on the exchange, or never held, the fee of the BUY taken from the BTC it bought), the
+          // next SELL of the stop finds nothing to sell: its refusal, the balances read after it, removes the stop. Read before that
+          // refusal ended, they end nothing either: the stop stays active for its rest.
+          describe('when it is canceled after selling 0.2 of 0.5, the balances read before its end, then its next SELL is refused', () => {
+            beforeEach(() => {
+              vi.mocked(randomUUID).mockReturnValueOnce(NEXT_SELL_ID);
+              endSellRead('is canceled', 0.2, false, false);
+              manager.onOneMinuteBucket(minute(48500, 48000)); // At or below its stop price, 49000: the stop sends a SELL of its 0.3
+            });
+
+            it.each`
+              read                | readAfterOrder | verdict                    | state
+              ${'after it'}       | ${true}        | ${'removes the stop'}      | ${undefined}
+              ${'before its end'} | ${false}       | ${'keeps the stop active'} | ${activeFor(0.3)}
+            `('$verdict when the Trader read the balances of that refusal $read, none free', ({ readAfterOrder, state }) => {
+              manager.onOrderErrored({
+                order: {
+                  id: NEXT_SELL_ID,
+                  symbol,
+                  side: 'SELL',
+                  type: 'MARKET',
+                  amount: 0.3,
+                  reason: 'Insufficient balance',
+                  orderCreationDate: 121000,
+                  orderErrorDate: 121000,
+                  filled: 0,
+                  mayBeLive: false,
+                },
+                exchange: {
+                  price: 48000,
+                  portfolio: new Map([['BTC', { free: 0, used: 0, total: 0 }]]),
+                  portfolioReadAfterOrder: readAfterOrder,
+                },
+              });
+              expect(stop()).toEqual(state);
+            });
+          });
+        });
+
         // The SELL already sent is the strategy's: a stop canceled is not brought back by its outcome
         describe('when the strategy cancels the stop while it sells', () => {
           beforeEach(() => {

@@ -89,8 +89,8 @@ export class TrailingStopManager extends EventEmitter {
 
   /**
    * Removes the stop whose SELL completed, nothing being left to protect: that SELL sold all the stop sells, or left a rest too little
-   * to sell, or a portfolio with too little of the asset free (see StrategyManager.settleCompletedStopSell). Returns whether a stop was
-   * selling through that SELL.
+   * to sell, or a portfolio, read after it, with too little of the asset free (see StrategyManager.settleCompletedStopSell). Returns
+   * whether a stop was selling through that SELL.
    */
   public removeSellingStop(sellOrderId: UUID): boolean {
     const order = this.findSellingStop(sellOrderId);

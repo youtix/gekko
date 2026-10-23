@@ -9,6 +9,7 @@ import { listInWords } from '@gekko/shared/utils/string/string.utils';
 import { isNil, isPlainObject } from 'lodash-es';
 import { inspect } from 'node:util';
 import { ORDER_KEYS, SIZING_KEYS, TRAILING_KEYS } from './strategyManager.const';
+import { isReadBeforeEnd } from '@gekko/strategies/helpers/positionTracker/positionTracker.helper';
 import { TrailingStopState } from '@gekko/strategies/trailingStopManager.types';
 
 /**
@@ -144,3 +145,11 @@ export const describeSale = ({ symbol, amount, stopPrice, highestPeak }: Trailin
   const [asset] = symbol.split('/');
   return `${amount} ${asset} once a price reaches its stop price, ${stopPrice}, trailing from its peak, ${highestPeak}`;
 };
+
+/**
+ * The clause the warning of a stop made active again, or kept, after its SELL ended adds when the Trader read the balances of that end
+ * before it (see isReadBeforeEnd): the StrategyManager does not read them (see StrategyManager.isNothingFreeToSell), and the rest the
+ * stop sells again may already be gone. Empty when the Trader read them after the end, or says nothing of it.
+ */
+export const describeUnreadBalances = (exchange: Pick<ExchangeEvent, 'portfolioReadAfterOrder'>) =>
+  isReadBeforeEnd(exchange) ? ', and the Trader could not read the balances after it' : '';

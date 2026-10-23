@@ -12,7 +12,7 @@ import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { getBucketTimestamp, getFirstCandleFromBucket } from '@gekko/shared/helpers/candle/candle.helper';
 import { clonePortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
-import { isSellable } from '@gekko/strategies/helpers/positionTracker/positionTracker.helper';
+import { isReadBeforeEnd, isSellable } from '@gekko/strategies/helpers/positionTracker/positionTracker.helper';
 import * as indicators from '@gekko/indicators/index';
 import { Indicator } from '@gekko/indicators/indicator';
 import { IndicatorNames, IndicatorParameters } from '@gekko/indicators/indicator.types';
@@ -49,6 +49,7 @@ import {
   copyOrderEvent,
   copyResult,
   describeSale,
+  describeUnreadBalances,
   getKeysProblem,
   getOrderProblem,
   getPairProblem,
@@ -611,6 +612,14 @@ export class StrategyManager extends EventEmitter {
    * Nor when the portfolio after that SELL (`exchange`) shows too little of the asset free to sell (see isNothingFreeToSell): nothing
    * is left for the stop to protect (sold by hand on the exchange, or by a SELL whose outcome was lost), and resumed it sent a SELL
    * refused on each such minute until the breaker stopped the bot. It is removed, with a warning.
+   *
+   * Unless the Trader read that portfolio before the SELL ended (see isReadBeforeEnd): its read after the end failed, and the event
+   * carries an earlier one, which counts as used what the SELL reserved when it was made while the SELL rested, and still shows free
+   * what the SELL sold when it was made before. It is not read (see isNothingFreeToSell): removed on it, the stop of a SELL canceled
+   * while the position was still held left that position without protection. The stop is active again, or kept, for what the SELL
+   * left unsold, its warning adding that the Trader could not read the balances after it: if that rest is gone, the next SELL of the
+   * stop is refused for lack of anything to sell, and the portfolio read after that refusal removes the stop, unless the account holds
+   * other coins of the asset free, which that SELL sells, as after a SELL that may still be live (above).
    */
   private resumeTrailingStop(sellId: UUID, outcome: string, sold: number, exchange: ExchangeEvent, reason?: string, mayBeLive = false) {
     const stop = this.trailingStopManager.resumeSellingStop(sellId, sold);
@@ -639,16 +648,19 @@ export class StrategyManager extends EventEmitter {
       return;
     }
     const selling = describeSale(stop);
+    // Empty unless the Trader read the balances of that end before it, which the stop is not ended on (see isNothingFreeToSell)
+    const unread = describeUnreadBalances(exchange);
     if (!mayBeLive) {
-      warning('strategy', `Trailing stop of BUY ${stop.id} active again: its SELL ${sellId} ${ending}. It sells ${selling}`);
+      warning('strategy', `Trailing stop of BUY ${stop.id} active again: its SELL ${sellId} ${ending}${unread}. It sells ${selling}`);
       return;
     }
     warning(
       'strategy',
       [
         `Trailing stop of BUY ${stop.id} kept: its SELL ${sellId} ${ending}, and may still have gone through on the exchange, where`,
-        `Gekko follows it no more. Check that SELL there. The stop stays armed, selling ${selling}: if that SELL went through, the next`,
-        `one is refused for lack of free ${asset} and the stop removed, unless the account holds other ${asset} free, which it would sell`,
+        `Gekko follows it no more${unread}. Check that SELL there. The stop stays armed, selling ${selling}: if that SELL went through,`,
+        `the next one is refused for lack of free ${asset} and the stop removed, unless the account holds other ${asset} free, which it`,
+        'would sell',
       ].join(' '),
     );
   }
@@ -662,7 +674,9 @@ export class StrategyManager extends EventEmitter {
    * completing (see resumeTrailingStop): the next price at or below that stop price sells the next part. Unless the rest is too little
    * to sell at the minimums of the market, or the portfolio after that SELL shows too little of the asset free (see
    * isNothingFreeToSell): a BUY whose fee the exchange took from the asset bought leaves its stop selling more than is free, its SELL
-   * capped to what is, and nothing is left to protect. The stop is then over, said at info level.
+   * capped to what is, and nothing is left to protect. The stop is then over, said at info level. A portfolio the Trader read before
+   * that SELL ended is not read (see isNothingFreeToSell): the stop is active again for the rest, its warning adding that the Trader
+   * could not read the balances after it, and if that rest is gone, the refusal of its next SELL removes it (see resumeTrailingStop).
    */
   private settleCompletedStopSell({ id: sellId, amount: sold }: OrderCompletedEvent['order'], exchange: ExchangeEvent) {
     const stop = this.getSellingStop(sellId);
@@ -692,7 +706,7 @@ export class StrategyManager extends EventEmitter {
       'strategy',
       [
         `Trailing stop of BUY ${stop.id} active again: ${ending} (the Trader caps a SELL to the free balance and to the maximum amount`,
-        `of the market). It sells ${describeSale(resumed)}`,
+        `of the market)${describeUnreadBalances(exchange)}. It sells ${describeSale(resumed)}`,
       ].join(' '),
     );
   }
@@ -701,14 +715,16 @@ export class StrategyManager extends EventEmitter {
    * Whether the portfolio after the SELL of a stop (`exchange`) shows too little of its asset free to sell: nothing is left for the
    * stop to protect. Not while a SELL the strategy created is pending on the pair, whose reservation of the asset leaves little free
    * while the position is held: that SELL decides (see isTriggerHeld). Nor when the portfolio does not list the asset, read before the
-   * first synchronization: nothing tells then. Too little is the PositionTracker's rule (see isSellable), for the MARKET SELL the stop
-   * sends.
+   * first synchronization, or when the Trader read it before the SELL ended (see isReadBeforeEnd): nothing tells then, a read made while
+   * the SELL rested counting as used what the SELL reserved, and one made before the SELL was placed still showing free what it sold,
+   * so that the stop is never ended on such a read. Too little is the PositionTracker's rule (see isSellable), for the MARKET SELL the
+   * stop sends.
    */
-  private isNothingFreeToSell({ symbol }: TrailingStopState, { portfolio, price }: ExchangeEvent): boolean {
+  private isNothingFreeToSell({ symbol }: TrailingStopState, exchange: ExchangeEvent): boolean {
     const [asset] = symbol.split('/');
-    const free = portfolio.get(asset)?.free;
-    if (!isFiniteNumber(free) || this.getStrategySellIds(symbol).length > 0) return false;
-    return !isSellable(free, price, 'MARKET', this.marketData.get(symbol));
+    const free = exchange.portfolio.get(asset)?.free;
+    if (isReadBeforeEnd(exchange) || !isFiniteNumber(free) || this.getStrategySellIds(symbol).length > 0) return false;
+    return !isSellable(free, exchange.price, 'MARKET', this.marketData.get(symbol));
   }
 
   /** The stop selling through the SELL `sellId` (see TrailingStopState.sellOrderId), if any */
