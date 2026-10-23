@@ -41,8 +41,10 @@ export const coversAmountAsked = (asked: number | undefined, amount: number) => 
  * Whether the balances the end of an order carries were read before that end, as the Trader says (ExchangeEvent.portfolioReadAfterOrder
  * false): its read after the end failed, and the event carries an earlier one, which may still show free what a SELL sold, count as used
  * what the order reserved and released, or miss what a BUY bought. The tracker does not read them as the state after the order (see
- * getUnreadHolding and PositionTracker.settleCompletedSell). Not when the Trader says nothing (undefined): before its first read, the
- * portfolio then the empty one it starts with, which lists no asset, and in events built without the flag.
+ * getUnreadHolding and PositionTracker.settleCompletedSell), nor does the StrategyManager end a trailing stop on those the end of the
+ * stop's SELL carries (see StrategyManager.isNothingFreeToSell), the warning of a stop it makes active again, or keeps, saying that the
+ * Trader could not read the balances after that SELL (see describeUnreadBalances). Not when the Trader says nothing (undefined): before
+ * its first read, the portfolio then the empty one it starts with, which lists no asset, and in events built without the flag.
  */
 export const isReadBeforeEnd = ({ portfolioReadAfterOrder }: Pick<ExchangeEvent, 'portfolioReadAfterOrder'>) =>
   portfolioReadAfterOrder === false;
