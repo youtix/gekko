@@ -1,0 +1,20 @@
+watch:
+  assets:
+    - UBTC # Hyperliquid's spot BTC, written by its token name
+  currency: USDC
+  mode: importer # backtest | importer | realtime
+  # Hyperliquid's API serves only the latest 5000 candles of each interval, about 3.5 days of 1-minute candles, and an import gets no
+  # older minute: move this range into the last 3 days before you run it
+  daterange:
+    start: 2026-10-13
+    end: 2026-10-15T23:59:00Z
+
+exchange:
+  name: hyperliquid # no privateKey or walletAddress: an import reads public market data only
+
+storage:
+  type: sqlite
+  database: ./db/hyperliquid-UBTC_USDC.sql
+
+plugins:
+  - name: CandleWriter

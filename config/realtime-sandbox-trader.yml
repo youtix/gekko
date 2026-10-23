@@ -1,8 +1,13 @@
+# Never write your keys in this file, which git tracks: copy it to config/realtime-sandbox-trader.local.yml (git ignores every
+# config/*.local.* file), fill in your testnet API key, secret and bot token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko
+# takes every value as written: it reads no environment variable inside the file (apiKey: ${API_KEY} is the text ${API_KEY}).
+
 watch:
-  asset: BTC
+  assets:
+    - BTC
   currency: USDT
-  mode: realtime # backtest | importer | realtime
   timeframe: 5m
+  mode: realtime # backtest | importer | realtime
   warmup:
     candleCount: 365
 
@@ -25,9 +30,10 @@ plugins:
 
   - name: 'Trader'
 
-  - name: 'PerformanceAnalyzer'
+  - name: 'RoundTripAnalyzer'
     enableConsoleTable: true
 
   - name: EventSubscriber
-    token: # Your telgram token
+    token: # Your telegram bot token
     botUsername: # Your telegram bot username
+    # chatId: 123456789 # Optional: the chat the bot talks to; without it, the first chat that sends it a command after start-up is bound

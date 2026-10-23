@@ -1,0 +1,21 @@
+{
+  "name": "@gekko/indicators",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/tsc/indicators.tsbuildinfo",
+    "test": "vitest --run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "@gekko/shared": "workspace:*",
+    "lodash-es": "^4.17.23"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

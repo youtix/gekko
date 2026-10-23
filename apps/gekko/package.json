@@ -1,0 +1,30 @@
+{
+  "name": "@gekko/cli",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/tsc/gekko.tsbuildinfo",
+    "test": "vitest --run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "build:exec": "bun build src/gekko.ts --compile --outfile ../../dist/gekko",
+    "test:e2e": "bun test --isolate test/e2e"
+  },
+  "dependencies": {
+    "@gekko/core": "workspace:*",
+    "@gekko/plugins": "workspace:*",
+    "@gekko/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "@gekko/schemas": "workspace:*",
+    "@gekko/strategies": "workspace:*",
+    "ccxt": "^4.5.39",
+    "lodash-es": "^4.17.23",
+    "vitest": "^4.0.18",
+    "winston": "^3.19.0",
+    "zod": "^4.3.6"
+  }
+}

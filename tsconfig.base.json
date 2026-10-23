@@ -1,0 +1,23 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "lib": ["ESNext"],
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "resolveJsonModule": true,
+    "allowJs": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "paths": {
+      "@gekko/shared/*": ["./packages/shared/src/*"],
+      "@gekko/schemas/*": ["./packages/schemas/src/*"],
+      "@gekko/indicators/*": ["./packages/indicators/src/*"],
+      "@gekko/strategies/*": ["./packages/strategies/src/*"],
+      "@gekko/core/*": ["./packages/core/src/*"],
+      "@gekko/plugins/*": ["./packages/plugins/src/*"],
+      "@gekko/cli/*": ["./apps/gekko/src/*"],
+      "@gekko/fox/*": ["./apps/fox/src/*"]
+    }
+  }
+}

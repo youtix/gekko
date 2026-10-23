@@ -1,1 +1,16 @@
-documentation
+# Prettier reads .gitignore too. A slash starts each pattern, which names a path from the root: without it a name matches at any
+# depth, and `documentation` also left scripts/documentation/ unformatted
+# What the tools write: the executables, the importer's candles, the coverage reports, Bun's lockfile
+/dist
+/db
+/coverage
+/bun.lock
+# Turborepo's cache and task logs, at the root and in every workspace: without a slash, at any depth
+.turbo
+# The guides, whose tables are aligned by hand
+/documentation
+# semantic-release writes it: its notes stay as the generator wrote them, as on the GitHub release
+/CHANGELOG.md
+# The worktrees the Claude desktop app checks out under .claude/worktrees/: copies of the checkout, whose guides the anchored
+# /documentation above does not reach, hidden from git by .git/info/exclude, which Prettier does not read
+/.claude

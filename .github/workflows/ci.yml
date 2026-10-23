@@ -6,22 +6,38 @@ on:
   pull_request:
     branches: [main, development]
 
+# turbo runs the tasks of each workspace (type:check, test:coverage, test:e2e, build:exec): no usage report sent from the runners
+env:
+  TURBO_TELEMETRY_DISABLED: 1
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    # The checks run the code under review, its install scripts and tests included: their token can read, not push
     permissions:
-      contents: write
-      issues: write
-      pull-requests: write
+      contents: read
+    # Without a bound, a step that hangs holds the runner, and on main the release behind it, for GitHub's default of six hours. The
+    # job takes a few minutes
+    timeout-minutes: 30
     steps:
+      # The whole history, so that the commit messages are read from the first commit of the pull request or of the push
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 20
+          fetch-depth: 0
 
+      # The e2e suite runs on Bun's own test runner (mock.module, setSystemTime, --isolate), which a new Bun could change under every
+      # pull request: pin the version, as Node's is, and bump it in both jobs and in package.json's packageManager in a commit of its
+      # own (its engines.bun stays >=1.3.0)
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: latest
+          bun-version: 1.4.4
+
+      # vitest runs the unit tests under Node, not Bun: pin the version package.json requires instead of the runner's
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
 
       - name: Cache Bun dependencies
         uses: actions/cache@v4
@@ -34,15 +50,28 @@ jobs:
       - name: Install dependencies
         run: bun install --frozen-lockfile
 
+      # The pull request's own commits. The checkout is the merge commit, whose first parent is the base branch: HEAD~10 linted the
+      # base's latest commits and missed the pull request's older ones
       - name: Check commit messages
         if: ${{ github.event_name == 'pull_request' }}
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: bun x commitlint --from "$BASE_SHA" --to "$HEAD_SHA"
+
+      # The commits a push brings, which a commit made in GitHub's editor or with --no-verify reaches without the commit-msg hook.
+      # A new branch has no previous tip (all zeros), and the tip a forced push replaced is not in the clone: nothing to read from
+      - name: Check commit messages of the push
+        if: ${{ github.event_name == 'push' }}
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.sha }}
         run: |
-          if git rev-parse HEAD~10 >/dev/null 2>&1; then
-            FROM="HEAD~10"
+          if git cat-file -e "$BEFORE_SHA^{commit}" 2>/dev/null; then
+            bun x commitlint --from "$BEFORE_SHA" --to "$AFTER_SHA"
           else
-            FROM=$(git rev-list --max-parents=0 HEAD)
+            echo "::notice::Commit messages not checked: the branch's previous tip $BEFORE_SHA is not in the clone (a new branch or a forced push)"
           fi
-          bunx commitlint --from="$FROM"
 
       - name: Check formatting
         run: bun run format:check
@@ -50,17 +79,85 @@ jobs:
       - name: Lint
         run: bun run lint:check
 
+      # Each workspace's tsc after those of the workspaces it imports, and the root's over scripts/
       - name: Type check
         run: bun run type:check
 
+      # Each workspace's vitest suite, one after the other, at 95 % on the four metrics, and the root's over scripts/
       - name: Test with coverage
         run: bun run test:coverage
 
+      # The whole pipeline of each mode on Bun's test runner (apps/gekko/test/e2e), the realtime flows playing real minutes under a fake
+      # clock of the harness's own (about 15 s). No git hook runs it. A step of this job rather than a job of its own: the release needs
+      # this job, so a failure holds it back. A test's timeout counts real time, but `await expect(promise).rejects` on a promise that
+      # never settles blocks past every timeout of its own, and fails here after ten minutes rather than at the job's bound
+      - name: Test end to end
+        timeout-minutes: 10
+        run: bun run test:e2e
+
+      # Both executables, dist/gekko and dist/fox, which the release builds again with the version it releases
       - name: Build
         run: bun run build:exec
 
+      # Both executables run once: Fox's help, then each on a template whose database the runner does not have, which the storage
+      # refuses once the configuration, the registries and the pipeline have loaded. A module the executable fails to load (a
+      # configuration helper, a registry, the compiled worker of Fox) fails before that line, with another message
+      - name: Run the executables
+        run: |
+          ./dist/fox --help > /dev/null
+          ./dist/fox --template-path apps/fox/templates/dema.yml > fox.log 2>&1 || true
+          cat fox.log
+          grep -q 'Cannot open the database' fox.log
+          GEKKO_CONFIG_FILE_PATH=apps/fox/templates/dema.yml ./dist/gekko > gekko.log 2>&1 || true
+          cat gekko.log
+          grep -q 'Cannot open the database' gekko.log
+
+  release:
+    needs: build
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-latest
+    # The release pushes its commit, its tag and its notes, publishes the GitHub release and comments on the issues and pull requests
+    # it closes
+    permissions:
+      contents: write
+      issues: write
+      pull-requests: write
+    # Neither installs nor runs the git hooks: they ran at each of the release's commit and pushes, the pre-commit reformatted the
+    # changelog, and a failing pre-push left main with a release commit but no tag
+    env:
+      HUSKY: 0
+    steps:
+      # The whole history and its tags, which semantic-release reads to find the last release
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # The Bun the checks passed on: the release compiles its executable with it, and the executable embeds it
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.4
+
+      # semantic-release runs under Node
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Cache Bun dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.bun/install/cache
+          key: ${{ runner.os }}-bun-${{ hashFiles('bun.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-bun-
+
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+
+      # No build step: the release's own plugin, scripts/release/version.cjs, rebuilds dist/gekko and dist/fox with the version it
+      # releases
       - name: Release
-        if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: bun run release

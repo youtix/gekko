@@ -1,0 +1,21 @@
+watch:
+  assets:
+    - UBTC # Hyperliquid's spot BTC, written by its token name
+  currency: USDC
+  timeframe: 1m
+  mode: realtime
+
+exchange:
+  name: hyperliquid # no privateKey or walletAddress: recording the candles reads public market data only
+  # A TradingAdvisor reads the account at walletAddress, and a Trader also signs its orders with privateKey. Write both in quotes, as
+  # below: unquoted, YAML reads 0x… as a number, which Gekko refuses. Write them in a copy of this file, which git ignores
+  # (config/realtime-hyperliquid-writer.local.yml), never in this one.
+  # walletAddress: '0x…' # the address of the account that holds the funds, which Gekko reads and trades for (not an API wallet's)
+  # privateKey: '0x…' # the key that signs for that account: an API wallet it approved, which only signs on its behalf, or its own
+
+storage:
+  type: sqlite
+  database: ./db/hyperliquid-UBTC_USDC.sql
+
+plugins:
+  - name: CandleWriter

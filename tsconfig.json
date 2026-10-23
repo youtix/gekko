@@ -1,23 +1,4 @@
 {
-  "compilerOptions": {
-    "target": "ESNext",
-    "module": "ESNext",
-    "moduleResolution": "bundler",
-    "outDir": "dist",
-    "strict": true,
-    "resolveJsonModule": true,
-    "esModuleInterop": true,
-    "skipLibCheck": true,
-    "paths": {
-      "@constants/*": ["./src/constants/*"],
-      "@models/*": ["./src/models/*"],
-      "@errors/*": ["./src/errors/*"],
-      "@utils/*": ["./src/utils/*"],
-      "@services/*": ["./src/services/*"],
-      "@indicators/*": ["./src/indicators/*"],
-      "@strategies/*": ["./src/strategies/*"],
-      "@plugins/*": ["./src/plugins/*"]
-    }
-  },
-  "exclude": ["./*.ts"]
+  "extends": "./tsconfig.base.json",
+  "include": ["**/*.ts", "scripts/release/version.cjs"]
 }

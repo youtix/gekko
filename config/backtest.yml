@@ -1,21 +1,69 @@
+# Backtests BTC and ETH on the database config/importer.yml writes, both pairs from 2017-10-01: run that import first
+
+showLogo: false
 watch:
-  asset: BTC
+  assets:
+    - BTC
+    - ETH
   currency: USDT
-  mode: backtest
   timeframe: 1h
+  mode: backtest
   warmup:
-    candleCount: 365
+    candleCount: 10000
   daterange:
     start: '2017-10-01T00:00:00.000Z'
     end: '2026-01-01T00:00:00.000Z'
 
 exchange:
   name: dummy-cex
+  marketData:
+    - symbol: BTC/USDT
+      marketData:
+        price:
+          min: 0.01
+          max: 1000000
+        amount:
+          min: 0.00001
+          max: 9000
+        cost:
+          min: 5
+          max: 9000000
+        precision:
+          price: 8
+          amount: 8
+        fee:
+          maker: 0.0004
+          taker: 0.0007
+    - symbol: ETH/USDT
+      marketData:
+        price:
+          min: 0.01
+          max: 1000000
+        amount:
+          min: 0.0001
+          max: 9000
+        cost:
+          min: 5
+          max: 9000000
+        precision:
+          price: 8
+          amount: 8
+        fee:
+          maker: 0.0004
+          taker: 0.0007
+  simulationBalance:
+    - assetName: BTC
+      balance: 0
+    - assetName: ETH
+      balance: 0
+    - assetName: USDT
+      balance: 1000
 
 storage:
   type: sqlite
-  database: ./db/binance-BTC_USDT.sql
+  database: ./db/binance-BTC_ETH_USDT.sql
 
+# Like every signal strategy, RSI trades every watched pair: each BUY takes an equal share of the free USDT among the pairs not invested
 strategy:
   name: RSI
   src: ohlc4
@@ -30,6 +78,10 @@ plugins:
     strategyName: RSI
 
   - name: Trader
+    portfolioUpdates:
+      threshold: 1 # in percentage
+      dust: 10 # in currency
 
-  - name: PerformanceAnalyzer
+  # Or the RoundTripAnalyzer, which follows a round trip on each watched pair and reports each pair's figures: one or the other, not both
+  - name: PortfolioAnalyzer
     enableConsoleTable: true

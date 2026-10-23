@@ -1,26 +1,34 @@
+# Never write your bot token in this file, which git tracks: copy it to config/realtime-screener.local.yml (git ignores every
+# config/*.local.* file), fill in the token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko takes every value as written: it
+# reads no environment variable inside the file (token: ${BOT_TOKEN} is the text ${BOT_TOKEN}).
+
 watch:
-  asset: BTC
+  assets:
+    - BTC
   currency: USDT
-  mode: realtime # backtest | importer | realtime
   timeframe: 5m
+  mode: realtime # backtest | importer | realtime
 
 exchange:
   name: paper-binance
   simulationBalance:
-    asset: 100
-    currency: 300000
+    - assetName: BTC
+      balance: 100
+    - assetName: USDT
+      balance: 300000
 
 strategy:
   name: DebugAdvice
-  each: 4
-  wait: 0
+  each: 2 # one advice every 2 candles: a SELL, then a BUY, and so on
+  wait: 0 # candles to let go by before the first advice
 
 plugins:
   - name: TradingAdvisor
     strategyName: DebugAdvice
 
-  - name: Trader
+  - name: Trader # Simulates the orders (paper-binance); without it, a built-in strategy waits forever for its first order to end
 
   - name: EventSubscriber
-    token: # Your Telegram bot token
+    token: # Your telegram bot token
     botUsername: # Your telegram bot username
+    # chatId: 123456789 # Optional: the chat the bot talks to; without it, the first chat that sends it a command after start-up is bound
