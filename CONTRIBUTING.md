@@ -18,7 +18,7 @@ git switch -c development upstream/development
 
 ### Install Bun and Node.js
 
-Gekko runs on [Bun](https://bun.sh/) 1.3 or later, but its end-to-end tests expect the version that `package.json`'s `packageManager` names and CI pins, Bun 1.4.4 today: on 1.3, some realtime flows fail on the message of an aborted run. Install that version with `curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"` (see Bun's [installation instructions](https://bun.sh/docs/installation)).
+Gekko runs on [Bun](https://bun.sh/) 1.3 or later, but its end-to-end tests expect the version that `package.json`'s `packageManager` names and CI pins, Bun 1.4.4 today: on 1.3, some flows fail on messages Bun 1.4 changed, that of an aborted run and those of a strategy file Bun cannot import. Install that version with `curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"` (see Bun's [installation instructions](https://bun.sh/docs/installation)).
 
 The unit tests also need [Node.js](https://nodejs.org/) 22.13 or later (not 23), with `node` on your `PATH`: vitest runs them under Node. Without one, `bun run` runs vitest on Bun, where part of the suite fails and coverage is not supported, so the pre-push hook cannot pass.
 

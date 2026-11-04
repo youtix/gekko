@@ -125,7 +125,7 @@ The candle hooks get the latest portfolio received, from the candle after it arr
 2. Sizes each order from the balances it last read, and caps it (see [Sizing](#sizing)): the exchange checks it against the market's limits and the funds, and an order it refuses ends with `orderErrored`
 3. Submits orders to the configured exchange
 4. Monitors order status and handles fills/cancellations
-5. Synchronizes with the exchange, reading the balances, at start-up, at the end of the warmup, every `exchangeSynchInterval` in realtime (every timeframe in a backtest) and after each order's end, and emits each read as `portfolioChange`, unless the `portfolioUpdates` filter holds it back
+5. Synchronizes with the exchange, reading the balances, at start-up, at the end of the warmup, every `exchangeSynchInterval` in realtime (every timeframe in a backtest, 10 minutes at least) and after each order's end, and emits each read as `portfolioChange`, unless the `portfolioUpdates` filter holds it back
 
 ### Trader Configuration
 
@@ -229,7 +229,7 @@ The Trader supports multiple order types depending on your strategy:
 
 A `STICKY` order is placed one minimum price step (`price.min` of the pair's market data) above the best bid for a BUY, below the best ask for a SELL, so that it leads the book. It is checked every `orderSynchInterval` of the exchange (20 s by default) in realtime, and at every minute in backtest: once the market has moved past it (a higher bid for a BUY, a lower ask for a SELL), it is canceled and what is left to fill is placed again at the new price. Its price and what is left are worked out in decimal, as the exchange takes them: 101.2 + 0.01 is 101.21, not 101.21000000000001 (the exchange rounds a price to its tick and truncates an amount to its step). A relaunch the exchange refuses once part of the order has filled, what is left being under the market's minimum for instance, ends the order as completed with what it filled. It has no option of its own. Like a `MARKET` order, it ignores the price an advice may give, which then only sizes a BUY without an amount and a SELL by `cost`.
 
-Hyperliquid has no market order: Gekko sends a `MARKET` order there as an immediate-or-cancel limit order 5 % beyond the ask (BUY) or the bid (SELL), ccxt's default slippage. What the book does not fill within that bound is canceled, and the order then ends with `orderCanceled` and what it filled: a trailing stop's SELL is then active again for the rest (see [Trailing Stops](./custom-strategies.md#trailing-stops)).
+Hyperliquid has no market order: Gekko sends a `MARKET` order there as an immediate-or-cancel limit order 5 % beyond the ask (BUY) or the bid (SELL), ccxt's default slippage. What the book does not fill within that bound is canceled, and the order then ends with `orderCanceled` and what it filled; when the book fills none of it, Hyperliquid refuses the order, which ends with `orderErrored`, counted towards the circuit breaker. Either way, a trailing stop's SELL is then active again for the rest (see [Trailing Stops](./custom-strategies.md#trailing-stops)).
 
 ### Exchange Modes
 

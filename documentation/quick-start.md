@@ -346,7 +346,7 @@ Each error below is the `message` of one JSON line, which Gekko prints at every 
 
 ## Next Steps
 
-- Explore the [built-in strategies](./built-in-strategies.md), whose code is in `packages/strategies/src/`
+- Explore the [built-in strategies](./built-in-strategies.md)
 - Write your own with the [Custom Strategies](./custom-strategies.md) guide: a file of your own anywhere, loaded through the TradingAdvisor's `strategyPath`, or a private strategy kept in your checkout's `packages/strategies/src/custom/`, exported from its `index.ts`
 - Adjust strategy parameters and backtest again, over the range you imported or inside it (import another range first to test on other dates), or let [Fox](./fox.md) backtest every combination of the values you list, side by side
 - Watch over a running Gekko from Telegram with the [Supervision](./plugins.md#-supervision) plugin, on a bot of its own: CPU and memory alerts, a check that the candles keep coming, and its warnings and errors, forwarded
