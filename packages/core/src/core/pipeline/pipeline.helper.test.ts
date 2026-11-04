@@ -324,30 +324,74 @@ describe('pipeline.helper', () => {
         ]);
       });
 
-      // From the start of the candle `candleCount` candles before the one in progress to the last closed minute. The window
+      // From the start of the candle `candleCount` candles before the one in progress to the last closed minute, but no further back
+      // than CANDLE_HISTORY_MINUTES before the minute in progress on hyperliquid, which serves only its latest 5000 1-minute candles: 4990
+      // minutes, which 83 1h candles fit in from a start in the first ten minutes of an hour (83 × 60 + 10), 82 from any. The window
       // itself is swept over many dates in candle.helper.test.ts (getCandleStart).
       it.each`
-        timeframe | candleCount | clock                         | start                     | end
-        ${'1m'}   | ${3}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-15T10:17:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'4h'}   | ${2}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-15T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'1w'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-04T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'1M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-02-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'3M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-10-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'6M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-07-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'1y'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-01-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
-        ${'1h'}   | ${0}        | ${'2024-03-15T10:00:30.500Z'} | ${'2024-03-15T10:00:00Z'} | ${'2024-03-15T09:59:00Z'}
-        ${'1h'}   | ${0}        | ${'2024-03-15T10:01:30.500Z'} | ${'2024-03-15T10:00:00Z'} | ${'2024-03-15T10:00:00Z'}
+        exchangeName     | timeframe | candleCount | clock                         | start                     | end
+        ${'binance'}     | ${'1m'}   | ${3}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-15T10:17:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'4h'}   | ${2}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-15T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'1w'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-03-04T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'1M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2024-02-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'3M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-10-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'6M'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-07-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'1y'}   | ${1}        | ${'2024-03-15T10:20:30.500Z'} | ${'2023-01-01T00:00:00Z'} | ${'2024-03-15T10:19:00Z'}
+        ${'binance'}     | ${'1h'}   | ${0}        | ${'2024-03-15T10:00:30.500Z'} | ${'2024-03-15T10:00:00Z'} | ${'2024-03-15T09:59:00Z'}
+        ${'binance'}     | ${'1h'}   | ${0}        | ${'2024-03-15T10:01:30.500Z'} | ${'2024-03-15T10:00:00Z'} | ${'2024-03-15T10:00:00Z'}
+        ${'binance'}     | ${'1h'}   | ${100}      | ${'2024-01-01T12:00:30.500Z'} | ${'2023-12-28T08:00:00Z'} | ${'2024-01-01T11:59:00Z'}
+        ${'hyperliquid'} | ${'1h'}   | ${100}      | ${'2024-01-01T12:00:30.500Z'} | ${'2023-12-29T00:50:00Z'} | ${'2024-01-01T11:59:00Z'}
+        ${'hyperliquid'} | ${'1h'}   | ${83}       | ${'2024-01-01T12:00:30.500Z'} | ${'2023-12-29T01:00:00Z'} | ${'2024-01-01T11:59:00Z'}
+        ${'hyperliquid'} | ${'1h'}   | ${83}       | ${'2024-01-01T12:59:30.500Z'} | ${'2023-12-29T01:49:00Z'} | ${'2024-01-01T12:58:00Z'}
+        ${'hyperliquid'} | ${'1h'}   | ${82}       | ${'2024-01-01T12:59:30.500Z'} | ${'2023-12-29T02:00:00Z'} | ${'2024-01-01T12:58:00Z'}
       `(
-        'should download the warmup history of $candleCount $timeframe candles from $start to $end at $clock',
-        async ({ timeframe, candleCount, clock, start, end }) => {
+        'should download the warmup history of $candleCount $timeframe candles on $exchangeName from $start to $end at $clock',
+        async ({ exchangeName, timeframe, candleCount, clock, start, end }) => {
+          const runExchange = { getExchangeName: () => exchangeName } as unknown as Exchange;
+          services.exchange.mockReturnValue(runExchange);
           vi.setSystemTime(at(clock));
           await launchRealtime(timeframe, candleCount);
           expect(MultiAssetHistoricalStream).toHaveBeenCalledWith({
-            exchange,
+            exchange: runExchange,
             daterange: { start: at(start), end: at(end) },
             tickrate: 1000,
             pairs,
           });
+        },
+      );
+
+      // One line for the run, however many pairs it watches: the history of every pair starts at the same minute
+      it.each`
+        candleCount | clock                         | start                         | leftOut
+        ${100}      | ${'2024-01-01T12:00:30.500Z'} | ${'2023-12-29T00:50:00.000Z'} | ${1010}
+        ${83}       | ${'2024-01-01T12:59:30.500Z'} | ${'2023-12-29T01:49:00.000Z'} | ${49}
+      `(
+        'should warn once that the warmup history of $candleCount 1h candles on hyperliquid at $clock starts at $start, without its first $leftOut minutes',
+        async ({ candleCount, clock, start, leftOut }) => {
+          services.exchange.mockReturnValue({ getExchangeName: () => 'hyperliquid' } as unknown as Exchange);
+          vi.setSystemTime(at(clock));
+          await launchRealtime('1h', candleCount, [{ symbol: 'BTC/USDC' }, { symbol: 'ETH/USDC' }]);
+          expect(vi.mocked(warning).mock.calls).toEqual([
+            [
+              'pipeline',
+              `The warmup history of ${candleCount} 1h candles (warmup.candleCount) reaches further back than hyperliquid serves 1-minute candles: it starts at ${start}, 4990 minutes before the minute in progress, without its first ${leftOut} minutes, and the strategy finishes its warmup on live candles.`,
+            ],
+          ]);
+        },
+      );
+
+      it.each`
+        exchangeName     | candleCount | clock
+        ${'hyperliquid'} | ${83}       | ${'2024-01-01T12:00:30.500Z'}
+        ${'hyperliquid'} | ${82}       | ${'2024-01-01T12:59:30.500Z'}
+        ${'binance'}     | ${100}      | ${'2024-01-01T12:00:30.500Z'}
+      `(
+        'should not warn of the warmup history of $candleCount 1h candles on $exchangeName at $clock',
+        async ({ exchangeName, candleCount, clock }) => {
+          services.exchange.mockReturnValue({ getExchangeName: () => exchangeName } as unknown as Exchange);
+          vi.setSystemTime(at(clock));
+          await launchRealtime('1h', candleCount);
+          expect(warning).not.toHaveBeenCalled();
         },
       );
 
@@ -390,7 +434,7 @@ describe('pipeline.helper', () => {
           vi.setSystemTime(at('2024-03-15T10:20:59.999Z'));
           uptime = vi.spyOn(process, 'uptime');
           fetchOHLCV.mockResolvedValue([]);
-          services.exchange.mockReturnValue({ fetchOHLCV } as unknown as Exchange);
+          services.exchange.mockReturnValue({ fetchOHLCV, getExchangeName: () => 'binance' } as unknown as Exchange);
         });
 
         afterEach(() => {

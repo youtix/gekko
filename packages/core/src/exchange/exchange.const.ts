@@ -27,6 +27,15 @@ export const PARAMS: Record<string, Record<string, Undefined<object>>> = {
  */
 export const PRICE_SIGNIFICANT_DIGITS: Record<string, Undefined<number>> = { hyperliquid: 5 };
 
+/**
+ * The minutes of 1-minute candles before the minute in progress that a realtime run's warmup history reads at most, on the exchanges
+ * that serve no older ones: Hyperliquid's candleSnapshot serves only its latest 5000 candles of an interval, the one in progress among
+ * them. Gekko asks for 4990 at most, keeping 9 minutes for the time between start-up's clock read and the first request, retries
+ * included, so that the first request never names a minute Hyperliquid no longer serves, whatever Hyperliquid would answer for one (see
+ * getWarmupStart in pipeline.helper.ts). An exchange left out serves its whole history.
+ */
+export const CANDLE_HISTORY_MINUTES: Record<string, Undefined<number>> = { hyperliquid: 4990 };
+
 export const LIMITS: Record<string, ExchangeDataLimits> = {
   binance: { candles: 1000, trades: 1000, orders: 1000 },
   // trades: the most fills Hyperliquid answers at once (userFills, userFillsByTime; ccxt's features.fetchMyTrades.limit). ccxt does not

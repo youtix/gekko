@@ -1,11 +1,13 @@
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
+import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { Plugin } from '../../plugin/plugin';
+import { CANDLE_HISTORY_MINUTES } from '../../exchange/exchange.const';
 import { info, warning } from '../../logger/logger';
 import type { RunContext } from '../../run/runContext.types';
 import { getCandleStart } from '@gekko/shared/helpers/candle/candle.helper';
 import { startOfMinuteUTC, toISOString } from '@gekko/shared/utils/date/date.utils';
-import { listInWords } from '@gekko/shared/utils/string/string.utils';
+import { listInWords, pluralize } from '@gekko/shared/utils/string/string.utils';
 import { synchronizeStreams } from '@gekko/shared/helpers/stream/stream.helper';
 import { Readable } from 'stream';
 import { pipeline } from 'stream/promises';
@@ -17,6 +19,39 @@ import { FillCandleGapStream } from '../stream/validation/fillCandleGap.stream';
 import { RejectDuplicateCandleStream } from '../stream/validation/rejectDuplicateCandle.stream';
 import { RejectFutureCandleStream } from '../stream/validation/rejectFutureCandle.stream';
 
+/**
+ * Where the warmup history of a realtime run starts: at the start of the candle `warmup.candleCount` candles before the one in progress
+ * (getCandleStart, on calendar boundaries), but no further back than the exchange serves its 1-minute candles (CANDLE_HISTORY_MINUTES
+ * before the minute in progress), so that no request names a minute Hyperliquid no longer serves: what it answers for one is not
+ * Gekko's to rely on. A start moved so is warned of once for the run, the history of every pair starting there: the batcher skips the
+ * minutes before its first timeframe boundary, and the strategy finishes its warmup on live candles, as many timeframe candles later as
+ * the history lacks.
+ */
+const getWarmupStart = (
+  exchangeName: string,
+  { timeframe, warmup }: Pick<Watch, 'timeframe' | 'warmup'>,
+  currentMinute: EpochTimeStamp,
+) => {
+  // The schema requires a timeframe in realtime mode
+  const start = getCandleStart(TIMEFRAME_TO_MINUTES[timeframe!], currentMinute, warmup.candleCount);
+  const servedMinutes = CANDLE_HISTORY_MINUTES[exchangeName];
+  if (servedMinutes === undefined) return start;
+  const oldestRead = currentMinute - servedMinutes * ONE_MINUTE;
+  if (start >= oldestRead) return start;
+
+  const leftOut = (oldestRead - start) / ONE_MINUTE;
+  warning(
+    'pipeline',
+    [
+      `The warmup history of ${warmup.candleCount} ${timeframe} ${pluralize('candle', warmup.candleCount)} (warmup.candleCount)`,
+      `reaches further back than ${exchangeName} serves 1-minute candles: it starts at ${toISOString(oldestRead)},`,
+      `${servedMinutes} ${pluralize('minute', servedMinutes)} before the minute in progress, without its first ${leftOut} ${pluralize('minute', leftOut)},`,
+      'and the strategy finishes its warmup on live candles.',
+    ].join(' '),
+  );
+  return oldestRead;
+};
+
 const buildRealtimePipeline = async (plugins: Plugin[], { configuration, services }: RunContext, signal?: AbortSignal) => {
   const watch = configuration.getWatch();
   const { pairs, timeframe, warmup } = watch;
@@ -26,8 +61,9 @@ const buildRealtimePipeline = async (plugins: Plugin[], { configuration, service
   // however slow start-up is
   const currentMinute = startOfMinuteUTC(Date.now());
   const liveStream = synchronizeStreams(pairs.map(({ symbol }) => new RealtimeStream({ exchange, symbol, startMinute: currentMinute })));
-  // The warmup history holds `candleCount` whole candles, then the closed minutes of the candle in progress
-  const start = getCandleStart(TIMEFRAME_TO_MINUTES[timeframe!], currentMinute, warmup.candleCount); // Timeframe will always defined in thanks to zod super refine
+  // The warmup history holds `candleCount` whole candles, then the closed minutes of the candle in progress, as far back as the exchange
+  // serves them
+  const start = getWarmupStart(exchange.getExchangeName(), { timeframe, warmup }, currentMinute);
   const end = currentMinute - ONE_MINUTE;
   const history = new MultiAssetHistoricalStream({ exchange, daterange: { start, end }, tickrate: warmup.tickrate, pairs });
 
