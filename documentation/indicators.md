@@ -1065,7 +1065,7 @@ if (close > ema200.results && rsi.results < 30 && volume.obv > volume.ma) {
 
 The moving averages (SMA, EMA, DEMA, TEMA, WMA, SMMA and Wilder Smoothing), ROC, Bollinger Bands and the Stochastic also take numbers you compute, through `update(value: number)`: the Stochastic takes each value as its own high, low and close. That is how indicators build on each other: TRIX feeds its triple EMA to a ROC, OBV its OBV to Bollinger Bands, and Stochastic RSI its RSI to a Stochastic. The result follows the same contract as through `addIndicator`.
 
-Only code that can import Gekko's classes uses it: a strategy in `packages/strategies/src/custom/`, or a new indicator. A strategy loaded through `strategyPath` can import Gekko's types only: the compiled executable resolves no other `@gekko/…` import of such a file, even one inside the checkout, and `bun run dev` resolves them only for a file inside it (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
+Only code that can import Gekko's classes uses it: a strategy in `packages/strategies/src/custom/`, or a new indicator. A strategy loaded through `strategyPath` can import Gekko's types only: the compiled executable resolves no other `@gekko/…` import of such a file, even one inside the checkout, and `bun run dev` resolves them only for a file inside it, or beside a `tsconfig.json` that maps them to it (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
 
 ```typescript
 import { EMA } from '@gekko/indicators/movingAverages/ema/ema.indicator';
