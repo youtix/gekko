@@ -26,6 +26,7 @@ import {
   getPortfolioContent,
   getRebalanceBuyCost,
   getRebalanceOrderPrice,
+  getSellAfterBuy,
   hasOnlyOneSide,
   inferAmountPrecision,
   inferPricePrecision,
@@ -1855,6 +1856,36 @@ describe('gridBot.helper', () => {
 
         expect(roundAmount(quantity, inferAmountPrecision(grid.marketData))).toBe(quantity);
       });
+    });
+  });
+
+  describe('getSellAfterBuy', () => {
+    // The steps of the strategy suite: an amount to the hundredth, at least 0.1
+    const hundredthMarketData: MarketData = { amount: { min: 0.1 }, precision: { amount: 0.01 } };
+    /** A whole BUY of the quantity at 95, which turns into a SELL at 100, nothing carried, unless `facts` say otherwise */
+    const wholeBuy = { quantity: 2.5, placed: 2.5, executed: 2.5, feeInAsset: 0.0025, carry: 0, sellPrice: 100 };
+    /** The amount sold, what the level held, the carry and the market minimum, when the SELL is not raised to the minimum */
+    const sold = (amount: number, held: number, carry: number, minimum: number) => ({ amount, held, carry, minimum, isRaised: false });
+
+    it.each`
+      facts                                                                                                            | marketData                | description                                                                                      | expected
+      ${wholeBuy}                                                                                                      | ${hundredthMarketData}    | ${'2.4975 left by a BUY of 2.5, 2.49 on the step, 0.0075 carried'}                               | ${sold(2.49, 2.4975, 0.0075, 0.1)}
+      ${{ ...wholeBuy, carry: 0.0075 }}                                                                                | ${hundredthMarketData}    | ${'the 0.0075 the level carried added: 2.505, 2.5 on the step, 0.005 carried'}                   | ${sold(2.5, 2.505, 0.005, 0.1)}
+      ${{ ...wholeBuy, feeInAsset: 0.01 }}                                                                             | ${hundredthMarketData}    | ${'a fee of a step, 2.49 left on the step, nothing carried'}                                     | ${sold(2.49, 2.49, 0, 0.1)}
+      ${{ ...wholeBuy, feeInAsset: 0 }}                                                                                | ${hundredthMarketData}    | ${'a fee of 0 taken in the asset: the whole quantity'}                                           | ${sold(2.5, 2.5, 0, 0.1)}
+      ${{ ...wholeBuy, placed: 1.5, executed: 1.5, feeInAsset: 0.0015 }}                                               | ${hundredthMarketData}    | ${'1.5 placed again once 1 filled before a cancel, its fee at the share of 1.5 the 0.0015 took'} | ${sold(2.49, 2.4975, 0.0075, 0.1)}
+      ${{ quantity: 0.00168, placed: 0.00168, executed: 0.00168, feeInAsset: 0.00000168, carry: 0, sellPrice: 60600 }} | ${binanceStepsMarketData} | ${"0.00167832 left on Binance's step of 0.00001, 0.00167, 0.00000832 carried"}                   | ${sold(0.00167, 0.00167832, 0.00000832, 0.00009)}
+    `('sells $description', ({ facts, marketData, expected }) => {
+      expect(getSellAfterBuy(facts, marketData)).toEqual(expected);
+    });
+
+    // What the level holds under the market minimum at the SELL price: the SELL of what it held was refused at each attempt
+    it.each`
+      facts                                                                                                            | marketData                | description                                                                                | expected
+      ${{ ...wholeBuy, quantity: 0.1, placed: 0.1, executed: 0.1, feeInAsset: 0.0001 }}                                | ${hundredthMarketData}    | ${'0.0999 left by a BUY of 0.1, 0.09 on the step, under amount.min'}                       | ${{ amount: 0.1, held: 0.0999, carry: 0, minimum: 0.1, isRaised: true }}
+      ${{ quantity: 0.00009, placed: 0.00009, executed: 0.00009, feeInAsset: 0.00000009, carry: 0, sellPrice: 60600 }} | ${binanceStepsMarketData} | ${"0.00008991 left on Binance's BTC/USDT, 0.00008 on its step, 4.848 USDT under cost.min"} | ${{ amount: 0.00009, held: 0.00008991, carry: 0, minimum: 0.00009, isRaised: true }}
+    `('raises to the market minimum, nothing carried, $description', ({ facts, marketData, expected }) => {
+      expect(getSellAfterBuy(facts, marketData)).toEqual(expected);
     });
   });
 

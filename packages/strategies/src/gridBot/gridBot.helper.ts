@@ -28,6 +28,8 @@ import {
   OutOfRangeSide,
   PricePrecision,
   RebalancePlan,
+  SellAfterBuy,
+  SellAfterBuyFacts,
 } from './gridBot.types';
 
 /** The balances of the traded asset and of its currency, a balance of 0 for either the portfolio lacks (see getAssetBalance) */
@@ -802,6 +804,45 @@ export const deriveLevelQuantity = (
   // buy level sells once it has bought
   const quantity = Math.min(share, getMaximumAmount(priceAt(fundedSellLevels), marketData));
   return { quantity, buyLevels: fundedBuyLevels, sellLevels: fundedSellLevels, minimumAmount };
+};
+
+/**
+ * The SELL a level places once its BUY has filled, when the exchange took the BUY's fee, or part of it, in the asset bought (see
+ * FeeTakenInAsset): Binance does so unless the fees are paid in BNB, Hyperliquid in the token bought. The account then holds that much
+ * less of the asset than the BUY bought, while the grid is sized as the simulator charges fees, in currency (see getMakerFee). The SELL of
+ * the quantity of a level used to ask for more than the level held: the Trader capped it at the free balance, with a warning at each
+ * round trip once the asset the sizing left idle was spent, and the SELLs placed together, two BUYs heard filled on one candle, shared
+ * what their BUYs left, the last one capped for all of them. The level sells what it holds instead (`held`):
+ * - what its BUY bought less the fee the exchange took in the asset. The BUY's fills before a cancel count too, the quantity less the
+ *   amount the last attempt was placed with (each cancel placed the rest again), and so do their fees, which no event carries, at the
+ *   share of its own fills the completion's fee took;
+ * - plus what the level carried from its previous SELL (`carry`): the SELL is put on the amount step, truncated as the exchange truncates
+ *   it (see roundAmount), and the rest, under one step, is carried to the next SELL of the level, so that over its round trips the level
+ *   sells all that its BUYs left. Truncated each time without it, up to a step stayed idle at each round trip: 0.00000832 of the
+ *   0.00167832 BTC a BUY of 0.00168 leaves on Binance's BTC/USDT, whose step is 0.00001, 0.5 USDT at 60000, more than half of what a
+ *   round trip of a level spaced by 1 % makes.
+ *
+ * Never under the market minimum at its price (see getMinimumAmount): a level whose BUY left less on the step, a grid sized at the market
+ * minimum on a pair whose step is coarse for its price (0.00009 BTC at 60000 on Binance's BTC/USDT, of which a BUY leaves 0.00008991,
+ * 0.00008 on the step, 4.8 USDT under the minimum cost of 5), sells that minimum (`isRaised`), nothing carried, the rest taken from the
+ * asset the grid does not trade. Sold on its own, what the level held was refused at its first round trip and at every attempt after it,
+ * where the SELL of the quantity went through as long as the asset the sizing left idle paid the fee. Once that is spent, the Trader caps
+ * such a SELL at the free balance and the market refuses it, as it refused the SELL of the quantity.
+ *
+ * The next BUY of the level buys the quantity again, which leaves the level what the SELL sold, the fee taken out of it: the asset the
+ * level trades stays the same from one round trip to the next, and its gain is in the currency. Worked out in decimal (see addPrecise), but
+ * the fee of the fills before a cancel, a quotient.
+ */
+export const getSellAfterBuy = (facts: SellAfterBuyFacts, marketData: MarketData): SellAfterBuy => {
+  const { quantity, placed, executed, feeInAsset, carry, sellPrice } = facts;
+  const filledBefore = Math.max(addPrecise(quantity, -placed), 0);
+  const feeBefore = filledBefore > 0 ? toSignificantDigits((filledBefore * feeInAsset) / executed) : 0;
+  const bought = addPrecise(executed, filledBefore);
+  const held = addPrecise(carry, addPrecise(bought, -addPrecise(feeInAsset, feeBefore)));
+  const onStep = roundAmount(held, inferAmountPrecision(marketData));
+  const minimum = getMinimumAmount(sellPrice, marketData);
+  if (onStep < minimum) return { amount: minimum, held, carry: 0, minimum, isRaised: true };
+  return { amount: onStep, held, carry: addPrecise(held, -onStep), minimum, isRaised: false };
 };
 
 /**

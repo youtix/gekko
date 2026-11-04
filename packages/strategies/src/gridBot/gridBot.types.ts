@@ -68,15 +68,55 @@ export interface LevelState {
    */
   side: OrderSide;
   /**
-   * Amount of the order placed last on the level: the quantity of every level, or what was left of it once an order was canceled
-   * after a partial fill. A fill turns the level to the other side with the whole quantity again.
+   * Amount of the order placed last on the level: the quantity of every level, what was left of it once an order was canceled after a
+   * partial fill, or, for the SELL that follows a BUY whose fee the exchange took in the asset, what that BUY left (see
+   * getSellAfterBuy). A SELL's fill turns the level to a BUY of the whole quantity again, and so does a BUY's whose fee was taken in
+   * the currency or in a third asset (BNB).
    */
   amount: number;
+  /**
+   * The asset the level carries to its next SELL: what the amount step left, under one step, of what its BUY left once the exchange
+   * took its fee in the asset (see getSellAfterBuy). 0 for a level whose BUYs paid their fees otherwise, as on the simulator.
+   */
+  carry: number;
   /**
    * Active order ID if order is placed. None for good once the level gave up on an order that failed at every attempt, or left an
    * order whose outcome is unknown, which may be live on the exchange.
    */
   orderId?: UUID;
+}
+
+/**
+ * What the SELL a level places once its BUY has filled is sized from, when the exchange took the BUY's fee in the asset bought (see
+ * getSellAfterBuy)
+ */
+export interface SellAfterBuyFacts {
+  /** The quantity of a level of the grid */
+  quantity: number;
+  /** The amount the BUY was placed with: the quantity, or what a cancel after a partial fill left of it (see LevelState.amount) */
+  placed: number;
+  /** What the BUY executed (OrderCompletedEvent.amount), above 0 */
+  executed: number;
+  /** What its fees took of the asset (OrderCompletedEvent.feeTakenInAsset.amount) */
+  feeInAsset: number;
+  /** What the level carried from its previous SELL (see LevelState.carry) */
+  carry: number;
+  /** The price of the SELL */
+  sellPrice: number;
+}
+
+/** The SELL a level places once its BUY has filled, the exchange having taken the BUY's fee in the asset (see getSellAfterBuy) */
+export interface SellAfterBuy {
+  /** Its amount: what the level holds, on the amount step, or the market minimum at its price when that is more */
+  amount: number;
+  /** What the level holds of the asset once the BUY filled: what the BUY left, and what the level carried */
+  held: number;
+  /** What the level carries to its next SELL: what the amount step left of `held`, under one step; 0 once raised to the minimum */
+  carry: number;
+  /** The market minimum at its price (see getMinimumAmount) */
+  minimum: number;
+  /** Whether what the level holds is under that minimum on the amount step, the SELL raised to it */
+  isRaised: boolean;
 }
 
 /** The grid the free balances fund (see deriveLevelQuantity) */

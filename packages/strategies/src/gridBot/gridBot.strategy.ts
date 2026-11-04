@@ -30,6 +30,7 @@ import type {
   OutOfRangeCount,
   OutOfRangeSide,
   RebalancePlan,
+  SellAfterBuy,
 } from './gridBot.types';
 import {
   checkLowestBuyPrice,
@@ -44,6 +45,7 @@ import {
   getPortfolioContent,
   getRebalanceBuyCost,
   getRebalanceOrderPrice,
+  getSellAfterBuy,
   hasOnlyOneSide,
   inferPricePrecision,
   isResetSide,
@@ -79,9 +81,13 @@ import {
  *   that states no tick has them rounded to 8 decimals, with a warning
  * - Each level trades back and forth between two adjacent prices of the grid: once its BUY fills it sells one step above, once its
  *   SELL fills it buys one step below
- * - Every level trades the same quantity, and the portfolio is first rebalanced to the split that funds them all with it: a unit of
- *   the asset for each sell level, and each buy level's price in currency, the maker fee on top. Not 50/50: the BUYs, below the
+ * - Every level is funded with the same quantity, and the portfolio is first rebalanced to the split that funds them all with it: a
+ *   unit of the asset for each sell level, and each buy level's price in currency, the maker fee on top. Not 50/50: the BUYs, below the
  *   center price, cost less than the SELLs are worth. A portfolio on which less than 1 % of the value would stay idle is not rebalanced
+ * - Live, an exchange may take a BUY's fee in the asset bought (Binance unless the fees are paid in BNB, Hyperliquid in the token
+ *   bought): the SELL that follows such a BUY sells what it left, on the amount step, the rest carried to the level's next SELL, and
+ *   never less than the market minimum at its price: a level whose BUY left less sells that minimum, the rest taken from the asset the
+ *   grid does not trade, with a warning (see getSellAfterBuy). The next BUY buys the quantity again
  * - The rebalance and the grid use the free balances, and every order is one the market takes, of at least its minimum amount and
  *   cost: a rebalance under them is not sent, and a side that cannot fund all its levels with them leaves out the farthest
  * - A refused or canceled order is placed again up to retryOnError times, a canceled grid order for what is left of it. A grid order
@@ -142,6 +148,10 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
   private outOfRangeSide: OutOfRangeSide | null = null;
   /** Whether the last fill left orders on one side of the grid only: warned of once, until a fill gives the grid both sides again */
   private isOneSided = false;
+  /** Whether a SELL sized from what its BUY left once the exchange took the fee in the asset was said, at info, once in the run */
+  private isSellAfterBuySaid = false;
+  /** Whether a SELL raised to the market minimum, what its BUY left being under it, was warned of, once in the run */
+  private isSellRaisedWarned = false;
 
   // Rebalance state
   private awaitingRebalance = false;
@@ -272,7 +282,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // Filled before the cancel of a reset reached it: its level is not turned, the new grid replacing every level, built on the
     // portfolio the fill left
     if (this.awaitingReset) return this.rebuildOnceEnded(exchange, tools);
-    this.turnLevel(levelIndex, tools);
+    this.turnLevel(levelIndex, tools, this.getAmountAfterFill(this.levels[levelIndex], order, tools));
   }
 
   onOrderCanceled({ order, exchange, tools }: OnOrderCanceledEventParams<GridBotStrategyParams>): void {
@@ -355,7 +365,8 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // Any error used to place the order again. One that may be live on the exchange, where nothing tracks it any more, its creation
     // lost on the network or its poll failed for good, was doubled: two lots bought or sold where the level holds one, or the copy
     // refused for want of the reserve the first one holds. The order says whether it may be (OrderErroredEvent.mayBeLive); any other
-    // error is a refusal: placed again, as refused.
+    // error is a refusal: placed again, as refused, for the amount it asked for (a SELL that follows a BUY whose fee the exchange took
+    // in the asset, what that BUY left: see getAmountAfterFill).
     if (order.mayBeLive) return this.leaveUntracked(level, order.reason, tools);
     this.placeAgain(levelIndex, level.amount, order.reason, tools);
   }
@@ -765,14 +776,15 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     this.orderToLevel.clear();
     this.retryCount.clear();
 
-    // Create buy levels (negative indices, stored first), which start with their BUY: every one above 0, the lowest checked first
+    // Create buy levels (negative indices, stored first), which start with their BUY: every one above 0, the lowest checked first. A
+    // level carries nothing from the grid before a reset, the free balances it is built on holding what the old levels carried
     for (let i = size.buyLevels; i >= 1; i--) {
-      this.levels.push({ index: -i, buyPrice: priceAt(-i), sellPrice: priceAt(1 - i), side: 'BUY', amount: this.quantity });
+      this.levels.push({ index: -i, buyPrice: priceAt(-i), sellPrice: priceAt(1 - i), side: 'BUY', amount: this.quantity, carry: 0 });
     }
 
     // Create sell levels (positive indices), which start with their SELL, above the center price
     for (let i = 1; i <= size.sellLevels; i++) {
-      this.levels.push({ index: i, buyPrice: priceAt(i - 1), sellPrice: priceAt(i), side: 'SELL', amount: this.quantity });
+      this.levels.push({ index: i, buyPrice: priceAt(i - 1), sellPrice: priceAt(i), side: 'SELL', amount: this.quantity, carry: 0 });
     }
 
     // Place initial orders
@@ -823,8 +835,67 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     return levelIndex;
   }
 
-  /** Turns a level whose order filled to its other side, for the quantity of a level: its failed attempts are forgotten */
-  private turnLevel(levelIndex: number, tools: Tools<GridBotStrategyParams>): void {
+  /**
+   * The amount of the order a fill turns its level to (see turnLevel): the quantity of a level, but for the SELL that follows a BUY whose
+   * fee the exchange took in the asset, which sells what the level holds (see getSellAfterBuy), the rest under the amount step carried to
+   * its next SELL. A BUY whose fee was taken in the currency, as the simulator takes every fee, or in a third asset, BNB with Binance's
+   * discount, leaves the whole quantity, which its SELL sells. A level a cancel turns (see onOrderCanceled) gets the quantity too: the
+   * event of a cancel carries no fee.
+   */
+  private getAmountAfterFill(
+    level: LevelState,
+    { amount, feeTakenInAsset }: OnOrderCompletedEventParams<GridBotStrategyParams>['order'],
+    tools: Tools<GridBotStrategyParams>,
+  ): number {
+    if (level.side !== 'BUY' || !feeTakenInAsset) return this.quantity;
+    const facts = {
+      quantity: this.quantity,
+      placed: level.amount,
+      executed: amount,
+      feeInAsset: feeTakenInAsset.amount,
+      carry: level.carry,
+      sellPrice: level.sellPrice,
+    };
+    const sell = getSellAfterBuy(facts, tools.marketData.get(this.pair)!);
+    level.carry = sell.carry;
+    this.reportSellAfterBuy(level, sell, tools);
+    return sell.amount;
+  }
+
+  /**
+   * Says once in the run that the SELLs of the grid sell what their BUYs left, the first time the exchange takes a BUY's fee in the asset
+   * (see getSellAfterBuy): at info, or at warn for a SELL raised to the market minimum, warned of once too, which a grid at the minimum
+   * meets at every round trip. Not at each SELL: a grid trades many round trips a day.
+   */
+  private reportSellAfterBuy(
+    level: LevelState,
+    { amount, held, minimum, isRaised }: SellAfterBuy,
+    tools: Tools<GridBotStrategyParams>,
+  ): void {
+    const taken = `The exchange took the fee of the BUY at ${formatEveryDecimal(level.buyPrice)} in ${this.base}`;
+    const holds = `its level holds ${formatEveryDecimal(held)} ${this.base}`;
+    if (isRaised) {
+      if (this.isSellRaisedWarned) return;
+      this.isSellRaisedWarned = true;
+      const under = `under the market minimum of ${formatEveryDecimal(minimum)} at its SELL price, ${formatEveryDecimal(level.sellPrice)}`;
+      const raised = `the SELL sells ${formatEveryDecimal(minimum)}, the rest taken from the ${this.base} the grid does not trade`;
+      const refused = 'once that is spent, the market refuses such a SELL at each attempt until its level gives up';
+      const advice = 'Pay the fees in another asset (BNB on Binance), or fund each level with more than the market minimum and its fee';
+      return tools.log('warn', `GridBot: ${taken}: ${holds}, ${under}, and ${raised}; ${refused}. ${advice}`);
+    }
+    if (this.isSellAfterBuySaid) return;
+    this.isSellAfterBuySaid = true;
+    const sellAt = `its SELL at ${formatEveryDecimal(level.sellPrice)} sells ${formatEveryDecimal(amount)}`;
+    const sells = `${sellAt}, on the amount step, the rest carried to the level's next SELL`;
+    const every = `A SELL that follows a BUY whose fee is taken in ${this.base} sells what that BUY left, and the next BUY buys the quantity again`;
+    tools.log('info', `GridBot: ${taken}: ${holds}, and ${sells}. ${every}`);
+  }
+
+  /**
+   * Turns a level whose order filled to its other side, for `amount`, the quantity of a level unless told otherwise (see
+   * getAmountAfterFill): its failed attempts are forgotten
+   */
+  private turnLevel(levelIndex: number, tools: Tools<GridBotStrategyParams>, amount = this.quantity): void {
     const level = this.levels[levelIndex];
     this.retryCount.delete(levelIndex);
 
@@ -832,7 +903,7 @@ export class GridBot implements Strategy<GridBotStrategyParams> {
     // the neighbouring level, and only if it held no order: a neighbour whose own fill was not reported yet was skipped, so a drop
     // through several BUYs re-armed when a backtest reported them highest first but not when paper or live trading polled them lowest
     // first, and the two levels next to the center price, each the other's neighbour, armed nothing on their first fill.
-    this.placeOrder(levelIndex, level.side === 'BUY' ? 'SELL' : 'BUY', tools);
+    this.placeOrder(levelIndex, level.side === 'BUY' ? 'SELL' : 'BUY', tools, amount);
 
     // Warned of once, until a fill gives the grid both sides again. It was warned of after every fill that left one side, so after
     // every fill of a grid holding a single order: one whose free balances fund a single level, or whose other levels gave up.

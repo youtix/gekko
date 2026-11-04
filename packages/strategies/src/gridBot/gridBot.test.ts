@@ -3,7 +3,7 @@ import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
 import { ETH_IGNORED_WARNING, logsAtInit } from '../helpers/positionTracker/positionTracker.mock';
 import type { Candle } from '@gekko/shared/models/candle.types';
-import type { CandleBucket, ExchangeEvent } from '@gekko/shared/models/event.types';
+import type { CandleBucket, ExchangeEvent, FeeTakenInAsset } from '@gekko/shared/models/event.types';
 import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { OrderSide } from '@gekko/shared/models/order.types';
 import type { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
@@ -131,23 +131,24 @@ describe('GridBot', () => {
   const liveOrder = (price: number, side: OrderSide) => issuedOrders.findLast(order => order.price === price && order.side === side);
 
   /**
-   * Delivers the outcome of the live order at that price and side, as the Trader reports it: a cancel with nothing filled and an
-   * error 'Test error' that filled nothing and is not live, a refusal, unless `details` say otherwise. The event carries the price of
-   * the order and the balanced portfolio, read after the order ended (see ExchangeEvent.portfolioReadAfterOrder), after what the
-   * strategy did before (a reset that canceled the order), unless `event` says otherwise.
+   * Delivers the outcome of the live order at that price and side, as the Trader reports it: a completion of its amount whose fee
+   * took nothing of the asset, a cancel with nothing filled and an error 'Test error' that filled nothing and is not live, a refusal,
+   * unless `details` say otherwise. The event carries the price of the order and the balanced portfolio, read after the order ended
+   * (see ExchangeEvent.portfolioReadAfterOrder), after what the strategy did before (a reset that canceled the order), unless `event`
+   * says otherwise.
    */
   const settle = (
     outcome: 'completed' | 'canceled' | 'errored',
     price: number,
     side: OrderSide,
-    details: { filled?: number; remaining?: number; reason?: string; mayBeLive?: boolean } = {},
+    details: { filled?: number; remaining?: number; reason?: string; mayBeLive?: boolean; feeTakenInAsset?: FeeTakenInAsset } = {},
     event: Partial<ExchangeEvent> = {},
   ) => {
     const { id, amount } = liveOrder(price, side) ?? {};
     const order = { id, symbol: 'BTC/USDT', side, type: 'LIMIT', amount, price } as any;
     const exchange: ExchangeEvent = { price, portfolio: balancedPortfolio, portfolioReadAfterOrder: true, ...event };
     settledIds.add(order.id);
-    if (outcome === 'completed') strategy.onOrderCompleted({ order, exchange, tools });
+    if (outcome === 'completed') strategy.onOrderCompleted({ order: { ...order, ...details }, exchange, tools });
     if (outcome === 'canceled')
       strategy.onOrderCanceled({ order: { ...order, filled: 0, remaining: amount, ...details }, exchange, tools });
     if (outcome === 'errored')
@@ -1138,6 +1139,162 @@ describe('GridBot', () => {
       else strategy.onOrderErrored({ order, exchange, tools });
 
       expect(createOrder).toHaveBeenCalledTimes(4);
+    });
+  });
+
+  // Live, Binance takes a BUY's fee in the asset bought unless the fees are paid in BNB: the SELL of the quantity that followed asked
+  // for more than the level held, which the Trader capped at the free balance, with a warning at each round trip once the asset the
+  // sizing left idle was spent, and the SELLs placed together took the shortfall of all of them out of the last one
+  describe('a BUY whose fee the exchange took in the asset bought', () => {
+    /** The facts of a completion whose fees took `amount` of the asset, at the price of the BUY at 95 */
+    const feeOf = (amount: number) => ({ feeTakenInAsset: { amount, value: amount * 95 } });
+    // The default grid at 100 on 0.2 BTC and 18.5 USDT: its SELLs 0.2, its BUYs at 95 and 90 0.1 × 185, 0.1 a level, amount.min
+    const atMinimum: Portfolio = new Map<string, BalanceDetail>([
+      ['BTC', { free: 0.2, used: 0, total: 0.2 }],
+      ['USDT', { free: 18.5, used: 0, total: 18.5 }],
+    ]);
+    /** The lines GridBot logs about the fees the exchange took in the asset, as `level message` */
+    const feeLines = () =>
+      log.mock.calls
+        .filter(([, message]) => message.includes('The exchange took the fee'))
+        .map(([level, message]) => `${level} ${message}`);
+
+    // 2.5 a level: the BUY at 95 turns into a SELL at 100, on a step of 0.01
+    it.each`
+      details          | description                                                                          | expected
+      ${{}}            | ${'none of it, the fee taken in the currency, as the simulator takes it, or in BNB'} | ${['SELL 100 x2.5']}
+      ${feeOf(0)}      | ${'0 of it'}                                                                         | ${['SELL 100 x2.5']}
+      ${feeOf(0.0025)} | ${'0.0025 of it: 2.4975 left, 2.49 on the step'}                                     | ${['SELL 100 x2.49']}
+      ${feeOf(0.01)}   | ${'0.01 of it: 2.49 left, on the step'}                                              | ${['SELL 100 x2.49']}
+    `('turns its level to a SELL of what it left, the fee having taken $description', ({ details, expected }) => {
+      startStrategy(100);
+      const sentBefore = issuedOrders.length;
+      settle('completed', 95, 'BUY', details);
+
+      expect(amountsSentAfter(sentBefore)).toEqual(expected);
+    });
+
+    // 2.4975 left each time: 0.0075 carried, then 0.005, 0.0025 and nothing, 9.99 sold in all, 4 × 2.4975. Truncated each time without
+    // the carry, 2.49 a SELL, 0.03 stayed idle
+    it('sells over its round trips all that its BUYs left, carrying what the step leaves to the next SELL, its BUYs of the quantity', () => {
+      startStrategy(100);
+      const sentBefore = issuedOrders.length;
+      for (let i = 0; i < 4; i++) {
+        settle('completed', 95, 'BUY', feeOf(0.0025));
+        settle('completed', 100, 'SELL');
+      }
+
+      expect(amountsSentAfter(sentBefore)).toEqual([
+        'SELL 100 x2.49',
+        'BUY 95 x2.5',
+        'SELL 100 x2.5',
+        'BUY 95 x2.5',
+        'SELL 100 x2.5',
+        'BUY 95 x2.5',
+        'SELL 100 x2.5',
+        'BUY 95 x2.5',
+      ]);
+    });
+
+    it('places a refused SELL again for what it asked for', () => {
+      startStrategy(100);
+      const sentBefore = issuedOrders.length;
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      settle('errored', 100, 'SELL');
+
+      expect(amountsSentAfter(sentBefore)).toEqual(['SELL 100 x2.49', 'SELL 100 x2.49']);
+    });
+
+    it('places again what is left of a SELL canceled after a partial fill', () => {
+      startStrategy(100);
+      const sentBefore = issuedOrders.length;
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      settle('canceled', 100, 'SELL', { filled: 1, remaining: 1.49 });
+
+      expect(amountsSentAfter(sentBefore)).toEqual(['SELL 100 x2.49', 'SELL 100 x1.49']);
+    });
+
+    // 1 filled before the cancel, 1.5 placed again, which pays 0.0015 of it: the 1 paid 0.001 at that share, and the level holds
+    // 2.5 - 0.0025, 2.49 on the step
+    it('sells, once a BUY placed again after a cancel completes, the fills before the cancel too, their fee at the share of its own', () => {
+      startStrategy(100);
+      const sentBefore = issuedOrders.length;
+      settle('canceled', 95, 'BUY', { filled: 1, remaining: 1.5 });
+      settle('completed', 95, 'BUY', { feeTakenInAsset: { amount: 0.0015, value: 0.1425 } });
+
+      expect(amountsSentAfter(sentBefore)).toEqual(['BUY 95 x1.5', 'SELL 100 x2.49']);
+    });
+
+    // As before, the event of a cancel carrying no fee
+    it('turns a BUY canceled with less left than the market takes to a SELL of the quantity, once a fee was taken in the asset', () => {
+      startStrategy(100);
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      settle('completed', 100, 'SELL');
+      const sentBefore = issuedOrders.length;
+      settle('canceled', 95, 'BUY', { filled: 2.45, remaining: 0.05 });
+
+      expect(amountsSentAfter(sentBefore)).toEqual(['SELL 100 x2.5']);
+    });
+
+    it('says once in the run, at info, that the SELL sells what the BUY left', () => {
+      startStrategy(100);
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      settle('completed', 90, 'BUY', feeOf(0.0025));
+
+      expect(feeLines()).toEqual([
+        "info GridBot: The exchange took the fee of the BUY at 95 in BTC: its level holds 2.4975 BTC, and its SELL at 100 sells 2.49, on the amount step, the rest carried to the level's next SELL. A SELL that follows a BUY whose fee is taken in BTC sells what that BUY left, and the next BUY buys the quantity again",
+      ]);
+    });
+
+    it('names a SELL that may be live on the exchange untracked by the amount it asked for', () => {
+      startStrategy(100);
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      settle('errored', 100, 'SELL', { reason: lostOnTheNetwork, mayBeLive: true });
+
+      expect(log).toHaveBeenCalledWith(
+        'warn',
+        `GridBot: SELL 2.49 at 100 may be live on the exchange without GridBot tracking it: it is not placed again, its level is left without an order, the rest of the grid trades on. Check it there. Last error: ${lostOnTheNetwork}`,
+      );
+    });
+
+    // The reset canceled the SELL at 100 that the BUY at 95 turned into, its level carrying 0.0075: the grid at 111 is built on the
+    // balances, which hold it, and its BUY at 106 leaves 2.4975, 2.49 on the step, as at the start, not 2.505, 2.5
+    it('builds the grid of a reset with levels carrying nothing of the old ones', () => {
+      startStrategy(100, { resetMode: 'up' });
+      settle('completed', 95, 'BUY', feeOf(0.0025));
+      strategy.onEachTimeframeCandle({ candle: makeCandle(111), portfolio: balancedPortfolio, tools });
+      const open = issuedOrders.filter(({ id }) => !settledIds.has(id));
+      // The split of the default grid at 111, 2.5 a level: 5 BTC for its SELLs, 517.5 USDT for its BUYs at 106 and 101: no rebalance
+      const splitAt111 = new Map<string, BalanceDetail>([
+        ['BTC', { free: 5, used: 0, total: 5 }],
+        ['USDT', { free: 517.5, used: 0, total: 517.5 }],
+      ]);
+      open.forEach(({ price, side }) => settle('canceled', price, side, {}, { price: 111, portfolio: splitAt111 }));
+      const sentBefore = issuedOrders.length;
+      settle('completed', 106, 'BUY', feeOf(0.0025));
+
+      expect(amountsSentAfter(sentBefore)).toEqual(['SELL 111 x2.49']);
+    });
+
+    describe('when what the BUY left is under the market minimum at the SELL price, on a grid at that minimum', () => {
+      // 0.1 a level: the BUY at 95 leaves 0.0999, 0.09 on the step, under amount.min. Sold alone, it was refused at each attempt
+      it('sells the minimum, the rest taken from the asset the grid does not trade', () => {
+        startStrategy(100, {}, atMinimum);
+        const sentBefore = issuedOrders.length;
+        settle('completed', 95, 'BUY', feeOf(0.0001));
+
+        expect(amountsSentAfter(sentBefore)).toEqual(['SELL 100 x0.1']);
+      });
+
+      it('warns of it once in the run, at its first SELL', () => {
+        startStrategy(100, {}, atMinimum);
+        settle('completed', 95, 'BUY', feeOf(0.0001));
+        settle('completed', 90, 'BUY', feeOf(0.0001));
+
+        expect(feeLines()).toEqual([
+          'warn GridBot: The exchange took the fee of the BUY at 95 in BTC: its level holds 0.0999 BTC, under the market minimum of 0.1 at its SELL price, 100, and the SELL sells 0.1, the rest taken from the BTC the grid does not trade; once that is spent, the market refuses such a SELL at each attempt until its level gives up. Pay the fees in another asset (BNB on Binance), or fund each level with more than the market minimum and its fee',
+        ]);
+      });
     });
   });
 
