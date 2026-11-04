@@ -1018,7 +1018,7 @@ if (rsi.results < 30 && close < bb.lower) {
 }
 ```
 
-`IndicatorRegistry` is the global interface that each indicator's `<name>.types.ts` augments with its `input` and `output`: it is in scope wherever `addIndicator` type-checks. The `as` only tells TypeScript which indicator you registered there, and nothing checks it against the order of your `addIndicator` calls, no more than a hook whose rest parameter you type, as the built-in MACD strategy does with `...indicators: IndicatorResults<{ macd: number; signal: number; hist: number } | null>[]`.
+`IndicatorRegistry` is the global interface that each indicator's `<name>.types.ts` augments with its `input` and `output`: it is in scope wherever `addIndicator` type-checks. The `as` only tells TypeScript which indicator you registered there, and nothing checks it against the order of your `addIndicator` calls, no more than a hook whose rest parameter you type, as the built-in MACD strategy does with `...indicators: IndicatorResults<MACDResult | null>[]`, `MACDResult` being `NonNullable<IndicatorRegistry['MACD']['output']>`.
 
 `results` is your strategy's own copy, made once per candle and shared by the hooks of that candle, then by the order hooks until the next one: writing to it changes nothing in the indicator.
 
@@ -1065,7 +1065,7 @@ if (close > ema200.results && rsi.results < 30 && volume.obv > volume.ma) {
 
 The moving averages (SMA, EMA, DEMA, TEMA, WMA, SMMA and Wilder Smoothing), ROC, Bollinger Bands and the Stochastic also take numbers you compute, through `update(value: number)`: the Stochastic takes each value as its own high, low and close. That is how indicators build on each other: TRIX feeds its triple EMA to a ROC, OBV its OBV to Bollinger Bands, and Stochastic RSI its RSI to a Stochastic. The result follows the same contract as through `addIndicator`.
 
-Only code that can import Gekko's classes uses it: a strategy in `packages/strategies/src/custom/`, or a new indicator. A strategy loaded through `strategyPath` from outside the repository can import Gekko's types only (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
+Only code that can import Gekko's classes uses it: a strategy in `packages/strategies/src/custom/`, or a new indicator. A strategy loaded through `strategyPath` can import Gekko's types only: the compiled executable resolves no other `@gekko/…` import of such a file, even one inside the checkout, and `bun run dev` resolves them only for a file inside it (see [Where Your Strategy Lives](./custom-strategies.md#where-your-strategy-lives)). Feed such an indicator in `onEachTimeframeCandle`, which runs on every candle, the warmup included:
 
 ```typescript
 import { EMA } from '@gekko/indicators/movingAverages/ema/ema.indicator';
