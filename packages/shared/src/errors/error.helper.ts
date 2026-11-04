@@ -7,10 +7,11 @@ import { GekkoError } from './gekko.error';
 
 /**
  * The message of a failure, for a line that quotes it: a log line or the message of another error, each with a tag of its own. A
- * GekkoError gives its message without its tag (see GekkoError.untaggedMessage), an AggregateError its message then its errors, any
- * other Error its message, a string itself, an object with a message util.inspect does not show (Bun's ResolveMessage and BuildMessage)
- * its class and message, and any other value what util.inspect writes. Not String(), which a template literal calls too: it writes an
- * object as "[object Object]" and throws for one without a prototype, from the very catch meant to report the failure.
+ * GekkoError gives its message without its tag (see GekkoError.untaggedMessage), an AggregateError its message then its errors, Bun's
+ * ResolveMessage and BuildMessage their class and message (see describeErrorLike), any other Error its message, a string itself, any
+ * other object with a message util.inspect does not show its class and message too, and any other value what util.inspect writes. Not
+ * String(), which a template literal calls too: it writes an object as "[object Object]" and throws for one without a prototype, from
+ * the very catch meant to report the failure.
  */
 export const describeError = (value: unknown): string => describeListed(value, []);
 
@@ -18,10 +19,18 @@ export const describeError = (value: unknown): string => describeListed(value, [
 const describeListed = (value: unknown, listing: readonly unknown[]): string => {
   if (value instanceof GekkoError) return value.untaggedMessage;
   if (value instanceof AggregateError) return describeAggregateError(value, listing);
-  if (value instanceof Error) return value.message;
+  if (value instanceof Error && !isLoaderMessage(value)) return value.message;
   if (isString(value)) return value;
   return describeErrorLike(value) ?? inspect(value);
 };
+
+/**
+ * Whether an Error is Bun's ResolveMessage or BuildMessage, which Bun 1.4.4 makes Errors (Bun 1.3.14 did not): quoted by its message
+ * alone, as any other Error is, it lost its class, which says what failed, and a BuildMessage its position, the only place its file is
+ * named. Told apart by the name Bun gives both classes, in 1.3.14 as in 1.4.4, the first word of what String() writes of them
+ * (`ResolveMessage: Cannot find package 'zod' imported from …`): a property of theirs, such as `position`, other errors can have too.
+ */
+const isLoaderMessage = (error: Error) => error.name === 'ResolveMessage' || error.name === 'BuildMessage';
 
 /**
  * Its message names none of its errors: Bun reports two syntax errors in a strategy file as '2 errors building "<file>"', whose errors
@@ -37,11 +46,12 @@ const describeAggregateError = (error: AggregateError, listing: readonly unknown
 };
 
 /**
- * util.inspect writes an object's own enumerable properties, so it wrote Bun's ResolveMessage and BuildMessage, which the import of a
- * strategy file that cannot be found or parsed rejects with, as 'ResolveMessage {}': they are not Errors, and their message is a getter
- * of their class. An object with a string message that is not one of those properties is written "<its class>: <message>", followed by
- * its position when it has one, as a BuildMessage does: its message names no file ('Expected ")" but found ";"'). Undefined for any
- * other value, and when a getter throws: inspect, which calls none, never threw on such an object.
+ * An object whose message util.inspect does not show, written "<its class>: <message>": util.inspect writes an object's own enumerable
+ * properties, and its message, a string, is not one of them. Such are Bun's ResolveMessage and BuildMessage, which the import of a
+ * strategy file that cannot be found or parsed rejects with, their message a getter of their class. util.inspect wrote Bun 1.3.14's,
+ * which are not Errors, as 'ResolveMessage {}'; Bun 1.4.4's are Errors, which describeListed sends here too (see isLoaderMessage).
+ * Its position follows when it has one, as a BuildMessage does: its message names no file ('Expected ")" but found ";"'). Undefined
+ * for any other value, and when a getter throws: inspect, which calls none, never threw on such an object.
  */
 const describeErrorLike = (value: unknown): string | undefined => {
   if (typeof value !== 'object' || value === null) return undefined;

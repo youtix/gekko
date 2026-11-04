@@ -153,9 +153,10 @@ export class StrategyManager extends EventEmitter {
       try {
         strategyModule = await import(resolvedPath);
       } catch (err) {
-        // Bun rejects with a ResolveMessage or a BuildMessage, which are not Errors, when it cannot find or parse the file, and with an
-        // AggregateError of BuildMessages for two syntax errors or more, which the log wrote as '2 errors building "<file>"', without
-        // them. The start-up failed without saying which step failed: describeError writes each of them, with its file.
+        // Bun rejects with a ResolveMessage or a BuildMessage when it cannot find or parse the file (Errors under Bun 1.4.4, objects of
+        // their own under 1.3.14), and with an AggregateError of BuildMessages for two syntax errors or more, which the log wrote as
+        // '2 errors building "<file>"', without them. The start-up failed without saying which step failed: describeError writes each
+        // of them with its class, and a BuildMessage with its position, which names its file.
         throw new GekkoError('trading advisor', `Cannot import the strategy file ${resolvedPath}: ${describeError(err)}`, { cause: err });
       }
       SelectedStrategy = strategyModule[strategyName];

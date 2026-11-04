@@ -180,9 +180,9 @@ describe('StrategyManager', () => {
       await expect(manager.createStrategy('MissingStrategy', DEBUG_ADVICE_PATH)).rejects.toThrow(GekkoError);
     });
 
-    // Bun rejects the import of a file it cannot find or parse with a ResolveMessage or a BuildMessage, which are not Errors, or with an
-    // AggregateError of BuildMessages, which the log wrote without them: the start-up failed without saying which step failed. Under
-    // vitest, a missing file rejects with the ERR_MODULE_NOT_FOUND Error of the module loader.
+    // Bun rejects the import of a file it cannot find or parse with a ResolveMessage or a BuildMessage (Errors under Bun 1.4.4, objects
+    // of their own under 1.3.14), or with an AggregateError of BuildMessages, which the log wrote without them: the start-up failed
+    // without saying which step failed. Under vitest, a missing file rejects with the ERR_MODULE_NOT_FOUND Error of the module loader.
     describe('when the strategy file cannot be imported', () => {
       const MISSING_PATH = '/nowhere.strategy.ts';
       let failure: unknown;
