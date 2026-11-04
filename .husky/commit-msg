@@ -1,2 +1,3 @@
 #!/usr/bin/env sh
-bun run commit:check --edit "$1"
+# commitlint itself rather than the commit:check script, whose range options --edit would override or refuse
+bun x commitlint --edit "$1"

@@ -1,9 +1,10 @@
 watch:
-  asset: BTC
+  assets:
+    - BTC
+    - ETH
   currency: USDT
   mode: importer # backtest | importer | realtime
   tickrate: 500
-  fillGaps: empty
   daterange:
     start: '2017-10-01T00:00:00.000Z'
     end: '2026-01-01T00:00:00.000Z'
@@ -13,7 +14,7 @@ exchange:
 
 storage:
   type: sqlite
-  database: ./db/binance-BTC_USDT.sql
+  database: ./db/binance-BTC_ETH_USDT.sql
 
 plugins:
   - name: CandleWriter

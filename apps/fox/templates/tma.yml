@@ -1,0 +1,90 @@
+# Fox's template for TMA: backtests BTC and ETH in 2024 on the database config/importer.yml writes, run that import first. Each option
+# of Fox's command line sets a key of it, and its lists and ranges make the variants (documentation/fox.md):
+#   fox --template-path apps/fox/templates/tma.yml --strategy.short 5..10 --strategy.long 50,100 --strategy.src close,ohlc4
+
+showLogo: false
+watch:
+  assets:
+    - BTC
+    - ETH
+  currency: USDT
+  timeframe: 1h
+  mode: backtest
+  warmup:
+    candleCount: 100
+  daterange:
+    start: '2024-01-01T00:00:00.000Z'
+    end: '2024-12-31T23:59:00.000Z'
+
+exchange:
+  name: dummy-cex
+  marketData:
+    - symbol: BTC/USDT
+      marketData:
+        price:
+          min: 0.01
+          max: 1000000
+        amount:
+          min: 0.00001
+          max: 9000
+        cost:
+          min: 5
+          max: 9000000
+        precision:
+          price: 8
+          amount: 8
+        fee:
+          maker: 0.0004
+          taker: 0.0007
+    - symbol: ETH/USDT
+      marketData:
+        price:
+          min: 0.01
+          max: 1000000
+        amount:
+          min: 0.0001
+          max: 9000
+        cost:
+          min: 5
+          max: 9000000
+        precision:
+          price: 8
+          amount: 8
+        fee:
+          maker: 0.0004
+          taker: 0.0007
+  simulationBalance:
+    - assetName: BTC
+      balance: 0
+    - assetName: ETH
+      balance: 0
+    - assetName: USDT
+      balance: 1000
+
+storage:
+  type: sqlite
+  database: ./db/binance-BTC_ETH_USDT.sql
+
+# short < medium < long, which the strategy's schema checks for each variant
+strategy:
+  name: TMA
+  short: 10
+  medium: 21
+  long: 50
+  src: close
+
+plugins:
+  - name: TradingAdvisor
+    strategyName: TMA
+
+  - name: Trader
+    portfolioUpdates:
+      threshold: 1 # in percentage
+      dust: 10 # in currency
+
+  # Without enableConsoleTable: an analyzer prints its table whatever the log level, and each variant would print its own
+  - name: PortfolioAnalyzer
+
+  # Each variant adds its row to this file, in the directory Fox runs in
+  - name: PerformanceReporter
+    fileName: TMA_performance_reports.csv

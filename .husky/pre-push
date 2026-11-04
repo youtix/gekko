@@ -1,2 +1,13 @@
 #!/usr/bin/env sh
-bun run test:coverage
+# git runs this hook for every push, of a tag, a notes ref or a deletion too, and passes one line per ref on stdin: local ref, local
+# sha, remote ref, remote sha. The coverage suite runs only when a branch is created or moved: the remote ref is a branch (the local
+# one can be HEAD, as in `git push origin HEAD:main`) and the local sha is not all zeros, which is a deletion.
+run_suite=
+while read -r _local_ref local_sha remote_ref _remote_sha; do
+  case "$remote_ref" in
+    refs/heads/*) case "$local_sha" in *[!0]*) run_suite=1 ;; esac ;;
+  esac
+done
+if [ -n "$run_suite" ]; then
+  bun run test:coverage
+fi

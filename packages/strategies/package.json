@@ -1,0 +1,26 @@
+{
+  "name": "@gekko/strategies",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/tsc/strategies.tsbuildinfo",
+    "test": "vitest --run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "bench": "vitest --run bench",
+    "bench:watch": "vitest bench"
+  },
+  "dependencies": {
+    "@gekko/indicators": "workspace:*",
+    "@gekko/schemas": "workspace:*",
+    "@gekko/shared": "workspace:*",
+    "lodash-es": "^4.17.23",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

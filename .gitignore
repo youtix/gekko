@@ -1,8 +1,24 @@
 node_modules
 dist
+# Turborepo's cache and the log of each task it runs, at the root and in every workspace. turbo hashes the files git does not ignore:
+# a task's log, written as it ran, changed the hash of its next run, which never replayed from the cache
+.turbo
+# The html or lcov report of a coverage run, which each workspace writes in a coverage directory of its own (test:coverage prints its
+# table)
+coverage
 .env.local
-db
-.sql
-.sql-shm
-.sql-wal
-src/strategies/custom
+# SQLite: the db folder (or a link to one) the example configurations write to, and a database elsewhere with its -shm and -wal
+/db
+*.sql
+*.sql-shm
+*.sql-wal
+# The PerformanceReporter's CSV files (its default name, and the names Fox's templates give theirs) and the locks taken while
+# writing them
+*performance_reports.csv*
+# A configuration copied from a tracked one to hold your own keys, such as config/realtime-trader.local.yml
+config/*.local.*
+# The private strategies, but the placeholder index.ts git tracks, and their directory before the monorepo, where a checkout updated
+# since may still hold some: not ignored there, they showed in git status and `git add -A` staged them
+packages/strategies/src/custom
+/src/strategies/custom
+documentation/dev
