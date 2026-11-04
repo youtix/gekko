@@ -4,7 +4,8 @@ watch:
   currency: USDC
   mode: importer # backtest | importer | realtime
   # Hyperliquid's API serves only the latest 5000 candles of each interval, about 3.5 days of 1-minute candles, and an import gets no
-  # older minute: move this range into the last 3 days before you run it
+  # older minute: copy this file to config/importer-hyperliquid.local.yml (git ignores every config/*.local.* file), move the copy's
+  # range into the last 3 days and point GEKKO_CONFIG_FILE_PATH at the copy
   daterange:
     start: 2026-10-13
     end: 2026-10-15T23:59:00Z

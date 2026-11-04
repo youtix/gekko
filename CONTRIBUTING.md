@@ -18,7 +18,7 @@ git switch -c development upstream/development
 
 ### Install Bun and Node.js
 
-Gekko runs on [Bun](https://bun.sh/) 1.3 or later. Follow the [installation instructions](https://bun.sh/docs/install) if you don't already have it.
+Gekko runs on [Bun](https://bun.sh/) 1.3 or later, but its end-to-end tests expect the version that `package.json`'s `packageManager` names and CI pins, Bun 1.4.4 today: on 1.3, some realtime flows fail on the message of an aborted run. Install that version with `curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"` (see Bun's [installation instructions](https://bun.sh/docs/installation)).
 
 The unit tests also need [Node.js](https://nodejs.org/) 22.13 or later (not 23), with `node` on your `PATH`: vitest runs them under Node. Without one, `bun run` runs vitest on Bun, where part of the suite fails and coverage is not supported, so the pre-push hook cannot pass.
 
@@ -48,7 +48,7 @@ The repository is a monorepo of Bun workspaces, whose tasks [Turborepo](https://
 - `packages/plugins` (`@gekko/plugins`): the plugins.
 - `apps/gekko`, the bot, with the end-to-end tests, and `apps/fox`, Fox (see [the Fox guide](./documentation/fox.md)), each compiled to an executable in `dist/`.
 
-A module of another package is imported by its package's name and its path under that package's `src/`, without `.ts` (`import { round } from '@gekko/shared/utils/math/round.utils'`); a module of the same package by a relative path. [CLAUDE.md](./CLAUDE.md) says what each package holds and the conventions the code follows.
+A module of another package is imported by its package's name and its path under that package's `src/`, without `.ts` (`import { round } from '@gekko/shared/utils/math/round.utils'`); a module of the same package by a relative path. [CLAUDE.md](./CLAUDE.md) says what each package holds and the conventions the code follows, and lists the files a new built-in strategy, indicator, plugin or exchange needs and where each is registered.
 
 ### Run Tests
 
@@ -61,7 +61,7 @@ bun run test:e2e                                                               #
 
 The unit tests are the `*.test.ts` files next to the code they test, in each package's `src/` and in `scripts/`, and vitest runs them: `bun run test` runs every package's, one package at a time, through Turborepo, which replays a package's last results while nothing it reads has changed, the packages it imports included (`--force` runs them anyway). A run stops at the first package that fails: `bun run test --continue` runs the others. At the root, `bun run test <file>` does not work (Turborepo reads the file as a task name): use `bun run --filter <package> test <file>`. In a package's directory, `bun run test` runs its tests alone, `bun run test <file>` one file and `bun run test:watch` them again as you edit. `test:coverage` fails when the lines, functions, branches or statements a package's tests cover fall below 95%.
 
-The end-to-end tests in `apps/gekko/test/e2e` run the whole pipeline of each mode on Bun's own test runner: from `apps/gekko`, `bun test --isolate test/e2e/<path_to_file>` runs one file. CI runs them, on the Bun version that `.github/workflows/ci.yml` pins, but the hooks do not, so run them before you open a pull request. The realtime flows run on real minutes under a fake clock of the harness's own (`startFakeClock`, `apps/gekko/test/e2e/helpers/clock.helper.ts`), not Bun's fake timers, which no realtime flow calls: a run of minutes lasts milliseconds and meets the same minutes every time.
+The end-to-end tests in `apps/gekko/test/e2e` run the whole pipeline of each mode on Bun's own test runner: from `apps/gekko`, `bun test --isolate test/e2e/<path_to_file>` runs one file. CI runs them on that Bun version, the one `.github/workflows/ci.yml` pins, but the hooks do not, so run them before you open a pull request. The realtime flows run on real minutes under a fake clock of the harness's own (`startFakeClock`, `apps/gekko/test/e2e/helpers/clock.helper.ts`), not Bun's fake timers, which no realtime flow calls: a run of minutes lasts milliseconds and meets the same minutes every time.
 
 ### Check Formatting, Linting, Types and the Build
 
@@ -84,6 +84,10 @@ bun run build:exec  # compiles the executables to dist/gekko and dist/fox
 
 CI runs these four commands, `bun run test:coverage` and `bun run test:e2e` on every push and pull request to `development` and `main`, in a job whose token can only read the repository.
 
+### Check the Documentation
+
+`bun run test` also runs `scripts/documentation/documentation.test.ts`, which holds the guides to the code. Every `yaml` block of `documentation/*.md` and `README.md` must validate as Gekko's loader validates a configuration: a block holding `watch`, `exchange` and `plugins` as a whole file, any other block section by section, a plugin entry against its plugin's options, a `strategy:` block against its strategy's parameters. Every `typescript` block must type-check. The YAML files of `config/`, your own `config/<name>.local.yml` copies included, and Fox's templates are checked too. Fence a block that shows only part of something (a key of a section, a line of a file) as ` ```yaml fragment ` or ` ```typescript fragment `, and the test leaves it out. Re-fencing it as `text` takes it out of every check.
+
 ## Commit Message Guidelines
 
 We use [Conventional Commits](https://www.conventionalcommits.org/) to keep our history readable, and the release reads them to pick the next version. A header reads `type(scope): subject`:
@@ -92,7 +96,7 @@ We use [Conventional Commits](https://www.conventionalcommits.org/) to keep our 
 - the subject does not start with a capital letter and does not end with a full stop;
 - the header is at most 125 characters long. The lines of the body and of the footers may be as long as you need.
 
-`feat` releases a minor version and `fix` or `perf` a patch, while `docs`, `test`, `chore` and the like release nothing on their own. A breaking change releases a major version, whatever its type. Mark it either way:
+`feat` releases a minor version, and `fix`, `perf` and a revert a patch. A revert is a `revert:` or `Revert "…"` header with git's `This reverts commit <sha>.` line; when a revert and the commit it reverts come in the same release, both drop out of it. `docs`, `test`, `chore` and the like release nothing on their own. A breaking change releases a major version, whatever its type. Mark it either way:
 
 - a `!` after the type or the scope (`feat!:`, `fix(trader)!:`), whose subject the release notes quote;
 - a `BREAKING CHANGE:` footer (or `BREAKING-CHANGE:`) after a blank line, whose text the release notes quote.
@@ -113,7 +117,7 @@ A breaking change described in a footer:
 ```
 feat(config): read the watched pairs from watch.assets
 
-BREAKING CHANGE: watch.asset is replaced by watch.assets, a list of pairs.
+BREAKING CHANGE: watch.asset is replaced by watch.assets, a list of assets.
 ```
 
 The commit-msg hook checks each message as you commit, and CI checks the commits of every pull request and the commits pushed to `development` and `main`. To check messages by hand, run `bun run commit:check --last` (your last commit), `bun run commit:check --from upstream/development` (the commits of your branch) or `echo "feat: …" | bun run commit:check`.
