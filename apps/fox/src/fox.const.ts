@@ -36,7 +36,7 @@ Example:
   fox --template-path apps/fox/templates/dema.yml --strategy.period 10..30:5 --strategy.thresholds.up 50,100
 
 Fox logs at the level GEKKO_LOG_LEVEL sets, error by default: set it to info to follow the variants. Each
-backtest then logs its whole run too: | grep '"_tag":"FOX"' keeps Fox's own lines.`;
+backtest then logs its orders too, six lines each: | grep '"_tag":"FOX"' keeps Fox's own lines.`;
 
 /**
  * The worker's module, from the directory of src/fox.ts, which resolves it from its own URL: from source, the file there; in the

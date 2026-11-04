@@ -148,9 +148,10 @@ export class Trader extends Plugin {
     return this.synchronizeOnceEnded(this.synchronization, startedAfter);
   }
 
-  private startSynchronization() {
+  /** Starts a synchronization, its line logged at `level` (see runSynchronization) */
+  private startSynchronization(level: 'info' | 'debug' = 'debug') {
     this.synchronizationCount++;
-    const synchronization = this.runSynchronization();
+    const synchronization = this.runSynchronization(level);
     this.synchronization = synchronization;
     // Registered first, it runs before the callers resume, and before any other synchronization can start. Its own promise always
     // fulfils: no unhandled rejection here, the failure is the callers' to handle.
@@ -167,11 +168,21 @@ export class Trader extends Plugin {
     return this.synchronize(startedAfter);
   }
 
-  private async runSynchronization() {
+  /**
+   * Reads the balances and the prices, then emits the portfolio (see synchronize). Its line, `Synchronizing data with <exchange>`, is an
+   * info line for the reads of a realtime run nobody waits for, the first one and one every exchangeSynchInterval, which show at info
+   * that the bot reads its account (see synchronizeInBackground). Every other read logs it at debug: those of a backtest, one at each
+   * timeframe candle or every 10 minutes on a shorter timeframe (see processOneMinuteBucket), which buried the orders, the round trips
+   * and the reports at info (some 8,000 lines in 11 months at 1h), and those that follow the end of the warmup or of an order, whose own
+   * info lines say what happened (the end of the warmup, the order's summary, its cancelation, its error).
+   */
+  private async runSynchronization(level: 'info' | 'debug') {
     const exchange = this.getExchange();
     // The number of this synchronization, which startSynchronization has just counted
     const synchronizationNumber = this.synchronizationCount;
-    info('trader', `Synchronizing data with ${exchange.getExchangeName()}`);
+    const line = `Synchronizing data with ${exchange.getExchangeName()}`;
+    if (level === 'info') info('trader', line);
+    else debug('trader', line);
 
     // Update portfolio, balance and prices
     this.portfolio = await exchange.fetchBalance();
@@ -237,11 +248,14 @@ export class Trader extends Plugin {
   /**
    * A synchronization nobody waits for: the first one, and the periodic ones in realtime. Skipped while one is in flight, whose
    * outcome it would only share. A failure is logged rather than thrown, which would make it an unhandled rejection: it is not
-   * fatal, the next synchronization tries again.
+   * fatal, the next synchronization tries again. Its line is an info line in realtime, at debug in a backtest, whose only such
+   * synchronization is the first one (see runSynchronization).
    */
   private synchronizeInBackground() {
     if (this.synchronization) return debug('trader', 'Synchronization skipped: another one is in flight');
-    this.synchronize().catch(err => error('trader', `Impossible to synchronize: ${describeError(err)}`));
+    this.startSynchronization(this.mode === 'realtime' ? 'info' : 'debug').catch(err =>
+      error('trader', `Impossible to synchronize: ${describeError(err)}`),
+    );
   }
 
   /* -------------------------------------------------------------------------- */

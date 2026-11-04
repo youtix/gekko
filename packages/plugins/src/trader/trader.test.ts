@@ -458,6 +458,62 @@ describe('Trader', () => {
     });
   });
 
+  // An info line for the reads of a realtime run nobody waits for, the first one and the periodic ones, which show at info that the bot
+  // reads its account. Every other read logs it at debug: a backtest's, at each timeframe candle, buried the orders and the reports at
+  // info, and the end of the warmup or of an order has info lines of its own.
+  describe('the line of a synchronization', () => {
+    const exchangeSynchInterval = 60_000;
+    const LINE = 'Synchronizing data with MockExchange';
+    const bucket = new Map([['BTC/USDT', defaultCandle]]) as any;
+    // The minute 28,333,340 since the epoch, a multiple of 10, when a backtest at 1m synchronizes (see getBacktestModeIntervalSyncTime)
+    const synchronizationBucket = new Map([['BTC/USDT', { ...defaultCandle, start: 1_700_000_400_000 }]]) as any;
+    const countLines = (log: typeof logger.info) => vi.mocked(log).mock.calls.filter(([, message]) => message === LINE).length;
+
+    /** Ends an order the strategy created with `event`: its report synchronizes once the order is over */
+    const endOrder = async (event: string, payload?: unknown) => {
+      const order = await prepareOrder('creation', buildAdvice({ type: 'MARKET', amount: 1 }));
+      await order.emitAndSettle(event, payload);
+    };
+    const reads: Record<string, () => Promise<unknown>> = {
+      'the first one': () => {
+        trader['processInit']();
+        return vi.advanceTimersByTimeAsync(0);
+      },
+      'the first one and a periodic one': () => {
+        trader['processInit']();
+        return vi.advanceTimersByTimeAsync(exchangeSynchInterval);
+      },
+      'the one of a timeframe candle': () => trader['processOneMinuteBucket'](synchronizationBucket),
+      'the one at the end of the warmup': () => trader.onStrategyWarmupCompleted([bucket]),
+      'the one after the completion of an order': () => endOrder(ORDER_COMPLETED_EVENT),
+      'the one after its cancelation': () => endOrder(ORDER_CANCELED_EVENT, { timestamp: 1_700_000_100_000, filled: 0, remaining: 1 }),
+      'the one after its error': () => endOrder(ORDER_ERRORED_EVENT, { reason: 'exchange timeout', mayBeLive: false }),
+      'the one after its refusal': () => endOrder(ORDER_INVALID_EVENT, { reason: 'too small', status: 'rejected', filled: false }),
+    };
+
+    beforeEach(() => {
+      vi.mocked(context.configuration.getExchange).mockReturnValue({ name: 'binance', exchangeSynchInterval } as Configuration['exchange']);
+      trader['prices'].set('BTC/USDT', 100);
+    });
+
+    it.each`
+      read                                          | mode          | level      | count
+      ${'the first one'}                            | ${'realtime'} | ${'info'}  | ${1}
+      ${'the first one and a periodic one'}         | ${'realtime'} | ${'info'}  | ${2}
+      ${'the first one'}                            | ${'backtest'} | ${'debug'} | ${1}
+      ${'the one of a timeframe candle'}            | ${'backtest'} | ${'debug'} | ${1}
+      ${'the one at the end of the warmup'}         | ${'realtime'} | ${'debug'} | ${1}
+      ${'the one after the completion of an order'} | ${'realtime'} | ${'debug'} | ${1}
+      ${'the one after its cancelation'}            | ${'realtime'} | ${'debug'} | ${1}
+      ${'the one after its error'}                  | ${'realtime'} | ${'debug'} | ${1}
+      ${'the one after its refusal'}                | ${'realtime'} | ${'debug'} | ${1}
+    `('logs $count line(s) at $level, none at the other level, for $read in $mode', async ({ read, mode, level, count }) => {
+      (trader as any).mode = mode;
+      await reads[read]();
+      expect({ info: countLines(logger.info), debug: countLines(logger.debug) }).toEqual({ info: 0, debug: 0, [level]: count });
+    });
+  });
+
   describe('processInit', () => {
     const exchangeSynchInterval = 60_000;
 

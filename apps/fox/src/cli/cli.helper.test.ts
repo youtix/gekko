@@ -153,7 +153,7 @@ describe('createProgram', () => {
     ${'how the values of an override are read'}  | ${'--strategy.period 12..24:4    12, 16, 20 and 24, a step of 4'}
     ${'the = form of a value read as an option'} | ${'--strategy.src=-tma           the = form, for a value Fox would take for its own option: one that starts'}
     ${'the values read as an option'}            | ${'                                with -t or -w (-tma is read as -t ma), or -h or --help, which print this help'}
-    ${"how to keep Fox's own lines"}             | ${`backtest then logs its whole run too: | grep '"_tag":"FOX"' keeps Fox's own lines.`}
+    ${"how to keep Fox's own lines"}             | ${`backtest then logs its orders too, six lines each: | grep '"_tag":"FOX"' keeps Fox's own lines.`}
   `('should describe $description in the help', ({ text }) => {
     expect(helpOf(12)).toContain(text);
   });

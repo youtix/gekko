@@ -1,5 +1,6 @@
 import { PORTFOLIO_CHANGE_EVENT } from '@gekko/shared/constants/event.const';
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
+import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { Trader as TraderClass } from '@gekko/plugins/trader/trader';
 import type { traderSchema } from '@gekko/schemas/plugins/trader.schema';
@@ -18,9 +19,9 @@ import { clearLogs, findTextLines, loggedRoundTrips } from '../../mocks/winston.
 // 1. Mock winston, ccxt and the fetcher. Each test runs on real minutes under the fake clock, from 12:00:30, and ends its run before
 // the next test starts (see realtimeRun.helper)
 mockRealtimeModules();
-// The Trader's lines read here are info lines, which the logger hands winston whatever the level: set, so that a level in the
-// environment cannot add the debug lines
-process.env.GEKKO_LOG_LEVEL = 'info';
+// The Trader logs the line of each synchronization read here at info for the first one, at debug for the others, which the logger hands
+// winston only at that level: set, so that the flow counts them all whatever the level of the environment
+process.env.GEKKO_LOG_LEVEL = 'debug';
 
 // 2. Configuration: paper trading of BTC, DebugRealtime buying 1 BTC on the first candle, 12:00, and selling it on the second, unless a
 // run gives the block of another strategy
@@ -65,8 +66,12 @@ let Trader: typeof TraderClass;
 let addDeferredEmit: TraderClass['addDeferredEmit'];
 let emittedPortfolios: EmittedPortfolio[] = [];
 
-/** How many synchronizations the Trader started: it reads the balance and the tickers, then emits the portfolio unless filtered */
-const countSynchronizations = () => findTextLines('Synchronizing data with paper-binance', 'info').length;
+/**
+ * The level of the line of each synchronization the Trader started, in the order they started: each reads the balance and the tickers,
+ * then emits the portfolio unless filtered
+ */
+const synchronizationLevels = () => findTextLines('Synchronizing data with paper-binance').map(({ level }) => level);
+const countSynchronizations = () => synchronizationLevels().length;
 
 // --------------------------------------------------------------------------
 // TEST SUITE
@@ -105,6 +110,9 @@ describe('E2E: Realtime paper trading options', () => {
   // The Trader synchronizes at start-up (12:00:30), at the end of the warmup, with the first candle (12:01:02), and after each order,
   // the BUY of 12:01:02 and the SELL of 12:02:02. The BUY of 1 BTC at 100 costs 100.1 with Binance's 0.1 % taker fee: 2 BTC and
   // 299,899.9 USDT. The SELL at 110 brings 110 - 0.11: 1 BTC and 300,009.79 USDT.
+  // Only the read at start-up logs its line at info, as the periodic reads would, every exchangeSynchInterval (10 minutes, after these
+  // runs end): the end of the warmup and that of each order have info lines of their own, and log their reads at debug.
+  const levels: LogLevel[] = ['info', 'debug', 'debug', 'debug'];
   const start = { at: REALTIME_START, totals: { BTC: 1, USDT: 300000 } };
   const warmupEnd = { at: minute(12, 1) + 2 * ONE_SECOND, totals: { BTC: 1, USDT: 300000 } };
   const afterBuy = { at: minute(12, 1) + 2 * ONE_SECOND, totals: { BTC: 2, USDT: 299899.9 } };
@@ -130,7 +138,7 @@ describe('E2E: Realtime paper trading options', () => {
 
     // The first synchronization always emits. A later one emits when an asset crossed the dust (its total valued at the ticker, the
     // currency at 1), or when the total of an asset held changed by more than the threshold since the last portfolio emitted
-    expect({ synchronizations: countSynchronizations(), emitted: emittedPortfolios }).toEqual({ synchronizations: 4, emitted });
+    expect({ synchronizations: synchronizationLevels(), emitted: emittedPortfolios }).toEqual({ synchronizations: levels, emitted });
   });
 
   // The rows above emit the same portfolios whether the filter compares a read with the last portfolio emitted, as it does, or with the
@@ -153,8 +161,8 @@ describe('E2E: Realtime paper trading options', () => {
     // The start, then the warmup end and the first BUY with the first candle (12:01:02), the second BUY with the second (12:02:02). 3 to 4
     // BTC is 33 % since the portfolio emitted at start-up: held back. 4 to 5 is 25 % since the read before it, but 67 % since that
     // portfolio: emitted. The BUY at 100 costs 100.1, the BUY at 110 costs 110.11: 300,000 - 100.1 - 110.11 = 299,789.79 USDT.
-    expect({ synchronizations: countSynchronizations(), emitted: emittedPortfolios }).toEqual({
-      synchronizations: 4,
+    expect({ synchronizations: synchronizationLevels(), emitted: emittedPortfolios }).toEqual({
+      synchronizations: levels,
       emitted: [
         { at: REALTIME_START, totals: { BTC: 3, USDT: 300000 } },
         { at: minute(12, 2) + 2 * ONE_SECOND, totals: { BTC: 5, USDT: 299789.79 } },
