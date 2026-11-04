@@ -609,10 +609,10 @@ Gekko takes no command-line option: a configuration file decides what it runs, i
 
 ```bash
 # The executable
-GEKKO_CONFIG_FILE_PATH=./config/backtest.yml GEKKO_LOG_LEVEL=warn ./dist/gekko
+GEKKO_CONFIG_FILE_PATH=./config/backtest.yml GEKKO_LOG_LEVEL=info ./dist/gekko
 
 # The sources
-GEKKO_CONFIG_FILE_PATH=./config/backtest.yml GEKKO_LOG_LEVEL=warn bun run dev
+GEKKO_CONFIG_FILE_PATH=./config/backtest.yml GEKKO_LOG_LEVEL=info bun run dev
 ```
 
 ### Environment Variables
@@ -642,8 +642,8 @@ Gekko reads `.env`, then `.env.local`, from the directory it runs in, not from a
 |---------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
 | `error` | The default: the errors alone, such as a configuration refused, a failure that stops the run or the circuit breaker's stop. A run then prints nothing else but the logo (unless the configuration sets `showLogo: false`) and the tables of an analyzer whose `enableConsoleTable` is set: an import runs for minutes without a line, and a realtime run says nothing while it follows the market. |
 | `warn`  | The warnings too: an order the market will refuse, warned of before it is sent; a minute the exchange lacked, filled with a flat candle; a TradingAdvisor without a Trader; a stop by Ctrl-C or SIGTERM; the line that opens every backtest, `BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!`.                                                                   |
-| `info`  | The progress too: the version, each download, the start of a backtest, the strategy's lines, the orders, the round trips and the reports. In a backtest, it also logs `Synchronizing data with dummy-cex` at each balance read of the Trader, every timeframe candle (every 10 minutes on a shorter timeframe) and after each order: `warn` keeps a long backtest's output short.                  |
-| `debug` | The details of each step too, such as the sizing of each order and the events the plugins send each other: many lines for each minute of candles.                                                                                                                                                                                                                                                  |
+| `info`  | The progress too: the version, each download, the start of a backtest, the strategy's lines, the orders, the round trips and the reports, and in realtime the Trader's balance read at start-up and every `exchangeSynchInterval` (`Synchronizing data with binance`).                                                                                                                             |
+| `debug` | The details of each step too, such as the sizing of each order, every balance read of the Trader (in a backtest, one at each timeframe candle, or every 10 minutes on a shorter timeframe) and the events the plugins send each other: many lines for each minute of candles.                                                                                                                      |
 
 `http` and `verbose` print what `info` prints, and `silly` what `debug` prints: Gekko logs no line at those levels. The value is case-insensitive, `warning` reads as `warn`, and an unknown value falls back to `error`, with an error line: `Invalid GEKKO_LOG_LEVEL 'Warning2', falling back to 'error'. Valid levels: error, warn, info, http, verbose, debug, silly.`
 

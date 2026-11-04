@@ -26,7 +26,7 @@ bun run build:exec
 
 Run every step's command from the root of the checkout, the `gekko` directory, where the paths `./config/…` and `./db/…` start: each names its configuration in front of the executable (`GEKKO_CONFIG_FILE_PATH=<file> ./dist/gekko`). Save each configuration as `config/<name>.local.yml`, which git ignores.
 
-By default Gekko prints its logo, its errors and the tables of an analyzer with `enableConsoleTable`; put `GEKKO_LOG_LEVEL=info` in front of a command to follow its progress. At `info`, it also logs the progress of each download, each order and round trip, and each balance read of the Trader, at least one per hourly candle in step 3's backtest: some 8,000 lines over its range, among which its tables scroll by, so run step 3 at the default level.
+By default Gekko prints its logo, its errors and the tables of an analyzer with `enableConsoleTable`; put `GEKKO_LOG_LEVEL=info` in front of a command to follow its progress. At `info`, it also logs the progress of each download, each order and round trip (some 270 lines in step 3's backtest, beside its tables) and, in steps 4 to 6, the Trader's read of the balances every 10 minutes.
 
 Apart from its logo and what an analyzer prints with `enableConsoleTable`, each line Gekko prints is one JSON object, its text the `message`, where a line break is written `\n`. The levels run from `error`, the default, through `warn` and `info` to `debug` (see [Logs and Exit Codes](./modes.md#logs-and-exit-codes)), and both variables can also be set in a `.env.local` file (see [Environment Variables](./modes.md#environment-variables)).
 
