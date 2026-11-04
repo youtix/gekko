@@ -210,7 +210,7 @@ describe('gekko.worker', () => {
       new Error('level 1', { cause: new Error('level 2', { cause: new Error('level 3', { cause: new Error('the root cause') }) }) }),
     );
 
-    expect((await backtest()).stack).toMatch(/\nCaused by: Error: the root cause\n/);
+    expect(await backtest()).toMatchObject({ stack: expect.stringMatching(/\nCaused by: Error: the root cause\n/) });
   });
 
   it('should post no stack for a failure that is no Error, which its message says all of', async () => {
@@ -239,7 +239,77 @@ describe('gekko.worker', () => {
       throw new Error('database is locked');
     });
 
-    expect((await backtest()).error).toBe('boom; Could not close the storage: database is locked');
+    expect(await backtest()).toMatchObject({ error: 'boom; Could not close the storage: database is locked' });
+  });
+
+  // The bot stops in good order and exits 0 (`Application stopped: [STRATEGY] Max consecutive order errors reached (5)`): Fox counted
+  // such a variant as failed, and exited 1
+  describe('when the circuit breaker stops the backtest', () => {
+    let stop: Error;
+
+    beforeEach(async () => {
+      // The class the worker's modules load, after the reset of each test: instanceof fails across a reset
+      const { ApplicationStopError } = await import('@gekko/shared/errors/applicationStop.error');
+      stop = new ApplicationStopError('strategy', 'Max consecutive order errors reached (5)');
+      vi.mocked(gekkoPipeline).mockRejectedValue(stop);
+    });
+
+    it('should post the variant stopped, with the reason of its stop as the bot logs it', async () => {
+      expect(await backtest()).toStrictEqual({
+        variant: 3,
+        status: 'stopped',
+        reason: '[STRATEGY] Max consecutive order errors reached (5)',
+        durationMs: 3000,
+      });
+    });
+
+    it('should close the storage', async () => {
+      await backtest();
+
+      expect(context.services.closeStorage).toHaveBeenCalledOnce();
+    });
+
+    // As the bot, which exits 0 after its stop whatever rejection it left unhandled: its main() overrides the code its handler set
+    it('should post the variant stopped when a rejection was left unhandled, naming it after the stop, without its stack', async () => {
+      vi.mocked(gekkoPipeline).mockImplementation(async () => {
+        handlerOf('unhandledRejection')(new Error('floating rejection'));
+        throw stop;
+      });
+
+      expect(await backtest()).toStrictEqual({
+        variant: 3,
+        status: 'stopped',
+        reason: '[STRATEGY] Max consecutive order errors reached (5); Unhandled rejection: floating rejection',
+        durationMs: 3000,
+      });
+    });
+
+    // As the bot, a stopped run keeping its code when the close of its storage fails
+    it('should post the variant stopped when the storage cannot be closed, naming that failure after the stop', async () => {
+      vi.mocked(context.services.closeStorage).mockImplementation(() => {
+        throw new Error('database is locked');
+      });
+
+      expect(await backtest()).toStrictEqual({
+        variant: 3,
+        status: 'stopped',
+        reason: '[STRATEGY] Max consecutive order errors reached (5); Could not close the storage: database is locked',
+        durationMs: 3000,
+      });
+    });
+
+    // As the bot, which exits 1 at once on an uncaught exception
+    it('should post the variant failed when an exception is not caught after the stop', async () => {
+      vi.mocked(gekkoPipeline).mockImplementation(async () => {
+        setTimeout(() => handlerOf('uncaughtException')(new Error('thrown in a timer')), 0);
+        throw stop;
+      });
+
+      expect(await backtest()).toMatchObject({
+        status: 'failed',
+        error: 'Max consecutive order errors reached (5); Uncaught exception: thrown in a timer',
+      });
+    });
   });
 
   // As the bot's main() does, before anything can fail: a rejection left unhandled, a throw in a timer
@@ -296,7 +366,7 @@ describe('gekko.worker', () => {
       for (const message of ['first', 'second', 'third']) handlerOf('unhandledRejection')(message);
     });
 
-    expect((await backtest()).error).toBe('Unhandled rejection: first (and 2 more)');
+    expect(await backtest()).toMatchObject({ error: 'Unhandled rejection: first (and 2 more)' });
   });
 
   it('should name the failure of the backtest before a rejection left unhandled', async () => {
@@ -305,7 +375,7 @@ describe('gekko.worker', () => {
       throw new Error('boom');
     });
 
-    expect((await backtest()).error).toBe('boom; Unhandled rejection: floating rejection');
+    expect(await backtest()).toMatchObject({ error: 'boom; Unhandled rejection: floating rejection' });
   });
 
   // The bot logs it, closes its storage and exits 1 at once, without finalising its plugins
@@ -376,7 +446,7 @@ describe('gekko.worker', () => {
         setTimeout(() => handlerOf('uncaughtException')(new Error('thrown in a timer')), 0);
       });
 
-      expect((await backtest()).error).toBe('Uncaught exception: thrown in a timer');
+      expect(await backtest()).toMatchObject({ error: 'Uncaught exception: thrown in a timer' });
     });
 
     it('should let a rejection it left unhandled be reported before it posts its outcome', async () => {
@@ -384,7 +454,7 @@ describe('gekko.worker', () => {
         setTimeout(() => handlerOf('unhandledRejection')('floating rejection'), 0);
       });
 
-      expect((await backtest()).error).toBe('Unhandled rejection: floating rejection');
+      expect(await backtest()).toMatchObject({ error: 'Unhandled rejection: floating rejection' });
     });
 
     it('should let them come after a failed backtest too', async () => {
@@ -393,7 +463,7 @@ describe('gekko.worker', () => {
         throw new Error('boom');
       });
 
-      expect((await backtest()).error).toBe('boom; Unhandled rejection: floating rejection');
+      expect(await backtest()).toMatchObject({ error: 'boom; Unhandled rejection: floating rejection' });
     });
   });
 });

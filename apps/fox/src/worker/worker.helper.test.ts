@@ -266,6 +266,38 @@ describe('runWorkers', () => {
     });
   });
 
+  // The circuit breaker's stop, which the bot logs at error level as it exits 0: `Application stopped: [STRATEGY] Max consecutive …`
+  describe('when a variant is stopped', () => {
+    const REASON = '[STRATEGY] Max consecutive order errors reached (5)';
+
+    beforeEach(() => {
+      FakeWorker.answer = ({ variant }) => ({
+        result: variant === 2 ? { variant, status: 'stopped', reason: REASON, durationMs: 2000 } : done(variant),
+        delayMs: 1,
+      });
+    });
+
+    it('should log its stop at error level, with its reason', async () => {
+      await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL);
+
+      expect(error).toHaveBeenCalledExactlyOnceWith('fox', `Variant 2 of 3 (--strategy.period 20) stopped after 2 seconds: ${REASON}`);
+    });
+
+    it('should give its result among the others', async () => {
+      expect(await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL)).toStrictEqual([
+        done(1),
+        { variant: 2, status: 'stopped', reason: REASON, durationMs: 2000 },
+        done(3),
+      ]);
+    });
+
+    it('should log nothing at debug level', async () => {
+      await runWorkers(variantsOf(3), 2, WORKER_MODULE_URL);
+
+      expect(debug).not.toHaveBeenCalled();
+    });
+  });
+
   it('should log the stack of an unexpected failure at debug level, under its line', async () => {
     const stack = "TypeError: Cannot read properties of undefined (reading 'close')\n    at onTimeframeCandle (dema.strategy.ts:42:7)";
     FakeWorker.answer = ({ variant }) => ({ result: { variant, status: 'failed', error: 'boom', stack, durationMs: 300 }, delayMs: 1 });

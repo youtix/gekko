@@ -47,10 +47,29 @@ export const runWorker = (variant: number, configuration: Template, workerModule
 const formatDuration = (durationMs: number) => formatDurationUTC(0, durationMs) || 'less than a second';
 
 /**
+ * Logs how a variant ended: done at info level; stopped at error level, with the reason of its stop, as the bot logs its own
+ * (`Application stopped: [STRATEGY] Max consecutive order errors reached (5)`); failed at error level, with its reason, followed at debug
+ * level by what its worker posted of a failure whose message does not say where it came from (see VariantResult)
+ */
+const logOutcome = (name: string, result: VariantResult) => {
+  const duration = formatDuration(result.durationMs);
+  switch (result.status) {
+    case 'done':
+      info('fox', `${name} done in ${duration}`);
+      break;
+    case 'stopped':
+      error('fox', `${name} stopped after ${duration}: ${result.reason}`);
+      break;
+    case 'failed':
+      error('fox', `${name} failed after ${duration}: ${result.error}`);
+      if (result.stack) debug('fox', `${name}: ${result.stack}`);
+  }
+};
+
+/**
  * Backtests the variants, `maxWorkers` at a time, each in a worker of its own, which runs `workerModule` (see runWorker): the next one
- * starts as soon as one ends. Logs a line as each starts and as each ends, at info level, a failed one's at error level with its reason,
- * followed at debug level by what its worker posted of a failure whose message does not say where it came from (see
- * VariantResult.stack). Settles once every variant is over, with their results in the order of the variants, failed ones included.
+ * starts as soon as one ends. Logs a line as each starts and as each ends (see logOutcome). Settles once every variant is over, with
+ * their results in the order of the variants, stopped and failed ones included.
  */
 export const runWorkers = async (variants: readonly Variant[], maxWorkers: number, workerModule: string): Promise<VariantResult[]> => {
   const results: VariantResult[] = [];
@@ -61,9 +80,7 @@ export const runWorkers = async (variants: readonly Variant[], maxWorkers: numbe
       const name = `Variant ${variant} of ${variants.length}${label ? ` (${label})` : ''}`;
       info('fox', `${name} started`);
       const result = await runWorker(variant, configuration, workerModule);
-      if (result.status === 'done') info('fox', `${name} done in ${formatDuration(result.durationMs)}`);
-      else error('fox', `${name} failed after ${formatDuration(result.durationMs)}: ${result.error}`);
-      if (result.stack) debug('fox', `${name}: ${result.stack}`);
+      logOutcome(name, result);
       results[index] = result;
     }
   };

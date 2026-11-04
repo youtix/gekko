@@ -4,10 +4,11 @@ import type { RunContext } from '@gekko/core/run/runContext.types';
 import { describeFailure, logFailure } from '@gekko/core/logger/failure.helper';
 import { useWriteLock } from '@gekko/core/logger/logger';
 import * as plugins from '@gekko/plugins/index';
+import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { isNil } from 'lodash-es';
-import type { VariantRequest, VariantResult } from '../fox.types';
+import type { VariantOutcome, VariantRequest, VariantResult } from '../fox.types';
 
 declare let self: Worker;
 
@@ -32,20 +33,26 @@ const turnEventLoop = () => new Promise<void>(resolve => setTimeout(resolve, 0))
  * configuration (createRunContext, which checks it again), the pipeline run with every plugin of the registry, then the storage closed,
  * whatever the run did. As the bot's process handlers do, a rejection left unhandled is logged as it surfaces, the backtest going on to
  * its end, its row written, and an uncaught exception (a throw in a timer, which a backtest gives its turn only as it ends, its row then
- * written unless it waits for the lock of its file) is logged, the storage closed and the variant posted at once: either fails the
- * variant. Before it posts the outcome of a run that settled, the worker lets the event loop turn, for what the run left due to surface
- * (see turnEventLoop).
+ * written unless it waits for the lock of its file) is logged, the storage closed and the variant posted at once: the first fails a
+ * variant that did not stop, the second any variant. Before it posts the outcome of a run that settled, the worker lets the event loop
+ * turn, for what the run left due to surface (see turnEventLoop).
  *
- * Posted failed when the run failed, the storage could not be closed, a rejection was left unhandled or an exception was not caught,
- * each failure as describeError writes it, in that order (the rejections after what ended the run, the first named and the others
- * counted), followed, for one that has more to tell, by what the bot's main() would log of it (describeFailure): its stack, and its
- * causes down to the root.
+ * Posted as the bot's main() ends: stopped when the run rejected with an ApplicationStopError (the circuit breaker) and no exception went
+ * uncaught, as the bot stops in good order and exits 0 whatever rejection it left unhandled and whatever close of its storage failed,
+ * the reason the stop's message, with its tag, as the bot logs it, followed by those other failures; failed when an exception went
+ * uncaught, the stop among the failures or not, as the bot exits 1 at once, and otherwise when the run failed, the storage could not be
+ * closed or a rejection was left unhandled. Each failure is written as describeError writes it, in that order (the stop first, the
+ * rejections after what ended the run, the first named and the others counted), a failed one followed, for one that has more to tell,
+ * by what the bot's main() would log of it (describeFailure): its stack, and its causes down to the root.
  */
 const backtest = ({ variant, configuration }: Omit<VariantRequest, 'writeLock'>) => {
   const start = Date.now();
   const failures: string[] = [];
   const stacks: string[] = [];
   let context: RunContext | undefined;
+  // The stop the run rejected with, the circuit breaker's, kept apart from the other failures, which its reason lists after it
+  let stop: ApplicationStopError | undefined;
+  let isUncaught = false;
   let rejectionCount = 0;
   let firstRejection: unknown;
   let isPosted = false;
@@ -63,21 +70,29 @@ const backtest = ({ variant, configuration }: Omit<VariantRequest, 'writeLock'>)
     }
   };
 
+  /**
+   * How the backtest ended, as the bot's main() decides its code: stopped after the stop, but for an uncaught exception, the other
+   * failures in its reason, the worker having logged a rejection with its stack as it surfaced; done without a failure; failed otherwise
+   */
+  const outcomeOf = (): VariantOutcome => {
+    if (stop && !isUncaught) return { status: 'stopped', reason: [stop.message, ...failures].join('; ') };
+    const all = stop ? [describeError(stop), ...failures] : failures;
+    if (!all.length) return { status: 'done' };
+    return { status: 'failed', error: all.join('; '), ...(stacks.length ? { stack: stacks.join('\n') } : {}) };
+  };
+
   // Once: in the worker, process.exit() ends the thread at once, but an uncaught exception can come while the run goes on
   const post = () => {
     if (isPosted) return;
     isPosted = true;
     if (rejectionCount) fail(firstRejection, 'Unhandled rejection: ', rejectionCount > 1 ? ` (and ${rejectionCount - 1} more)` : '');
-    const durationMs = Date.now() - start;
-    const result: VariantResult = failures.length
-      ? { variant, status: 'failed', error: failures.join('; '), ...(stacks.length ? { stack: stacks.join('\n') } : {}), durationMs }
-      : { variant, status: 'done', durationMs };
+    const result: VariantResult = { variant, ...outcomeOf(), durationMs: Date.now() - start };
     postMessage(result);
     process.exit();
   };
 
   // As the bot does, which logs it, goes on to the end of its run (a timer-driven task of a live run floats promises that reject on a
-  // network blip) and exits 1: the variant fails once its backtest is over, its row written
+  // network blip) and exits 1, but 0 after a stop: the variant fails once its backtest is over, its row written, or stays stopped
   const onUnhandledRejection = (reason: unknown) => {
     logFailure('gekko', reason, 'Unhandled rejection: ');
     if (!rejectionCount) firstRejection = reason;
@@ -87,6 +102,7 @@ const backtest = ({ variant, configuration }: Omit<VariantRequest, 'writeLock'>)
   // As the bot does, which logs it, closes its storage and exits 1 at once, its plugins not finalised
   const onUncaughtException = (err: unknown) => {
     logFailure('gekko', err, 'Uncaught exception: ');
+    isUncaught = true;
     fail(err, 'Uncaught exception: ');
     closeStorage();
     post();
@@ -97,7 +113,9 @@ const backtest = ({ variant, configuration }: Omit<VariantRequest, 'writeLock'>)
       context = createRunContext(configuration, `variant ${variant}`);
       await gekkoPipeline({ context, plugins });
     } catch (err) {
-      fail(err);
+      // Kept apart (see outcomeOf): an ApplicationStopError takes no cause, so it has no stack to post
+      if (err instanceof ApplicationStopError) stop = err;
+      else fail(err);
     } finally {
       closeStorage();
     }

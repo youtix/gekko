@@ -36,17 +36,35 @@ export type Variant = {
 export type VariantRequest = Pick<Variant, 'variant' | 'configuration'> & { writeLock: SharedArrayBuffer };
 
 /** What a worker posts back once the backtest of its variant is over, and what runWorker makes of a worker that failed to post it */
-export type VariantResult = {
+export type VariantResult = VariantOutcome & {
   variant: number;
-  status: 'done' | 'failed';
-  /** Why it failed, as describeError writes it */
-  error?: string;
-  /**
-   * What its message does not say, as the bot's main() logs the failure (describeFailure): the stack of a failure that is not a
-   * GekkoError (an exception in a strategy's hook) and the causes of any, down to the root, the errors of an AggregateError included (a
-   * strategy's exception in end(), which the pipeline wraps). Left out for a GekkoError without a cause, whose message says it all.
-   */
-  stack?: string;
   /** From the start of the backtest to its end */
   durationMs: number;
 };
+
+/**
+ * How the backtest of a variant ended, as the bot's main() ends a run: done; stopped, as the bot stops in good order and exits 0 (the
+ * circuit breaker's ApplicationStopError, whatever rejection the run left unhandled and whatever close of its storage failed, but not
+ * after an uncaught exception, on which the bot exits 1 at once); or failed, as the bot exits 1
+ */
+export type VariantOutcome =
+  | { status: 'done' }
+  | {
+      status: 'stopped';
+      /**
+       * Why it stopped: the message of the ApplicationStopError with its tag, as the bot logs it, then the other failures as
+       * describeError writes them, separated by semicolons (`[STRATEGY] Max consecutive order errors reached (5); Unhandled rejection: …`)
+       */
+      reason: string;
+    }
+  | {
+      status: 'failed';
+      /** Why it failed, as describeError writes each failure, separated by semicolons */
+      error: string;
+      /**
+       * What its message does not say, as the bot's main() logs the failure (describeFailure): the stack of a failure that is not a
+       * GekkoError (an exception in a strategy's hook) and the causes of any, down to the root, the errors of an AggregateError included
+       * (a strategy's exception in end(), which the pipeline wraps). Left out for a GekkoError without a cause, whose message says it all.
+       */
+      stack?: string;
+    };
