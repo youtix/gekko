@@ -2,11 +2,11 @@
 
 Get Gekko up and running in minutes. This guide walks you through from installation to live trading.
 
+You need: [Bun](https://bun.sh/docs/installation) (the repository pins 1.4.4, which CI builds with) and git, a POSIX shell (Linux, macOS, or WSL on Windows: the commands set variables as `VAR=value command`), and for the last steps a Telegram account (steps 4 and 6), a Binance testnet account (step 5) and a Binance account (step 6). Node.js is only needed to run the tests (see [CONTRIBUTING](../CONTRIBUTING.md)).
+
 ---
 
 ## 📦 1. Install
-
-### Clone, Install Dependencies and Build the Executable
 
 ```bash
 # Clone the repository
@@ -18,45 +18,17 @@ cd gekko
 # Install dependencies
 bun install
 
-# Compile Gekko into a standalone executable
-bun run build:exec # This creates `dist/gekko` — a single binary you can run anywhere without Bun installed — and `dist/fox`, the parameter sweeper of the Fox guide.
+# Compile Gekko and Fox into standalone executables
+bun run build:exec
 ```
 
-Run every command of this guide from the root of the checkout, the `gekko` directory: the executable reads `.env` and `.env.local` from the directory it runs in, and the paths that `GEKKO_CONFIG_FILE_PATH` and the configurations name (`./config/…`, `./db/…`) are relative to it.
+`bun run build:exec` creates `dist/gekko`, a single binary that runs without Bun on any machine of the system and architecture it was built on, and `dist/fox`, the parameter sweeper of the [Fox](./fox.md) guide.
 
-### Configure with `.env.local`
+Run every step's command from the root of the checkout, the `gekko` directory, where the paths `./config/…` and `./db/…` start: each names its configuration in front of the executable (`GEKKO_CONFIG_FILE_PATH=<file> ./dist/gekko`). Save each configuration as `config/<name>.local.yml`, which git ignores.
 
-Gekko takes no command-line option: two environment variables decide what it runs. **Create** `.env.local`, which git ignores, to set them (`.env` is a file of the repository, tracked by git: leave it as it is):
+By default Gekko prints its logo, its errors and the tables of an analyzer with `enableConsoleTable`; put `GEKKO_LOG_LEVEL=info` in front of a command to follow its progress. At `info`, it also logs the progress of each download, each order and round trip, and each balance read of the Trader, at least one per hourly candle in step 3's backtest: some 8,000 lines over its range, among which its tables scroll by, so run step 3 at the default level.
 
-```bash
-# .env.local
-# The configuration to run (step 3 writes this one): its watch.mode picks importer, backtest or realtime
-GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml
-# What Gekko prints, from the most severe level down to this one: error (the default), warn, info, debug
-GEKKO_LOG_LEVEL=info
-```
-
-At the default `error` level, Gekko prints its logo, its errors and the tables of an analyzer whose `enableConsoleTable` is set, and nothing else: the import of step 2 runs for minutes without a line, and the realtime runs of steps 4 to 6 print nothing while they follow the market. At `info`, it logs the progress of each download, the orders and the round trips, one JSON line per message.
-
-### Run Gekko
-
-**Using the executable**:
-
-```bash
-# Runs the configuration that .env.local names
-./dist/gekko
-
-# Or name it on the command line, which wins over .env and .env.local
-GEKKO_CONFIG_FILE_PATH=./config/backtest.local.yml ./dist/gekko
-```
-
-The executable loads `.env`, then `.env.local`, by itself: there is nothing to `source`. A variable set on the command line, or exported in your shell, wins over both files.
-
-> **Tip:** To switch between modes (importer, backtest, realtime), point `GEKKO_CONFIG_FILE_PATH` at another configuration: in `.env.local` for every run, or on the command line for one run, as the steps below do. Not in `.env`, which `.env.local` overrides.
-
-### Keep Your Configurations Out of Git
-
-Each step below has you write a configuration. Save it in `config/` under a name that ends in `.local.yml`, as the steps do: git ignores every `config/*.local.*` file, so neither your settings nor the keys and tokens of steps 4 to 6 can be committed by mistake, and the examples git tracks in `config/` (`importer.yml`, `backtest.yml`, the `realtime-*.yml` files, …) stay untouched, for `git pull` to update them without a conflict. To start from one of those examples instead, copy it to such a name first (`cp config/realtime-trader.yml config/realtime-trader.local.yml`) and edit the copy.
+Apart from its logo and what an analyzer prints with `enableConsoleTable`, each line Gekko prints is one JSON object, its text the `message`, where a line break is written `\n`. The levels run from `error`, the default, through `warn` and `info` to `debug` (see [Logs and Exit Codes](./modes.md#logs-and-exit-codes)), and both variables can also be set in a `.env.local` file (see [Environment Variables](./modes.md#environment-variables)).
 
 ---
 
@@ -92,9 +64,9 @@ plugins:
 GEKKO_CONFIG_FILE_PATH=./config/importer.local.yml ./dist/gekko
 ```
 
-This downloads the 1-minute candles of BTC/USDT from Binance, from 2024-01-01 00:00 to 2024-12-01 00:00 UTC, both minutes included, and stores them in `./db/binance-BTC_USDT.sql`, creating the `db/` directory, which git ignores. An import reads public market data only: it needs no API key. It takes about 8 minutes: Binance answers 1000 minutes per request, and `watch.tickrate` spaces the requests at least 1000 ms apart by default. At the `info` level, Gekko logs its progress at every percent; at `error`, it prints its logo and nothing more.
+This downloads the 1-minute candles of BTC/USDT from Binance, from 2024-01-01 00:00 to 2024-12-01 00:00 UTC, both minutes included, and stores them in `./db/binance-BTC_USDT.sql`, creating the `db/` directory, which git ignores. An import reads public market data only: it needs no API key. It takes about 8 minutes; put `GEKKO_LOG_LEVEL=info` in front of the command to see its progress at every percent.
 
-A minute Binance has no candle for, between two it has, is stored as a flat candle without volume, up to 7 days in a row. A longer gap stops the import with an error naming the pair and the gap, before it writes a flat candle of that gap, and a pair whose history starts after the range does, or ends before it does, keeps its first or its last minutes missing, with a warning saying how many. Only closed minutes are imported: an `end` at or after the minute in progress is moved back to the last closed minute, with a warning.
+A minute Binance lacks is stored as a flat candle; see [Importer Mode](./modes.md#-importer-mode) for gaps of more than 7 days, for pairs listed or delisted within the range, and for an `end` that is not past yet.
 
 ---
 
@@ -163,9 +135,7 @@ plugins:
     enableConsoleTable: true
 ```
 
-The simulator receives each order as the live exchange does: its amount truncated to the amount step (`precision.amount`), its price rounded half up to the price tick (`precision.price`). An amount truncated to 0, below `amount.min`, or whose cost falls under `cost.min`, is refused (the Trader warns of one it sized, by `cost`, `allocation` or all-in for a BUY, before it sends it: see the Trader's [Sizing](./plugins.md#sizing)), and an order fills for the amount truncated. The cost is worked out in decimal, as the exchange works it out: an order costing exactly `cost.min` passes. For Hyperliquid, whose tick depends on the price, add `priceSignificantDigits: 5` under `precision`.
-
-Write assets, the currency and symbols in upper case, as the exchange lists them (`BTC`, `1INCH`, `BTC/USDT`), each `marketData` symbol once. `simulationBalance` lists only the watched assets and the currency, each once and spelt as in `watch`: a balance of any other asset is refused, the simulator never holding it.
+`marketData` gives the simulator the fees and order limits of each watched pair, which it applies as the exchange would (see [Backtest Mode](./modes.md#-backtest-mode)). Write assets, the currency and symbols in upper case, as `watch` does.
 
 **Run the backtest:**
 
@@ -228,12 +198,12 @@ plugins:
 **Run the screener:**
 
 ```bash
-GEKKO_CONFIG_FILE_PATH=./config/screener.local.yml ./dist/gekko
+GEKKO_LOG_LEVEL=info GEKKO_CONFIG_FILE_PATH=./config/screener.local.yml ./dist/gekko
 ```
 
-**Subscribe from your chat.** Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: the EventSubscriber sends nothing until its chat subscribes, and keeps its subscriptions in memory only. The bot answers `Subscribed to all events` (`/sub_strat_create` subscribes to the signals alone, and `/start` lists every command). `/portfolio` answers at any time, subscribed or not, with the balances the Trader read last (here the simulated ones, which start from `simulationBalance`), the last prices and the total value. Without `chatId`, the bot binds itself to the first chat that sends it a command after start-up, and drops the commands sent before; Gekko logs that chat's id at the `info` level, for you to set as `chatId`. With `chatId` set, a command your chat sent while Gekko was not running is handled as it starts.
+**Subscribe from your chat.** Once Gekko runs, send the bot `/subscribe_all`, and again after every restart: it sends nothing until its chat subscribes, and answers `Subscribed to all events`. `/portfolio` shows the balances the Trader read last, at any time. Without `chatId`, the bot belongs to the first chat that sends it a command, whoever that is: at the `info` level, which the command above sets, Gekko logs your chat's id (`set chatId: <id>`); set it as `chatId` before step 6 (see [EventSubscriber](./plugins.md#-eventsubscriber)).
 
-Gekko first downloads the warmup, 365 candles of 4 hours (about a minute and a half at the default `warmup.tickrate`), then follows the market minute by minute. The strategy decides on the close of each 4-hour candle (00:00, 04:00, … UTC), and Gekko sends a Telegram message when a buy/sell signal triggers. No real trades are executed: the orders are only simulated, on the `simulationBalance` portfolio. Keep the `Trader` all the same: without it no order ever ends, so the strategy signals once per run, and Gekko warns at start-up (a `warn` line, which the `warn` and `info` levels show).
+Gekko first downloads the warmup, 365 candles of 4 hours (about a minute and a half at the default `warmup.tickrate`), then follows the market minute by minute. The strategy decides on the close of each 4-hour candle (00:00, 04:00, … UTC), and Gekko sends a Telegram message when a buy/sell signal triggers. No real trades are executed: the orders are only simulated, on the `simulationBalance` portfolio. Stop it with Ctrl-C (see [Stopping and Restarting a Live Run](./modes.md#stopping-and-restarting-a-live-run)).
 
 ---
 
@@ -272,7 +242,6 @@ plugins:
   - name: Trader
 
   - name: RoundTripAnalyzer
-    riskFreeReturn: 5
 ```
 
 Gekko reads the keys from this file only, exactly as written: it expands no environment variable in it (`apiKey: ${BINANCE_API_KEY}` is read as that very text), so the file holds them in clear. Keep them in a `config/*.local.*` file, which git ignores, and never in a file git tracks, such as `config/realtime-sandbox-trader.yml`: a `git commit -a` would commit them.
@@ -288,7 +257,7 @@ GEKKO_CONFIG_FILE_PATH=./config/sandbox.local.yml ./dist/gekko
 
 Real orders are placed on the testnet with fake funds. Perfect for validating your strategy behavior. At the `info` level, Gekko logs the warmup download (365 hours of minutes, about 20 seconds), then each order, and each round trip as it closes.
 
-**Stopping it.** Ctrl-C closes the storage and exits (code 130) without finalising the plugins, so the RoundTripAnalyzer's report of the whole run (win rate, Sharpe and Sortino ratios, …) is not printed: it comes only when a failure or the circuit breaker stops the run, the round trips having been logged one by one as they closed. However Gekko stops, an order still open stays on the exchange (DEMA places STICKY orders, limit orders that follow the price): Gekko cancels none, and the next run does not follow it. Check the open orders on the exchange after you stop Gekko.
+**Stopping it.** Ctrl-C stops Gekko at once, without the RoundTripAnalyzer's report of the whole run (at the `info` level, each round trip was logged as it closed). However Gekko stops, it cancels no order, and the next run does not follow the ones left open: check the open orders on the exchange (see [Stopping and Restarting a Live Run](./modes.md#stopping-and-restarting-a-live-run)).
 
 ---
 
@@ -296,7 +265,7 @@ Real orders are placed on the testnet with fake funds. Perfect for validating yo
 
 > ⚠️ **WARNING:** You can lose money. Only proceed if you understand the risks and have tested thoroughly.
 
-**Create** `config/live.local.yml`, with your live keys and your bot's token and username:
+**Create** `config/live.local.yml`, with your live keys, your bot's token and username, and your chat id:
 
 ```yaml
 watch:
@@ -326,12 +295,11 @@ plugins:
   - name: Trader
 
   - name: RoundTripAnalyzer
-    riskFreeReturn: 5
 
   - name: EventSubscriber
     token: YOUR_TELEGRAM_BOT_TOKEN
     botUsername: YOUR_BOT_USERNAME
-    # chatId: 123456789 # Optional: the chat the bot talks to; without it, the first chat that sends it a command after start-up is bound
+    chatId: 123456789 # Your chat id, logged at step 4: the only chat the bot answers
 
 'I understand that Gekko only automates MY OWN trading strategies': true
 ```
@@ -346,7 +314,20 @@ The last line, at the top level of the file, outside every section, is the discl
 GEKKO_CONFIG_FILE_PATH=./config/live.local.yml ./dist/gekko
 ```
 
-Gekko executes real trades with real money. Monitor closely and use stop-losses. Once Gekko runs, send the bot `/subscribe_all`, and again after every restart, as in step 4. Stopped with Ctrl-C, it prints no final report, and however it stops, it cancels no open order (see step 5): check your open orders on the exchange.
+Gekko executes real trades with real money. DEMA trades the whole free balance of its pair: each BUY spends the free USDT (5 % kept back for the fee), each SELL sells all the free BTC, coins you held before included. It places no stop-loss, and a stop order you place by hand on Binance holds the BTC its SELL would sell: that SELL is refused, DEMA takes itself for flat and buys again at its next signal. Run it on an account holding only what you mean it to trade, and monitor it closely (see [Pairs and Capital](./built-in-strategies.md#pairs-and-capital); a strategy of your own can protect each BUY with a [trailing stop](./custom-strategies.md#trailing-stops), which lasts as long as the run).
+
+Once Gekko runs, send the bot `/subscribe_all`, and again after every restart, as in step 4. As in step 5, Ctrl-C stops it without the final report, and however it stops, it cancels no order: check your open orders on the exchange (see [Stopping and Restarting a Live Run](./modes.md#stopping-and-restarting-a-live-run)).
+
+---
+
+## If a Step Fails
+
+Each error below is the `message` of one JSON line, which Gekko prints at every level:
+
+- `Cannot read the configuration file <path>: ENOENT: …`: no file at that path, a typo in it or a command run outside the root of the checkout.
+- `Invalid configuration file <path>:`, then each problem after a `✖`, with the key at fault after `→ at` (`→ at watch.assets[0]` for an asset written `btc`). `Invalid YAML in configuration file <path>: …`: a fault in the YAML itself, such as a bad indentation, at the line and column it names.
+- `Cannot open the database …` or `Missing candles in database: …`: the backtest of step 3 finds no database at `storage.database`, or not every minute of its range in it (see [Troubleshooting](./custom-strategies.md#cannot-open-the-database--or-missing-candles-in-database)).
+- The Telegram bot does not answer: see the `chatId` note of the [EventSubscriber](./plugins.md#-eventsubscriber).
 
 ---
 
@@ -354,7 +335,7 @@ Gekko executes real trades with real money. Monitor closely and use stop-losses.
 
 | Step | Mode       | Config             | What it does               |
 |------|------------|--------------------|----------------------------|
-| 1    | —          | .env.local         | Install & Build Gekko      |
+| 1    | —          | —                  | Install & Build Gekko      |
 | 2    | `importer` | importer.local.yml | Download historical data   |
 | 3    | `backtest` | backtest.local.yml | Simulate trades on history |
 | 4    | `realtime` | screener.local.yml | Get alerts, no trading     |
@@ -368,4 +349,4 @@ Gekko executes real trades with real money. Monitor closely and use stop-losses.
 - Explore the [built-in strategies](./built-in-strategies.md), whose code is in `packages/strategies/src/`
 - Write your own with the [Custom Strategies](./custom-strategies.md) guide: a file of your own anywhere, loaded through the TradingAdvisor's `strategyPath`, or a private strategy kept in your checkout's `packages/strategies/src/custom/`, exported from its `index.ts`
 - Adjust strategy parameters and backtest again, over the range you imported or inside it (import another range first to test on other dates), or let [Fox](./fox.md) backtest every combination of the values you list, side by side
-- Set up Telegram monitoring with the EventSubscriber or Supervision plugins, each on a bot of its own (two plugins on one token conflict, with HTTP 409 errors). Supervision starts subscribed to nothing, and runs no check, so sends no alert, until its chat subscribes: send `/subscribe_all` to each bot once Gekko runs, and again after every restart
+- Watch over a running Gekko from Telegram with the [Supervision](./plugins.md#-supervision) plugin, on a bot of its own: CPU and memory alerts, a check that the candles keep coming, and its warnings and errors, forwarded
