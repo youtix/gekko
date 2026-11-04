@@ -27,10 +27,11 @@ const describeListed = (value: unknown, listing: readonly unknown[]): string => 
 /**
  * Whether an Error is Bun's ResolveMessage or BuildMessage, which Bun 1.4.4 makes Errors (Bun 1.3.14 did not): quoted by its message
  * alone, as any other Error is, it lost its class, which says what failed, and a BuildMessage its position, the only place its file is
- * named. Told apart by the name Bun gives both classes, in 1.3.14 as in 1.4.4, the first word of what String() writes of them
- * (`ResolveMessage: Cannot find package 'zod' imported from …`): a property of theirs, such as `position`, other errors can have too.
+ * named, which String() leaves out too and no stack holds (a 1.4.4 BuildMessage has none): a line that quotes one writes it as
+ * describeError does. Told apart by the name Bun gives both classes, in 1.3.14 as in 1.4.4, the first word of what String() writes of
+ * them (`ResolveMessage: Cannot find package 'zod' imported from …`): a property of theirs, such as `position`, other errors can have.
  */
-const isLoaderMessage = (error: Error) => error.name === 'ResolveMessage' || error.name === 'BuildMessage';
+export const isLoaderMessage = (error: Error) => error.name === 'ResolveMessage' || error.name === 'BuildMessage';
 
 /**
  * Its message names none of its errors: Bun reports two syntax errors in a strategy file as '2 errors building "<file>"', whose errors

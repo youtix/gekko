@@ -29,18 +29,72 @@ vi.mock('../../logger/logger', () => ({
 
 const BUCKET: CandleBucket = new Map();
 
-/** As Bun's ResolveMessage, which the dynamic import() of a file that cannot be found rejects with: not an Error, its message a getter */
-class ResolveMessage {
+/**
+ * As Bun 1.4.4's ResolveMessage and BuildMessage, which the dynamic import() of a file that cannot be found or parsed rejects with:
+ * Errors whose name, message and position are getters of their class, a BuildMessage without a stack
+ */
+class ResolveMessage extends Error {
   readonly #message: string;
 
   constructor(message: string) {
+    super();
     this.#message = message;
   }
 
-  get message() {
+  override get name() {
+    return 'ResolveMessage';
+  }
+
+  override get message() {
     return this.#message;
   }
+
+  get position() {
+    return null;
+  }
 }
+
+class BuildMessage extends Error {
+  readonly #message: string;
+  readonly #position: object;
+
+  constructor(message: string, position: object) {
+    super();
+    this.#message = message;
+    this.#position = position;
+    this.stack = undefined;
+  }
+
+  override get name() {
+    return 'BuildMessage';
+  }
+
+  override get message() {
+    return this.#message;
+  }
+
+  get position() {
+    return this.#position;
+  }
+}
+
+/**
+ * As Bun 1.3.14's ResolveMessage: not an Error, its message a getter. Named by its key: esbuild, which vitest transforms the suite
+ * with, renames a class expression named as the class above (ResolveMessage2), so that it shadows none
+ */
+const bun13 = {
+  ResolveMessage: class {
+    readonly #message: string;
+
+    constructor(message: string) {
+      this.#message = message;
+    }
+
+    get message() {
+      return this.#message;
+    }
+  },
+};
 
 const STRATEGY_FILE = '/strategies/my.strategy.ts';
 
@@ -455,14 +509,17 @@ describe('PluginsStream', () => {
         expect(plugin.processCloseStream).toHaveBeenCalledWith(failure);
       });
 
-      // util.inspect wrote a ResolveMessage as 'ResolveMessage {}', without the module or the file that imported it
+      // util.inspect wrote Bun 1.3.14's ResolveMessage, not an Error, as 'ResolveMessage {}', without the module or the file that imported
+      // it, and String() wrote Bun 1.4.4's BuildMessage, an Error, without its position, the only place its file is named
       it.each`
-        kind                  | thrown                                                                          | reason
-        ${'a GekkoError'}     | ${new GekkoError('trader', 'No balance')}                                       | ${'[TRADER] No balance'}
-        ${'an Error'}         | ${new TypeError('fetch failed')}                                                | ${'TypeError: fetch failed'}
-        ${'a string'}         | ${'string error'}                                                               | ${'string error'}
-        ${'another value'}    | ${{ code: 42 }}                                                                 | ${'{ code: 42 }'}
-        ${'a ResolveMessage'} | ${new ResolveMessage(`Cannot find module './signals' from '${STRATEGY_FILE}'`)} | ${`ResolveMessage: Cannot find module './signals' from '${STRATEGY_FILE}'`}
+        kind                                | thrown                                                                                          | reason
+        ${'a GekkoError'}                   | ${new GekkoError('trader', 'No balance')}                                                       | ${'[TRADER] No balance'}
+        ${'an Error'}                       | ${new TypeError('fetch failed')}                                                                | ${'TypeError: fetch failed'}
+        ${'a string'}                       | ${'string error'}                                                                               | ${'string error'}
+        ${'another value'}                  | ${{ code: 42 }}                                                                                 | ${'{ code: 42 }'}
+        ${'a ResolveMessage of Bun 1.3.14'} | ${new bun13.ResolveMessage(`Cannot find module './signals' from '${STRATEGY_FILE}'`)}           | ${`ResolveMessage: Cannot find module './signals' from '${STRATEGY_FILE}'`}
+        ${'a ResolveMessage of Bun 1.4.4'}  | ${new ResolveMessage(`Cannot find module './signals' imported from ${STRATEGY_FILE}`)}          | ${`ResolveMessage: Cannot find module './signals' imported from ${STRATEGY_FILE}`}
+        ${'a BuildMessage of Bun 1.4.4'}    | ${new BuildMessage('Expected ")" but found ";"', { file: STRATEGY_FILE, line: 3, column: 21 })} | ${`BuildMessage: Expected ")" but found ";" at ${STRATEGY_FILE}:3:21`}
       `('logs why the application closes when a plugin throws $kind', async ({ thrown, reason }) => {
         await runPipeline([BUCKET], [createPluginStub({ processInputStream: throwing(thrown) })]);
 

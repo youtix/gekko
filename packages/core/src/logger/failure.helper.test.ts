@@ -8,6 +8,91 @@ vi.mock('./logger', () => ({ debug: vi.fn(), error: vi.fn() }));
 /** An Error whose stack is what Bun gives a DOMException: frames only, without its "<name>: <message>" line */
 const framesOnly = Object.assign(new Error('The object can not be cloned.'), { name: 'DataCloneError', stack: '    at structuredClone' });
 const withoutStack = Object.assign(new Error('no frames'), { stack: undefined });
+/** An Error whose stack, a writable property, holds no string */
+const oddStack = Object.assign(new Error('odd frames'), { stack: 42 });
+
+const FILE = '/strategies/my.strategy.ts';
+
+// Bun's ResolveMessage and BuildMessage, which the import of a strategy file that cannot be found or parsed rejects with, as Bun 1.4.4
+// makes them: Errors whose name, message and position are getters of their class, a ResolveMessage's stack its "<name>: <message>"
+// line alone, and a BuildMessage without a stack, its position the only place its file is named
+class ResolveMessage extends Error {
+  readonly #message: string;
+
+  constructor(message: string) {
+    super();
+    this.#message = message;
+    this.stack = `ResolveMessage: ${message}`;
+  }
+
+  override get name() {
+    return 'ResolveMessage';
+  }
+
+  override get message() {
+    return this.#message;
+  }
+
+  get position() {
+    return null;
+  }
+}
+
+class BuildMessage extends Error {
+  readonly #message: string;
+  readonly #position: object;
+
+  constructor(message: string, position: object) {
+    super();
+    this.#message = message;
+    this.#position = position;
+    this.stack = undefined;
+  }
+
+  override get name() {
+    return 'BuildMessage';
+  }
+
+  override get message() {
+    return this.#message;
+  }
+
+  get position() {
+    return this.#position;
+  }
+}
+
+// A BuildMessage as Bun 1.3.14 made it: not an Error, every field a getter of its class. Named by its key: esbuild, which vitest
+// transforms the suite with, renames a class expression named as the class above (BuildMessage2), so that it shadows none
+const bun13 = {
+  BuildMessage: class {
+    readonly #message: string;
+    readonly #position: object;
+
+    constructor(message: string, position: object) {
+      this.#message = message;
+      this.#position = position;
+    }
+
+    get message() {
+      return this.#message;
+    }
+
+    get position() {
+      return this.#position;
+    }
+  },
+};
+
+const positionIn = (line: number, column: number) => ({ file: FILE, namespace: 'file', line, column, length: 1 });
+const syntaxError = new BuildMessage('Expected ")" but found ";"', positionIn(3, 21));
+const missingPackage = new ResolveMessage(`Cannot find package 'zod' imported from ${FILE}`);
+const syntaxErrorOfBun13 = new bun13.BuildMessage('Expected ")" but found ";"', positionIn(3, 21));
+// Bun's AggregateError of two syntax errors, without a stack too when Gekko runs from source
+const twoSyntaxErrors = Object.assign(
+  new AggregateError([syntaxError, new BuildMessage('Expected "]" but found ";"', positionIn(4, 20))], `2 errors building "${FILE}"`),
+  { stack: undefined },
+);
 
 /** `error`, thrown at `frame` alone: its stack is its "<name>: <message>" line, then that frame, for a test to write it out whole */
 const thrownAt = <E extends Error>(error: E, frame: string): E => Object.assign(error, { stack: `${String(error)}\n    at ${frame}` });
@@ -40,6 +125,7 @@ describe('logFailure', () => {
     ${'an Error, with its stack'}            | ${new TypeError('x is undefined')}                     | ${/^TypeError: x is undefined\n\s+at /}
     ${'an Error whose stack is frames only'} | ${framesOnly}                                          | ${/^DataCloneError: The object can not be cloned\.\n {4}at structuredClone$/}
     ${'an Error without a stack'}            | ${withoutStack}                                        | ${/^Error: no frames$/}
+    ${'an Error whose stack is no string'}   | ${oddStack}                                            | ${/^Error: odd frames$/}
     ${'a value that is not an Error'}        | ${'a plain text'}                                      | ${/^a plain text$/}
     ${'a GekkoError with its causes'}        | ${new GekkoError('core', 'outer', { cause: 'inner' })} | ${/^\[CORE\] outer\nCaused by: inner$/}
   `('should log $description at error level', ({ failure, expected }) => {
@@ -97,6 +183,28 @@ describe('logFailure', () => {
       ${'an error it holds twice, once'}                   | ${failureOf([reporterFailure, reporterFailure])}                                                         | ${[...opening(2), 'Error 1 of 2: RangeError: Invalid array length', '    at reporterFinalize (performanceReporter.ts:88:3)']}
       ${'its errors, not itself, when it holds itself'}    | ${thrownAt(selfHolding, 'any (promise.ts:1:1)')}                                                         | ${['AggregateError: holds itself', '    at any (promise.ts:1:1)', 'Error 2 of 2: TypeError: report is undefined', '    at analyzerFinalize (portfolioAnalyzer.ts:120:7)']}
       ${'no error when its errors are no list'}            | ${Object.assign(thrownAt(new AggregateError([], 'none'), 'any (promise.ts:1:1)'), { errors: 'x' })}      | ${['AggregateError: none', '    at any (promise.ts:1:1)']}
+    `('should log $description', ({ failure, lines }) => {
+      logFailure('gekko', failure);
+
+      expect(String(vi.mocked(error).mock.calls[0][1]).split('\n')).toStrictEqual(lines);
+    });
+  });
+
+  // As describeError writes them, wherever they stand. String() leaves out a Bun 1.4.4 BuildMessage's position, and it has no stack:
+  // the Caused by line of a broken strategy file named no line of it, and main()'s report of a broken strategy of custom/, which is the
+  // BuildMessage itself, named no file at all
+  describe("of Bun's loader messages", () => {
+    /** The failure of the import of a strategy file, as the StrategyManager throws it, caused by what Bun rejected the import with */
+    const importFailure = (cause: unknown) => new GekkoError('trading advisor', `Cannot import the strategy file ${FILE}`, { cause });
+    const opening = `[TRADING ADVISOR] Cannot import the strategy file ${FILE}`;
+
+    it.each`
+      description                                              | failure                           | lines
+      ${'a BuildMessage of Bun 1.4.4, at its position'}        | ${syntaxError}                    | ${[`BuildMessage: Expected ")" but found ";" at ${FILE}:3:21`]}
+      ${'a ResolveMessage of Bun 1.4.4, by its stack'}         | ${missingPackage}                 | ${[`ResolveMessage: Cannot find package 'zod' imported from ${FILE}`]}
+      ${'a BuildMessage of Bun 1.3.14, not an Error, as ever'} | ${syntaxErrorOfBun13}             | ${[`BuildMessage: Expected ")" but found ";" at ${FILE}:3:21`]}
+      ${'the BuildMessage a failure was caused by'}            | ${importFailure(syntaxError)}     | ${[opening, `Caused by: BuildMessage: Expected ")" but found ";" at ${FILE}:3:21`]}
+      ${'each BuildMessage of an AggregateError'}              | ${importFailure(twoSyntaxErrors)} | ${[opening, `Caused by: AggregateError: 2 errors building "${FILE}"`, `Error 1 of 2: BuildMessage: Expected ")" but found ";" at ${FILE}:3:21`, `Error 2 of 2: BuildMessage: Expected "]" but found ";" at ${FILE}:4:20`]}
     `('should log $description', ({ failure, lines }) => {
       logFailure('gekko', failure);
 

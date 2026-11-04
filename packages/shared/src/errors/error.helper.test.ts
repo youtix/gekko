@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { ApplicationStopError } from './applicationStop.error';
-import { describeError, toError } from './error.helper';
+import { describeError, isLoaderMessage, toError } from './error.helper';
 import { GekkoError } from './gekko.error';
 
 const timeout = new GekkoError('exchange', 'Request timed out (10000 ms)');
@@ -237,6 +237,19 @@ describe('describeError', () => {
     ${'an object whose message getter throws'}   | ${new UnreadableMessage()} | ${'UnreadableMessage {}'}
   `('describes $kind as util.inspect writes it: $said', ({ value, said }) => {
     expect(describeError(value)).toBe(said);
+  });
+});
+
+// What every line that quotes a failure asks before it writes an Error by its message, String() or its stack
+describe('isLoaderMessage', () => {
+  it.each`
+    kind                                               | error                                              | is
+    ${'a ResolveMessage of Bun 1.4.4'}                 | ${missingFile}                                     | ${true}
+    ${'a BuildMessage of Bun 1.4.4'}                   | ${syntaxError}                                     | ${true}
+    ${'a TypeError'}                                   | ${new TypeError('fetch failed')}                   | ${false}
+    ${'an Error whose message names a ResolveMessage'} | ${new Error('ResolveMessage: Cannot find module')} | ${false}
+  `('says $is of $kind', ({ error, is }) => {
+    expect(isLoaderMessage(error)).toBe(is);
   });
 });
 

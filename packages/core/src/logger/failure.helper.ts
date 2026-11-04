@@ -1,14 +1,19 @@
-import { describeError } from '@gekko/shared/errors/error.helper';
+import { describeError, isLoaderMessage } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Tag } from '@gekko/shared/models/tag.types';
-import { isNil } from 'lodash-es';
+import { isNil, isString } from 'lodash-es';
 import { debug, error } from './logger';
 
 // "<name>: <message>", then the frames. A stack usually starts with that line, but not always: in Bun, a DOMException's stack
-// (the DataCloneError of structuredClone, for one) is frames only.
+// (the DataCloneError of structuredClone, for one) is frames only. Bun's ResolveMessage and BuildMessage open with what describeError
+// writes of them: String() leaves out a BuildMessage's position, which no stack holds either (under Bun 1.4.4, where it is an Error, a
+// BuildMessage has none). A stack that is not a string (a writable property, which may hold anything) is left out, rather than make
+// the report throw.
 const describeStack = (e: Error) => {
-  const header = String(e);
-  return e.stack?.startsWith(header) ? e.stack : [header, e.stack].filter(Boolean).join('\n');
+  const opening = String(e);
+  const header = isLoaderMessage(e) ? describeError(e) : opening;
+  const stack = isString(e.stack) ? e.stack : '';
+  return stack.startsWith(opening) ? header + stack.slice(opening.length) : [header, stack].filter(Boolean).join('\n');
 };
 
 // An Error in full, any other value as describeError writes it
