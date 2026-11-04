@@ -29,12 +29,14 @@ Values:
   --strategy.period 12..24:4    12, 16, 20 and 24, a step of 4
   --strategy.period 10,20..30:5 a list holding a range: 10, 20, 25 and 30
   --strategy.src close,ohlc4    texts (true and false are booleans, a path such as ../db/x.sql a text)
-  --strategy.src=-tma           the = form, for a value that starts with -t, -w or -h, as Fox's own options do
+  --strategy.src=-tma           the = form, for a value Fox would take for its own option: one that starts
+                                with -t or -w (-tma is read as -t ma), or -h or --help, which print this help
 
 Example:
   fox --template-path apps/fox/templates/dema.yml --strategy.period 10..30:5 --strategy.thresholds.up 50,100
 
-Fox logs at the level GEKKO_LOG_LEVEL sets, error by default: set it to info to follow the variants.`;
+Fox logs at the level GEKKO_LOG_LEVEL sets, error by default: set it to info to follow the variants. Each
+backtest then logs its whole run too: | grep '"_tag":"FOX"' keeps Fox's own lines.`;
 
 /**
  * The worker's module, from the directory of src/fox.ts, which resolves it from its own URL: from source, the file there; in the

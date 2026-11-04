@@ -151,7 +151,9 @@ describe('createProgram', () => {
     ${'the usage'}                               | ${'Usage: fox [options] [--<key> <values>...]'}
     ${'the threads of the machine, by default'}  | ${'by default, else 12'}
     ${'how the values of an override are read'}  | ${'--strategy.period 12..24:4    12, 16, 20 and 24, a step of 4'}
-    ${'the = form of a value read as an option'} | ${'--strategy.src=-tma           the = form, for a value that starts with -t, -w or -h'}
+    ${'the = form of a value read as an option'} | ${'--strategy.src=-tma           the = form, for a value Fox would take for its own option: one that starts'}
+    ${'the values read as an option'}            | ${'                                with -t or -w (-tma is read as -t ma), or -h or --help, which print this help'}
+    ${"how to keep Fox's own lines"}             | ${`backtest then logs its whole run too: | grep '"_tag":"FOX"' keeps Fox's own lines.`}
   `('should describe $description in the help', ({ text }) => {
     expect(helpOf(12)).toContain(text);
   });
@@ -179,6 +181,8 @@ describe('parseCommandLine', () => {
     ${'the end of the options after an override'}                | ${['-t', 'dema.yml', '--x', '1', '--', '--y', '2']}         | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { x: 1, y: 2 } }}
     ${'a value like -t after the end of the options'}            | ${['-t', 'dema.yml', '--strategy.src', '--', '-tma']}       | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-tma' } } }}
     ${'a value like -t in the = form'}                           | ${['-t', 'dema.yml', '--strategy.src=-tma']}                | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-tma' } } }}
+    ${'a value of -h in the = form'}                             | ${['-t', 'dema.yml', '--strategy.src=-h']}                  | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-h' } } }}
+    ${'a value that starts with -h but is longer, as a value'}   | ${['-t', 'dema.yml', '--strategy.src', '-hma']}             | ${{}}                               | ${{ templatePath: 'dema.yml', maxWorkers: THREADS, overrides: { strategy: { src: '-hma' } } }}
   `('should read $description', ({ argv, env, expected }) => {
     expect(parseCommandLine(argv, env, THREADS)).toStrictEqual(expected);
   });
@@ -196,6 +200,15 @@ describe('parseCommandLine', () => {
     ${'an override refused'}                  | ${['-t', 'dema.yml', '--x', '24..12']}  | ${{}}                         | ${'[FOX] Invalid range "24..12" of --x: its start, 24, is above its end, 12'}
   `('should refuse $description', ({ argv, env, message }) => {
     expect(() => parseCommandLine(argv, env, THREADS)).toThrow(message);
+  });
+
+  // A value that starts with -t or -w, given apart, is read as that option, the rest of it as its argument (see the help)
+  it.each`
+    value     | read       | message
+    ${'-tma'} | ${'-t ma'} | ${'[FOX] --strategy.src has no value'}
+    ${'-wma'} | ${'-w ma'} | ${'[FOX] --max-workers must be a whole number of at least 1, got "ma"'}
+  `('should refuse a value of $value, read as $read', ({ value, message }) => {
+    expect(() => parseCommandLine(['-t', 'dema.yml', '--strategy.src', value], {}, THREADS)).toThrow(message);
   });
 
   it('should default to the threads of the machine', () => {
@@ -240,6 +253,15 @@ describe('parseCommandLine', () => {
       ${'-h'}
     `('should give nothing to run for $option', ({ option }) => {
       expect(parseCommandLine(['-t', 'dema.yml', option], {}, THREADS)).toBeUndefined();
+    });
+
+    // Given apart, as the value of an override, it is the help all the same: the = form passes it as a value (see the help)
+    it.each`
+      option
+      ${'--help'}
+      ${'-h'}
+    `('should give nothing to run for a value of $option', ({ option }) => {
+      expect(parseCommandLine(['-t', 'dema.yml', '--strategy.src', option], {}, THREADS)).toBeUndefined();
     });
 
     it('should print the usage', () => {
