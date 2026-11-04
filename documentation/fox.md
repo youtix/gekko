@@ -25,9 +25,13 @@ Fox is the second executable of the Gekko checkout: `bun run build:exec` compile
 
 ### 1. Import the Candles
 
-A backtest reads its candles from `storage.database`, and refuses to start while a minute of `watch.daterange` is missing there: so does every variant. The templates shipped with Fox, `apps/fox/templates/dema.yml` and `apps/fox/templates/tma.yml`, backtest BTC and ETH over 2024 on `./db/binance-BTC_ETH_USDT.sql`, the database `config/importer.yml` writes. Import it first, from the root of the checkout (see the [Quick Start guide](./quick-start.md) for the executable and `.env.local`):
+A backtest reads its candles from `storage.database`, and refuses to start while a minute of `watch.daterange` is missing there: so does every variant. The templates shipped with Fox, `apps/fox/templates/dema.yml` and `apps/fox/templates/tma.yml`, backtest BTC and ETH over 2024 on `./db/binance-BTC_ETH_USDT.sql`, the database `config/importer.yml` writes. Import it first, from the root of the checkout (the [Quick Start guide](./quick-start.md) builds `dist/gekko` and `dist/fox`). `config/importer.yml` imports October 2017 to January 2026, which takes at least 36 minutes and more than half a gigabyte (see [Modes](./modes.md#-importer-mode)). The templates read 2024 only: a copy of it, `config/importer-fox.local.yml`, which git ignores, with its `daterange` from `'2024-01-01T00:00:00Z'` to `'2024-12-31T23:59:00Z'`, imports that year into the same database in about 5 minutes:
 
 ```bash
+# 2024 alone, from your copy of config/importer.yml: about 5 minutes
+GEKKO_CONFIG_FILE_PATH=./config/importer-fox.local.yml ./dist/gekko
+
+# Or the whole range of config/importer.yml: at least 36 minutes
 GEKKO_CONFIG_FILE_PATH=./config/importer.yml ./dist/gekko
 ```
 
@@ -48,7 +52,7 @@ bun run dev:fox --template-path apps/fox/templates/dema.yml --strategy.period 10
 
 ### 3. Read the Results
 
-Each variant adds a row to the CSV file of the template's PerformanceReporter, `DEMA_performance_reports.csv` in the working directory for `dema.yml`, its `id` column the values of its `strategy` block joined by `-`, then, in parentheses, the values Fox gave the variant (`DEMA-15-100--150 (--strategy.period 15 --strategy.thresholds.up 100)`), so that each row names its variant (see [Results](#results)). At the default log level a sweep that succeeds prints nothing: set `GEKKO_LOG_LEVEL=info` to follow the variants, and mind the exit code, 1 when a variant failed (see [Logs and Exit Code](#logs-and-exit-code)).
+Each variant adds a row to the CSV file of the template's PerformanceReporter, `DEMA_performance_reports.csv` in the working directory for `dema.yml`, its `id` column the values of its `strategy` block joined by `-`, then, in parentheses, the values Fox gave the variant (`DEMA-15-100--150 (--strategy.period 15 --strategy.thresholds.up 100)`), so that each row names its variant (see [Results](#results)). At the default log level a sweep whose backtests meet no error prints nothing, so mind the exit code, 1 when a variant failed. To follow the variants, set `GEKKO_LOG_LEVEL=info` and keep Fox's own lines with `| grep '"_tag":"FOX"'`: at `info`, every backtest logs its whole run too (see [Logs and Exit Code](#logs-and-exit-code)).
 
 ---
 
@@ -170,29 +174,34 @@ Leave `enableConsoleTable` out of the analyzer of a template, as its comment say
 | `--<key> <values>`           |                      |                            | The values to try at that key of the template, its path written with dots (`--strategy.thresholds.up 50,100`), or `--<key>=<values>`     |
 | `-h, --help`                 |                      |                            | Prints the usage, the options and how values are written, then exits with code 0                                                         |
 
-An option given on the command line wins over its environment variable, and an empty variable counts as unset. The overrides may come before or after Fox's own options. Fox reads `GEKKO_LOG_LEVEL` as Gekko does (see [Logs and Exit Code](#logs-and-exit-code)), and Bun loads `.env` and `.env.local` from the directory Fox runs in, as for Gekko.
+An option given on the command line wins over its environment variable, and an empty variable counts as unset. The overrides may come before or after Fox's own options. Fox reads `GEKKO_LOG_LEVEL` as Gekko does (see [Logs and Exit Code](#logs-and-exit-code)). Like Gekko, Fox, from source or compiled, reads `.env` and then `.env.local` from the directory it runs in (see [Environment Variables](./modes.md#environment-variables)): a `FOX_TEMPLATE_PATH`, `FOX_MAX_WORKERS` or `GEKKO_LOG_LEVEL` written there applies to Fox and to its workers, and one set on the command line or exported in your shell wins over both files.
 
-Fox's own options are read wherever they are, a value that starts like one of them included: `--strategy.src -tma` sets the template to `ma`, then finds `--strategy.src` without a value. Write such a value in the `=` form, `--strategy.src=-tma`, or after a bare `--`, which ends Fox's own options: `-t dema.yml -- --strategy.src -tma`. Fox skips a `--` among the overrides, wherever it is.
+Fox's own options are read wherever they are, and so is a value that Fox takes for one of them:
+
+- a value that starts with `-t` or `-w` is read as that option, the rest of the value being its argument: `--strategy.src -tma` sets the template to `ma`, then finds `--strategy.src` without a value, and `--strategy.src -wma` is refused with `--max-workers must be a whole number of at least 1, got "ma"`;
+- a value of `-h` or `--help` prints the help and exits with code 0, without a sweep.
+
+Write such a value in the `=` form, `--strategy.src=-tma`, which always works, as it does for any value that starts with `--`. A bare `--` written before every override ends Fox's own options and lets a value that starts with a single dash through (`-t dema.yml -- --strategy.src -tma`). Fox skips a `--` among the overrides, wherever it is, but one written after an override still lets `-h` and `--help` print the help.
 
 ---
 
 ## Values: Lists and Ranges
 
-| Written             | Values tried                                                          |
-|---------------------|-----------------------------------------------------------------------|
-| `14`                | 14 alone, in every variant                                            |
-| `12,24`             | 12 and 24, a variant each                                             |
-| `12..24`            | every number from 12 to 24, both included, a step of 1                |
-| `12..24:4`          | 12, 16, 20 and 24, a step of 4                                        |
-| `12..24:5`          | 12, 17, 22 and 24: the end is always tried                            |
-| `0.5..0.75`         | 0.5, 0.51, … 0.75: without a step, a unit of the bounds' last decimal |
-| `12..12`            | 12 alone                                                              |
-| `10,20..30:5`       | a list holding a range: 10, 20, 25 and 30                             |
-| `1..10:3,10..30:10` | 1, 4, 7, 10, 20 and 30: a value two items give is tried once          |
-| `close,ohlc4`       | two texts                                                             |
-| `true`, `false`     | the booleans `true` and `false`                                       |
+| Written             | Values tried                                                                                   |
+|---------------------|------------------------------------------------------------------------------------------------|
+| `14`                | 14 alone, in every variant                                                                     |
+| `12,24`             | 12 and 24, a variant each                                                                      |
+| `12..24`            | every number from 12 to 24, both included, a step of 1                                         |
+| `12..24:4`          | 12, 16, 20 and 24, a step of 4                                                                 |
+| `12..24:5`          | 12, 17, 22 and 24: the end is always tried                                                     |
+| `0.5..0.75`         | 0.5, 0.51, … 0.75: without a step, a unit of the bounds' last decimal, trailing zeros left out |
+| `12..12`            | 12 alone                                                                                       |
+| `10,20..30:5`       | a list holding a range: 10, 20, 25 and 30                                                      |
+| `1..10:3,10..30:10` | 1, 4, 7, 10, 20 and 30: a value two items give is tried once                                   |
+| `close,ohlc4`       | two texts                                                                                      |
+| `true`, `false`     | the booleans `true` and `false`                                                                |
 
-A value that reads as a number (digits, a minus sign before them, a decimal point between them) is a number, `true` and `false` are booleans, and anything else is a text, `1e3` and `.5` included. A value is a range when it holds `..` and starts like a number, with a digit, or a minus sign and a digit: `run..2`, `..` and `../db/x.sql` are texts, and so is a value holding a `/` or a `\` whatever its dots, so that a path such as `2024..old/x.sql` is not read as a range either. The values of a range are worked out in decimal: `0.1..0.3` holds 0.3. A value given twice, by an item and a range (`10,10..30:10`) or by two ranges sharing a bound, is tried once, at its first place, rather than make two variants of one backtest.
+A value that reads as a number (digits, a minus sign before them, a decimal point between them) is a number, `true` and `false` are booleans, and anything else is a text, `1e3` and `.5` included. A value is a range when it holds `..` and starts like a number, with a digit, or a minus sign and a digit: `run..2`, `..` and `../db/x.sql` are texts, and so is a value holding a `/` or a `\` whatever its dots, so that a path such as `2024..old/x.sql` is not read as a range either. The values of a range are worked out in decimal: `0.1..0.3` holds 0.3. Trailing zeros count for nothing in the step: `0.10..0.20` is 0.1 and 0.2, and `50.0..60.0` steps by 1; give the step instead, `0.10..0.20:0.01`. A value given twice, by an item and a range (`10,10..30:10`) or by two ranges sharing a bound, is tried once, at its first place, rather than make two variants of one backtest.
 
 Fox refuses before anything runs, with a line saying why:
 
@@ -202,7 +211,7 @@ Fox refuses before anything runs, with a line saying why:
 - a key named `__proto__`, `constructor` or `prototype`, which names no key of a configuration;
 - a key that names an item of a list of the template otherwise than by its index (`--plugins.Trader.portfolioUpdates.threshold`, see [Variants](#variants));
 - a range without both bounds (`12..`), whose start is above its end (`24..12`), or whose step is not a number above 0 (`12..24:0`);
-- a number that no number holds as it is written, which Fox would otherwise try in place of the one written: a number keeps some 15 significant digits, so that `9007199254740993` would be read as 9007199254740992 (`Invalid value "9007199254740993" of --x: it holds more digits than a number keeps, which reads it as 9007199254740992: write it with fewer digits`). In a range, that is a bound so written (`9007199254740990..9007199254740993`), or a value its step makes: from bounds of 17 significant digits (`0.30000000000000004..0.5`, whose step by default is 0.00000000000000001), from a step below what its values can change by (`1..2:0.0000000000000001`), or from whole numbers beyond 9007199254740992, where a number no longer changes by 1: `Invalid range "0.30000000000000004..0.5" of --x: its step of 0.00000000000000001 makes 0.30000000000000005, more digits than a number keeps, which reads it as 0.30000000000000004: write the bounds with fewer digits, or give a larger step`;
+- a number that Fox cannot hold as it is written, which it would otherwise try in place of the one written (`9007199254740993`, read as 9007199254740992), and a range whose bounds or step make such a value (`0.30000000000000004..0.5`, whose default step makes 0.30000000000000005): the line says `more digits than a number keeps`, and names the number it would have been read as;
 - a range of more than 10 000 values, the most variants Fox makes: `Invalid range "2..100001" of --strategy.period: it holds 100000 values, more than the 10000 variants Fox makes at most: narrow it, or give it a larger step`.
 
 ---
@@ -223,7 +232,15 @@ An item of a list of the template, `plugins`, `watch.assets`, `exchange.marketDa
 
 ## Checked Before the First Backtest
 
-Before any worker starts, Fox checks every variant as Gekko would check its configuration file: the configuration as a whole, its `watch.mode`, which must be `backtest` (a realtime variant would trade until stopped, an importer one would write candles), the strategy its TradingAdvisor names, which must be one of Gekko's, and its `strategy` block against that strategy's parameters (a strategy loaded through a `strategyPath` is checked as each worker starts), and each entry of `plugins`, whose name must be a plugin's (`No plugin is named "trader" (did you mean "Trader"?): the plugins are …`), against the options of its plugin, an analyzer's `benchmarkAsset` included, which must be one of `watch.assets` (`benchmarkAsset must be one of the watched assets (BTC and ETH), got "SOL"`, at `plugins[2].benchmarkAsset`). Each plugin must run in backtest mode (`Plugin CandleWriter does not support backtest mode, only realtime and importer`), and no two may send the same event: the PortfolioAnalyzer and the RoundTripAnalyzer both send the performance report (`Plugins PortfolioAnalyzer (plugins[2]) and RoundTripAnalyzer are broadcasting the same event: performanceReport. This behavior is unsupported.`, at the second of them), so keep one. Fox refuses a plugin entry in Gekko's own words, at the path of the entry, the index of the earlier of two plugins sending one event added. The first variant refused stops Fox with exit code 1, before any backtest, naming the variant, its values and every problem, each with its path from the root of the configuration; with `--strategy.period 1..3` on the DEMA template:
+Before any worker starts, Fox checks every variant as Gekko would check its configuration file:
+
+- the configuration as a whole;
+- its `watch.mode`, which must be `backtest`: a realtime variant would trade until stopped, an importer one would write candles;
+- the strategy its TradingAdvisor names, which must be one of Gekko's, and its `strategy` block against that strategy's parameters (a strategy loaded through a `strategyPath` is checked as each worker starts);
+- each entry of `plugins`: its name must be a plugin's (`No plugin is named "trader" (did you mean "Trader"?): the plugins are …`), its plugin must run in backtest mode (`Plugin CandleWriter does not support backtest mode, only realtime and importer`), and its options must be those of its plugin, an analyzer's `benchmarkAsset` one of `watch.assets` (`benchmarkAsset must be one of the watched assets (BTC and ETH), got "SOL"`, at `plugins[2].benchmarkAsset`);
+- no two plugins may send the same event: the PortfolioAnalyzer and the RoundTripAnalyzer both send the performance report (`Plugins PortfolioAnalyzer (plugins[2]) and RoundTripAnalyzer are broadcasting the same event: performanceReport. This behavior is unsupported.`, at the second of them), so keep one.
+
+Fox refuses a plugin entry in Gekko's own words, at the path of the entry. The first variant refused stops Fox with exit code 1, before any backtest, naming the variant, its values and every problem, each with its path from the root of the configuration. With `--strategy.period 1..3` on the DEMA template, the `message` of that error line reads:
 
 ```
 [FOX] Variant 1 (--strategy.period 1) is invalid:
@@ -239,7 +256,7 @@ A template without a PerformanceReporter is not refused, its backtests run, but 
 
 ## Workers
 
-Fox runs the variants in worker threads of its own process, `--max-workers` of them at once, the next variant starting as soon as one ends. Each worker loads Gekko's modules anew (about a second from source) and runs one backtest exactly as `dist/gekko` would run its configuration: it reads the candles from the template's database (the workers read one database side by side, each through a read-only connection), runs the strategy, the Trader and the analyzer on Gekko's simulated exchange, and the PerformanceReporter adds its row. A variant that fails (a missing minute in the database, an exception in the strategy) is reported as failed, and the others go on.
+Fox runs the variants in worker threads of its own process, `--max-workers` of them at once, the next variant starting as soon as one ends. Each worker loads Gekko's modules anew (about a second from source) and runs one backtest as `dist/gekko` would run its configuration: it reads the candles from the template's database (the workers read one database side by side, each through a read-only connection), runs the strategy, the Trader and the analyzer on Gekko's simulated exchange, and the PerformanceReporter adds its row. A variant that fails (a missing minute in the database, an exception in the strategy, or the circuit breaker's stop, `Max consecutive order errors reached (5)`, for which `dist/gekko` exits with code 0) is reported as failed, and the others go on. As Gekko does, a worker logs a promise rejection that no code handled (`Unhandled rejection: …`), goes on with its backtest, whose row it writes, then reports the variant as failed, naming the first such rejection and counting the others (`Unhandled rejection: floating rejection (and 2 more)`); and on an exception that no code caught, such as one thrown in a timer (`Uncaught exception: …`), it ends its backtest at once, without a row, and reports the variant as failed.
 
 Each worker holds its backtest in memory, its modules, its candles and its orders: lower `--max-workers` when the machine runs short of memory, or when the backtests leave it too little to do anything else.
 
@@ -257,23 +274,34 @@ DEMA-12-100--150 (--exchange.marketData.0.marketData.fee.maker 0.01);Portfolio;B
 
 A sweep of a single variant writes the `id` without a label, as Gekko does. A PerformanceReporter that has a `label` of its own, in the template or set by an option (`--plugins.3.label baseline`), keeps it, followed by the variant's: `DEMA-12-100--150 (baseline --exchange.marketData.0.marketData.fee.maker 0.01)`, and its label alone in a sweep of a single variant. The rows come in the order the variants end, not in the order of their numbers: each names its variant by its `id`.
 
-Variants ending together take turns: the PerformanceReporter writes a row while holding the lock file `<fileName>.lock`, trying for up to a minute, 25 to 75 ms between two attempts, so that no two rows mix. A row that still does not get the lock is lost, with an error line naming the lock file (`report lost: <id> not written, <file> could not be locked (…)`), and its variant fails, as does a variant whose row the reporter could not write for another reason, a file whose first line is not its header or a write error (see [PerformanceReporter](./plugins.md#-performancereporter)): `Variant 3 of 12 (--strategy.period 14) failed after 12 seconds: PerformanceReporter failed to finalize: The TRADING REPORT row was not written: <file> could not be locked (see the error logged above)`, the summary names it and Fox exits with code 1, so that a row missing from the file never goes unnoticed. Run the variant again on its own (give each of its keys its one value, and its PerformanceReporter the label of the row's `id`, the part in parentheses, in the `=` form, which a value starting with `--` takes: `--plugins.3.label='--strategy.period 14'`, or `--plugins.3.label='baseline --strategy.period 14'` after a label of the template's own) to get its row.
+Variants ending together take turns: the PerformanceReporter writes a row while holding the lock file `<fileName>.lock`, trying for up to a minute, so that no two rows mix. A row that still does not get the lock is lost, with an error line naming the lock file: `report lost: <report> not written, <file> could not be locked (…)`, where `<report>` is the analyzer's report, `PORTFOLIO PROFIT REPORT` on the shipped templates, `TRADING REPORT` under a RoundTripAnalyzer. Its variant fails, as does a variant whose row the reporter could not write for another reason, a file whose first line is not its header or a write error (see [PerformanceReporter](./plugins.md#-performancereporter)): `Variant 3 of 12 (--strategy.period 14) failed after 12 seconds: PerformanceReporter failed to finalize: The PORTFOLIO PROFIT REPORT row was not written: <file> could not be locked (see the error logged above)`. The summary names it and Fox exits with code 1, so that a row missing from the file never goes unnoticed. Run the variant again on its own (give each of its keys its one value, and its PerformanceReporter the label of the row's `id`, the part in parentheses, in the `=` form, which a value starting with `--` takes: `--plugins.3.label='--strategy.period 14'`, or `--plugins.3.label='baseline --strategy.period 14'` after a label of the template's own) to get its row.
 
-A file that already holds rows keeps them: the rows of a new sweep are added after those of the earlier ones. Give each sweep a `fileName` of its own (`--plugins.3.fileName DEMA_periods.csv` on the shipped templates, whose PerformanceReporter is their fourth plugin), or move the file aside, to compare one sweep's rows only.
+A file that already holds rows keeps them: the rows of a new sweep are added after those of the earlier ones. Give each sweep a `fileName` of its own (`--plugins.3.fileName DEMA_periods_performance_reports.csv` on the shipped templates, whose PerformanceReporter is their fourth plugin: git ignores a name that ends in `performance_reports.csv`), or move the file aside, to compare one sweep's rows only.
 
 ---
 
 ## Logs and Exit Code
 
-Fox logs its own lines, tagged `fox`, at the level `GEKKO_LOG_LEVEL` sets, `error` by default, so that a sweep that succeeds prints nothing; set `info` to follow the variants:
+Fox logs its own lines, tagged `fox`, at the level `GEKKO_LOG_LEVEL` sets, one of Gekko's levels (see [Logs and Exit Codes](./modes.md#logs-and-exit-codes)), `error` by default, and its workers log at the same level: a sweep whose backtests meet no error prints nothing. Set `info` to follow the variants, and keep Fox's own lines with `grep`, since each worker then logs its whole backtest too (`set -o pipefail`, in bash or zsh, keeps Fox's exit code rather than grep's):
 
 ```bash
-GEKKO_LOG_LEVEL=info ./dist/fox --template-path apps/fox/templates/tma.yml --strategy.short 5..10 --strategy.long 50,100
+set -o pipefail
+GEKKO_LOG_LEVEL=info ./dist/fox --template-path apps/fox/templates/tma.yml --strategy.short 5..10 --strategy.long 50,100 | grep '"_tag":"FOX"'
 ```
 
-It logs Gekko's version, then `Backtesting 12 variants of apps/fox/templates/tma.yml, 8 at a time`, a line as each variant starts, `Variant 3 of 12 (--strategy.short 6 --strategy.long 50) started`, and as it ends, `… done in 10 seconds` (the backtest's own duration), or, at `error` level, `… failed after 15 seconds: <reason>`, and at the end the summary: `12 variants, 0 failed` at `info`, `12 variants, 2 failed: variants 2 and 4` at `error`. A failure whose message does not say where it was thrown is followed at `debug` level by what Gekko would log of it, its stack and its causes, down to the root cause: an exception in a strategy's hook, `Variant 3 of 12 (…): TypeError: … at onTimeframeCandleAfterWarmup (…/my.strategy.ts:5:20) …`, or one in its `end()`, which Gekko reports as the TradingAdvisor failing to finalize, `Variant 3 of 12 (…): [STREAM] TradingAdvisor failed to finalize: …`, followed by the exception that caused it, `Caused by: TypeError: … at end (…/my.strategy.ts:13:39) …`. Gekko's own refusals, a missing minute for one, say it all in their line. Each worker logs its backtest at the same level, on the same output, its lines among Fox's and the other workers': at `info`, every variant's start-up and report too, and at `warn` and below the warning each backtest gives as it starts.
+A `GEKKO_LOG_LEVEL` written in `.env.local` applies to Fox and its workers, and `GEKKO_LOG_LEVEL=error ./dist/fox …` overrides it for one run.
 
-Fox exits with code 0 when every variant completed, and after `--help`; with code 1 when a variant failed (its backtest, or the writing of its row, see [Results](#results)), when a variant or an option is refused, when the template cannot be read, or when anything else throws. Ctrl-C (SIGINT) and SIGTERM stop Fox and every worker at once, with the codes a shell reports for them (130 and 143): the variants in progress write no row, and the rows written stay. The lines of Fox and of its workers are written before the call that logs them returns, so that none is lost when a worker or Fox exits: piped into a pager that is not scrolled, Fox waits. Each is written whole, under a lock the threads share, so that a long line (the TRADING REPORT of a run of many pairs) is never cut by another thread's.
+Fox and its workers print one JSON object per line, an analyzer's table aside (`enableConsoleTable`): `{"_tag":"FOX","level":"info","message":"…","timestamp":"…"}` for Fox's own lines, a worker's lines carrying Gekko's tags, such as `TRADER` and `STRATEGY`. The texts this guide quotes are the `message`, where a line break is written `\n`.
+
+Fox logs Gekko's version, then `Backtesting 12 variants of apps/fox/templates/tma.yml, 8 at a time`, a line as each variant starts, `Variant 3 of 12 (--strategy.short 6 --strategy.long 50) started`, and as it ends, `… done in 10 seconds` (the backtest's own duration), or, at `error` level, `… failed after 15 seconds: <reason>`, and at the end the summary: `12 variants, 0 failed` at `info`, `12 variants, 2 failed: variants 2 and 4` at `error`. A failure whose message does not say where it was thrown is followed at `debug` level by what Gekko would log of it, its stack and its causes, down to the root cause. For an exception in a strategy's hook, that is `Variant 3 of 12 (…): TypeError: … at onTimeframeCandleAfterWarmup (…/my.strategy.ts:5:20) …`; for one in its `end()`, which Gekko reports as the TradingAdvisor failing to finalize, `Variant 3 of 12 (…): [STREAM] TradingAdvisor failed to finalize: …`, followed by the exception that caused it, `Caused by: TypeError: … at end (…/my.strategy.ts:13:39) …`. Gekko's own refusals, a missing minute for one, say it all in their line.
+
+Each worker logs its backtest on the same output, its lines among Fox's and the other workers':
+
+- at every level, the errors of its backtest: an order the simulated exchange refuses (`[<id>] SELL MARKET order rejected: …`), a row the PerformanceReporter could not write (see [Results](#results)), a rejection or an exception that no code handled, logged as Gekko logs them, tagged `GEKKO` (`Unhandled rejection: …`, `Uncaught exception: …`, see [Workers](#workers)), and a failure that stops the backtest in its course, such as an exception in a strategy's hook, `Gekko is closing the application due to an error: TypeError: …`, logged before Fox's line of the variant, which quotes it again;
+- from `warn` on, the warning each backtest gives as it starts, `BACKTESTING FEATURE NEEDS PROPER TESTING, ACT ON THESE NUMBERS AT YOUR OWN RISK!`;
+- at `info`, its whole backtest: its start-up, the Trader's `Synchronizing data with dummy-cex` at each timeframe candle, six lines for each order, the strategy's advice among them, and its report: some 11,000 lines per variant of the shipped DEMA template over 2024, and 13,000 of the TMA one, close to 8,800 of them the Trader's synchronizations.
+
+Fox exits with code 0 when every variant completed, and after `--help`; with code 1 when a variant failed (its backtest, or the writing of its row, see [Results](#results)), when a variant or an option is refused, when the template cannot be read, or when anything else throws. Ctrl-C (SIGINT) and SIGTERM stop Fox and every worker at once, with the codes a shell reports for them (130 and 143): the variants in progress write no row, and the rows written stay. The lines of Fox and of its workers are written before the call that logs them returns, so that none is lost when a worker or Fox exits: piped into a pager that is not scrolled, Fox waits. Each line is written whole, however long (the TRADING REPORT of a run of many pairs), never cut by a line of another worker or of Fox.
 
 ---
 
@@ -289,7 +317,9 @@ A variant was refused before any backtest (see [Checked Before the First Backtes
 
 ### "Unexpected argument …", "… has no value", "Invalid value …" or "Invalid range …"
 
-The command line itself was refused (see [Values: Lists and Ranges](#values-lists-and-ranges)): a value written after the first (`--strategy.period 12 24`, write `12,24`), an option without its value (a value that starts with `-t`, `-w` or `-h` is taken for one of Fox's options: write it `--strategy.src=-tma`), a number of more digits than a number keeps, or a range that is not `<from>..<to>` or `<from>..<to>:<step>`, of numbers, its start at most its end and its step above 0, each of its values a number as written and 10 000 values at most.
+The command line itself was refused (see [Values: Lists and Ranges](#values-lists-and-ranges)): a value written after the first (`--strategy.period 12 24`, write `12,24`), an option without its value, a number of more digits than a number keeps, or a range that is not `<from>..<to>` or `<from>..<to>:<step>`, of numbers, its start at most its end and its step above 0, each of its values a number as written and 10 000 values at most.
+
+A value that starts with `-t` or `-w` is read as that option, `-tma` as `-t ma` (`--strategy.src -wma` is refused with `--max-workers must be a whole number of at least 1, got "ma"`), and a value of `-h` or `--help` prints the help and runs no sweep: write such a value in the `=` form, `--strategy.src=-tma` (see [Options](#options)).
 
 ### "… is a list, name its item by its index"
 
