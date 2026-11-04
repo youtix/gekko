@@ -172,7 +172,8 @@ export class PluginsStream extends Writable {
    * earlier queues events on a later one, delivered in this pass (in a backtest, the order a TradingAdvisor's advice places ends on the
    * Trader at once, and the strategy and the analyzers hear of it in the bucket it filled in). What a handler queues on a plugin whose
    * turn is over waits for the next pass (see deliversQueuedFirst), as the order an order hook places does: the TradingAdvisor queues it
-   * as the Trader delivers the end of an order.
+   * as the Trader delivers the end of an order. A delivery that rejects, once its group has reached every listener, ends the pass and
+   * fails the bucket: what is left queued, on any plugin, waits for a bucket that never comes (see logDroppedEvents).
    */
   private async deliverDeferredEvents() {
     for (const plugin of this.plugins) {
@@ -224,9 +225,10 @@ export class PluginsStream extends Writable {
    * flushed before it (an order a strategy hook places on a fill), for a bucket that never comes. They are dropped: delivered after a
    * stop (the circuit breaker), they could make the strategy act again, an order hook placing a new order. The final reports may miss
    * them (an orderCompleted, a roundtripCompleted).
-   * Not counted: the group whose delivery threw. broadcastDeferredEmit takes a group out of the queue before delivering it, and stops
-   * at the listener that throws: the listeners wired after it (in config order) never receive it. An EventSubscriber configured
-   * after the TradingAdvisor never hears of the orderErrored that tripped the circuit breaker.
+   * Not counted: the group whose delivery threw. broadcastDeferredEmit takes a group out of the queue before delivering it, and delivers
+   * it to every listener before it rejects, those wired after the one that threw (in config order) included: an EventSubscriber
+   * configured after the TradingAdvisor notifies the orderErrored that tripped the circuit breaker, and the analyzers count it. What a
+   * listener queues as it hears of it (the roundtripCompleted of a round trip that order closed) is counted here, and dropped.
    */
   private logDroppedEvents() {
     const dropped = this.plugins.flatMap(plugin => {

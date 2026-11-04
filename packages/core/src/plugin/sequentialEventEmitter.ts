@@ -1,4 +1,6 @@
-import { debug } from '../logger/logger';
+import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
+import { describeError } from '@gekko/shared/errors/error.helper';
+import { debug, error } from '../logger/logger';
 import { copyPayload } from '@gekko/shared/helpers/event/event.helper';
 import { NO_LISTENERS } from './sequentialEventEmitter.const';
 import { DeferredGroup, Listener } from './sequentialEventEmitter.types';
@@ -31,12 +33,23 @@ export class SequentialEventEmitter {
   /**
    * Calls the listeners of the event at once, one after the other, each awaited, with the payload itself: unlike a deferred event, it
    * is not copied, so the listeners share it with each other and with the emitter (the report of the PortfolioAnalyzer holds its own
-   * equity curve). It serves the final reports, sent from processFinalize once the run is over, and the error line of a strategy, a new
-   * object, each with one listener among the plugins: a copy would protect nothing, and would walk a curve of a point per timeframe
-   * candle.
+   * equity curve). It serves the final reports, sent from processFinalize once the run is over, which each PerformanceReporter listens
+   * to, and the error line of a strategy, a new object, which the EventSubscriber listens to, neither writing to what it gets: a copy
+   * would protect nothing, and would walk a curve of a point per timeframe candle.
+   * A listener that throws does not keep the payload from the listeners after it: once every listener has run, emit rejects with one of
+   * the failures and logs the others (see throwFailure). Its two callers catch what it rejects with and log it, each under its own tag
+   * (emitPerformanceReport, and the TradingAdvisor as it relays the error line).
    */
   public async emit<T = unknown>(event: string, payload?: T): Promise<void> {
-    for (const listener of this.listeners.get(event) ?? NO_LISTENERS) await listener(payload);
+    let failures: unknown[] | undefined;
+    for (const listener of this.listeners.get(event) ?? NO_LISTENERS) {
+      try {
+        await listener(payload);
+      } catch (failure) {
+        (failures ??= []).push(failure);
+      }
+    }
+    if (failures) this.throwFailure(event, failures);
   }
 
   /**
@@ -62,6 +75,11 @@ export class SequentialEventEmitter {
   /**
    * Delivers the oldest group of deferred events to each listener in turn, each with its own copy of the array and its payloads.
    * Resolves to false when none is queued, to true otherwise.
+   * A listener that throws does not keep the group from the listeners after it: once every listener has run, it rejects with one of the
+   * failures and logs the others (see throwFailure), and PluginsStream fails the bucket with it. So the plugins listed after the
+   * TradingAdvisor hear of the order whose error trips the circuit breaker, or of the fill on which a strategy's order hook throws: the
+   * EventSubscriber notifies it, and the analyzers count it in their final reports. A delivery stopped at the listener that threw: an
+   * EventSubscriber configured after the TradingAdvisor never notified the order error that tripped the breaker.
    */
   public async broadcastDeferredEmit(): Promise<boolean> {
     // Out of the queue before its delivery: a payload a listener queues meanwhile joins a later group, not the array being delivered
@@ -76,10 +94,18 @@ export class SequentialEventEmitter {
     // holding a payload queued while nobody listened holds the emitter's own object: every listener gets a copy then, the last included.
     const listeners = this.listeners.get(name) ?? NO_LISTENERS;
     const newCopies = isCopied ? listeners.length - 1 : listeners.length;
+    let failures: unknown[] | undefined;
     for (let index = 0; index < listeners.length; index++) {
+      // Copied out of the try: only what a listener throws is its failure, not a copy refused (a payload queued for nobody)
+      const delivered = index < newCopies ? copyPayload(payloads) : payloads;
       // One after the other, to avoid race conditions
-      await listeners[index](index < newCopies ? copyPayload(payloads) : payloads);
+      try {
+        await listeners[index](delivered);
+      } catch (failure) {
+        (failures ??= []).push(failure);
+      }
     }
+    if (failures) this.throwFailure(name, failures);
     return true;
   }
 
@@ -101,5 +127,21 @@ export class SequentialEventEmitter {
       if (this.listeners.get(name)?.length) counts.set(name, (counts.get(name) ?? 0) + payloads.length);
     }
     return counts;
+  }
+
+  /**
+   * Throws the failure an emit or a delivery of `event` rejects with, once every listener has run, from the `failures` of its
+   * listeners, in their order: the first ApplicationStopError among them, the orderly stop (the circuit breaker), which main() tells
+   * from a crash by the error the pipeline rejects with (PluginsStream ranks a plugin's stop first likewise), else the first of them.
+   * Each other failure is logged at error level, naming the emitter and the event: nothing else reports it.
+   */
+  private throwFailure(event: string, failures: unknown[]): never {
+    const stopIndex = failures.findIndex(failure => failure instanceof ApplicationStopError);
+    // By its place, not by identity: two listeners can throw the same value
+    const thrownIndex = stopIndex === -1 ? 0 : stopIndex;
+    failures.forEach((failure, index) => {
+      if (index !== thrownIndex) error('event', `[${this.emitterName}] A listener of ${event} failed as well: ${describeError(failure)}`);
+    });
+    throw failures[thrownIndex];
   }
 }

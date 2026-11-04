@@ -705,6 +705,7 @@ describe('PluginsStream', () => {
         'Trader (orderCompleted: 1, portfolioChange: 2), RoundTripAnalyzer (roundtripCompleted: 1)';
       let plugins: Plugin[];
       let onOrderCompleted: Mock;
+      let onOrderErroredAfterStop: Mock;
 
       beforeEach(async () => {
         const advisor = createEmittingPluginStub('TradingAdvisor');
@@ -715,6 +716,9 @@ describe('PluginsStream', () => {
         trader.on('orderErrored', () => {
           throw new ApplicationStopError('strategy', 'Max consecutive order errors reached (1)');
         });
+        // A plugin listed after the advisor, as the EventSubscriber and the analyzers usually are
+        onOrderErroredAfterStop = vi.fn();
+        trader.on('orderErrored', onOrderErroredAfterStop);
         onOrderCompleted = vi.fn();
         trader.on('orderCompleted', onOrderCompleted);
         trader.on('portfolioChange', noop);
@@ -735,6 +739,11 @@ describe('PluginsStream', () => {
 
       it('delivers none of them', () => {
         expect(onOrderCompleted).not.toHaveBeenCalled();
+      });
+
+      // The EventSubscriber notifies the order error that tripped the circuit breaker, the analyzers count it
+      it('delivers the event it stopped on to the listener after the one that stopped it', () => {
+        expect(onOrderErroredAfterStop).toHaveBeenCalledExactlyOnceWith([{ id: 1 }]);
       });
 
       it('logs, once and after the stop reason, those a plugin listens to, per plugin, as a warning', () => {

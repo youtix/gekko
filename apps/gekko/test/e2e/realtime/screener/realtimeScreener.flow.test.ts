@@ -599,7 +599,7 @@ describe('E2E: Realtime Screener Flow', () => {
       });
     });
 
-    it('Scenario F: creations failing: 4 errors notified, BTC ones lost on the network as maybe live, the breaker at the 5th', async () => {
+    it('Scenario F: creations failing: 5 errors notified, BTC ones lost on the network as maybe live, the breaker at the 5th', async () => {
       MockCCXTExchange.setPredefinedCandles('BTC/USDT', zigzag(100, 110));
       MockCCXTExchange.setPredefinedCandles('ETH/USDT', zigzag(2000, 2200));
       // The creations fail as an exchange answers, within the minute: those asked with a candle when the next one reaches the simulated
@@ -630,9 +630,11 @@ describe('E2E: Realtime Screener Flow', () => {
 
       // The orders of each candle error with the next one, the strategy's lines going out with it: 12:00's orders error with the candle
       // of 12:01, 12:01's with 12:02's. Each notification quotes the last close the subscriber has processed, that of the candle its order
-      // was advised on. The 5th error, that of <BTC SELL 3>, delivered as the candle of 12:03 arrives, trips the breaker
-      // (maxConsecutiveErrors, 5 by default) once the strategy has heard of it, before the plugins process that candle, which advises
-      // nothing: what was queued since is dropped as the run stops, the strategy's line for the 5th error and the 6th error among them.
+      // was advised on, and is dated with the end of that candle, the Trader's clock. The 5th error, that of <BTC SELL 3>, delivered as
+      // the candle of 12:03 arrives, trips the breaker (maxConsecutiveErrors, 5 by default) once the strategy has heard of it, before the
+      // plugins process that candle, which advises nothing. The EventSubscriber, configured after the TradingAdvisor, hears of it in the
+      // same delivery all the same, and notifies it. What was queued since is dropped as the run stops, the strategy's line for the 5th
+      // error and the 6th error among them.
       expect({
         failure,
         errored: postsWith(' order errored ('),
@@ -676,7 +678,18 @@ describe('E2E: Realtime Screener Flow', () => {
             'Current price: 2,200 USDT',
             '------',
           ),
+          // The one that tripped the breaker: <BTC SELL 3>, advised on the candle of 12:02, which BTC closes at 100, and dated with its end
+          message(
+            'SELL STICKY order errored (<BTC SELL 3>) for BTC/USDT',
+            `Due to ${OUTCOME_UNKNOWN}`,
+            'It may still be live on the exchange, where Gekko follows it no more: check it there',
+            'At time: 2024-01-01T12:03:00.000Z',
+            'Requested amount: 1',
+            'Current price: 100 USDT',
+            '------',
+          ),
         ],
+        // The strategy's line for the 5th error is queued as the TradingAdvisor hears of it, then dropped with the stop
         heard: ['Order Errored: <BTC SELL 1>', 'Order Errored: <ETH SELL 1>', 'Order Errored: <BTC BUY 2>', 'Order Errored: <ETH BUY 2>'],
         stop: [
           'Application stopped gracefully: [STRATEGY] Max consecutive order errors reached (5)',

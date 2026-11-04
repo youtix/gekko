@@ -1,9 +1,12 @@
+import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error';
+import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
-import { debug } from '../logger/logger';
+import { debug, error } from '../logger/logger';
 import { noop } from 'lodash-es';
 import { describe, expect, it, vi } from 'vitest';
 import { copyPayload } from '@gekko/shared/helpers/event/event.helper';
 import { SequentialEventEmitter } from './sequentialEventEmitter';
+import { Listener } from './sequentialEventEmitter.types';
 
 // The real copy, counted
 vi.mock('@gekko/shared/helpers/event/event.helper', async importOriginal => {
@@ -11,7 +14,7 @@ vi.mock('@gekko/shared/helpers/event/event.helper', async importOriginal => {
   return { copyPayload: vi.fn(actual.copyPayload) };
 });
 
-vi.mock('../logger/logger', () => ({ debug: vi.fn() }));
+vi.mock('../logger/logger', () => ({ debug: vi.fn(), error: vi.fn() }));
 
 type Delivery = [event: string, payloads: unknown[]];
 
@@ -58,19 +61,36 @@ const deliverPortfolios = async (count: number, listen: (index: number, payloads
   await broadcastAll(emitter);
 };
 
-/** An emitter whose first listener of 'a' throws, and whose second records the payloads it receives */
-const createEmitterWithFailingListener = () => {
-  const emitter = new SequentialEventEmitter('test');
-  const received: unknown[][] = [];
-  emitter.on('a', () => {
-    throw new Error('listener failed');
-  });
-  emitter.on('a', (payloads: unknown[]) => {
-    received.push(payloads);
-  });
-  emitter.addDeferredEmit('a', 'a1');
-  return { emitter, received };
+/** A listener that throws `thrown` */
+const throwing =
+  (thrown: unknown): Listener =>
+  () => {
+    throw thrown;
+  };
+
+/** The two ways the emitter calls the listeners of 'a' with 'a1': at once, or delivering a group queued under 'a', as the stream does */
+const CALLS = {
+  emit: (emitter: SequentialEventEmitter) => emitter.emit('a', 'a1'),
+  broadcastDeferredEmit: async (emitter: SequentialEventEmitter) => {
+    emitter.addDeferredEmit('a', 'a1');
+    await emitter.broadcastDeferredEmit();
+  },
 };
+
+/** Calls `listeners`, the listeners of 'a' in that order, by `method`, and returns what it rejected with, undefined when it resolved */
+const callListeners = (method: keyof typeof CALLS, listeners: Listener[]) => {
+  const emitter = new SequentialEventEmitter('test');
+  for (const listener of listeners) emitter.on('a', listener);
+  return CALLS[method](emitter).then(
+    () => undefined,
+    (reason: unknown) => reason,
+  );
+};
+
+const firstError = new Error('first failure');
+const secondError = new Error('second failure');
+const firstStop = new ApplicationStopError('strategy', 'first stop');
+const secondStop = new ApplicationStopError('strategy', 'second stop');
 
 describe('SequentialEventEmitter', () => {
   describe('emit', () => {
@@ -393,16 +413,42 @@ describe('SequentialEventEmitter', () => {
         expect(calls).toEqual(['first', 'second']);
       });
 
-      it('should reject with what a listener throws', async () => {
-        const { emitter } = createEmitterWithFailingListener();
-        await expect(emitter.broadcastDeferredEmit()).rejects.toThrow('listener failed');
+      // Each but the last gets a copy of its own, a listener that throws included: what it wrote before reaches none of the next ones
+      it('should deliver the payloads as queued to the listener after one that wrote to them, then threw', async () => {
+        let received: Portfolio[] = [];
+        await deliverPortfolios(2, (index, payloads) => {
+          if (index === 1) received = payloads;
+          else {
+            payloads[0].get('BTC')!.free = 0;
+            throw firstError;
+          }
+        }).catch(noop);
+
+        expect(received).toEqual(queuedPortfolios());
       });
 
-      it('should not deliver the group to the listeners after one that throws', async () => {
-        const { emitter, received } = createEmitterWithFailingListener();
+      // What the stream counts as dropped once the bucket fails: the group whose delivery threw is not among them
+      it('should take the group whose delivery threw out of the queue', async () => {
+        const emitter = new SequentialEventEmitter('test');
+        emitter.on('a', throwing(firstError));
+        emitter.addDeferredEmit('a', 'a1');
+
         await emitter.broadcastDeferredEmit().catch(noop);
 
-        expect(received).toEqual([]);
+        expect(emitter.countUndeliveredPayloads().size).toBe(0);
+      });
+
+      // As the RoundTripAnalyzer queues the round trip an order closed, the order on which the TradingAdvisor stops the run
+      it('should leave queued what a listener queues as it hears a group on which another threw', async () => {
+        const emitter = new SequentialEventEmitter('test');
+        emitter.on('a', throwing(firstStop));
+        emitter.on('a', () => emitter.addDeferredEmit('b', 'b1'));
+        emitter.on('b', noop);
+        emitter.addDeferredEmit('a', 'a1');
+
+        await emitter.broadcastDeferredEmit().catch(noop);
+
+        expect(Array.from(emitter.countUndeliveredPayloads())).toEqual([['b', 1]]);
       });
 
       it('should deliver a listener added during a delivery the groups that follow, not the one being delivered', async () => {
@@ -424,6 +470,53 @@ describe('SequentialEventEmitter', () => {
 
         expect(lateDeliveries).toEqual([['a2']]);
       });
+    });
+  });
+
+  // A plugin that fails on an event keeps none of the plugins listed after it from hearing it: the TradingAdvisor stops the run on the
+  // order error that trips the circuit breaker, which the EventSubscriber still notifies and the analyzers still count
+  describe.each`
+    method
+    ${'emit'}
+    ${'broadcastDeferredEmit'}
+  `('$method, when a listener throws', ({ method }: { method: keyof typeof CALLS }) => {
+    /** The line the emitter logs for a failure it does not reject with, described as describeError writes it */
+    const failedAsWell = (described: string) => ['event', `[test] A listener of a failed as well: ${described}`];
+
+    it('should call the listener after it', async () => {
+      const after = vi.fn();
+      await callListeners(method, [throwing(firstError), after]);
+      expect(after).toHaveBeenCalledOnce();
+    });
+
+    it.each`
+      rejection                                             | listeners                                        | expected
+      ${'what it throws, the first of two listeners'}       | ${[throwing(firstError), noop]}                  | ${firstError}
+      ${'what it throws, the second of two listeners'}      | ${[noop, throwing(secondError)]}                 | ${secondError}
+      ${'the first of two failures'}                        | ${[throwing(firstError), throwing(secondError)]} | ${firstError}
+      ${'an ApplicationStopError over a failure before it'} | ${[throwing(firstError), throwing(secondStop)]}  | ${secondStop}
+      ${'an ApplicationStopError over a failure after it'}  | ${[throwing(firstStop), throwing(secondError)]}  | ${firstStop}
+      ${'the first of two ApplicationStopErrors'}           | ${[throwing(firstStop), throwing(secondStop)]}   | ${firstStop}
+    `(
+      'should reject, once every listener has run, with $rejection',
+      async ({ listeners, expected }: { listeners: Listener[]; expected: unknown }) => {
+        expect(await callListeners(method, listeners)).toBe(expected);
+      },
+    );
+
+    it.each`
+      logged                                                            | listeners                                                             | lines
+      ${'nothing when one listener throws'}                             | ${[throwing(firstError), noop]}                                       | ${[]}
+      ${'the second of two failures'}                                   | ${[throwing(firstError), throwing(secondError)]}                      | ${[failedAsWell('second failure')]}
+      ${'a failure before the ApplicationStopError it rejects with'}    | ${[throwing(firstError), throwing(secondStop)]}                       | ${[failedAsWell('first failure')]}
+      ${'an ApplicationStopError after the one it rejects with'}        | ${[throwing(firstStop), throwing(secondStop)]}                        | ${[failedAsWell('second stop')]}
+      ${'every failure but the one it rejects with, in listener order'} | ${[throwing(firstError), throwing(firstStop), throwing(secondError)]} | ${[failedAsWell('first failure'), failedAsWell('second failure')]}
+      ${'a GekkoError without its tag'}                                 | ${[throwing(firstError), throwing(new GekkoError('trader', 'down'))]} | ${[failedAsWell('down')]}
+      ${'a value that is no Error as util.inspect writes it'}           | ${[throwing(firstError), throwing({ errno: -13 })]}                   | ${[failedAsWell('{ errno: -13 }')]}
+      ${'the same value thrown by two listeners once, for the second'}  | ${[throwing(firstError), throwing(firstError)]}                       | ${[failedAsWell('first failure')]}
+    `('should log at error level $logged', async ({ listeners, lines }: { listeners: Listener[]; lines: string[][] }) => {
+      await callListeners(method, listeners);
+      expect(vi.mocked(error).mock.calls).toEqual(lines);
     });
   });
 
