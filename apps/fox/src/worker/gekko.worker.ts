@@ -31,9 +31,10 @@ const turnEventLoop = () => new Promise<void>(resolve => setTimeout(resolve, 0))
  * Backtests a variant as the executable runs a configuration file, then posts its outcome and exits: its context built from the
  * configuration (createRunContext, which checks it again), the pipeline run with every plugin of the registry, then the storage closed,
  * whatever the run did. As the bot's process handlers do, a rejection left unhandled is logged as it surfaces, the backtest going on to
- * its end, its row written, and an uncaught exception (a throw in a timer) is logged and ends the backtest at once, the storage closed:
- * either fails the variant. Before it posts the outcome of a run that settled, the worker lets the event loop turn, for what the run
- * left due to surface (see turnEventLoop).
+ * its end, its row written, and an uncaught exception (a throw in a timer, which a backtest gives its turn only as it ends, its row then
+ * written unless it waits for the lock of its file) is logged, the storage closed and the variant posted at once: either fails the
+ * variant. Before it posts the outcome of a run that settled, the worker lets the event loop turn, for what the run left due to surface
+ * (see turnEventLoop).
  *
  * Posted failed when the run failed, the storage could not be closed, a rejection was left unhandled or an exception was not caught,
  * each failure as describeError writes it, in that order (the rejections after what ended the run, the first named and the others
