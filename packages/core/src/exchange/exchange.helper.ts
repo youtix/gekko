@@ -260,12 +260,23 @@ const getOrderTimestamp = ({ timestamp, lastUpdateTimestamp }: CCXTOrder): Epoch
   [timestamp, lastUpdateTimestamp].find(isFiniteNumber) ?? Date.now();
 
 /**
+ * The time of the last change of a ccxt order (see OrderState.lastUpdateTimestamp), or, when ccxt leaves it undefined, now, the time
+ * the state is read: never its timestamp, which a read gives as the creation of the order. ccxt 4.5.39 reads it from Binance's
+ * transactTime (the answer to a creation or a cancelation) or updateTime (a read), and from Hyperliquid's statusTimestamp (a read: its
+ * cancelation is answered without the order, which is read back, see CCXTExchange.getCanceledOrderState).
+ */
+const getLastUpdateTimestamp = ({ lastUpdateTimestamp }: CCXTOrder): EpochTimeStamp =>
+  isFiniteNumber(lastUpdateTimestamp) ? lastUpdateTimestamp : Date.now();
+
+/**
  * Maps a ccxt order onto the state of a Gekko order, its fill and remaining amount completed by getFill. Its timestamp is never left
  * undefined, as ccxt 4.5.39 leaves it when the exchange gives none: createOrderSummary fetches the trades of the order from it
  * (fetchMyTrades), and undefined made that bound NaN, so that no trade was found and logging the bound threw. It falls back on the
  * last update of the order, then on now, the time the state is read. Now is the safest bound left: the order exists by then, so the
  * bound does not reach back into the trades of older orders, which could crowd its own out of the page fetched, though it may miss
  * a fill made before the state was read.
+ * The time of the last change of the order goes beside it (see getLastUpdateTimestamp): a canceled order is dated with it. Dated with
+ * the timestamp, a cancelation that a read reported, rather than the answer to it, was dated with the creation of the order.
  */
 export const mapCcxtOrderToOrder = (order: CCXTOrder): OrderState => ({
   id: order.id,
@@ -273,6 +284,7 @@ export const mapCcxtOrderToOrder = (order: CCXTOrder): OrderState => ({
   ...getFill(order),
   price: order.price,
   timestamp: getOrderTimestamp(order),
+  lastUpdateTimestamp: getLastUpdateTimestamp(order),
 });
 
 /** The side of a ccxt order, which ccxt writes in lower case, or undefined when it is neither a buy nor a sell */

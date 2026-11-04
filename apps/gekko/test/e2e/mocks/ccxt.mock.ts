@@ -458,6 +458,20 @@ export class MockCCXTExchange {
   }
 
   /**
+   * Cancels an open order as Binance does an order canceled from its interface, or one it expires: outside the run, no call to the
+   * account recorded, at the time of the call. The book is matched first, as a call to the account matches it, and what the order
+   * filled stays filled. A query reads it canceled, dated with its creation (time) and its cancelation (updateTime), which ccxt's binance
+   * parses as its timestamp and its lastUpdateTimestamp (see toCcxtOrder). An order that is not open is refused with an Error: a
+   * scenario that cancels one has gone wrong.
+   */
+  public static cancelFromInterface(id: string) {
+    this.settleBook();
+    const order = this.book.get(id);
+    if (order?.status !== 'open') throw new Error(`No order ${id} open on the book to cancel (${order?.status ?? 'never placed'})`);
+    Object.assign(order, { status: 'canceled', lastUpdateTimestamp: Date.now() });
+  }
+
+  /**
    * Places an order on the book before the run, as one placed by hand or by an earlier run: open, resting, what it filled booked as
    * already traded (its trades are none of this run). Returns its id. It reserves what it holds, and a LIMIT one trades with the
    * predefined candles served from then on, as any order resting on the book, at Binance's fees.

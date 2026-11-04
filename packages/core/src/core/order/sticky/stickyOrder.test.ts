@@ -60,7 +60,15 @@ const whenSent = (method: Mock, response: Promise<OrderState>) =>
   );
 
 describe('StickyOrder', () => {
-  const defaultOrder: OrderState = { id: 'order-1', status: 'open', filled: 0, remaining: 5, timestamp: Date.now() };
+  const placedAt = Date.now();
+  const defaultOrder: OrderState = {
+    id: 'order-1',
+    status: 'open',
+    filled: 0,
+    remaining: 5,
+    timestamp: placedAt,
+    lastUpdateTimestamp: placedAt,
+  };
   const flushAsync = () => new Promise(resolve => setTimeout(resolve, 0));
 
   beforeEach(() => {
@@ -1299,6 +1307,31 @@ describe('StickyOrder', () => {
       vi.useRealTimers();
     });
 
+    // Dated with the last change of the state that reports the cancelation, a minute after the creation of the order, which a read gives
+    // as its timestamp: Hyperliquid answers a cancelation by a read of the order (see CCXTExchange.getCanceledOrderState), and a poll
+    // finds the cancelations of the exchange (expired, from its interface). So dated, they predated the cancelation by the order's life.
+    describe('the date of its cancelation', () => {
+      const canceledAt = timestamp + 60_000;
+      const canceled: OrderState = { ...defaultOrder, status: 'canceled', lastUpdateTimestamp: canceledAt };
+      const cancelAnsweredByARead = async () => {
+        fakeExchange.cancelOrder.mockResolvedValueOnce(canceled);
+        await order.cancel();
+      };
+      const pollFindingItCanceled = async () => {
+        fakeExchange.fetchOrder.mockResolvedValueOnce(canceled);
+        await nextCheck();
+      };
+
+      it.each`
+        path                                                     | report
+        ${'answered to the strategy by a read of the order'}     | ${cancelAnsweredByARead}
+        ${'found by a poll, the order canceled by the exchange'} | ${pollFindingItCanceled}
+      `('is the last change of the state when the cancelation is $path', async ({ report }) => {
+        await report();
+        expect(canceledListener.mock.calls).toEqual([[expect.objectContaining({ timestamp: canceledAt })]]);
+      });
+    });
+
     // A cancelation sent again while the first one is in flight would be answered OrderNotFound, the order being canceled already
     describe('while a cancelation is in flight', () => {
       let cancelation: Deferred<OrderState>;
@@ -1734,6 +1767,7 @@ describe('StickyOrder', () => {
       id,
       status,
       timestamp,
+      lastUpdateTimestamp: timestamp,
       ...details,
     });
 

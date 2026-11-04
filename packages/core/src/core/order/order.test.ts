@@ -208,7 +208,7 @@ describe('order', () => {
       ${true}
       ${false}
     `('says mayBeLive $mayBeLive when told, whatever its transaction', ({ mayBeLive }) => {
-      testOrder['recordOrderUpdate']({ id: 'tx1', status: mayBeLive ? 'canceled' : 'open', timestamp: 1000 });
+      testOrder['recordOrderUpdate']({ id: 'tx1', status: mayBeLive ? 'canceled' : 'open', timestamp: 1000, lastUpdateTimestamp: 1000 });
       const listener = vi.fn();
       testOrder.on(ORDER_ERRORED_EVENT, listener);
       testOrder['orderErrored'](new Error('Invalid API key'), mayBeLive);
@@ -264,7 +264,15 @@ describe('order', () => {
 
   // Every state the exchange reports for the order (creation, poll, cancelation, settlement in backtest) is recorded on its transaction
   describe('recordOrderUpdate', () => {
-    const state: OrderState = { id: 'tx1', status: 'open', filled: 2, remaining: 8, price: 100, timestamp: 1000 };
+    const state: OrderState = {
+      id: 'tx1',
+      status: 'open',
+      filled: 2,
+      remaining: 8,
+      price: 100,
+      timestamp: 1000,
+      lastUpdateTimestamp: 1000,
+    };
     const record = (update: Partial<OrderState> = {}) => testOrder['recordOrderUpdate']({ ...state, ...update });
     const getTransaction = () => testOrder['transactions'].get('tx1');
 
@@ -351,6 +359,15 @@ describe('order', () => {
           expect.stringContaining('BUY STICKY order update: transaction tx1 open, filled: 2, remaining: 8, price: 100, at '),
         );
       });
+
+      // The time of the update it reports: a read dates the order with its creation, poll after poll
+      it('dates the state with its last change, not with its timestamp', () => {
+        record({ status: 'canceled', timestamp: 1000, lastUpdateTimestamp: 61_000 });
+        expect(logger.debug).toHaveBeenCalledWith(
+          'order',
+          expect.stringMatching(/transaction tx1 canceled, .*, at 1970-01-01T00:01:01\.000Z$/),
+        );
+      });
     });
 
     // The fill of a transaction is cumulative, and its first timestamp the bound its trades are fetched from (createOrderSummary)
@@ -424,7 +441,9 @@ describe('order', () => {
   // cannot give one: the cumulative fill of each transaction, added up over the transactions (a STICKY order places several)
   describe('getFilledAmount', () => {
     const record = (states: Partial<OrderState>[]) =>
-      states.forEach(state => testOrder['recordOrderUpdate']({ id: 'tx1', status: 'open', timestamp: 1000, ...state }));
+      states.forEach(state =>
+        testOrder['recordOrderUpdate']({ id: 'tx1', status: 'open', timestamp: 1000, lastUpdateTimestamp: 1000, ...state }),
+      );
 
     it.each`
       kind                                       | states                                                                   | expected
@@ -452,7 +471,9 @@ describe('order', () => {
   // the exchange reported for each transaction that filled, weighted by that fill
   describe('getAverageFillPrice', () => {
     const record = (states: Partial<OrderState>[]) =>
-      states.forEach(state => testOrder['recordOrderUpdate']({ id: 'tx1', status: 'open', timestamp: 1000, ...state }));
+      states.forEach(state =>
+        testOrder['recordOrderUpdate']({ id: 'tx1', status: 'open', timestamp: 1000, lastUpdateTimestamp: 1000, ...state }),
+      );
 
     it.each`
       kind                                               | states                                                                         | expected
@@ -473,7 +494,15 @@ describe('order', () => {
 
   // The state recorded, the order follows its transaction: filled, canceled or open
   describe('applyOrderUpdate', () => {
-    const state: OrderState = { id: 'tx1', status: 'open', filled: 2, remaining: 8, price: 100, timestamp: 1000 };
+    const state: OrderState = {
+      id: 'tx1',
+      status: 'open',
+      filled: 2,
+      remaining: 8,
+      price: 100,
+      timestamp: 1000,
+      lastUpdateTimestamp: 1000,
+    };
     const apply = (update: Partial<OrderState> = {}) => testOrder['applyOrderUpdate']({ ...state, ...update });
     const listen = (event: string) => {
       const listener = vi.fn();
@@ -510,6 +539,18 @@ describe('order', () => {
       expect(listener.mock.calls).toEqual([[payload]]);
     });
 
+    // Dated with the last change of the state that reports the cancelation, whichever answer it is. A read dates the order with its
+    // creation (timestamp), and so dated a cancelation a poll found, or one read back after an answer without the order (Hyperliquid)
+    it.each`
+      kind                                                                | states                                                                      | expected
+      ${'reported by the answer to the cancelation, dated with its time'} | ${[{ status: 'canceled', timestamp: 61_000, lastUpdateTimestamp: 61_000 }]} | ${61_000}
+      ${'found by a poll, which dates the order with its creation, 1000'} | ${[{}, { status: 'canceled', lastUpdateTimestamp: 121_000 }]}               | ${121_000}
+    `('dates the cancelation $kind with the last change of that state, $expected', ({ states, expected }) => {
+      const listener = listen(ORDER_CANCELED_EVENT);
+      states.forEach((update: Partial<OrderState>) => apply(update));
+      expect(listener.mock.calls).toEqual([[expect.objectContaining({ timestamp: expected })]]);
+    });
+
     // A MARKET or LIMIT order relayed the answer to the cancelation alone, an amount it left out as 0: a fill an earlier poll had
     // reported was lost, and a cancelation answered without its fill read as 0 filled and 0 remaining
     it.each`
@@ -538,8 +579,8 @@ describe('order', () => {
       const order = new TestOrder('BTC/USDT', 'ee21e130-48bc-405f-be0c-46e9bf17b52e', 'BUY', 'STICKY', 0.1, context);
       const listener = vi.fn();
       order.on(ORDER_CANCELED_EVENT, listener);
-      order['applyOrderUpdate']({ id: 'tx1', status: 'open', filled: 0.02, timestamp: 1000 });
-      order['applyOrderUpdate']({ id: 'tx2', status: 'canceled', filled: 0.07, timestamp: 2000 });
+      order['applyOrderUpdate']({ id: 'tx1', status: 'open', filled: 0.02, timestamp: 1000, lastUpdateTimestamp: 1000 });
+      order['applyOrderUpdate']({ id: 'tx2', status: 'canceled', filled: 0.07, timestamp: 2000, lastUpdateTimestamp: 2000 });
       const [payload] = listener.mock.calls.at(-1) ?? [];
       expect(payload?.[field]).toBe(expected);
     });
@@ -733,6 +774,17 @@ describe('order', () => {
       fakeExchange.fetchOrder.mockRejectedValue(error);
       await testOrder['fetchOrder']('order1');
       expect(testOrder.handleFetchOrderError).toHaveBeenCalledWith(error);
+    });
+
+    // An open order is read every orderSynchInterval: at info level, a realtime GridBot of 20 resting orders wrote 60 lines a minute
+    it.each`
+      level      | log             | logged
+      ${'debug'} | ${logger.debug} | ${[['order', '[ee21e130-48bc-405f-be0c-46e9bf17b52e] Fetching BUY STICKY order']]}
+      ${'info'}  | ${logger.info}  | ${[]}
+    `('should log the read of the order at the $level level: $logged', async ({ log, logged }) => {
+      fakeExchange.fetchOrder.mockResolvedValue({ id: 'order1', status: 'open', filled: 0, price: 100 });
+      await testOrder['fetchOrder']('order1');
+      expect((log as Mock).mock.calls.filter(([, message]) => message.includes('Fetching'))).toEqual(logged);
     });
   });
 });

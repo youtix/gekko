@@ -1188,18 +1188,42 @@ describe('CCXTExchange', () => {
     // What ccxt 4.5.39 returns for the answer of Hyperliquid to a cancelation, { status: 'ok', response: { type: 'cancel', data:
     // { statuses: ['success'] } } }: an order built from the status alone, with neither id nor fill (hyperliquid.js cancelOrders)
     const hyperliquidAcknowledgement = { info: 'success', status: 'success', id: undefined, filled: undefined, remaining: undefined };
-    // What fetchOrder parses from Hyperliquid for that order afterwards: canceled after a partial fill
-    const orderReadBack = { id: '6195281425', status: 'canceled', amount: 1, filled: 0.4, remaining: 0.6, timestamp: 1704346468838 };
+    // What fetchOrder parses from Hyperliquid for that order afterwards: canceled after a partial fill, dated with its creation
+    // (timestamp) and with its cancelation, 50 s later (statusTimestamp, ccxt's lastUpdateTimestamp)
+    const orderReadBack = {
+      id: '6195281425',
+      status: 'canceled',
+      amount: 1,
+      filled: 0.4,
+      remaining: 0.6,
+      timestamp: 1704346440000,
+      lastUpdateTimestamp: 1704346490000,
+    };
     let exchange: CCXTExchange;
     let instance: any;
 
     beforeEach(() => {
-      (mapCcxtOrderToOrder as Mock).mockImplementation(({ id, status, filled, remaining }) => ({ id, status, filled, remaining }));
+      (mapCcxtOrderToOrder as Mock).mockImplementation(({ id, status, filled, remaining, lastUpdateTimestamp }) => ({
+        id,
+        status,
+        filled,
+        remaining,
+        lastUpdateTimestamp,
+      }));
     });
 
     describe('on binance, answered with the order canceled', () => {
-      // What ccxt parses from the answer of Binance to DELETE /api/v3/order: the order itself, with its status and its fill
-      const answer = { id: '1', status: 'canceled', amount: 1, filled: 0.4, remaining: 0.6, timestamp: 1704346468838 };
+      // What ccxt parses from the answer of Binance to DELETE /api/v3/order: the order itself, with its status and its fill, dated with
+      // the time of the cancelation (transactTime, both its timestamp and its lastUpdateTimestamp)
+      const answer = {
+        id: '1',
+        status: 'canceled',
+        amount: 1,
+        filled: 0.4,
+        remaining: 0.6,
+        timestamp: 1704346490000,
+        lastUpdateTimestamp: 1704346490000,
+      };
 
       beforeEach(() => {
         exchange = new CCXTExchange(binanceConfig, watch);
@@ -1217,8 +1241,14 @@ describe('CCXTExchange', () => {
         expect(instance.fetchOrder).not.toHaveBeenCalled();
       });
 
-      it('returns the state of the answer', async () => {
-        expect(await exchange.cancelOrder('BTC/USDT', '1')).toEqual({ id: '1', status: 'canceled', filled: 0.4, remaining: 0.6 });
+      it('returns the state of the answer, dated with the cancelation', async () => {
+        expect(await exchange.cancelOrder('BTC/USDT', '1')).toEqual({
+          id: '1',
+          status: 'canceled',
+          filled: 0.4,
+          remaining: 0.6,
+          lastUpdateTimestamp: 1704346490000,
+        });
       });
     });
 
@@ -1241,12 +1271,13 @@ describe('CCXTExchange', () => {
         expect(instance.fetchOrder).toHaveBeenCalledWith('6195281425', 'BTC/USDC');
       });
 
-      it('returns the state of the order read back', async () => {
+      it('returns the state of the order read back, dated with its cancelation', async () => {
         expect(await exchange.cancelOrder('BTC/USDC', '6195281425')).toEqual({
           id: '6195281425',
           status: 'canceled',
           filled: 0.4,
           remaining: 0.6,
+          lastUpdateTimestamp: 1704346490000,
         });
       });
     });

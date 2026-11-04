@@ -135,9 +135,15 @@ export abstract class Order extends EventEmitter {
     }
   }
 
+  /**
+   * Reads the order, then hands its state to handleFetchOrderSuccess, or the failure to handleFetchOrderError. The read is logged at
+   * debug level: an open order is polled every orderSynchInterval (20 s by default), and at info level a realtime GridBot of 20 resting
+   * orders wrote 60 such lines a minute. What the read finds (a fill, a status change, the end of the order) is logged where it is
+   * handled, and the Trader relays it.
+   */
   protected async fetchOrder(id: string) {
     try {
-      info('order', `[${this.gekkoOrderId}] Fetching ${this.side} ${this.type} order`);
+      debug('order', `[${this.gekkoOrderId}] Fetching ${this.side} ${this.type} order`);
       const order = await this.exchange.fetchOrder(this.symbol, id);
       await this.handleFetchOrderSuccess(order);
     } catch (error) {
@@ -241,13 +247,14 @@ export abstract class Order extends EventEmitter {
    * cumulative: a state that reports none, or less than already recorded (the answer to a cancelation after a poll), leaves it as it
    * is, and it stays undefined until a state reports one, so that a fill never reported is not taken for nothing filled (see
    * getCancelationFill). ORDER_PARTIALLY_FILLED_EVENT is emitted when it grows. Its price is the last one a state reported above 0
-   * (see getAverageFillPrice).
+   * (see getAverageFillPrice). The debug line dates the state with its last change (OrderState.lastUpdateTimestamp), the time of the
+   * update it reports: a read gives the creation of the order as its timestamp, poll after poll.
    */
   protected recordOrderUpdate(order: OrderState) {
-    const { id, status, filled, remaining, price, timestamp } = order;
+    const { id, status, filled, remaining, price, timestamp, lastUpdateTimestamp } = order;
     if (!id || this.isLateUpdate(order)) return false;
 
-    const details = `filled: ${filled}, remaining: ${remaining}, price: ${price}, at ${toISOString(timestamp)}`;
+    const details = `filled: ${filled}, remaining: ${remaining}, price: ${price}, at ${toISOString(lastUpdateTimestamp)}`;
     debug('order', `[${this.gekkoOrderId}] ${this.side} ${this.type} order update: transaction ${id} ${status}, ${details}`);
 
     const transaction = this.transactions.get(id);
@@ -271,17 +278,21 @@ export abstract class Order extends EventEmitter {
    * Applies a state the exchange reported for the order, once recorded (see recordOrderUpdate): executed in full ('closed'), the order
    * is filled; canceled, see handleTransactionCanceled; open, the order is open, which is reported once per transaction. Those are the
    * only statuses a state carries (see processStatus in exchange.helper).
+   * A cancelation is dated with the last change of the state (OrderState.lastUpdateTimestamp), whichever answer reports it: to the
+   * cancelation, to a poll, to the read-back of a cancelation answered OrderNotFound, or to the creation (a market order expired). Dated
+   * with its timestamp, a cancelation that a read reported was dated with the creation of the order: on Hyperliquid, whose cancelation is
+   * read back, always, and on Binance, a cancelation by the exchange (expired, canceled from its interface) that a poll found.
    */
   protected applyOrderUpdate(order: OrderState): void | Promise<void> {
     const previousStatus = this.transactions.get(order.id)?.status;
     if (!this.recordOrderUpdate(order)) return;
 
-    const { status, price, timestamp } = order;
+    const { status, price, lastUpdateTimestamp } = order;
     switch (status) {
       case 'closed':
         return this.orderFilled();
       case 'canceled':
-        return this.handleTransactionCanceled({ price, timestamp });
+        return this.handleTransactionCanceled({ price, timestamp: lastUpdateTimestamp });
       case 'open':
         if (previousStatus !== 'open') this.setStatus('open');
     }

@@ -56,6 +56,7 @@ describe('LimitOrder', () => {
     remaining: 1,
     price: 100,
     timestamp: toTimestamp('2025'),
+    lastUpdateTimestamp: toTimestamp('2025'),
   };
 
   let order: LimitOrder;
@@ -780,6 +781,36 @@ describe('LimitOrder', () => {
       order.on(ORDER_CANCELED_EVENT, listener);
       (order as any).handleCancelOrderSuccess({ ...defaultOrder, status: 'canceled', price: 99.99 });
       expect(listener).toHaveBeenCalledWith(expect.objectContaining({ price: 99.99 }));
+    });
+
+    // Dated with the last change of the state that reports the cancelation, five minutes after the creation of the order, which a read
+    // gives as its timestamp: so dated, the cancelations Hyperliquid answers by a read, and those a poll finds, predated the cancelation
+    // by the whole life of the order
+    describe('the date of its cancelation', () => {
+      const canceledAt = toTimestamp('2025-01-01T00:05:00Z');
+      const canceled: OrderState = { ...defaultOrder, status: 'canceled', lastUpdateTimestamp: canceledAt };
+      const cancelAnsweredWith = (answer: OrderState) => () => {
+        fakeExchange.cancelOrder.mockResolvedValue(answer);
+        return order.cancel();
+      };
+      const cancelReadBack = () => {
+        fakeExchange.cancelOrder.mockRejectedValue(new OrderNotFound('Unknown order'));
+        fakeExchange.fetchOrder.mockResolvedValue(canceled);
+        return order.cancel();
+      };
+
+      it.each`
+        path                                                                                   | report
+        ${'answered by a read of the order canceled (Hyperliquid, see CCXTExchange)'}          | ${cancelAnsweredWith(canceled)}
+        ${'answered with the time of the cancelation alone (Binance, transactTime)'}           | ${cancelAnsweredWith({ ...canceled, timestamp: canceledAt })}
+        ${'found by a poll, the order canceled by the exchange (expired, from its interface)'} | ${() => (order as any).handleFetchOrderSuccess(canceled)}
+        ${'read back after a cancelation answered OrderNotFound'}                              | ${cancelReadBack}
+      `('is the last change of the state when the cancelation is $path', async ({ report }) => {
+        const listener = vi.fn();
+        order.on(ORDER_CANCELED_EVENT, listener);
+        await report();
+        expect(listener.mock.calls).toEqual([[expect.objectContaining({ timestamp: canceledAt })]]);
+      });
     });
 
     it('ignores update if order id is missing', async () => {

@@ -207,7 +207,7 @@ export class StickyOrder extends Order {
     // recorded first (the larger value wins), then the transactions are added up once, so that a partial fill is not counted twice
     if (!this.recordOrderUpdate(order)) return;
 
-    const { status, remaining, price, timestamp } = order;
+    const { status, remaining, price, lastUpdateTimestamp } = order;
     if (status === 'closed' || remaining === 0 || this.getFilledAmount() >= this.amount) return this.orderFilled();
 
     // Accepted, but not completed yet: the transaction is still live, neither canceled nor to be placed again. The order stays
@@ -219,7 +219,8 @@ export class StickyOrder extends Order {
       }
       return;
     }
-    return this.handleTransactionCanceled({ price, timestamp });
+    // Dated with the last change of the state, its cancelation, as Order.applyOrderUpdate dates one
+    return this.handleTransactionCanceled({ price, timestamp: lastUpdateTimestamp });
   }
 
   protected handleCancelOrderError(error: unknown) {

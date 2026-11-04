@@ -461,10 +461,12 @@ export class CCXTExchange implements Exchange {
 
   /**
    * The state of an order the exchange has just accepted to cancel. Binance answers with the order canceled, its id, its status and
-   * the amount filled until then: it is mapped as is. Hyperliquid only acknowledges the request ({ statuses: ['success'] }), which
-   * ccxt turns into an order of status 'success' with neither id nor fill: mapped as is, it would be an order without an id, which
-   * the order classes drop, so that the cancelation of a limit order would never end and a fill made just before it would go unseen.
-   * An answer lacking the id or the status of the order is completed by reading the order back by the id the cancelation was sent for.
+   * the amount filled until then, dated with the time of the cancelation (transactTime): it is mapped as is. Hyperliquid only
+   * acknowledges the request ({ statuses: ['success'] }), which ccxt turns into an order of status 'success' with neither id nor fill:
+   * mapped as is, it would be an order without an id, which the order classes drop, so that the cancelation of a limit order would never
+   * end and a fill made just before it would go unseen. An answer lacking the id or the status of the order is completed by reading the
+   * order back by the id the cancelation was sent for: the read dates the order with its creation, and its cancelation with the last
+   * update of its status (Hyperliquid's statusTimestamp), which the canceled order is dated with (see mapCcxtOrderToOrder).
    */
   private async getCanceledOrderState(symbol: string, id: string, order: CCXTOrder | undefined): Promise<OrderState> {
     if (order && !isNil(order.id) && !isNil(order.status)) return mapCcxtOrderToOrder(order);

@@ -51,9 +51,9 @@ describe('MarketOrder', () => {
   const orderId = 'ee21e130-48bc-405f-be0c-46e9bf17b52e';
   const side: OrderSide = 'BUY';
   const amount = 1;
-  const open: OrderState = { id: 'ex-1', status: 'open', filled: 0, remaining: 1, timestamp: 1000 };
-  const executed: OrderState = { ...open, status: 'closed', filled: 1, remaining: 0, timestamp: 2000 };
-  const canceled: OrderState = { ...open, status: 'canceled', timestamp: 2000 };
+  const open: OrderState = { id: 'ex-1', status: 'open', filled: 0, remaining: 1, timestamp: 1000, lastUpdateTimestamp: 1000 };
+  const executed: OrderState = { ...open, status: 'closed', filled: 1, remaining: 0, timestamp: 2000, lastUpdateTimestamp: 2000 };
+  const canceled: OrderState = { ...open, status: 'canceled', timestamp: 2000, lastUpdateTimestamp: 2000 };
 
   const setMode = (mode: 'backtest' | 'realtime') => mockConfig.getWatch.mockReturnValue({ mode, pairs: [{ symbol: 'BTC/USDT' }] });
   // The next check of an order polled in realtime, every orderSynchInterval
@@ -416,13 +416,14 @@ describe('MarketOrder', () => {
       });
 
       // The exchange expires what the book did not fill, and may answer that without the fill: what an earlier poll reported is kept.
-      // The order used to relay that answer alone, its missing amounts as 0, which a strategy read as nothing executed
-      it('reports the fill an earlier poll saw once a poll finds it expired, answered without its fill', async () => {
+      // The order used to relay that answer alone, its missing amounts as 0, which a strategy read as nothing executed. The read dates
+      // the order with its creation, 1000, and its last change, the expiry, 3000, which dates the cancelation
+      it('reports the fill an earlier poll saw once a poll finds it expired, answered without its fill, dated with its expiry', async () => {
         const listener = vi.fn();
         order.on(ORDER_CANCELED_EVENT, listener);
         fakeExchange.fetchOrder.mockResolvedValueOnce({ ...open, filled: 0.4, remaining: 0.6 });
         await nextCheck();
-        fakeExchange.fetchOrder.mockResolvedValueOnce({ id: 'ex-1', status: 'canceled', timestamp: 3000 });
+        fakeExchange.fetchOrder.mockResolvedValueOnce({ id: 'ex-1', status: 'canceled', timestamp: 1000, lastUpdateTimestamp: 3000 });
         await nextCheck();
         expect(listener.mock.calls).toEqual([[{ status: 'canceled', filled: 0.4, remaining: 0.6, timestamp: 3000 }]]);
       });
@@ -772,7 +773,7 @@ describe('MarketOrder', () => {
 
     it('should handle fetch success via handleFetchOrderSuccess', () => {
       const spyApply = vi.spyOn(order as any, 'applyOrderUpdate');
-      const orderState: OrderState = { id: 'ex-1', status: 'open', timestamp: 1000 };
+      const orderState: OrderState = { id: 'ex-1', status: 'open', timestamp: 1000, lastUpdateTimestamp: 1000 };
 
       (order as any).handleFetchOrderSuccess(orderState);
 
@@ -830,7 +831,7 @@ describe('MarketOrder', () => {
     it('should handle create error via handleCreateOrderSuccess', () => {
       // already covered in launch, but ensuring direct call works too
       const spyApply = vi.spyOn(order as any, 'applyOrderUpdate');
-      const orderState: OrderState = { id: 'ex-1', status: 'open', timestamp: 1000 };
+      const orderState: OrderState = { id: 'ex-1', status: 'open', timestamp: 1000, lastUpdateTimestamp: 1000 };
 
       (order as any).handleCreateOrderSuccess(orderState);
 
@@ -839,7 +840,7 @@ describe('MarketOrder', () => {
 
     it('should handle cancel success via handleCancelOrderSuccess', () => {
       const spyApply = vi.spyOn(order as any, 'applyOrderUpdate');
-      const orderState: OrderState = { id: 'ex-1', status: 'canceled', timestamp: 1000 };
+      const orderState: OrderState = { id: 'ex-1', status: 'canceled', timestamp: 1000, lastUpdateTimestamp: 1000 };
 
       (order as any).handleCancelOrderSuccess(orderState);
 
@@ -862,13 +863,14 @@ describe('MarketOrder', () => {
       expect(spyEmit).toHaveBeenCalledWith(ORDER_PARTIALLY_FILLED_EVENT, 0.5);
     });
 
+    // A canceled order is dated with the last change of the state, 2000, not with the time the exchange dates the order with
     it.each`
       status        | expectedEvent            | payload
       ${'closed'}   | ${ORDER_COMPLETED_EVENT} | ${{ status: 'filled', filled: true }}
-      ${'canceled'} | ${ORDER_CANCELED_EVENT}  | ${{ status: 'canceled', filled: 0, remaining: 1, timestamp: 1000 }}
+      ${'canceled'} | ${ORDER_CANCELED_EVENT}  | ${{ status: 'canceled', filled: 0, remaining: 1, timestamp: 2000 }}
     `('should emit $expectedEvent when status is $status', ({ status, expectedEvent, payload }) => {
       const spyEmit = vi.spyOn(order, 'emit');
-      const orderState = { id: 'ex-1', status, filled: 0, remaining: 1, timestamp: 1000 };
+      const orderState = { id: 'ex-1', status, filled: 0, remaining: 1, timestamp: 1000, lastUpdateTimestamp: 2000 };
 
       (order as any).applyOrderUpdate(orderState);
 

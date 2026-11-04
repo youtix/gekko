@@ -6,7 +6,7 @@ import { TradingPair } from '@gekko/shared/models/utility.types';
 import { DUMMY_CANDLE_BUFFER_SIZE, DUMMY_CANDLE_BUFFER_TRIM_MARGIN, LIMITS } from '../exchange.const';
 import { InvalidOrder } from '../exchange.error';
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
-import { map, omit, range } from 'lodash-es';
+import { map, omit, pick, range } from 'lodash-es';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { Watch } from '@gekko/schemas/configuration/configuration.types';
 import { DummyCentralizedExchange } from './dummyCentralizedExchange';
@@ -1204,6 +1204,65 @@ describe('DummyCentralizedExchange', () => {
       const order = await exchange.createLimitOrder(SYMBOL, 'SELL', 1, 150);
       await exchange.processOneMinuteBucket(createBucket(Date.now(), { high: 120 }));
       expect(await exchange.fetchOrder(SYMBOL, order.id)).toMatchObject({ status: 'open' });
+    });
+  });
+
+  // A state is dated as a read of Binance dates an order: with its creation (time), which the trades of the order are fetched from, and
+  // with its last change (updateTime), its fill or its cancelation, which a canceled order is dated with, both on the clock of the
+  // exchange, the close of the last candle processed. The order is created at now, the close of the candle of the last minute; the
+  // candle of now closes a minute later (low 90, high 110: it fills a BUY at 95, not one at 50), and the next one two minutes later.
+  describe('the dates of the state of an order', () => {
+    const createdAt = Date.UTC(2024, 0, 1);
+    const minutesLater = (minutes: number) => createdAt + minutes * 60_000;
+    const startExchange = async () => {
+      const exchange = createExchange();
+      await exchange.processOneMinuteBucket(createBucket(createdAt - 60_000));
+      return exchange;
+    };
+    const nextCandle = (exchange: DummyCentralizedExchange, minutes = 0) =>
+      exchange.processOneMinuteBucket(createBucket(createdAt + minutes * 60_000));
+
+    const createdLimit = async () => (await startExchange()).createLimitOrder(SYMBOL, 'BUY', 1, 95);
+    const createdMarket = async () => (await startExchange()).createMarketOrder(SYMBOL, 'BUY', 1);
+    const canceledAMinuteLater = async () => {
+      const exchange = await startExchange();
+      const { id } = await exchange.createLimitOrder(SYMBOL, 'BUY', 1, 50);
+      await nextCandle(exchange);
+      return exchange.cancelOrder(SYMBOL, id);
+    };
+    const canceledThenRead = async () => {
+      const exchange = await startExchange();
+      const { id } = await exchange.createLimitOrder(SYMBOL, 'BUY', 1, 50);
+      await nextCandle(exchange);
+      await exchange.cancelOrder(SYMBOL, id);
+      await nextCandle(exchange, 1);
+      return exchange.fetchOrder(SYMBOL, id);
+    };
+    const filledThenRead = async () => {
+      const exchange = await startExchange();
+      const { id } = await exchange.createLimitOrder(SYMBOL, 'BUY', 1, 95);
+      await nextCandle(exchange);
+      await nextCandle(exchange, 1);
+      return exchange.fetchOrder(SYMBOL, id);
+    };
+    const filledAsSettled = async () => {
+      const exchange = await startExchange();
+      const onSettled = vi.fn();
+      await exchange.createLimitOrder(SYMBOL, 'BUY', 1, 95, onSettled);
+      await nextCandle(exchange);
+      return onSettled.mock.calls[0][0];
+    };
+
+    it.each`
+      state                                                            | answer                  | expected
+      ${'a limit order just created'}                                  | ${createdLimit}         | ${{ timestamp: createdAt, lastUpdateTimestamp: createdAt }}
+      ${'a market order, executed as it is created'}                   | ${createdMarket}        | ${{ timestamp: createdAt, lastUpdateTimestamp: createdAt }}
+      ${'a limit order canceled a minute after its creation'}          | ${canceledAMinuteLater} | ${{ timestamp: createdAt, lastUpdateTimestamp: minutesLater(1) }}
+      ${'a limit order canceled, read a minute after its cancelation'} | ${canceledThenRead}     | ${{ timestamp: createdAt, lastUpdateTimestamp: minutesLater(1) }}
+      ${'a limit order filled, read a minute after its fill'}          | ${filledThenRead}       | ${{ timestamp: createdAt, lastUpdateTimestamp: minutesLater(1) }}
+      ${'a limit order filled, as the settlement callback reports it'} | ${filledAsSettled}      | ${{ timestamp: createdAt, lastUpdateTimestamp: minutesLater(1) }}
+    `('dates $state with $expected', async ({ answer, expected }) => {
+      expect(pick(await answer(), ['timestamp', 'lastUpdateTimestamp'])).toEqual(expected);
     });
   });
 

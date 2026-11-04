@@ -1,12 +1,16 @@
+import { ORDER_CANCELED_EVENT } from '@gekko/shared/constants/event.const';
 import { ONE_MINUTE } from '@gekko/shared/constants/time.const';
+import type { OrderCanceledEvent } from '@gekko/shared/models/event.types';
+import type { Trader } from '@gekko/plugins/trader/trader';
 import type { debugOrderScriptStrategySchema } from '@gekko/schemas/strategies/debug/debugOrderScript.schema';
-import { afterEach, beforeEach, describe, expect, it } from 'bun:test';
+import { afterEach, beforeEach, describe, expect, it, spyOn } from 'bun:test';
 import type { z } from 'zod';
 import { startFakeClock } from '../../helpers/clock.helper';
 import type { RawConfiguration } from '../../helpers/configuration.helper';
 import {
   endRealtimeRun,
   mockRealtimeModules,
+  runRealtimeFor,
   runRealtimeUntil,
   runRealtimeUntilEnd,
   startRealtimeRun,
@@ -87,6 +91,13 @@ const book = () =>
     status,
   }));
 
+/**
+ * The date of each cancelation the Trader relayed, oldest first (orderCanceled's order.orderCancelationDate), as it queued it: what the
+ * EventSubscriber's order_cancel message gives as its time, and the RoundTripAnalyzer the date of what a canceled order filled
+ */
+let cancelationDates: EpochTimeStamp[];
+let traderEventsSpy: { mockRestore: () => void };
+
 /** The line the Trader logs as it summarizes a completed order, executed at `time` (see Trader.checkOrderSummary) */
 const summaryLine = (order: string, time: string, figures: string) =>
   `${order} order summary for BTC/USDT: Completed at: 2024-01-01T${time}.000Z ${figures}`;
@@ -108,7 +119,7 @@ const BEFORE_FIRST_ORDER_CALLS: AccountCall[] = [...START_UP_CALLS, { method: 'f
 // --------------------------------------------------------------------------
 
 describe('E2E: Realtime Live Trader Flow', () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     clearLogs();
 
     // Reset mocks
@@ -116,10 +127,26 @@ describe('E2E: Realtime Live Trader Flow', () => {
     exchange = TESTNET;
     isDisclaimerAccepted = undefined;
     startFakeClock();
+
+    // The date of every cancelation the Trader queues is recorded as it is queued. The pipeline builds its Trader from this class once
+    // the run starts.
+    const { Trader } = await import('@gekko/plugins/trader/trader');
+    const queue = Trader.prototype.addDeferredEmit;
+    cancelationDates = [];
+    traderEventsSpy = spyOn(Trader.prototype, 'addDeferredEmit').mockImplementation(function (this: Trader, name, payload) {
+      if (name === ORDER_CANCELED_EVENT) cancelationDates.push((payload as OrderCanceledEvent).order.orderCancelationDate);
+      queue.call(this, name, payload);
+    });
   });
 
   // A realtime run never ends by itself: each test ends its own, plugins finalised and orders stopped, before the next one starts
-  afterEach(() => endRealtimeRun());
+  afterEach(async () => {
+    try {
+      await endRealtimeRun();
+    } finally {
+      traderEventsSpy.mockRestore();
+    }
+  });
 
   // bun:test takes no tagged-template table
   it.each<{ title: string; settings: { exchange: BinanceExchange; isDisclaimerAccepted?: boolean }; isSandboxModeEnabled: boolean }>([
@@ -317,6 +344,7 @@ describe('E2E: Realtime Live Trader Flow', () => {
       warnings: warnings(),
       book: book(),
       balances: MockCCXTExchange.getBalances(),
+      canceledAt: cancelationDates,
     }).toEqual({
       calls: [
         ...BEFORE_FIRST_ORDER_CALLS,
@@ -346,6 +374,61 @@ describe('E2E: Realtime Live Trader Flow', () => {
       // 0.4 BTC at 90 cost 36 USDT, and the maker fee of 0.1 % went in BTC: 0.4 - 0.0004. The 54 USDT the order held for the 0.6 it had
       // left are free again.
       balances: { BTC: { free: 0.3996, used: 0, total: 0.3996 }, USDT: { free: 9964, used: 0, total: 9964 } },
+      // The time Binance dates its answer to the cancelation with (transactTime), the second the strategy canceled the order in
+      canceledAt: [at('12:03:02')],
+    });
+  });
+
+  it('Scenario F: a resting LIMIT BUY filled in part, canceled from the interface of Binance, read canceled by a poll and dated with its cancelation', async () => {
+    // Scenario B's LIMIT BUY of 1 at 90.004, which candle 1 fills 0.4 of, but canceled outside Gekko, from the interface of the
+    // exchange, at 12:02:30: no strategy line says it canceled it.
+    strategy = script([{ candle: 0, side: 'BUY', type: 'LIMIT', price: 90.004 }]);
+    MockCCXTExchange.setBalances({ BTC: 0, USDT: 10000 });
+    MockCCXTExchange.setPredefinedCandles('BTC/USDT', [
+      { close: 100 },
+      { open: 95, low: 89, close: 92, volume: 0.4 },
+      { close: 95 },
+      { close: 96 },
+    ]);
+
+    // To 12:02:30: the order created at 12:01:02, its poll of 12:02:02 reading the 0.4 BTC candle 1 filled of it
+    await runRealtimeFor({ minutes: 2 });
+    MockCCXTExchange.cancelFromInterface('1');
+    // The poll of 12:02:42 reads it canceled, reported between two buckets, and heard as the next one arrives, candle 2's at 12:03:02
+    await runRealtimeUntil(() => findTextLine('Order 0 canceled:') !== undefined, { maxMinutes: 3 });
+
+    expect({
+      calls: MockCCXTExchange.accountCalls,
+      trader: traderLines(),
+      strategy: strategyLines(),
+      warnings: warnings(),
+      book: book(),
+      balances: MockCCXTExchange.getBalances(),
+      canceledAt: cancelationDates,
+    }).toEqual({
+      calls: [
+        ...BEFORE_FIRST_ORDER_CALLS,
+        { method: 'createOrder', symbol: 'BTC/USDT', type: 'limit', side: 'BUY', amount: 1, price: 90 },
+        // Polled every 20 s from its creation at 12:01:02: 12:01:22, 12:01:42, 12:02:02 (the fill of 0.4), 12:02:22, and 12:02:42, which
+        // reads it canceled; then the Trader reads the portfolio the cancelation leaves
+        ...Array.from({ length: 5 }, (): AccountCall => ({ method: 'fetchOrder', id: '1', symbol: 'BTC/USDT' })),
+        { method: 'fetchBalance' },
+      ],
+      trader: [
+        '[#1] Status changed: OPEN',
+        '[#1] BUY LIMIT order fill, total filled: 0.4',
+        // The status change the listeners of the creation log, which a cancelation by the strategy replaces with its own
+        '[#1] Status changed: CANCELED',
+        '[#1] BUY LIMIT order canceled (filled: 0.4, remaining: 0.6)',
+      ],
+      strategy: ['Order 0 created on candle 0: BUY LIMIT of 1 on BTC/USDT at 90.004', 'Order 0 canceled: filled 0.4, remaining 0.6'],
+      warnings: [],
+      book: [{ id: '1', type: 'limit', side: 'buy', price: 90, amount: 1, filled: 0.4, remaining: 0.6, status: 'canceled' }],
+      // As in Scenario B: 0.4 BTC bought at 90 for 36 USDT, less the maker fee of 0.1 % taken in BTC, the 54 USDT held for the rest free
+      balances: { BTC: { free: 0.3996, used: 0, total: 0.3996 }, USDT: { free: 9964, used: 0, total: 9964 } },
+      // The poll reads the order dated with its creation, 12:01:02 (Binance's time), and its cancelation, 12:02:30 (updateTime): the
+      // cancelation is dated with the second, the time the order was canceled at, not with the first, a minute and a half before
+      canceledAt: [at('12:02:30')],
     });
   });
 

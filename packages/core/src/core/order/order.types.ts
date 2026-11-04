@@ -54,6 +54,10 @@ export type OrderSummary = {
   orderExecutionDate: EpochTimeStamp;
 };
 export type OrderCancelDetails = {
+  /**
+   * When the order was canceled: the last change of the state that reported its cancelation (OrderState.lastUpdateTimestamp), which the
+   * Trader relays as orderCancelationDate
+   */
   timestamp: EpochTimeStamp;
   filled?: number;
   remaining?: number;

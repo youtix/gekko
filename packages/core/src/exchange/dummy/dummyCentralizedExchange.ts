@@ -192,6 +192,7 @@ export class DummyCentralizedExchange implements Exchange {
         remaining: orderAmount,
         amount: orderAmount,
         timestamp: this.currentTimestamp,
+        lastUpdateTimestamp: this.currentTimestamp,
         side,
         type: 'LIMIT',
       };
@@ -248,6 +249,7 @@ export class DummyCentralizedExchange implements Exchange {
         remaining: 0,
         amount: orderAmount,
         timestamp: this.currentTimestamp,
+        lastUpdateTimestamp: this.currentTimestamp,
         side,
         type: 'MARKET',
       };
@@ -266,7 +268,7 @@ export class DummyCentralizedExchange implements Exchange {
       if (order.status === 'open') {
         this.releaseBalance(order);
         order.status = 'canceled';
-        order.timestamp = this.currentTimestamp;
+        order.lastUpdateTimestamp = this.currentTimestamp;
 
         const orders = this.getOrderBook(order.symbol)[order.side];
         const idx = orders.indexOf(order);
@@ -435,7 +437,7 @@ export class DummyCentralizedExchange implements Exchange {
     order.status = 'closed';
     order.filled = order.amount;
     order.remaining = 0;
-    order.timestamp = this.currentTimestamp;
+    order.lastUpdateTimestamp = this.currentTimestamp;
 
     if (order.side === 'BUY') {
       const cost = this.getLimitBuyCost(symbol, order.amount, price);
@@ -484,9 +486,14 @@ export class DummyCentralizedExchange implements Exchange {
     sellOrders.splice(index, 0, order);
   }
 
+  /**
+   * The state of an order as the exchange answers it, dated as a read of Binance dates one: its creation (time), and its last change, its
+   * fill or its cancelation (updateTime), on the clock of the simulator (see currentTimestamp). A canceled order is dated with the second
+   * (see Order.applyOrderUpdate), the trades of an order fetched from the first (see Order.recordOrderUpdate).
+   */
   private cloneOrder(order: DummyInternalOrder): OrderState {
-    const { id, status, filled, remaining, price, timestamp } = order;
-    return { id, status, filled, remaining, price, timestamp };
+    const { id, status, filled, remaining, price, timestamp, lastUpdateTimestamp } = order;
+    return { id, status, filled, remaining, price, timestamp, lastUpdateTimestamp };
   }
 
   /** An order of a book as fetchOpenOrders lists it: a limit order, whose fill and remaining amount createLimitOrder sets */
@@ -510,7 +517,8 @@ export class DummyCentralizedExchange implements Exchange {
       id: order.id,
       amount: order.filled ?? 0,
       price: order.price ?? 0,
-      timestamp: order.timestamp,
+      // The time of the fill: an order executes at its last change, on the candle that fills it, or at its creation for a market order
+      timestamp: order.lastUpdateTimestamp,
       fee: { rate: shiftDecimalPoint(this.getFeeRate(order.symbol, order.type), 2), currency },
     };
 

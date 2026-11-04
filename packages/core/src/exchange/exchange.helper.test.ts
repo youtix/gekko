@@ -417,6 +417,77 @@ describe('exchange.helper', () => {
         remaining: undefined,
         price: undefined,
         timestamp: now,
+        lastUpdateTimestamp: now,
+      });
+    });
+
+    // The time of the last change of the order, which a canceled order is dated with: a read dates the order with its creation, which
+    // dated a cancelation a read reported with the whole life of the order. ccxt 4.5.39 gives Binance's transactTime or updateTime and
+    // Hyperliquid's statusTimestamp as lastUpdateTimestamp; without it, the time of the read, now, never the timestamp of the order.
+    it.each`
+      description                                                                            | timestamp        | lastUpdateTimestamp | expected
+      ${'keeps the last update a read of Binance gives (updateTime), after its creation'}    | ${1704346468838} | ${1704346490000}    | ${1704346490000}
+      ${'keeps the last update the answer to a cancelation of Binance gives (transactTime)'} | ${1704346490000} | ${1704346490000}    | ${1704346490000}
+      ${'falls back on now, not on the timestamp, without a last update'}                    | ${1704346468838} | ${undefined}        | ${now}
+      ${'falls back on now when the last update is not a finite number'}                     | ${1704346468838} | ${Number.NaN}       | ${now}
+    `('$description', ({ timestamp, lastUpdateTimestamp, expected }) => {
+      const order: any = { id: '1', status: 'canceled', amount: 2, filled: 0, remaining: 2, price: 100, timestamp, lastUpdateTimestamp };
+      expect(utils.mapCcxtOrderToOrder(order).lastUpdateTimestamp).toBe(expected);
+    });
+
+    // A read of Hyperliquid (orderStatus), parsed by ccxt 4.5.39's hyperliquid: the order dated with its creation (order.timestamp), its
+    // status with its last change (statusTimestamp), here a cancelation 50 s later. Its cancelation is answered without the order, which
+    // CCXTExchange reads back (see getCanceledOrderState).
+    it('maps the read of an order Hyperliquid canceled with its creation as its timestamp and its cancelation as its last update', () => {
+      const exchange = new hyperliquid({});
+      const statusResponse = {
+        order: {
+          coin: 'BTC',
+          limitPx: '90000.0',
+          oid: 6195281425,
+          orderType: 'Limit',
+          origSz: '1.0',
+          side: 'B',
+          sz: '0.6',
+          tif: 'Gtc',
+          timestamp: 1704346440000,
+        },
+        status: 'canceled',
+        statusTimestamp: 1704346490000,
+      };
+      const order = exchange.parseOrder(statusResponse, { symbol: 'BTC/USDC', base: 'BTC', quote: 'USDC' } as any);
+      expect(pick(utils.mapCcxtOrderToOrder(order), ['status', 'timestamp', 'lastUpdateTimestamp'])).toEqual({
+        status: 'canceled',
+        timestamp: 1704346440000,
+        lastUpdateTimestamp: 1704346490000,
+      });
+    });
+
+    // A read of Binance (GET /api/v3/order), parsed by ccxt 4.5.39's binance: the order created (time), canceled from the interface of the
+    // exchange 50 s later (updateTime), the cancelation a poll finds
+    it('maps the read of an order canceled on Binance with its creation as its timestamp and its cancelation as its last update', () => {
+      const exchange = new binance({});
+      const queryResponse = {
+        symbol: 'BTCUSDT',
+        orderId: 28457,
+        clientOrderId: 'x-1',
+        price: '90000.00',
+        origQty: '1.00000',
+        executedQty: '0.40000',
+        cummulativeQuoteQty: '36000.00000',
+        status: 'CANCELED',
+        timeInForce: 'GTC',
+        type: 'LIMIT',
+        side: 'BUY',
+        time: 1704346440000,
+        updateTime: 1704346490000,
+        workingTime: 1704346440000,
+      };
+      const order = exchange.parseOrder(queryResponse, { symbol: 'BTC/USDT', base: 'BTC', quote: 'USDT', spot: true } as any);
+      expect(pick(utils.mapCcxtOrderToOrder(order), ['status', 'timestamp', 'lastUpdateTimestamp'])).toEqual({
+        status: 'canceled',
+        timestamp: 1704346440000,
+        lastUpdateTimestamp: 1704346490000,
       });
     });
 

@@ -651,13 +651,15 @@ describe('MockCCXTExchange', () => {
       });
     });
 
+    // Binance dates its answer with the time of the cancelation alone (transactTime), which ccxt's binance gives as both dates
     it('should cancel an open order with what it filled, dated with the cancelation, its reserve released', async () => {
       await serveCandles(2);
       await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
       await serveCandles(1);
       setSystemTime(new Date(NOW + ONE_MINUTE));
       const answer = await exchange.cancelOrder('1', BTC);
-      expect({ answer: { ...describeOrder(answer), timestamp: answer.timestamp }, balances: MockCCXTExchange.getBalances() }).toEqual({
+      const { timestamp, lastUpdateTimestamp } = answer;
+      expect({ answer: { ...describeOrder(answer), timestamp, lastUpdateTimestamp }, balances: MockCCXTExchange.getBalances() }).toEqual({
         answer: {
           id: '1',
           type: 'limit',
@@ -668,9 +670,56 @@ describe('MockCCXTExchange', () => {
           remaining: 0.6,
           status: 'canceled',
           timestamp: NOW + ONE_MINUTE,
+          lastUpdateTimestamp: NOW + ONE_MINUTE,
         },
         balances: { BTC: { free: 0.3996, used: 0, total: 0.3996 }, USDT: { free: 9964, used: 0, total: 9964 } },
       });
+    });
+
+    // Canceled from the interface of the exchange a minute after its creation, the 0.4 candle 2 filled kept: no call of the run, and
+    // the query that follows reads the order dated with its creation (time) and its cancelation (updateTime)
+    it('should cancel an open order from its interface, outside the run, read canceled with its creation and its cancelation', async () => {
+      await serveCandles(2);
+      await exchange.createOrder(BTC, 'limit', 'buy', 1, 90);
+      await serveCandles(1);
+      setSystemTime(new Date(NOW + ONE_MINUTE));
+      MockCCXTExchange.cancelFromInterface('1');
+      setSystemTime(new Date(NOW + 2 * ONE_MINUTE));
+      const read = await exchange.fetchOrder('1', BTC);
+      const { timestamp, lastUpdateTimestamp } = read;
+      expect({
+        read: { ...describeOrder(read), timestamp, lastUpdateTimestamp },
+        calls: MockCCXTExchange.accountCalls.map(({ method }) => method),
+        balances: MockCCXTExchange.getBalances(),
+      }).toEqual({
+        read: {
+          id: '1',
+          type: 'limit',
+          side: 'buy',
+          price: 90,
+          amount: 1,
+          filled: 0.4,
+          remaining: 0.6,
+          status: 'canceled',
+          timestamp: NOW,
+          lastUpdateTimestamp: NOW + ONE_MINUTE,
+        },
+        calls: ['createOrder', 'fetchOrder'],
+        balances: { BTC: { free: 0.3996, used: 0, total: 0.3996 }, USDT: { free: 9964, used: 0, total: 9964 } },
+      });
+    });
+
+    it.each<{ title: string; setUp: () => Promise<unknown>; message: string }>([
+      {
+        title: 'an order executed',
+        setUp: () => exchange.createOrder(BTC, 'market', 'buy', 1, 100),
+        message: 'No order 1 open on the book to cancel (closed)',
+      },
+      { title: 'an order never placed', setUp: async () => undefined, message: 'No order 1 open on the book to cancel (never placed)' },
+    ])('should refuse to cancel $title from the interface', async ({ setUp, message }) => {
+      await serveCandles(1);
+      await setUp();
+      expect(() => MockCCXTExchange.cancelFromInterface('1')).toThrow(message);
     });
 
     it('should give each order the status Binance answers it with, which ccxt parses (info)', async () => {
