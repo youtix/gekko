@@ -5,8 +5,19 @@
       "type": "bun",
       "internalConsoleOptions": "openOnSessionStart",
       "request": "launch",
-      "name": "Debug App (gekko2)",
-      "program": "${workspaceFolder}/src/gekko2.ts",
+      "name": "Debug App (gekko)",
+      "program": "${workspaceFolder}/apps/gekko/src/gekko.ts",
+      "cwd": "${workspaceFolder}",
+      "stopOnEntry": false,
+      "watchMode": false
+    },
+    {
+      "type": "bun",
+      "internalConsoleOptions": "openOnSessionStart",
+      "request": "launch",
+      "name": "Debug Fox",
+      "program": "${workspaceFolder}/apps/fox/src/fox.ts",
+      "args": ["--template-path", "apps/fox/templates/dema.yml"],
       "cwd": "${workspaceFolder}",
       "stopOnEntry": false,
       "watchMode": false

@@ -1,19 +1,26 @@
+# Never write your bot token in this file, which git tracks: copy it to config/realtime-supervision.local.yml (git ignores every
+# config/*.local.* file), fill in the token there and point GEKKO_CONFIG_FILE_PATH at the copy. Gekko takes every value as written: it
+# reads no environment variable inside the file (token: ${BOT_TOKEN} is the text ${BOT_TOKEN}).
+
 watch:
-  asset: BTC
+  assets:
+    - BTC
   currency: USDT
-  mode: realtime
   timeframe: 5m
+  mode: realtime
 
 exchange:
   name: paper-binance
   simulationBalance:
-    asset: 100
-    currency: 300000
+    - assetName: BTC
+      balance: 100
+    - assetName: USDT
+      balance: 300000
 
 strategy:
   name: DebugAdvice
-  each: 4
-  wait: 0
+  each: 2 # one advice every 2 candles: a SELL, then a BUY, and so on
+  wait: 0 # candles to let go by before the first advice
 
 plugins:
   - name: TradingAdvisor
@@ -24,6 +31,7 @@ plugins:
   - name: Supervision
     token: # Your telegram bot token
     botUsername: # Your telegram bot username
+    # chatId: 123456789 # Optional: the chat the bot talks to; without it, the first chat that sends it a command after start-up is bound
     cpuThreshold: 80
     memoryThreshold: 1024
     cpuCheckInterval: 10000

@@ -1,0 +1,33 @@
+{
+  "name": "@gekko/core",
+  "private": true,
+  "type": "module",
+  "exports": {
+    "./*": "./src/*.ts"
+  },
+  "scripts": {
+    "type:check": "bun tsc --noEmit --incremental --tsBuildInfoFile ../../node_modules/.cache/tsc/core.tsbuildinfo",
+    "test": "vitest --run",
+    "test:coverage": "vitest run --coverage",
+    "test:watch": "vitest",
+    "bench": "vitest --run bench",
+    "bench:watch": "vitest bench"
+  },
+  "dependencies": {
+    "@gekko/schemas": "workspace:*",
+    "@gekko/shared": "workspace:*",
+    "ccxt": "^4.5.39",
+    "date-fns": "^4.1.0",
+    "https-proxy-agent": "^7.0.6",
+    "js-yaml": "^4.1.1",
+    "json5": "^2.2.3",
+    "lodash-es": "^4.17.23",
+    "protobufjs": "^8.0.0",
+    "socks-proxy-agent": "^8.0.5",
+    "winston": "^3.19.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "vitest": "^4.0.18"
+  }
+}

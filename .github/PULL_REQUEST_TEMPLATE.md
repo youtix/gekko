@@ -8,10 +8,14 @@
 
 ## Checklist
 
-- [ ] Code is formatted using Prettier
+<!-- CI runs the first six on every pull request, the pre-push hook the tests with coverage -->
+
+- [ ] Formatting passes (`bun run format:check`)
 - [ ] Linting passes (`bun run lint:check`)
-- [ ] Tests pass (`bun run test`)
 - [ ] Type checks pass (`bun run type:check`)
+- [ ] Tests pass with coverage (`bun run test:coverage`)
+- [ ] The end-to-end tests pass (`bun run test:e2e`)
+- [ ] Both executables build (`bun run build:exec`: `dist/gekko` and `dist/fox`)
 - [ ] I've added or updated documentation (if applicable)
 
 ## Screenshots or Additional Context (optional)
