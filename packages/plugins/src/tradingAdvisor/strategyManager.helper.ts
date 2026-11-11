@@ -2,23 +2,52 @@ import { ORDER_SIDES, ORDER_TYPES } from '@gekko/shared/constants/order.const';
 import { copyPayload } from '@gekko/shared/helpers/event/event.helper';
 import { StrategyOrder } from '@gekko/shared/models/advice.types';
 import { CandleBucket, ExchangeEvent, OrderInitiatedEvent } from '@gekko/shared/models/event.types';
+import { OrderSide } from '@gekko/shared/models/order.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { isFinitePositive } from '@gekko/shared/utils/math/math.utils';
 import { listInWords } from '@gekko/shared/utils/string/string.utils';
 import { isNil, isPlainObject } from 'lodash-es';
 import { inspect } from 'node:util';
-import { ORDER_KEYS, SIZING_KEYS, TRAILING_KEYS } from './strategyManager.const';
-import { isReadBeforeEnd } from '@gekko/strategies/helpers/positionTracker/positionTracker.helper';
+import { ORDER_KEYS, POSITION_BUY_KEYS, POSITION_SELL_KEYS, SIZING_KEYS, TRAILING_KEYS } from './strategyManager.const';
+import { isReadBeforeEnd } from './positionTracker.helper';
+import type { IndicatorResults } from '@gekko/strategies/strategy.types';
 import { TrailingStopState } from '@gekko/strategies/trailingStopManager.types';
 
 /**
- * What is wrong with the pair an order or an indicator names, or undefined when it is watched: a key of `marketData`, which the
- * TradingAdvisor fills with every watched pair before the first candle. Gekko has no candle, price or balance of any other pair.
+ * What is wrong with the pair an order, an indicator or the position book names, or undefined when it is watched: a key of
+ * `marketData`, which the TradingAdvisor fills with every watched pair before the first candle. Gekko has no candle, price or balance of
+ * any other pair.
  */
 export const getPairProblem = (symbol: TradingPair, marketData: Map<TradingPair, MarketData>): string | undefined => {
   if (marketData.has(symbol)) return;
   return `symbol must be one of the watched pairs (${[...marketData.keys()].join(', ')}), got ${inspect(symbol)}`;
+};
+
+/**
+ * What is wrong with the pairs a strategy gives the position book to track (see Positions.track), or undefined when they are an array
+ * of at least one item, each of which is then checked as a watched pair (see getPairProblem), then for a repeat (see
+ * getRepeatedPairProblem). Left out, the book tracks every watched pair, which the caller resolves before asking. Anything else an
+ * untyped strategy can pass, a pair alone, a Set or a Map of pairs, is refused, and so is an empty array: it would track no pair, and
+ * every order of tools.positions would be refused for want of one, from the first signal on.
+ */
+export const getPairListProblem = (pairs: unknown): string | undefined => {
+  if (Array.isArray(pairs) && pairs.length > 0) return;
+  return `pairs must be an array of at least one watched pair, or left out to track every watched pair, got ${inspect(pairs)}`;
+};
+
+/**
+ * What is wrong with the watched pairs a strategy gives the position book to track, or undefined when it names each once: the first
+ * pair named again. The strategies walk the pairs tracked on every candle, each pair once: one named twice would be asked for twice,
+ * and a single pair named twice would make a book of several pairs, whose line names it twice and which skips the BUYs a book of one
+ * pair sends (see PositionBook.buy).
+ */
+export const getRepeatedPairProblem = (pairs: readonly TradingPair[]): string | undefined => {
+  const named = new Set<TradingPair>();
+  for (const pair of pairs) {
+    if (named.has(pair)) return `pairs must name each watched pair once, got ${inspect(pair)} twice`;
+    named.add(pair);
+  }
 };
 
 /**
@@ -53,6 +82,27 @@ const getUnknownKeys = (object: object, keys: readonly string[]) => Object.keys(
 export const getKeysProblem = (order: StrategyOrder): string | undefined => {
   const unknownKeys = getUnknownKeys(order, ORDER_KEYS);
   if (unknownKeys.length) return `order keys must be one of ${showValues(ORDER_KEYS)}, got ${showValues(unknownKeys)}`;
+};
+
+/**
+ * What is wrong with the keys of an order of tools.positions, or undefined when it holds none but those of PositionBuyOrder for a BUY,
+ * of PositionSellOrder for a SELL, whatever their values, as createOrder refuses a key StrategyOrder does not declare (see
+ * getKeysProblem). The position book sizes its orders, a BUY a share of the currency, a SELL all of the asset free (see Positions.buy),
+ * and sets their side: an amount, a cost or an allocation given there would size the order otherwise than the book counts it, or be
+ * refused beside the share the book adds, and a side would be overwritten. A refusal that names one of those sizes says where an order
+ * is sized so; it says nothing more of another key, a misspelt price or a trailing stop given to a SELL, which the list of the keys
+ * taken shows.
+ */
+export const getPositionKeysProblem = (order: object, side: OrderSide): string | undefined => {
+  const [method, keys, sizing] =
+    side === 'BUY'
+      ? ['buy', POSITION_BUY_KEYS, 'the position book sizes the order']
+      : ['sell', POSITION_SELL_KEYS, 'it sells all of the asset free'];
+  const unknownKeys = getUnknownKeys(order, keys);
+  if (!unknownKeys.length) return;
+  const problem = `tools.positions.${method} takes no key but ${showValues(keys)}, got ${showValues(unknownKeys)}`;
+  const isSized = unknownKeys.some(key => (SIZING_KEYS as readonly string[]).includes(key));
+  return isSized ? `${problem}: ${sizing} (tools.createOrder takes an amount, a cost or an allocation)` : problem;
 };
 
 /**
@@ -129,6 +179,23 @@ export const copyResult = (result: unknown): unknown => {
   const copy: Record<string, unknown> = {};
   for (const key in source) copy[key] = copyResult(source[key]);
   return copy;
+};
+
+/**
+ * The indicator arguments of a hook grouped by pair (Tools.indicatorsBySymbol): the results of each pair in the order of its
+ * addIndicator calls, the pairs in the order of their first indicator. A strategy that adds the same indicators on every pair, pair by
+ * pair, reads those of a pair as it read the flat arguments on one pair (`const [dema, sma] = bySymbol.get(pair) ?? []`). Built at each
+ * call, from the arguments given: the results change on every candle. It groups the arguments themselves, the hook's own copy of the
+ * results (see copyResult), without copying them again.
+ */
+export const indicatorsBySymbol = <T>(indicators: readonly IndicatorResults<T>[]): Map<TradingPair, IndicatorResults<T>[]> => {
+  const bySymbol = new Map<TradingPair, IndicatorResults<T>[]>();
+  for (const indicator of indicators) {
+    const ofSymbol = bySymbol.get(indicator.symbol);
+    if (ofSymbol) ofSymbol.push(indicator);
+    else bySymbol.set(indicator.symbol, [indicator]);
+  }
+  return bySymbol;
 };
 
 /**

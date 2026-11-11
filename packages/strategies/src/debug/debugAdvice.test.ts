@@ -1,4 +1,4 @@
-import { LoggedLine, OrderOutcome, OrderRecorder, relayOrderOutcome } from '../helpers/positionTracker/positionTracker.mock';
+import { LoggedLine, OrderOutcome, OrderRecorder, relayOrderOutcome } from '../strategy.mock';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
 import { beforeEach, describe, expect, it } from 'vitest';
 import { playCandles, toolsOf } from './debug.mock';

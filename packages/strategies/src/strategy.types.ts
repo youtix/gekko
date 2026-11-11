@@ -48,6 +48,103 @@ export type AddIndicatorFn = <T extends IndicatorNames>(name: T, symbol: Trading
  * It used to reach the logs and the subscribers as "[object Object]", and one holding a function (`tools` itself) failed its bucket.
  */
 export type LoggerFn = (level: LogLevel, msg: string) => void;
+/**
+ * A BUY as tools.positions places it: its pair, its type, and a price and a trailing stop if any. It holds no amount, cost or
+ * allocation: the position book sizes it (see Positions.buy).
+ */
+export type PositionBuyOrder = Pick<StrategyOrder, 'symbol' | 'type' | 'price' | 'trailing'>;
+/** A SELL as tools.positions places it, of all of the asset free: its pair, its type, and a price if any (see Positions.sell) */
+export type PositionSellOrder = Pick<StrategyOrder, 'symbol' | 'type' | 'price'>;
+/**
+ * The position book of the strategy, which the StrategyManager keeps for it: on each pair the strategy has it track, whether the
+ * strategy is flat or long, whether an order placed through the book still waits for its outcome, and the share of the currency each
+ * BUY takes. Gekko relays every order: a strategy advising on every candle of a trend placed an all-in order sized from what the
+ * previous one left, then had it refused until maxConsecutiveErrors stopped the bot. So a strategy buys a pair only when canBuy allows
+ * it and sells it only when canSell does, through buy and sell. The book reads the position from the outcome of each of those orders
+ * before the strategy's order hook runs, which reads the position after the order: no hook relays anything to it. A built-in strategy
+ * and one loaded through strategyPath, which can import no code of Gekko, get the same book.
+ *
+ * It follows its own orders alone: those placed through buy and sell, and the SELL of a trailing stop one of its BUYs asked for (see
+ * buy). An order created with tools.createOrder is not its own, nor is the SELL of a stop such an order asked for: their outcomes
+ * change no position. A strategy that sizes its orders itself (an amount, a cost, an allocation) creates them with tools.createOrder
+ * and keeps its own bookkeeping.
+ *
+ * Its lines go through the strategy's log (see Tools.log), relayed as strategy info unless they are at debug level: the pairs it
+ * trades, when it tracks several, the BUYs it skips, the positions it reads after an order that did not complete or after a SELL that
+ * left enough of the asset to sell, and those it keeps when the Trader could not read the balances after an order.
+ */
+export type Positions = {
+  /**
+   * Starts the tracking, each pair flat with nothing pending: of every watched pair, in the order of watch.assets, when `pairs` is left
+   * out, else of `pairs` alone, in the order given, each a watched pair named once. The pairs tracked, not the pairs watched, share the
+   * currency among their BUYs (see buy): when there are several, the book says so once, at info level, through the strategy's log, on
+   * the first minute (`Trading BTC/USDT and ETH/USDT: each BUY takes an equal share of the free currency among the pairs not invested,
+   * each SELL sells all of its asset`).
+   *
+   * Available in init only, and once: called from a later hook, or a second time, it throws a GekkoError, and so does a pair that is
+   * not watched (the error names the watched pairs), a pair named twice, or anything but an array of at least one pair: the bot stops.
+   * A strategy that never calls it tracks nothing: buy and sell then refuse every order.
+   */
+  track(pairs?: TradingPair[]): void;
+  /**
+   * The pairs tracked, in the order track took them: none before track. The book's own list, which a strategy walks on every candle,
+   * neither copied nor frozen: read it, do not write to it.
+   */
+  readonly pairs: readonly TradingPair[];
+  /**
+   * Whether the strategy holds enough of the asset of `pair` to sell, as far as the outcomes of the orders placed through the book
+   * tell; false for a pair not tracked. Every pair starts flat: a holding present at start-up is sold only once the book has learnt of
+   * it, from a BUY of its own that completed, or ended without completing while the account held enough to sell, or that it skipped
+   * while the portfolio showed enough of the asset free (see buy).
+   */
+  isLong(pair: TradingPair): boolean;
+  /** Whether an order placed through the book on `pair` still waits for its outcome; false for a pair not tracked */
+  isPendingOrder(pair: TradingPair): boolean;
+  /** Flat on `pair`, and nothing pending there; false for a pair not tracked */
+  canBuy(pair: TradingPair): boolean;
+  /** Long on `pair`, and nothing pending there; false for a pair not tracked */
+  canSell(pair: TradingPair): boolean;
+  /**
+   * Places a BUY of `order.symbol` and keeps it pending until its outcome; returns its id, or undefined when the BUY is skipped.
+   *
+   * The book sizes it: an equal share of the free currency among the pairs tracked that are not long, the pair asking and those whose
+   * BUY is pending among them, sent as its `allocation` (100 / n %, rounded down to 6 decimals, see createOrder), and all-in, without
+   * an allocation, for the last of them, or when one pair is tracked.
+   *
+   * A book that tracks several pairs skips a BUY the market would refuse as too small, its share of the currency under the minimum cost
+   * or the minimum amount of the market: nothing is sent or pending, and the skip is said through the strategy's log, at warn level
+   * the first time for a pair, then at debug level until a BUY of that pair is placed. When the pair is flat with nothing pending and
+   * the portfolio shows enough of its asset free to sell, the book takes that holding for the position instead, said at info level: the
+   * pair is long. Sent, such a BUY was refused at every signal, each refusal counting towards the circuit breaker. A book of one pair
+   * skips nothing.
+   *
+   * The book estimates the BUY from what the StrategyManager holds, none of it the copies the hooks get, which a strategy may write to:
+   * the last portfolio received (the balance read at start-up, then the one the Trader relays with a portfolio change or with the end of
+   * an order, which replaces it before the order's hook runs, so that a BUY placed from onOrderCompleted is estimated from the balances
+   * read after that order), of which the candle hooks get a copy; the market data of the pair, of which tools.marketData is a copy; and
+   * `order.price`, else the close of the pair in the last timeframe candle, of which the candle hooks get a copy, a BUY placed from an
+   * order hook included.
+   *
+   * A `trailing` is armed once the BUY completes (see createOrder). The SELL its stop sends when it triggers is an order of the book's
+   * own, adopted before onTrailingStopTriggered runs, and so is the next SELL of that stop once it is active again: its outcome
+   * settles the position as that of sell does.
+   *
+   * Available once the warmup is over, as createOrder is. It throws a GekkoError, and the bot stops, in this order: during the warmup,
+   * for a key other than `symbol`, `type`, `price` and `trailing` (whatever its value), for whatever createOrder refuses of a pair, a
+   * type, a price or a trailing, then, in the book, for a pair it does not track. A BUY so refused is never skipped. It does not check
+   * canBuy: a BUY placed while long, or while an order is pending, is sent all the same.
+   */
+  buy(order: PositionBuyOrder): UUID | undefined;
+  /**
+   * Places an all-in SELL of `order.symbol`, of all of its asset free, and keeps it pending until its outcome; returns its id. As a
+   * SELL created with createOrder, it holds back the trailing stops of its pair while it pends, and cancels them once it completes.
+   *
+   * Available once the warmup is over. It throws a GekkoError, and the bot stops, in this order: during the warmup, for a key other
+   * than `symbol`, `type` and `price` (whatever its value), for whatever createOrder refuses of a pair, a type or a price, then, in the
+   * book, for a pair it does not track. It does not check canSell.
+   */
+  sell(order: PositionSellOrder): UUID;
+};
 export type Tools<T> = {
   /**
    * The parameters of the strategy: the output of its class's schema (see StrategyConstructor), or, for a class without one, the
@@ -56,9 +153,9 @@ export type Tools<T> = {
    */
   strategyParams: T;
   /**
-   * The limits, precision and fees of each watched pair, by pair: its keys are the pairs createOrder and addIndicator accept. The
-   * strategy's own copy, made before the first candle: writing to it changes neither the exchange (the fees and limits its simulator
-   * applies in backtest and paper trading) nor the pairs those two accept.
+   * The limits, precision and fees of each watched pair, by pair: its keys are the pairs createOrder, addIndicator and positions.track
+   * accept. The strategy's own copy, made before the first candle: writing to it changes neither the exchange (the fees and limits its
+   * simulator applies in backtest and paper trading), nor the pairs those accept, nor what the position book estimates a BUY from.
    */
   marketData: Map<TradingPair, MarketData>;
   log: LoggerFn;
@@ -160,6 +257,19 @@ export type Tools<T> = {
    * trigger, once that SELL completes they are canceled, and if it fails they protect the position again (see createOrder).
    */
   cancelTrailingOrder: (orderId: UUID) => void;
+  /**
+   * The position book of the strategy (see Positions): the pairs it tracks from init on, whether it can buy or sell each, and the
+   * orders it places through it. The object every hook gets, for the whole run, whose members work taken apart
+   * (`const { canBuy, buy } = tools.positions`).
+   */
+  positions: Positions;
+  /**
+   * The indicator arguments of a hook grouped by pair: the results of each pair in the order of its addIndicator calls, the pairs in the
+   * order of their first indicator. A strategy that adds the same indicators on every pair, pair by pair, reads those of a pair as it
+   * read the flat arguments on one pair (`const [dema, sma] = bySymbol.get(pair) ?? []`). Built at each call, from the arguments given:
+   * the results change on every candle.
+   */
+  indicatorsBySymbol: <R>(indicators: readonly IndicatorResults<R>[]) => Map<TradingPair, IndicatorResults<R>[]>;
 };
 export type OnCandleEventParams<T> = {
   /** The timeframe candle of every watched pair: the strategy's own copy, made once per candle and shared by the hooks of that candle */
@@ -204,9 +314,9 @@ type OrderEventParams<Order, T> = {
    * order had ended, and once every order whose end it relayed before had ended too; false when its read after the end failed, the
    * event then carrying an earlier read, which may still show free what a SELL sold, count as used what the order reserved, or miss
    * what it filled; undefined before its first read, the portfolio then the empty one it starts with (and in orderInitiated, which no
-   * hook gets). The PositionTracker takes no portfolio flagged false for the state after the order, the StrategyManager ends no
-   * trailing stop on one the end of the stop's SELL carries, and GridBot warns before it builds the grid of a reset on balances not
-   * read after the cancels (see ExchangeEvent.portfolioReadAfterOrder).
+   * hook gets). The position book (tools.positions) takes no portfolio flagged false for the state after the order, the StrategyManager
+   * ends no trailing stop on one the end of the stop's SELL carries, and GridBot warns before it builds the grid of a reset on balances
+   * not read after the cancels (see ExchangeEvent.portfolioReadAfterOrder).
    */
   exchange: ExchangeEvent;
   tools: Tools<T>;
@@ -220,15 +330,19 @@ export type OnOrderErroredEventParams<T> = OrderEventParams<OrderErroredEvent['o
  * What a hook receives is the strategy's own copy: the candles, the portfolio, the indicator results, the order and the exchange event
  * of an order hook, the state of a trailing stop, the orders open at start-up, `tools.strategyParams` and `tools.marketData`. Writing
  * to it changes nothing elsewhere: not the configuration, the exchange or its simulator, the indicators, the other plugins (the
- * analyzers, the reporters), nor what the StrategyManager itself goes by. Where each is declared says when its copy is made.
+ * analyzers, the reporters), nor what the StrategyManager itself goes by, the position book of tools.positions included. Where each is
+ * declared says when its copy is made.
+ *
+ * The order hooks run once the position book has settled the order (see Positions): tools.positions reads the position after it.
  */
 export interface Strategy<T> {
   /**
    * Executed once, on the first one-minute bucket, before any timeframe candle: in realtime the first minute of the warmup history,
    * replayed at start-up (with no history to replay, the first live minute, once it closes), in a backtest the first minute of
-   * watch.daterange. The place to pick the pairs and to register the indicators, addIndicator being refused once it has returned: an
-   * indicator misspelt there, or a parameter refused there, stops the bot at start-up, not when the first timeframe candle closes, up
-   * to a day later on 1d without warmup. The warmup is not over: no orders here (see Tools.createOrder).
+   * watch.daterange. The place to pick the pairs, to have the position book track them (tools.positions.track) and to register the
+   * indicators, track and addIndicator being refused once it has returned: an indicator misspelt there, or a parameter refused there,
+   * stops the bot at start-up, not when the first timeframe candle closes, up to a day later on 1d without warmup. The warmup is not
+   * over: no orders here (see Tools.createOrder).
    */
   init?(params: InitParams<T>): void;
   /**
@@ -279,9 +393,11 @@ export interface Strategy<T> {
    *
    * `orderId` is the MARKET SELL the StrategyManager has just created for the stop, of the amount the stop protects (state.amount). From
    * now on it is an order of the strategy's own: its outcome comes through onOrderCompleted, onOrderCanceled or onOrderErrored, under
-   * that id, and a strategy that tracks its position adopts it as its pending SELL (PositionTracker.adoptSell, or
-   * PositionBook.adoptSell(orderId, state.symbol) for the tracker of the stop's pair). Not adopted, it leaves the strategy long once
-   * the stop has sold everything, and the SELL the strategy advises next is refused: nothing is left.
+   * that id. When the stop's BUY was placed through tools.positions.buy, the position book has adopted that SELL as the pending SELL of
+   * the stop's pair by the time this hook runs (tools.positions.isPendingOrder(state.symbol) is true), and its outcome settles the
+   * position as that of tools.positions.sell does, without any hook of the strategy. The SELL of a stop whose BUY was created with
+   * tools.createOrder is not the book's: a strategy that keeps its own bookkeeping takes it for its pending SELL here. Left out, it
+   * leaves that strategy long once the stop has sold everything, and the SELL it advises next is refused: nothing is left.
    *
    * The stop sells until that SELL ends (state.status 'selling', state.sellOrderId). Completed for all the stop sells, the stop is
    * over. So it is when that SELL errors or is canceled after a reported fill (order.filled) of all of it, said at info level under

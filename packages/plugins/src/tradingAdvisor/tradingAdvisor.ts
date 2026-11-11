@@ -8,13 +8,7 @@ import {
 import { TIMEFRAME_TO_MINUTES } from '@gekko/shared/constants/timeframe.const';
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { AdviceCancelOrder, AdviceOrder } from '@gekko/shared/models/advice.types';
-import {
-  CandleBucket,
-  OrderCanceledEvent,
-  OrderCompletedEvent,
-  OrderErroredEvent,
-  OrderInitiatedEvent,
-} from '@gekko/shared/models/event.types';
+import { CandleBucket, OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
@@ -24,7 +18,6 @@ import { CandleBucketBatcher } from '@gekko/core/core/batcher/candleBatcher/cand
 import { MarketData, OpenOrder } from '@gekko/shared/models/exchange.types';
 import { error, info } from '@gekko/core/logger/logger';
 import { StrategyManager } from './strategyManager';
-import { isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import { bindAll, filter } from 'lodash-es';
 import { tradingAdvisorSchema } from '@gekko/schemas/plugins/tradingAdvisor.schema';
 import { TradingAdvisorConfiguration } from './tradingAdvisor.types';
@@ -63,17 +56,6 @@ export class TradingAdvisor extends Plugin {
       .on(STRATEGY_INFO_EVENT, this.relayStrategyInfo);
   }
 
-  /**
-   * Gives the strategy the portfolio the last of these order events carries, which the Trader read once the order had ended: the candle
-   * hooks get it from the next candle on. Only a portfolio change refreshed it, which the Trader's portfolioUpdates filter holds back
-   * for a fill below its threshold: the candle hooks kept the balance from before the fill, and an all-in order sized on it was refused.
-   * The last event of a batch carries the latest portfolio: the Trader queues each one with the portfolio it read last.
-   */
-  private refreshPortfolio(payloads: OrderInitiatedEvent[]) {
-    const { portfolio } = payloads[payloads.length - 1].exchange;
-    if (isFetchedPortfolio(portfolio)) this.strategyManager?.onPortfolioChange(portfolio);
-  }
-
   /* -------------------------------------------------------------------------- */
   /*                           EVENTS EMITERS                                   */
   /* -------------------------------------------------------------------------- */
@@ -110,23 +92,21 @@ export class TradingAdvisor extends Plugin {
   /*                          EVENT LISTENERS                                   */
   /* -------------------------------------------------------------------------- */
 
-  // The order handlers relay their batch one order after the other, in the order the Trader queued it, then the portfolio of its last
-  // order. The hooks are synchronous: under an `await Promise.all` they only seemed to run together, and one that throws (the circuit
+  // The order handlers relay their batch one order after the other, in the order the Trader queued it: the StrategyManager takes the
+  // portfolio of each for the strategy's as it comes (see StrategyManager.refreshPortfolio), the last one's left for the candle hooks.
+  // The hooks are synchronous: under an `await Promise.all` they only seemed to run together, and one that throws (the circuit
   // breaker) stops the batch there either way.
 
   public onOrderCompleted(payloads: OrderCompletedEvent[]) {
     for (const payload of payloads) this.strategyManager?.onOrderCompleted(payload);
-    this.refreshPortfolio(payloads);
   }
 
   public onOrderCanceled(payloads: OrderCanceledEvent[]) {
     for (const payload of payloads) this.strategyManager?.onOrderCanceled(payload);
-    this.refreshPortfolio(payloads);
   }
 
   public onOrderErrored(payloads: OrderErroredEvent[]) {
     for (const payload of payloads) this.strategyManager?.onOrderErrored(payload);
-    this.refreshPortfolio(payloads);
   }
 
   public onPortfolioChange(payloads: Portfolio[]) {

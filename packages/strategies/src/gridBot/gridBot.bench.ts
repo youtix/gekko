@@ -2,6 +2,7 @@ import type { CandleBucket, OrderCompletedEvent } from '@gekko/shared/models/eve
 import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
 import type { MarketData } from '@gekko/shared/models/exchange.types';
+import { indicatorsBySymbol, ScriptedPositions } from '../strategy.mock';
 import type { Tools } from '../strategy.types';
 import { bench } from '@gekko/shared/utils/bench/bench.mock';
 import type { UUID } from 'node:crypto';
@@ -38,7 +39,10 @@ const fiveByFive = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'fixed', s
 const tenByTen = gridOf({ buyLevels: 10, sellLevels: 10, spacingType: 'fixed', spacingValue: 2, ...options });
 const logarithmic = gridOf({ buyLevels: 5, sellLevels: 5, spacingType: 'logarithmic', spacingValue: 0.02, ...options });
 
-/** The tools GridBot gets, each order it creates kept in `orders` as the event of its fill carries it */
+/**
+ * The tools GridBot gets, each order it creates kept in `orders` as the event of its fill carries it. GridBot orders through
+ * createOrder alone: tools.positions are scripted positions of its pair that it never reads.
+ */
 const toolsFor = (strategyParams: GridBotStrategyParams, orders: OrderCompletedEvent['order'][]): Tools<GridBotStrategyParams> => ({
   strategyParams,
   marketData,
@@ -50,6 +54,8 @@ const toolsFor = (strategyParams: GridBotStrategyParams, orders: OrderCompletedE
   },
   cancelOrder: () => {},
   cancelTrailingOrder: () => {},
+  positions: new ScriptedPositions([PAIR]),
+  indicatorsBySymbol,
 });
 
 /** A GridBot whose grid is placed: init on the first bucket, then the first candle after the warmup, which starts the grid */

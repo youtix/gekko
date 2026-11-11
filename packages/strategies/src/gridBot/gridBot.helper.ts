@@ -1,6 +1,9 @@
+import { CandleBucket } from '@gekko/shared/models/event.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
+import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
+import type { Tools } from '../strategy.types';
 import { checkOrderPrice, toBound } from '@gekko/shared/helpers/market/market.helper';
 import { getPriceSignificantDigits, getPriceTick, roundToStep } from '@gekko/shared/helpers/market/precision.helper';
 import {
@@ -31,6 +34,24 @@ import {
   SellAfterBuy,
   SellAfterBuyFacts,
 } from './gridBot.types';
+
+/**
+ * The pair GridBot trades: the first of the bucket its init gets, which holds a candle of every watched pair in the order of
+ * watch.assets. A grid trades one pair, where the signal strategies trade every pair the position book tracks for them (see
+ * Tools.positions). Taken without a word, it left the other pairs ignored, their candles still required every minute. Called once, from
+ * init, it warns through the strategy's log when the bucket holds more than one pair, naming the pair traded and the others.
+ */
+export const pickTradedPair = (candle: CandleBucket, tools: Pick<Tools<unknown>, 'log'>): TradingPair => {
+  const [pair, ...ignored] = candle.keys();
+  if (ignored.length > 0) {
+    const others = ignored.join(', ');
+    tools.log(
+      'warn',
+      `The strategy trades ${pair} only, the first pair watched (watch.assets): it ignores ${others}, whose candles are still required every minute`,
+    );
+  }
+  return pair;
+};
 
 /** The balances of the traded asset and of its currency, a balance of 0 for either the portfolio lacks (see getAssetBalance) */
 export const getPortfolioContent = (

@@ -38,7 +38,7 @@ Gekko is not financial advice software. The author is not responsible for any lo
 - **[Modes](./documentation/modes.md)** — The three modes with their options: `importer` stores an exchange's 1-minute candles, `backtest` replays them on a simulated exchange, `realtime` sends alerts, paper trades or trades live; and how to run Gekko and stop it.
 - **[Plugins](./documentation/plugins.md)** — The 8 plugins a configuration picks from, with their options, their events and the order to list them in: the TradingAdvisor, the Trader, two analyzers, the PerformanceReporter, the CandleWriter and two Telegram bots.
 - **[Built-in Strategies](./documentation/built-in-strategies.md)** — What each built-in strategy does, with its parameters: seven signal strategies (DEMA, MACD, RSI, CCI, TMA, SMACrossover, EMARibbon) that trade every watched pair, and GridBot, which keeps a grid of LIMIT orders on the first pair.
-- **[Custom Strategies](./documentation/custom-strategies.md)** — Write your own strategy in TypeScript: its interface and tools, the indicators it reads, its orders and trailing stops, the PositionTracker and PositionBook that keep its position, where it lives, how to run it, and troubleshooting.
+- **[Custom Strategies](./documentation/custom-strategies.md)** — Write your own strategy in TypeScript: its interface and tools, the indicators it reads, its orders and trailing stops, the position book Gekko keeps for it (`tools.positions`), where it lives, how to run it, and troubleshooting.
 - **[Technical Indicators](./documentation/indicators.md)** — Complete reference for the 31 built-in indicators, each with its parameters, its output and the candle of its first value, in six categories: moving averages, momentum, directional movement, oscillators, volatility and volume.
 - **[Fox](./documentation/fox.md)** — Backtest every combination of the values you give a template configuration's keys, as lists or ranges, in parallel workers: Fox checks every variant first, and their figures land in one CSV file.
 - **[Upgrading](./documentation/upgrading.md)** — Coming from version 2.0.0? The configuration keys, the executable and the commands that changed, what to do with your private strategies and old CSV files, and what the signal strategies now do differently.
@@ -52,9 +52,9 @@ Gekko is a monorepo of [Bun workspaces](https://bun.sh/docs/pm/workspaces), whos
 - `packages/shared`: the constants, the errors, the types and the helpers every package shares
 - `packages/schemas`: the zod schemas of the configuration, the exchanges, the plugins and the strategies
 - `packages/indicators`: the 31 indicators
-- `packages/strategies`: the built-in strategies, the PositionTracker and the PositionBook, and your private strategies (`custom/`)
+- `packages/strategies`: the built-in strategies, the interface a strategy implements with the types of its tools, and your private strategies (`custom/`)
 - `packages/core`: the configuration, the candle pipeline, the orders, the exchanges, the storage and the Telegram bots
-- `packages/plugins`: the 8 plugins
+- `packages/plugins`: the 8 plugins, and the position book the TradingAdvisor keeps for a strategy (`tools.positions`)
 - `apps/gekko`: the bot, compiled to `dist/gekko`, and its end-to-end tests
 - `apps/fox`: Fox, compiled to `dist/fox`, and its templates
 

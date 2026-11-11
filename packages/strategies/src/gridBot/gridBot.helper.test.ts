@@ -1,5 +1,7 @@
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
+import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
+import { LoggedLine } from '../strategy.mock';
 import { assertOrderWithinLimits } from '@gekko/shared/helpers/market/market.helper';
 import { addPrecise } from '@gekko/shared/utils/math/math.utils';
 import { omit } from 'lodash-es';
@@ -31,6 +33,7 @@ import {
   inferAmountPrecision,
   inferPricePrecision,
   isResetSide,
+  pickTradedPair,
   resolveSpacing,
   roundAmount,
   roundPrice,
@@ -70,6 +73,45 @@ const exactBreakEvenMarketData: MarketData = { precision: { price: 0.01 }, fee: 
 const pepeMarketData: MarketData = { precision: { price: 1e-8, amount: 1 }, fee: { maker: 0.001 } };
 
 describe('gridBot.helper', () => {
+  describe('pickTradedPair', () => {
+    const TWO_PAIRS_WARNING: LoggedLine = {
+      level: 'warn',
+      message:
+        'The strategy trades BTC/USDT only, the first pair watched (watch.assets): it ignores ETH/USDT, whose candles are still required every minute',
+    };
+    const THREE_PAIRS_WARNING: LoggedLine = {
+      level: 'warn',
+      message:
+        'The strategy trades ETH/USDT only, the first pair watched (watch.assets): it ignores BTC/USDT, SOL/USDT, whose candles are still required every minute',
+    };
+    /** Picks the pair of a bucket holding a candle of each of `pairs`, in that order; returns it with the lines it logged */
+    const pickPair = (pairs: TradingPair[]) => {
+      const logs: LoggedLine[] = [];
+      const candle = new Map(pairs.map(pair => [pair, { start: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }]));
+      const pair = pickTradedPair(candle, { log: (level, message) => logs.push({ level, message }) });
+      return { pair, logs };
+    };
+
+    // The bucket holds a candle of every watched pair, in the order of watch.assets
+    it.each`
+      case             | pairs                                   | expected
+      ${'one pair'}    | ${['BTC/USDT']}                         | ${'BTC/USDT'}
+      ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${'BTC/USDT'}
+      ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${'ETH/USDT'}
+    `('trades the first pair of the bucket: $case', ({ pairs, expected }) => {
+      expect(pickPair(pairs).pair).toBe(expected);
+    });
+
+    it.each`
+      case             | pairs                                   | expected
+      ${'one pair'}    | ${['BTC/USDT']}                         | ${[]}
+      ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${[TWO_PAIRS_WARNING]}
+      ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${[THREE_PAIRS_WARNING]}
+    `('warns once that it ignores the other pairs: $case', ({ pairs, expected }) => {
+      expect(pickPair(pairs).logs).toEqual(expected);
+    });
+  });
+
   describe('inferPricePrecision', () => {
     it.each`
       tick      | description                                    | expected

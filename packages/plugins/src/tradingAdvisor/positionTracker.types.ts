@@ -1,7 +1,16 @@
+import { OrderCanceledEvent, OrderErroredEvent, OrderInitiatedEvent } from '@gekko/shared/models/event.types';
 import { OrderSide } from '@gekko/shared/models/order.types';
-import { OnOrderCanceledEventParams, OnOrderErroredEventParams } from '../../strategy.types';
+import { PositionBookContext } from './positionBook.types';
 
-export type UnfinishedOrderParams = OnOrderCanceledEventParams<unknown> | OnOrderErroredEventParams<unknown>;
+/** What a tracker reads of the run: the part of its PositionBook's context it needs to place its orders and to settle them */
+export type TrackerContext = Pick<PositionBookContext, 'createOrder' | 'log' | 'getMarketData'>;
+/**
+ * The end of an order as the StrategyManager hears of it, which settles the position: the order, and the exchange event, with the
+ * portfolio after the order and whether the Trader read it after the order ended (see isReadBeforeEnd)
+ */
+export type OrderEnd<Event extends OrderInitiatedEvent> = Pick<Event, 'order' | 'exchange'>;
+/** The end of an order that did not complete: canceled or errored */
+export type UnfinishedOrderEnd = OrderEnd<OrderCanceledEvent> | OrderEnd<OrderErroredEvent>;
 /** How an order of the tracker's own ended without completing */
 export type UnfinishedOutcome = 'canceled' | 'errored';
 /** What a cancelation reports its order executed: the amount filled, and what remains of the amount ordered */

@@ -1,19 +1,43 @@
 import { StrategyOrder } from '@gekko/shared/models/advice.types';
+import { OrderErroredEvent } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
-import { LoggerFn } from '../../strategy.types';
+import {
+  holding,
+  OrderOutcome,
+  OrderRecorder,
+  OutcomeFacts,
+  playSteps,
+  relayOrderOutcome,
+  UNKNOWN_ORDER_ID,
+} from '@gekko/strategies/strategy.mock';
+import { LoggerFn } from '@gekko/strategies/strategy.types';
 import { UUID } from 'node:crypto';
 import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { PositionTracker } from './positionTracker';
-import { holding, OrderOutcome, OrderRecorder, OutcomeFacts, playSteps, relayOrderOutcome, UNKNOWN_ORDER_ID } from './positionTracker.mock';
+import { OrderEnd } from './positionTracker.types';
 
 const symbol = 'BTC/USDT';
 const ORDER_ID: UUID = '00000000-0000-0000-0000-000000000042';
+// At 100 USDT the minimum cost, 5 USDT, is 0.05 BTC, above the minimum amount, 0.001 BTC; a market order takes 0.2 BTC at least.
+// Amounts are sent truncated to 0.0001 BTC.
+const PRICE = 100;
+const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
+/** The market data the context of the tracker gives, unless a test gives other */
+const MARKET_DATA = new Map<TradingPair, MarketData>([[symbol, limits]]);
 
 describe('PositionTracker', () => {
   let tracker: PositionTracker;
   let orders: OrderRecorder;
+  /** The strategy's log, which the tracker logs through (TrackerContext.log) */
+  let log: Mock<LoggerFn>;
+  /** The market data its context gives, by pair, read at each end (TrackerContext.getMarketData) */
+  let marketData: Map<TradingPair, MarketData>;
+
+  /** A tracker on the context of the test: `createOrder`, the recorder's unless given, the log of the test and its market data */
+  const trackerOf = (createOrder: (order: StrategyOrder) => UUID = orders.createOrder) =>
+    new PositionTracker({ createOrder, log, getMarketData: pair => marketData.get(pair) });
 
   /**
    * Plays the steps (see playSteps): 'buy' and 'sell' place an order through the tracker, 'sell2' a SELL of 2 BTC, 'sellHalf' a SELL
@@ -22,31 +46,28 @@ describe('PositionTracker', () => {
    */
   const play = (steps: string) =>
     playSteps(steps, tracker, orders, step => {
-      if (step === 'buy') tracker.buy(orders.createOrder, { type: 'STICKY', symbol });
-      else if (step === 'sell') tracker.sell(orders.createOrder, { type: 'STICKY', symbol });
-      else if (step === 'sell2') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, amount: 2 });
-      else if (step === 'sellHalf') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, allocation: 50 });
-      else if (step === 'sellCost') tracker.sell(orders.createOrder, { type: 'STICKY', symbol, cost: 50 });
+      if (step === 'buy') tracker.buy({ type: 'STICKY', symbol });
+      else if (step === 'sell') tracker.sell({ type: 'STICKY', symbol });
+      else if (step === 'sell2') tracker.sell({ type: 'STICKY', symbol, amount: 2 });
+      else if (step === 'sellHalf') tracker.sell({ type: 'STICKY', symbol, allocation: 50 });
+      else if (step === 'sellCost') tracker.sell({ type: 'STICKY', symbol, cost: 50 });
       else if (step === 'stop') tracker.adoptSell(orders.createOrder({ type: 'MARKET', side: 'SELL', symbol }));
       else if (step === 'unadopted') orders.createOrder({ type: 'MARKET', side: 'SELL', symbol });
       else throw new Error(`Unknown step: ${step}`);
     });
 
-  // At 100 USDT the minimum cost, 5 USDT, is 0.05 BTC, above the minimum amount, 0.001 BTC; a market order takes 0.2 BTC at least.
-  // Amounts are sent truncated to 0.0001 BTC.
-  const PRICE = 100;
-  const limits: MarketData = { amount: { min: 0.001 }, cost: { min: 5 }, market: { min: 0.2 }, precision: { amount: 0.0001 } };
-  const marketData = new Map<TradingPair, MarketData>([[symbol, limits]]);
   const LONG = 'buy completed:1 sell';
   const STOP = 'buy completed:1 stop';
 
-  /** Relays the outcome of the last order placed, its event reporting the facts given, at 100 USDT on the market above by default */
+  /** Relays the outcome of the last order placed, its event reporting the facts given, at 100 USDT by default */
   const relayLast = (outcome: OrderOutcome, facts: OutcomeFacts) =>
-    relayOrderOutcome(tracker, outcome, orders.created(orders.ids.length)!, { price: PRICE, marketData, ...facts });
+    relayOrderOutcome(tracker, outcome, orders.created(orders.ids.length)!, { price: PRICE, ...facts });
 
   beforeEach(() => {
-    tracker = new PositionTracker();
     orders = new OrderRecorder();
+    log = vi.fn();
+    marketData = MARKET_DATA;
+    tracker = trackerOf();
   });
 
   describe('position', () => {
@@ -128,7 +149,6 @@ describe('PositionTracker', () => {
       const HALF = 'buy completed:1 sellHalf';
       const COST = 'buy completed:1 sellCost';
       const SELL2 = 'buy completed:1 sell2';
-      let log: Mock<LoggerFn>;
 
       /**
        * Relays the cancelation of the last order placed, sent for `sent`, after it filled `filled` and left `remaining` unsold, the
@@ -139,12 +159,8 @@ describe('PositionTracker', () => {
           tracker,
           'canceled',
           { ...orders.created(orders.ids.length)!, amount: sent },
-          { price: PRICE, marketData, log, filled, remaining, portfolio: free === undefined ? undefined : holding(symbol, free) },
+          { price: PRICE, filled, remaining, portfolio: free === undefined ? undefined : holding(symbol, free) },
         );
-
-      beforeEach(() => {
-        log = vi.fn();
-      });
 
       // A SELL of 50 % and one of 50 USDT at 100 USDT are each sent for 0.5 BTC, an all-in SELL capped at a maximum of 0.6 BTC for 0.6,
       // a SELL of 2 BTC capped at a maximum of 1 BTC for 1, a stop's SELL for the 0.5 BTC its BUY filled: each leaves the rest of the
@@ -220,23 +236,25 @@ describe('PositionTracker', () => {
         expect(tracker.isLong).toBe(isLong);
       });
 
+      // The market data of each row is the one the context gives at the end of the order, whatever it gave when the tracker was built
       it.each`
         case                                                            | free       | price    | data           | isLong
-        ${'0.1 BTC, enough to sell'}                                    | ${0.1}     | ${PRICE} | ${marketData}  | ${true}
-        ${'0.05 BTC, the minimum cost exactly'}                         | ${0.05}    | ${PRICE} | ${marketData}  | ${true}
-        ${'0.001 BTC at an unknown price, the minimum amount exactly'}  | ${0.001}   | ${0}     | ${marketData}  | ${true}
-        ${'0.01 BTC, above the minimum amount, under the minimum cost'} | ${0.01}    | ${PRICE} | ${marketData}  | ${false}
-        ${'0.01 BTC at an unknown price, the cost unchecked'}           | ${0.01}    | ${0}     | ${marketData}  | ${true}
-        ${'0.0005 BTC at an unknown price, under the minimum amount'}   | ${0.0005}  | ${0}     | ${marketData}  | ${false}
+        ${'0.1 BTC, enough to sell'}                                    | ${0.1}     | ${PRICE} | ${MARKET_DATA} | ${true}
+        ${'0.05 BTC, the minimum cost exactly'}                         | ${0.05}    | ${PRICE} | ${MARKET_DATA} | ${true}
+        ${'0.001 BTC at an unknown price, the minimum amount exactly'}  | ${0.001}   | ${0}     | ${MARKET_DATA} | ${true}
+        ${'0.01 BTC, above the minimum amount, under the minimum cost'} | ${0.01}    | ${PRICE} | ${MARKET_DATA} | ${false}
+        ${'0.01 BTC at an unknown price, the cost unchecked'}           | ${0.01}    | ${0}     | ${MARKET_DATA} | ${true}
+        ${'0.0005 BTC at an unknown price, under the minimum amount'}   | ${0.0005}  | ${0}     | ${MARKET_DATA} | ${false}
         ${'0.0001 BTC on a market without data, without minimums'}      | ${0.0001}  | ${PRICE} | ${new Map()}   | ${true}
         ${'no BTC on a market without data'}                            | ${0}       | ${PRICE} | ${new Map()}   | ${false}
-        ${'0.05269 BTC at 95 USDT, sent as 0.0526 BTC: 4.997 USDT'}     | ${0.05269} | ${95}    | ${marketData}  | ${false}
-        ${'0.0527 BTC at 95 USDT, 5.0065 USDT'}                         | ${0.0527}  | ${95}    | ${marketData}  | ${true}
+        ${'0.05269 BTC at 95 USDT, sent as 0.0526 BTC: 4.997 USDT'}     | ${0.05269} | ${95}    | ${MARKET_DATA} | ${false}
+        ${'0.0527 BTC at 95 USDT, 5.0065 USDT'}                         | ${0.0527}  | ${95}    | ${MARKET_DATA} | ${true}
         ${'0.05269 BTC at 95 USDT on a step of 0.25 BTC, sent as 0'}    | ${0.05269} | ${95}    | ${quarterStep} | ${false}
         ${'0.3 BTC at 95 USDT on a step of 0.25 BTC, sent as 0.25'}     | ${0.3}     | ${95}    | ${quarterStep} | ${true}
       `('reads a SELL errored with $case as long ($isLong)', ({ free, price, data, isLong }) => {
         play(LONG);
-        relayLast('errored', { portfolio: holding(symbol, free), price, marketData: data });
+        marketData = data;
+        relayLast('errored', { portfolio: holding(symbol, free), price });
         expect(tracker.isLong).toBe(isLong);
       });
     });
@@ -267,12 +285,7 @@ describe('PositionTracker', () => {
 
       it('ignores the facts of another order', () => {
         play('buy completed:1');
-        relayOrderOutcome(
-          tracker,
-          'errored',
-          { id: UNKNOWN_ORDER_ID, symbol },
-          { price: PRICE, marketData, portfolio: holding(symbol, 0) },
-        );
+        relayOrderOutcome(tracker, 'errored', { id: UNKNOWN_ORDER_ID, symbol }, { price: PRICE, portfolio: holding(symbol, 0) });
         expect(tracker.isLong).toBe(true);
       });
 
@@ -284,22 +297,17 @@ describe('PositionTracker', () => {
     });
 
     describe('log', () => {
-      let log: Mock<LoggerFn>;
-
-      beforeEach(() => {
-        log = vi.fn();
-      });
-
       it.each`
-        case                                  | steps    | outcome       | facts                                                            | message
-        ${'a SELL errored, no BTC left'}      | ${LONG}  | ${'errored'}  | ${{ portfolio: holding(symbol, 0) }}                             | ${'[00000000-0000-0000-0000-000000000002] SELL order errored: 0 BTC free in the portfolio after it, too little to sell: the strategy is flat'}
-        ${'a BUY errored, 0.5 BTC bought'}    | ${'buy'} | ${'errored'}  | ${{ portfolio: holding(symbol, 0.5) }}                           | ${'[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
-        ${'a BUY canceled after filling 0.9'} | ${'buy'} | ${'canceled'} | ${{ filled: 0.9, remaining: 0.1 }}                               | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.9 BTC filled, enough to sell: the strategy is long'}
-        ${'a SELL canceled with 0.0001 left'} | ${LONG}  | ${'canceled'} | ${{ filled: 0.9999, remaining: 0.0001 }}                         | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat'}
-        ${'a BUY that filled 0.0000005'}      | ${'buy'} | ${'canceled'} | ${{ filled: 5e-7, remaining: 0.9999995, marketData: new Map() }} | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.0000005 BTC filled, enough to sell: the strategy is long'}
-      `('logs the position read from $case, which changes it', ({ steps, outcome, facts, message }) => {
+        case                                  | steps    | outcome       | facts                                     | data           | message
+        ${'a SELL errored, no BTC left'}      | ${LONG}  | ${'errored'}  | ${{ portfolio: holding(symbol, 0) }}      | ${MARKET_DATA} | ${'[00000000-0000-0000-0000-000000000002] SELL order errored: 0 BTC free in the portfolio after it, too little to sell: the strategy is flat'}
+        ${'a BUY errored, 0.5 BTC bought'}    | ${'buy'} | ${'errored'}  | ${{ portfolio: holding(symbol, 0.5) }}    | ${MARKET_DATA} | ${'[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long'}
+        ${'a BUY canceled after filling 0.9'} | ${'buy'} | ${'canceled'} | ${{ filled: 0.9, remaining: 0.1 }}        | ${MARKET_DATA} | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.9 BTC filled, enough to sell: the strategy is long'}
+        ${'a SELL canceled with 0.0001 left'} | ${LONG}  | ${'canceled'} | ${{ filled: 0.9999, remaining: 0.0001 }}  | ${MARKET_DATA} | ${'[00000000-0000-0000-0000-000000000002] SELL order canceled: 0.0001 BTC left unsold, too little to sell: the strategy is flat'}
+        ${'a BUY that filled 0.0000005'}      | ${'buy'} | ${'canceled'} | ${{ filled: 5e-7, remaining: 0.9999995 }} | ${new Map()}   | ${'[00000000-0000-0000-0000-000000000001] BUY order canceled: 0.0000005 BTC filled, enough to sell: the strategy is long'}
+      `('logs the position read from $case, which changes it', ({ steps, outcome, facts, data, message }) => {
         play(steps);
-        relayLast(outcome, { ...facts, log });
+        marketData = data;
+        relayLast(outcome, facts);
         expect(log.mock.calls).toEqual([['info', message]]);
       });
 
@@ -310,7 +318,7 @@ describe('PositionTracker', () => {
         ${'a SELL errored, nothing reported'} | ${LONG}  | ${'errored'}  | ${{}}
       `('logs nothing after $case, which keeps the position', ({ steps, outcome, facts }) => {
         play(steps);
-        relayLast(outcome, { ...facts, log });
+        relayLast(outcome, facts);
         expect(log).not.toHaveBeenCalled();
       });
     });
@@ -320,7 +328,6 @@ describe('PositionTracker', () => {
   // completed, a position bought above that maximum was held while the strategy ignored its SELL signals and followed its BUY signals
   describe('position after a SELL that completed', () => {
     const SELL2 = 'buy completed:1 sell2';
-    let log: Mock<LoggerFn>;
 
     /** Relays the fill of the last order placed for `sold`, the portfolio after it holding `free` BTC, if given, at 100 USDT */
     const completeLast = (sold: number, free?: number) =>
@@ -328,12 +335,8 @@ describe('PositionTracker', () => {
         tracker,
         'completed',
         { ...orders.created(orders.ids.length)!, amount: sold },
-        { price: PRICE, marketData, log, portfolio: free === undefined ? undefined : holding(symbol, free) },
+        { price: PRICE, portfolio: free === undefined ? undefined : holding(symbol, free) },
       );
-
-    beforeEach(() => {
-      log = vi.fn();
-    });
 
     it.each`
       case                                                                       | steps    | sold      | free         | isLong
@@ -390,7 +393,6 @@ describe('PositionTracker', () => {
     const HALF = 'buy completed:1 sellHalf';
     const ID1: UUID = '00000000-0000-0000-0000-000000000001';
     const ID2: UUID = '00000000-0000-0000-0000-000000000002';
-    let log: Mock<LoggerFn>;
 
     /**
      * Relays the end of the last order placed, of `amount` when given (sent, or executed for a completion), its event reporting the
@@ -401,7 +403,7 @@ describe('PositionTracker', () => {
         tracker,
         outcome,
         { ...orders.created(orders.ids.length)!, ...(amount !== undefined && { amount }) },
-        { price: PRICE, marketData, log, ...facts },
+        { price: PRICE, ...facts },
       );
 
     /** endLast, the balances of its event read before the end */
@@ -411,10 +413,6 @@ describe('PositionTracker', () => {
     /** The warning of a position kept after the order `id` ended (see PositionTracker.keepPosition) */
     const kept = (id: UUID, ended: string, position: string) =>
       `[${id}] ${ended}, and the Trader could not read the balances after it: the strategy stays ${position} until the end of its next order`;
-
-    beforeEach(() => {
-      log = vi.fn();
-    });
 
     // A SELL that sold all it asked for, the fill of a BUY canceled, and what a SELL of an amount sent for all of it left unsold settle
     // the position, as after any read. What any other SELL canceled after a fill left unsold, and what a BUY that errored filled, are the
@@ -568,11 +566,48 @@ describe('PositionTracker', () => {
     });
   });
 
+  // The StrategyManager hands the end of an order to the book as it hears of it, the event alone: the market data and the log come from
+  // the context the book builds the tracker with, never from the tools of a hook
+  describe('context', () => {
+    it('settles the end of an order that carries no tools', () => {
+      play('buy');
+      const end = {
+        order: { ...orders.created(1)!, filled: 0, mayBeLive: false },
+        exchange: { portfolio: holding(symbol, 0.5), price: PRICE },
+      };
+      tracker.onOrderErrored(end as unknown as OrderEnd<OrderErroredEvent>);
+      expect(tracker.isLong).toBe(true);
+    });
+
+    // 0.1 BTC at 100 USDT is 10 USDT, above the minimum cost of 5 of the context, below the 100 of the tools the event carries
+    it('reads the market data of its context, not that of the tools an event carries', () => {
+      play(LONG);
+      relayLast('errored', { portfolio: holding(symbol, 0.1), marketData: new Map([[symbol, { cost: { min: 100 } }]]) });
+      expect(tracker.isLong).toBe(true);
+    });
+
+    it('logs through its context, not through the tools an event carries', () => {
+      const eventLog = vi.fn();
+      play('buy');
+      relayLast('errored', { portfolio: holding(symbol, 0.5), log: eventLog });
+      expect({ context: log.mock.calls, event: eventLog.mock.calls }).toEqual({
+        context: [
+          [
+            'info',
+            '[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long',
+          ],
+        ],
+        event: [],
+      });
+    });
+  });
+
   describe('buy and sell', () => {
     let createOrder: Mock<(order: StrategyOrder) => UUID>;
 
     beforeEach(() => {
       createOrder = vi.fn((_order: StrategyOrder) => ORDER_ID);
+      tracker = trackerOf(createOrder);
     });
 
     it.each`
@@ -581,17 +616,20 @@ describe('PositionTracker', () => {
       ${'buy'}  | ${{ type: 'LIMIT', symbol, amount: 2, price: 90, trailing: { percentage: 5 } }} | ${{ type: 'LIMIT', symbol, amount: 2, price: 90, trailing: { percentage: 5 }, side: 'BUY' }}
       ${'sell'} | ${{ type: 'MARKET', symbol }}                                                   | ${{ type: 'MARKET', symbol, side: 'SELL' }}
       ${'sell'} | ${{ type: 'LIMIT', symbol, amount: 2, price: 110 }}                             | ${{ type: 'LIMIT', symbol, amount: 2, price: 110, side: 'SELL' }}
-    `('$action creates the order once, as given, with its side: $created', ({ action, order, created }) => {
-      tracker[action as 'buy' | 'sell'](createOrder, order);
-      expect(createOrder.mock.calls).toStrictEqual([[created]]);
-    });
+    `(
+      '$action creates the order once, through the createOrder of its context, as given, with its side: $created',
+      ({ action, order, created }) => {
+        tracker[action as 'buy' | 'sell'](order);
+        expect(createOrder.mock.calls).toStrictEqual([[created]]);
+      },
+    );
 
     it.each`
       action
       ${'buy'}
       ${'sell'}
     `('$action returns the id of the order created', ({ action }) => {
-      expect(tracker[action as 'buy' | 'sell'](createOrder, { type: 'MARKET', symbol })).toBe(ORDER_ID);
+      expect(tracker[action as 'buy' | 'sell']({ type: 'MARKET', symbol })).toBe(ORDER_ID);
     });
   });
 });

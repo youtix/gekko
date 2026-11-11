@@ -1,4 +1,5 @@
 import { StrategyOrder, TrailingConfig } from '@gekko/shared/models/advice.types';
+import type { PositionBuyOrder, PositionSellOrder } from '@gekko/strategies/strategy.types';
 import { InspectOptions } from 'node:util';
 
 /** The keys of an order, those of StrategyOrder: the record is typed to hold each of them and no other */
@@ -15,6 +16,17 @@ export const ORDER_KEYS = Object.keys({
 
 /** The keys that size an order, each its own way (see Tools.createOrder): an order holds at most one of them, none for an all-in order */
 export const SIZING_KEYS = ['amount', 'cost', 'allocation'] as const satisfies readonly (keyof StrategyOrder)[];
+
+/** The keys of a BUY of tools.positions, those of PositionBuyOrder: the record is typed to hold each of them and no other */
+export const POSITION_BUY_KEYS = Object.keys({
+  symbol: true,
+  type: true,
+  price: true,
+  trailing: true,
+} satisfies Record<keyof PositionBuyOrder, true>);
+
+/** The keys of a SELL of tools.positions, those of PositionSellOrder: the record is typed to hold each of them and no other */
+export const POSITION_SELL_KEYS = Object.keys({ symbol: true, type: true, price: true } satisfies Record<keyof PositionSellOrder, true>);
 
 /** The keys of a trailing stop, those of TrailingConfig: the record is typed to hold each of them and no other */
 export const TRAILING_KEYS = Object.keys({ percentage: true, trigger: true } satisfies Record<keyof TrailingConfig, true>);

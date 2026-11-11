@@ -575,7 +575,7 @@ Configure `RoundTripAnalyzer` or `PortfolioAnalyzer`, not both: both emit the pe
 A realtime run goes on until you stop it (Ctrl-C, or SIGTERM from a service manager such as systemd or Docker), an error stops it, or the circuit breaker does. Gekko keeps the state of the run in memory: it writes nothing of it to disk but the candles a `CandleWriter` records. However the run stops, it loses:
 
 - the trailing stops: the next run arms a stop only for a BUY it places itself (see [Trailing Stops](./custom-strategies.md#trailing-stops));
-- the positions of the signal strategies, and of a custom strategy's `PositionTracker` or `PositionBook`: the next run starts flat on every pair, whatever the account holds (see [Position and Orders](./built-in-strategies.md#position-and-orders));
+- the positions of the signal strategies and of a strategy of your own, which `tools.positions`, or the strategy itself, keeps in memory: the next run starts flat on every pair, whatever the account holds (see [Position and Orders](./built-in-strategies.md#position-and-orders));
 - GridBot's grid: the next run refuses to start while orders are open on its pair (see GridBot's [Restarting](./built-in-strategies.md#restarting));
 - the orders the Trader follows: the next run follows only the orders its strategy creates;
 - the Telegram subscriptions: send each bot `/subscribe_all` again once Gekko runs;

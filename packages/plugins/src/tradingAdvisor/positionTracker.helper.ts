@@ -1,12 +1,10 @@
-import { CandleBucket, ExchangeEvent } from '@gekko/shared/models/event.types';
+import { ExchangeEvent } from '@gekko/shared/models/event.types';
 import { OrderType } from '@gekko/shared/models/order.types';
-import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
-import { Tools } from '../../strategy.types';
 import { getMarketOrderLimits, getSentCost } from '@gekko/shared/helpers/market/market.helper';
 import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
-import { Fill, Holding, PendingOrder, UnfinishedOrderParams, UnfinishedOutcome } from './positionTracker.types';
+import { Fill, Holding, PendingOrder, UnfinishedOrderEnd, UnfinishedOutcome } from './positionTracker.types';
 
 /** Whether a value above 0 is below a market minimum: one left undefined, 0 or below sets no bound, as toBound reads it (market.helper) */
 const isBelowMinimum = (value: number, minimum?: number) => minimum !== undefined && value < minimum;
@@ -69,7 +67,7 @@ export const isReadBeforeEnd = ({ portfolioReadAfterOrder }: Pick<ExchangeEvent,
  */
 export const getHolding = (
   { side, amount: asked }: PendingOrder,
-  { order, exchange }: UnfinishedOrderParams,
+  { order, exchange }: UnfinishedOrderEnd,
   fill?: Fill,
 ): Holding | undefined => {
   if (fill && side === 'BUY') return { held: fill.filled, fact: 'filled' };
@@ -97,7 +95,7 @@ export const getHolding = (
 export const getUnreadHolding = (
   outcome: UnfinishedOutcome,
   { side, amount: asked }: PendingOrder,
-  { order }: UnfinishedOrderParams,
+  { order }: UnfinishedOrderEnd,
   fill?: Fill,
 ): Holding | undefined => {
   if (outcome === 'errored') return side === 'BUY' ? { held: order.filled ?? 0, fact: 'filled', least: true } : undefined;
@@ -112,28 +110,9 @@ export const getUnreadHolding = (
  * errored, after what it filled as its event reports it (the fill of a cancelation, 0 included, the `filled` of an error, which is 0
  * when none was reported), or with no fill reported
  */
-export const describeUnfinishedEnd = (outcome: UnfinishedOutcome, { order }: UnfinishedOrderParams, fill?: Fill) => {
+export const describeUnfinishedEnd = (outcome: UnfinishedOutcome, { order }: UnfinishedOrderEnd, fill?: Fill) => {
   const filled = outcome === 'canceled' ? fill?.filled : order.filled || undefined;
   if (filled === undefined) return `${outcome}, no fill reported`;
   const [asset] = order.symbol.split('/');
   return `${outcome} after ${formatEveryDecimal(filled)} ${asset} filled`;
-};
-
-/**
- * The pair a single-pair strategy trades, GridBot or a custom strategy that trades one pair (the seven signal strategies trade every
- * watched pair, a position each, through a PositionBook): the first of the bucket its init gets, which holds a candle of every watched
- * pair in the order of watch.assets. Taken without a word, it left the other pairs ignored, their candles still required every minute.
- * Called once, from init, it warns through the strategy's log when the bucket holds more than one pair, naming the pair traded and the
- * others.
- */
-export const pickTradedPair = (candle: CandleBucket, tools: Pick<Tools<unknown>, 'log'>): TradingPair => {
-  const [pair, ...ignored] = candle.keys();
-  if (ignored.length > 0) {
-    const others = ignored.join(', ');
-    tools.log(
-      'warn',
-      `The strategy trades ${pair} only, the first pair watched (watch.assets): it ignores ${others}, whose candles are still required every minute`,
-    );
-  }
-  return pair;
 };

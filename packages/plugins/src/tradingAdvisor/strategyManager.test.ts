@@ -598,7 +598,7 @@ describe('StrategyManager', () => {
         const strategy = { onOrderCompleted: vi.fn() };
         manager['strategy'] = strategy as any;
         const order = { id: '1' } as any;
-        const exchange = { price: 10 };
+        const exchange = { price: 10, portfolio: new Map() };
         manager['indicatorsResults'] = [{ results: 'indicator', symbol: 'BTC/USDT' }];
 
         manager.onOrderCompleted({ order, exchange } as any);
@@ -664,7 +664,7 @@ describe('StrategyManager', () => {
         const strategy = { onOrderCanceled: vi.fn() };
         manager['strategy'] = strategy as any;
         const order = { id: '2' } as any;
-        const exchange = { price: 11 };
+        const exchange = { price: 11, portfolio: new Map() };
         manager['indicatorsResults'] = [{ results: 'indicator', symbol: 'BTC/USDT' }];
 
         manager.onOrderCanceled({ order, exchange } as any);
@@ -685,7 +685,7 @@ describe('StrategyManager', () => {
         const strategy = { onOrderErrored: vi.fn() };
         manager['strategy'] = strategy as any;
         const order = { id: '3' } as any;
-        const exchange = { price: 12 };
+        const exchange = { price: 12, portfolio: new Map() };
         manager['indicatorsResults'] = [{ results: 'indicator', symbol: 'BTC/USDT' }];
 
         manager.onOrderErrored({ order, exchange } as any);
@@ -834,7 +834,7 @@ describe('StrategyManager', () => {
 
     describe('Circuit Breaker (consecutiveErrors)', () => {
       const order = { id: '3' } as any;
-      const exchange = { price: 12 } as any;
+      const exchange = { price: 12, portfolio: new Map() } as any;
 
       /** Sends `target` at most `count` errors in a row: the number of the first that throws, and what it throws, if one does */
       const firstErrorThatThrows = (target: StrategyManager, count: number) => {
@@ -2802,6 +2802,101 @@ describe('StrategyManager', () => {
         expect(params?.portfolio).toEqual(portfolio);
       });
     });
+
+    // Only a portfolio change refreshed the portfolio of the candle hooks, and the Trader's portfolioUpdates filter holds that back for a
+    // fill below its threshold: they kept the balance from before the fill, and an all-in order sized on it was refused. The manager
+    // starts from the 1000 USDT read at start-up, as the TradingAdvisor gives it.
+    describe('the portfolio the end of an order carries', () => {
+      const FIRST_ID: UUID = '3b0e8a52-4c1d-4f6e-9a7b-2d5c8e1f0a01';
+      const SECOND_ID: UUID = '3b0e8a52-4c1d-4f6e-9a7b-2d5c8e1f0a02';
+      const ORDER = { symbol: 'BTC/USDT', side: 'BUY', type: 'LIMIT', amount: 1, price: 100, orderCreationDate: 0 } as const;
+      const usdt = (free: number): Portfolio => new Map([['USDT', { free, used: 0, total: free }]]);
+      /** The end of the order `id` of each kind, carrying `portfolio`, the one the Trader read after it */
+      const ENDS = {
+        onOrderCompleted: (id: UUID, portfolio: Portfolio): OrderCompletedEvent => ({
+          order: { ...ORDER, id, orderExecutionDate: 0, effectivePrice: 100, fee: 0.1 },
+          exchange: { portfolio, price: 100 },
+        }),
+        onOrderCanceled: (id: UUID, portfolio: Portfolio): OrderCanceledEvent => ({
+          order: { ...ORDER, id, orderCancelationDate: 0, filled: 0, remaining: 1 },
+          exchange: { portfolio, price: 100 },
+        }),
+        onOrderErrored: (id: UUID, portfolio: Portfolio): OrderErroredEvent => ({
+          order: { ...ORDER, id, orderErrorDate: 0, reason: 'Insufficient balance', filled: 0, mayBeLive: false },
+          exchange: { portfolio, price: 100 },
+        }),
+      };
+      type Handler = keyof typeof ENDS;
+      /** Relays the end of the order `id` of the kind `handler` handles, as the TradingAdvisor does */
+      const end = (handler: Handler, id: UUID, portfolio: Portfolio) => manager[handler](ENDS[handler](id, portfolio) as never);
+      let strategy: { onEachTimeframeCandle: Mock };
+
+      /** The portfolio the next candle gets */
+      const nextCandlePortfolio = () => {
+        manager.onTimeFrameCandle(bucket);
+        return strategy.onEachTimeframeCandle.mock.lastCall?.[0].portfolio;
+      };
+
+      beforeEach(() => {
+        strategy = { onEachTimeframeCandle: vi.fn() };
+        manager['strategy'] = strategy as any;
+        manager.onPortfolioChange(usdt(1000));
+      });
+
+      // A batch the TradingAdvisor relays one end after the other: each takes its portfolio, the Trader queuing each end with the
+      // portfolio it read last, and the last end leaves the latest
+      it.each`
+        handler
+        ${'onOrderCompleted'}
+        ${'onOrderCanceled'}
+        ${'onOrderErrored'}
+      `('$handler gives the next candle the portfolio the last end of a batch carries', ({ handler }: { handler: Handler }) => {
+        end(handler, FIRST_ID, usdt(900));
+        end(handler, SECOND_ID, usdt(800));
+        expect(nextCandlePortfolio()).toEqual(usdt(800));
+      });
+
+      // Until one of its synchronizations succeeds, the Trader relays the end of an order with the empty portfolio it starts with
+      it.each`
+        handler
+        ${'onOrderCompleted'}
+        ${'onOrderCanceled'}
+        ${'onOrderErrored'}
+      `(
+        '$handler leaves the next candle the portfolio it had when the end carries the empty one of a Trader yet to read any',
+        ({ handler }: { handler: Handler }) => {
+          end(handler, FIRST_ID, new Map());
+          expect(nextCandlePortfolio()).toEqual(usdt(1000));
+        },
+      );
+
+      // Each in the order the Trader queued it: the last one received is the latest it read
+      const portfolioChangeThenEnd = () => {
+        manager.onPortfolioChange(usdt(900));
+        end('onOrderCompleted', FIRST_ID, usdt(800));
+      };
+      const endThenPortfolioChange = () => {
+        end('onOrderCompleted', FIRST_ID, usdt(800));
+        manager.onPortfolioChange(usdt(900));
+      };
+
+      it.each`
+        received                                          | send                      | expected
+        ${'a portfolio change, then the end of an order'} | ${portfolioChangeThenEnd} | ${usdt(800)}
+        ${'the end of an order, then a portfolio change'} | ${endThenPortfolioChange} | ${usdt(900)}
+      `('gives the next candle the last portfolio received, after $received', ({ send, expected }) => {
+        send();
+        expect(nextCandlePortfolio()).toEqual(expected);
+      });
+
+      // The TradingAdvisor's own copy of the event, which nothing else holds: the position book reads it, the hooks a copy of it
+      it('keeps the portfolio of the end itself for the position book, not a copy', () => {
+        const portfolio = usdt(800);
+        end('onOrderCompleted', FIRST_ID, portfolio);
+        expect(manager['receivedPortfolio']).toBe(portfolio);
+      });
+    });
+
     describe('setMarketData', () => {
       it('applies the provided market data to newly created tools', () => {
         const marketData = new Map([['BTC/USDT', { amount: { min: 0.1, max: 5 } }]]) as any;
@@ -2896,7 +2991,7 @@ describe('StrategyManager', () => {
         manager.onTimeFrameCandle(bucket);
       });
 
-      // The portfolio handed over, the TradingAdvisor's own copy of the change, stays as it was
+      // The portfolio handed over, the TradingAdvisor's own copy of the change, which the position book reads, stays as it was
       it('leaves the portfolio received as it was', () => {
         expect(portfolio).toEqual(balances());
       });
@@ -4000,7 +4095,7 @@ describe('StrategyManager', () => {
         createTarget(3);
         sendCandles(1, 4);
         strategy.onOrderCompleted.mockImplementation(createTheOrder);
-        target.onOrderCompleted({ order: { id: 'db2254e3-c749-448c-b7b6-aa28831bbae7' }, exchange: {} } as any);
+        target.onOrderCompleted({ order: { id: 'db2254e3-c749-448c-b7b6-aa28831bbae7' }, exchange: { portfolio: new Map() } } as any);
         expect(listener).toHaveBeenCalledExactlyOnceWith(expect.objectContaining(ORDER));
       });
     });
@@ -4202,6 +4297,35 @@ describe('StrategyManager', () => {
       });
     });
 
+    // An SMA of one candle on each pair, added pair by pair as the signal strategies add theirs: on the first candle, each pair's close
+    describe('indicatorsBySymbol', () => {
+      it('groups the indicator arguments of a hook by pair, each with its results', () => {
+        let grouped: Map<TradingPair, IndicatorResults[]> | undefined;
+        const firstCandle: CandleBucket = new Map([
+          ['BTC/USDT', { ...candle }],
+          ['ETH/USDT', { ...candle, close: 3000 }],
+        ]);
+        manager.setMarketData(twoPairsMarketData);
+        manager['strategy'] = {
+          init: ({ addIndicator }: InitParams<object>) => {
+            addIndicator('SMA', 'BTC/USDT', { period: 1 });
+            addIndicator('SMA', 'ETH/USDT', { period: 1 });
+          },
+          onEachTimeframeCandle: ({ tools }: OnCandleEventParams<object>, ...indicators: IndicatorResults[]) => {
+            grouped = tools.indicatorsBySymbol(indicators);
+          },
+        };
+        manager.onOneMinuteBucket(firstCandle);
+        manager.onTimeFrameCandle(firstCandle);
+        expect(grouped).toEqual(
+          new Map([
+            ['BTC/USDT', [{ results: 1, symbol: 'BTC/USDT' }]],
+            ['ETH/USDT', [{ results: 3000, symbol: 'ETH/USDT' }]],
+          ]),
+        );
+      });
+    });
+
     describe('log', () => {
       // A debug line was relayed to the strat_info subscribers: four a candle for MACD, as many Telegram messages in realtime. Below
       // GEKKO_LOG_LEVEL the logger's debug drops it before winston formats it, which was most of the cost of a candle in a backtest.
@@ -4362,13 +4486,19 @@ describe('StrategyManager', () => {
         });
       });
 
-      // Two levels deep, the market data of each pair shows its keys, not every limit: one line, not a page per watched pair
+      // Two levels deep, the market data of each pair shows its keys, not every limit, and tools.positions its members: one line, not a
+      // page per watched pair
       it('writes the tools the strategy is given on one line, two levels deep', () => {
         manager['log']('info', manager['tools']);
         const [[, written]] = vi.mocked(info).mock.calls;
         // The functions are those bindAll made, whatever lodash names them
         expect(String(written).replaceAll(/\[Function: \w+\]/g, '[Function]')).toBe(
-          `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { name: ${quoted('DummyStrategy')}, each: 1, wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function] }`,
+          [
+            `{ createOrder: [Function], cancelOrder: [Function], log: [Function], strategyParams: { name: ${quoted('DummyStrategy')}, each: 1,`,
+            `wait: 0 }, marketData: Map(1) { ${quoted('BTC/USDT')} => { amount: [Object] } }, cancelTrailingOrder: [Function], positions: {`,
+            'track: [Function], pairs: [Getter], isLong: [Function], isPendingOrder: [Function], canBuy: [Function], canSell: [Function],',
+            'buy: [Function], sell: [Function] }, indicatorsBySymbol: [Function] }',
+          ].join(' '),
         );
       });
 

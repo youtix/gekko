@@ -1,4 +1,4 @@
-import { LoggedLine, OrderRecorder, relayOrderOutcome } from '../helpers/positionTracker/positionTracker.mock';
+import { LoggedLine, OrderRecorder, relayOrderOutcome } from '../strategy.mock';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
 import type { Tools } from '../strategy.types';
 import type { TrailingStopState } from '../trailingStopManager.types';

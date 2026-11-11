@@ -1,30 +1,41 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { LoggedLine, OrderRecorder, playSteps, relayOrderOutcome, UNKNOWN_ORDER_ID } from '../positionTracker/positionTracker.mock';
-import { StrategyOrder } from '@gekko/shared/models/advice.types';
-import { CandleBucket } from '@gekko/shared/models/event.types';
+import { StrategyOrder, TrailingConfig } from '@gekko/shared/models/advice.types';
+import { CandleBucket, OrderErroredEvent } from '@gekko/shared/models/event.types';
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
 import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
-import { LoggerFn } from '../../strategy.types';
-import { noop } from 'lodash-es';
+import {
+  BTC_ETH_TRADED_INFO,
+  flatBucket,
+  holding,
+  LoggedLine,
+  OrderRecorder,
+  playSteps,
+  relayOrderOutcome,
+  UNKNOWN_ORDER_ID,
+} from '@gekko/strategies/strategy.mock';
+import { LoggerFn, PositionBuyOrder } from '@gekko/strategies/strategy.types';
 import { UUID } from 'node:crypto';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { beforeEach, describe, expect, it, Mock, vi } from 'vitest';
 import { PositionBook } from './positionBook';
-import { BTC_ETH_TRADED_INFO, flatBucket } from './positionBook.mock';
 import { CurrencyRead } from './positionBook.types';
+import { OrderEnd } from './positionTracker.types';
 
 const BTC: TradingPair = 'BTC/USDT';
 const ETH: TradingPair = 'ETH/USDT';
 const SOL: TradingPair = 'SOL/USDT';
 const XRP: TradingPair = 'XRP/USDT';
-/** The id OrderRecorder gives the first order created */
+/** The ids OrderRecorder gives the first orders created */
 const FIRST_ORDER_ID: UUID = '00000000-0000-0000-0000-000000000001';
+const SECOND_ORDER_ID: UUID = '00000000-0000-0000-0000-000000000002';
 const RULE = 'each BUY takes an equal share of the free currency among the pairs not invested, each SELL sells all of its asset';
 const NEXT_SKIPS = '; the next skips of this pair are logged at debug level until a BUY of it is placed';
+/** The trailing stop the BUYs of the step 'trail<ASSET>' ask for */
+const TRAILING: TrailingConfig = { percentage: 5 };
 
 /** The first `count` of BTC/USDT, ETH/USDT, SOL/USDT, XRP/USDT, ADA/USDT and DOT/USDT, in that order */
 const pairsOf = (count: number) => ['BTC', 'ETH', 'SOL', 'XRP', 'ADA', 'DOT'].slice(0, count).map(asset => `${asset}/USDT` as TradingPair);
-/** A bucket holding a candle of each of `pairs`, in their order, as init gets it */
+/** A bucket holding a candle of each of `pairs`, in their order, every close at 100 */
 const bucketOf = (pairs: TradingPair[]): CandleBucket => flatBucket(Object.fromEntries(pairs.map(pair => [pair, 100])));
 /** A portfolio holding `free` of `currency` */
 const holdingCurrency = (free: number, currency = 'USDT'): Portfolio => new Map([[currency, { free, used: 0, total: free }]]);
@@ -41,33 +52,75 @@ describe('PositionBook', () => {
   let book: PositionBook;
   let orders: OrderRecorder;
   let logs: LoggedLine[];
+  /** The portfolio the context gives (PositionBookContext.getPortfolio) */
   let portfolio: Portfolio;
+  /** The market data the context gives, by pair (PositionBookContext.getMarketData) */
   let marketData: Map<TradingPair, MarketData>;
-  /** The candle of the hooks: that of the bucket the book tracked, every close at 100, unless a test sets it */
+  /**
+   * The last timeframe candle, whose closes the context gives (PositionBookContext.getClose): that of the pairs tracked, every close at
+   * 100, unless a test sets it
+   */
   let candle: CandleBucket;
+  /** The stops the StrategyManager keeps alive: that of every order created with a trailing (see createOrder), until a step ends it */
+  let aliveStops: Set<UUID>;
+  /** The context's isStopAlive, which records what the book asks of it */
+  let isStopAlive: Mock<(buyId: UUID) => boolean>;
+  /** The last BUY the book placed on each pair, whose stop the step 'stop<ASSET>' triggers */
+  let lastBuys: Map<TradingPair, UUID>;
 
+  /** The strategy's log, through which the book logs (PositionBookContext.log) */
   const log: LoggerFn = (level, message) => {
     logs.push({ level, message });
   };
-  /** The params of a candle hook, as a strategy hands them to buy and sell: the candle, the portfolio and the market data of the test */
-  const params = () => ({ candle, portfolio, tools: { createOrder: orders.createOrder, log, marketData } });
-  /** Tracks `pairs`, as init does on a bucket of them, the candle of the hooks at their closes */
+  /**
+   * Stands in for the StrategyManager's createOrder: records the order, and keeps alive the stop a BUY asks for, as the manager keeps it
+   * pending until that BUY's outcome
+   */
+  const createOrder = (order: StrategyOrder): UUID => {
+    const id = orders.createOrder(order);
+    if (order.trailing) aliveStops.add(id);
+    return id;
+  };
+  /** Tracks `pairs`, as tools.positions.track does from init, the last timeframe candle at their closes */
   const track = (pairs: TradingPair[]) => {
     candle = bucketOf(pairs);
-    book.track({ candle, tools: { log } });
+    book.track(pairs);
+  };
+  /** Tracks `pairs` as track does, the info line of several pairs left out of the lines a test asserts */
+  const trackSilently = (pairs: TradingPair[]) => {
+    track(pairs);
+    logs = [];
+  };
+  /** Places a BUY through the book, the last one of its pair once placed; returns its id */
+  const placeBuy = (order: PositionBuyOrder) => {
+    const id = book.buy(order);
+    if (id) lastBuys.set(order.symbol, id);
+    return id;
   };
   /**
-   * Plays the steps (see playSteps): 'buy<ASSET>' and 'sell<ASSET>' place a STICKY order of <ASSET>/USDT through the book, 'stop<ASSET>'
-   * is the SELL of a trailing stop there, which the StrategyManager creates and the book adopts, and 'usdt<free>' sets the portfolio of
-   * the next candles to <free> USDT
+   * Triggers the stop of the last BUY of `symbol` the book placed: the StrategyManager creates the MARKET SELL the stop sends, then hands
+   * it to the book to adopt; returns whether the book adopted it
+   */
+  const triggerStop = (symbol: TradingPair) => {
+    const buyId = lastBuys.get(symbol);
+    if (!buyId) throw new Error(`No BUY of ${symbol} placed, whose stop could trigger`);
+    return book.adoptStopSell(orders.createOrder({ type: 'MARKET', side: 'SELL', symbol }), { id: buyId, symbol });
+  };
+  /**
+   * Plays the steps (see playSteps): 'buy<ASSET>' and 'sell<ASSET>' place a STICKY order of <ASSET>/USDT through the book,
+   * 'trail<ASSET>' such a BUY with a trailing stop, 'stop<ASSET>' triggers the stop of the last BUY of <ASSET>/USDT the book placed,
+   * 'over<ASSET>' ends that stop (its SELL completed, or the stop canceled), and 'usdt<free>' sets the portfolio of the next candles to
+   * <free> USDT
    */
   const play = (steps: string) =>
     playSteps(steps, book, orders, step => {
-      const [, action, name] = /^(buy|sell|stop|usdt)([A-Z]+|\d+)$/.exec(step) ?? [];
+      const [, action, name] = /^(buy|trail|sell|stop|over|usdt)([A-Z]+|\d+)$/.exec(step) ?? [];
       const symbol = `${name}/USDT` as TradingPair;
-      if (action === 'buy') book.buy({ type: 'STICKY', symbol }, params());
-      else if (action === 'sell') book.sell({ type: 'STICKY', symbol }, params());
-      else if (action === 'stop') book.adoptSell(orders.createOrder({ type: 'MARKET', side: 'SELL', symbol }), symbol);
+      if (action === 'buy') placeBuy({ type: 'STICKY', symbol });
+      else if (action === 'trail') placeBuy({ type: 'STICKY', symbol, trailing: TRAILING });
+      else if (action === 'sell') book.sell({ type: 'STICKY', symbol });
+      else if (action === 'stop') triggerStop(symbol);
+      else if (action === 'over') aliveStops.delete(lastBuys.get(symbol)!);
       else if (action === 'usdt') portfolio = holdingCurrency(Number(name));
       else throw new Error(`Unknown step: ${step}`);
     });
@@ -75,12 +128,22 @@ describe('PositionBook', () => {
   const positionOn = (pair: TradingPair) => `${book.isLong(pair) ? 'long' : 'flat'}${book.isPendingOrder(pair) ? ', pending' : ''}`;
 
   beforeEach(() => {
-    book = new PositionBook();
     orders = new OrderRecorder();
     logs = [];
     portfolio = new Map();
     marketData = new Map();
     candle = new Map();
+    aliveStops = new Set();
+    lastBuys = new Map();
+    isStopAlive = vi.fn((id: UUID) => aliveStops.has(id));
+    book = new PositionBook({
+      createOrder,
+      log,
+      getPortfolio: () => portfolio,
+      getMarketData: pair => marketData.get(pair),
+      getClose: pair => candle.get(pair)?.close,
+      isStopAlive,
+    });
   });
 
   describe('track', () => {
@@ -88,12 +151,13 @@ describe('PositionBook', () => {
       expect(book.pairs).toEqual([]);
     });
 
-    // The bucket holds a candle of every watched pair, in the order of watch.assets
+    // The StrategyManager hands it every watched pair, in the order of watch.assets, or the pairs the strategy names, in their order
     it.each`
-      case             | pairs
-      ${'one pair'}    | ${[BTC]}
-      ${'three pairs'} | ${[ETH, BTC, SOL]}
-    `('tracks the pairs of the bucket in its order: $case', ({ pairs }) => {
+      case                                                       | pairs
+      ${'one pair'}                                              | ${[BTC]}
+      ${'three pairs'}                                           | ${[ETH, BTC, SOL]}
+      ${'a subset of the pairs watched, in an order of its own'} | ${[SOL, BTC]}
+    `('tracks the pairs given, in their order: $case', ({ pairs }) => {
       track(pairs);
       expect(book.pairs).toEqual(pairs);
     });
@@ -129,6 +193,33 @@ describe('PositionBook', () => {
       }
       expect(book.pairs).toEqual([BTC]);
     });
+
+    it('keeps a copy of its own of the pairs given', () => {
+      const pairs = [BTC, ETH];
+      book.track(pairs);
+      pairs.push(SOL);
+      expect(book.pairs).toEqual([BTC, ETH]);
+    });
+
+    // tools.positions.pairs is that array, which the strategies walk on every candle: a copy at each read, or a frozen array, which Bun
+    // walks some ten times slower, would cost a backtest on 1m candles a share of its time
+    it('gives its own array at every read', () => {
+      track([BTC, ETH]);
+      expect(book.pairs).toBe(book.pairs);
+    });
+
+    it('keeps its array of pairs unfrozen', () => {
+      track([BTC, ETH]);
+      expect(Object.isFrozen(book.pairs)).toBe(false);
+    });
+
+    // The StrategyManager has the market data of every watched pair: the BUYs share the currency among the pairs tracked alone
+    it('shares the currency among the pairs it tracks, not among those the context has market data of', () => {
+      marketData = withMarket([BTC, ETH, SOL], {});
+      track([SOL, BTC]);
+      book.buy({ type: 'STICKY', symbol: BTC });
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY', allocation: 50 }]);
+    });
   });
 
   describe('a pair not tracked', () => {
@@ -148,14 +239,15 @@ describe('PositionBook', () => {
       expect(book.canBuy(BTC)).toBe(false);
     });
 
+    // The pair of a stop is that of its BUY, which the book tracks: one that is not is refused as the BUY would be
     it.each`
-      case                                      | tracked            | act                                                           | message
-      ${'a BUY'}                                | ${[BTC, ETH]}      | ${() => book.buy({ type: 'STICKY', symbol: XRP }, params())}  | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
-      ${'a SELL'}                               | ${[BTC, ETH]}      | ${() => book.sell({ type: 'MARKET', symbol: XRP }, params())} | ${'Impossible to place the SELL MARKET order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
-      ${'the SELL of a trailing stop to adopt'} | ${[BTC, ETH]}      | ${() => book.adoptSell(FIRST_ORDER_ID, XRP)}                  | ${'Impossible to adopt the SELL 00000000-0000-0000-0000-000000000001 on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
-      ${'a BUY, one pair tracked'}              | ${[BTC]}           | ${() => book.buy({ type: 'STICKY', symbol: XRP }, params())}  | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT)'}
-      ${'a BUY, three pairs tracked'}           | ${[BTC, ETH, SOL]} | ${() => book.buy({ type: 'LIMIT', symbol: XRP }, params())}   | ${'Impossible to place the BUY LIMIT order on XRP/USDT: the position book does not track it (it tracks BTC/USDT, ETH/USDT and SOL/USDT)'}
-      ${'a BUY before track, no pair tracked'}  | ${undefined}       | ${() => book.buy({ type: 'STICKY', symbol: BTC }, params())}  | ${'Impossible to place the BUY STICKY order on BTC/USDT: the position book does not track it (it tracks no pair until init calls track)'}
+      case                                                    | tracked            | act                                                                                                                                | message
+      ${'a BUY'}                                              | ${[BTC, ETH]}      | ${() => book.buy({ type: 'STICKY', symbol: XRP })}                                                                                 | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+      ${'a SELL'}                                             | ${[BTC, ETH]}      | ${() => book.sell({ type: 'MARKET', symbol: XRP })}                                                                                | ${'Impossible to place the SELL MARKET order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+      ${'the SELL of a stop of its own BUY, on another pair'} | ${[BTC, ETH]}      | ${() => book.adoptStopSell(UNKNOWN_ORDER_ID, { id: placeBuy({ type: 'STICKY', symbol: BTC, trailing: TRAILING })!, symbol: XRP })} | ${'Impossible to adopt the SELL ffffffff-ffff-ffff-ffff-ffffffffffff on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+      ${'a BUY, one pair tracked'}                            | ${[BTC]}           | ${() => book.buy({ type: 'STICKY', symbol: XRP })}                                                                                 | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT)'}
+      ${'a BUY, three pairs tracked'}                         | ${[BTC, ETH, SOL]} | ${() => book.buy({ type: 'LIMIT', symbol: XRP })}                                                                                  | ${'Impossible to place the BUY LIMIT order on XRP/USDT: the position book does not track it (it tracks BTC/USDT, ETH/USDT and SOL/USDT)'}
+      ${'a BUY before track, no pair tracked'}                | ${undefined}       | ${() => book.buy({ type: 'STICKY', symbol: BTC })}                                                                                 | ${'Impossible to place the BUY STICKY order on BTC/USDT: the position book does not track it (it tracks no pair until init calls track)'}
     `('refuses $case with a GekkoError', ({ tracked, act, message }) => {
       if (tracked) track(tracked);
       expect(act).toThrow(new GekkoError('strategy', message));
@@ -180,8 +272,8 @@ describe('PositionBook', () => {
       ${'a BTC SELL placed, ETH long'}                  | ${'buyBTC buyETH completed:1 completed:2 sellBTC'}             | ${'long, pending'} | ${'long'}
       ${'the BTC SELL completed, ETH long'}             | ${'buyBTC buyETH completed:1 completed:2 sellBTC completed:3'} | ${'flat'}          | ${'long'}
       ${'the BTC SELL errored, nothing reported'}       | ${'buyBTC buyETH completed:1 completed:2 sellBTC errored:3'}   | ${'long'}          | ${'long'}
-      ${'a stop SELL adopted on BTC'}                   | ${'buyBTC completed:1 stopBTC'}                                | ${'long, pending'} | ${'flat'}
-      ${'the stop SELL completed'}                      | ${'buyBTC completed:1 stopBTC completed:2'}                    | ${'flat'}          | ${'flat'}
+      ${'a stop SELL adopted on BTC'}                   | ${'trailBTC completed:1 stopBTC'}                              | ${'long, pending'} | ${'flat'}
+      ${'the stop SELL completed'}                      | ${'trailBTC completed:1 stopBTC completed:2'}                  | ${'flat'}          | ${'flat'}
       ${'an order of neither completed, a BTC BUY due'} | ${'buyBTC completed:unknown'}                                  | ${'flat, pending'} | ${'flat'}
     `('reads $case: BTC $btc, ETH $eth', ({ steps, btc, eth }) => {
       play(steps);
@@ -210,20 +302,20 @@ describe('PositionBook', () => {
 
     // An outcome goes to the tracker of its order's pair: an order of a pair not tracked, or none, is no tracker's
     it.each`
-      outcome        | order                                 | steps                           | relayed                                  | isOwn
-      ${'completed'} | ${'its BTC BUY'}                      | ${'buyBTC'}                     | ${1}                                     | ${true}
-      ${'canceled'}  | ${'its BTC BUY'}                      | ${'buyBTC'}                     | ${1}                                     | ${true}
-      ${'errored'}   | ${'its BTC BUY'}                      | ${'buyBTC'}                     | ${1}                                     | ${true}
-      ${'completed'} | ${'its ETH BUY, beside a BTC BUY'}    | ${'buyBTC buyETH'}              | ${2}                                     | ${true}
-      ${'completed'} | ${'its BTC SELL'}                     | ${'buyBTC completed:1 sellBTC'} | ${2}                                     | ${true}
-      ${'completed'} | ${'a stop SELL it adopted'}           | ${'buyBTC completed:1 stopBTC'} | ${2}                                     | ${true}
-      ${'completed'} | ${'an order of a pair not tracked'}   | ${'buyBTC'}                     | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
-      ${'canceled'}  | ${'an order of a pair not tracked'}   | ${'buyBTC'}                     | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
-      ${'errored'}   | ${'an order of a pair not tracked'}   | ${'buyBTC'}                     | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
-      ${'completed'} | ${'an order without a pair'}          | ${'buyBTC'}                     | ${{ id: UNKNOWN_ORDER_ID }}              | ${false}
-      ${'completed'} | ${'another order of BTC'}             | ${'buyBTC'}                     | ${{ id: UNKNOWN_ORDER_ID, symbol: BTC }} | ${false}
-      ${'completed'} | ${'its BTC BUY, relayed on ETH/USDT'} | ${'buyBTC'}                     | ${{ id: FIRST_ORDER_ID, symbol: ETH }}   | ${false}
-      ${'completed'} | ${'an order already settled'}         | ${'buyBTC completed:1'}         | ${1}                                     | ${false}
+      outcome        | order                                 | steps                             | relayed                                  | isOwn
+      ${'completed'} | ${'its BTC BUY'}                      | ${'buyBTC'}                       | ${1}                                     | ${true}
+      ${'canceled'}  | ${'its BTC BUY'}                      | ${'buyBTC'}                       | ${1}                                     | ${true}
+      ${'errored'}   | ${'its BTC BUY'}                      | ${'buyBTC'}                       | ${1}                                     | ${true}
+      ${'completed'} | ${'its ETH BUY, beside a BTC BUY'}    | ${'buyBTC buyETH'}                | ${2}                                     | ${true}
+      ${'completed'} | ${'its BTC SELL'}                     | ${'buyBTC completed:1 sellBTC'}   | ${2}                                     | ${true}
+      ${'completed'} | ${'a stop SELL it adopted'}           | ${'trailBTC completed:1 stopBTC'} | ${2}                                     | ${true}
+      ${'completed'} | ${'an order of a pair not tracked'}   | ${'buyBTC'}                       | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
+      ${'canceled'}  | ${'an order of a pair not tracked'}   | ${'buyBTC'}                       | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
+      ${'errored'}   | ${'an order of a pair not tracked'}   | ${'buyBTC'}                       | ${{ id: FIRST_ORDER_ID, symbol: XRP }}   | ${false}
+      ${'completed'} | ${'an order without a pair'}          | ${'buyBTC'}                       | ${{ id: UNKNOWN_ORDER_ID }}              | ${false}
+      ${'completed'} | ${'another order of BTC'}             | ${'buyBTC'}                       | ${{ id: UNKNOWN_ORDER_ID, symbol: BTC }} | ${false}
+      ${'completed'} | ${'its BTC BUY, relayed on ETH/USDT'} | ${'buyBTC'}                       | ${{ id: FIRST_ORDER_ID, symbol: ETH }}   | ${false}
+      ${'completed'} | ${'an order already settled'}         | ${'buyBTC completed:1'}           | ${1}                                     | ${false}
     `('says whether $order, $outcome, was the order of the tracker of its pair ($isOwn)', ({ outcome, steps, relayed, isOwn }) => {
       play(steps);
       const order = typeof relayed === 'number' ? orders.created(relayed)! : relayed;
@@ -271,7 +363,7 @@ describe('PositionBook', () => {
 
     it('places the BUY as given, its price and its stop kept, with its side and its allocation', () => {
       track([BTC, ETH]);
-      book.buy({ type: 'LIMIT', symbol: BTC, price: 90, trailing: { percentage: 5 } }, params());
+      book.buy({ type: 'LIMIT', symbol: BTC, price: 90, trailing: { percentage: 5 } });
       expect(orders.advices).toStrictEqual([
         { type: 'LIMIT', symbol: BTC, price: 90, trailing: { percentage: 5 }, allocation: 50, side: 'BUY' },
       ]);
@@ -279,7 +371,7 @@ describe('PositionBook', () => {
 
     it('returns the id of the BUY placed', () => {
       track([BTC]);
-      expect(book.buy({ type: 'STICKY', symbol: BTC }, params())).toBe(FIRST_ORDER_ID);
+      expect(book.buy({ type: 'STICKY', symbol: BTC })).toBe(FIRST_ORDER_ID);
     });
   });
 
@@ -294,20 +386,246 @@ describe('PositionBook', () => {
       ${{ type: 'LIMIT', symbol: ETH, price: 110 }} | ${{ type: 'LIMIT', symbol: ETH, price: 110, side: 'SELL' }}
     `('places an all-in SELL as given, with its side and no allocation, BTC flat: $created', ({ order, created }) => {
       play('buyETH completed:1');
-      book.sell(order, params());
+      book.sell(order);
       expect(orders.advices.at(-1)).toStrictEqual(created);
     });
 
     it('returns the id of the SELL placed', () => {
-      expect(book.sell({ type: 'STICKY', symbol: ETH }, params())).toBe(FIRST_ORDER_ID);
+      expect(book.sell({ type: 'STICKY', symbol: ETH })).toBe(FIRST_ORDER_ID);
     });
 
     // The skip is the BUYs': a SELL brings the currency in
     it('places a SELL whatever the currency free', () => {
       portfolio = holdingCurrency(0);
       marketData = withMinimumCost([BTC, ETH], 10);
-      book.sell({ type: 'STICKY', symbol: BTC }, params());
+      book.sell({ type: 'STICKY', symbol: BTC });
       expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'SELL' }]);
+    });
+  });
+
+  describe('adoptStopSell', () => {
+    // A stop's id is its BUY's: the book adopts the SELL of a stop it asked for through buy, from the first SELL to the last
+    it.each`
+      case                                                                 | steps                                       | adopted
+      ${'its BUY with a trailing'}                                         | ${'trailBTC completed:1'}                   | ${true}
+      ${'its BUY without one'}                                             | ${'buyBTC completed:1'}                     | ${false}
+      ${'its BUY with a trailing, the stop active again after its SELL'}   | ${'trailBTC completed:1 stopBTC errored:2'} | ${true}
+      ${'its BUY with a trailing, the stop alive at a BUY with one after'} | ${'trailBTC completed:1 trailETH'}          | ${true}
+      ${'its BUY with a trailing, the stop over before a BUY with one'}    | ${'trailBTC completed:1 overBTC trailETH'}  | ${false}
+    `('adopts ($adopted) the SELL of the stop of $case', ({ steps, adopted }) => {
+      track([BTC, ETH]);
+      play(steps);
+      expect(triggerStop(BTC)).toBe(adopted);
+    });
+
+    // An adopted SELL is an order of the tracker's own, which its outcome settles as that of any SELL of the book
+    it.each`
+      case                                                    | steps                                                           | btc
+      ${'the second SELL of a stop active again, pending'}    | ${'trailBTC completed:1 stopBTC errored:2 stopBTC'}             | ${'long, pending'}
+      ${'the second SELL of a stop active again, completed'}  | ${'trailBTC completed:1 stopBTC errored:2 stopBTC completed:3'} | ${'flat'}
+      ${'the SELL of the stop of its BUY without a trailing'} | ${'buyBTC completed:1 stopBTC'}                                 | ${'long'}
+      ${'that SELL completed, not its own'}                   | ${'buyBTC completed:1 stopBTC completed:2'}                     | ${'long'}
+    `('reads BTC $btc after $case', ({ steps, btc }) => {
+      track([BTC, ETH]);
+      play(steps);
+      expect(positionOn(BTC)).toBe(btc);
+    });
+
+    it('adopts nothing before track', () => {
+      expect(book.adoptStopSell(UNKNOWN_ORDER_ID, { id: FIRST_ORDER_ID, symbol: BTC })).toBe(false);
+    });
+
+    // A BUY the strategy created with tools.createOrder is not the book's, nor is the SELL of its stop
+    it('adopts not the SELL of the stop of a BUY the book did not place', () => {
+      track([BTC, ETH]);
+      const buyId = createOrder({ type: 'STICKY', side: 'BUY', symbol: BTC, trailing: TRAILING });
+      expect(book.adoptStopSell(UNKNOWN_ORDER_ID, { id: buyId, symbol: BTC })).toBe(false);
+    });
+
+    it('leaves the pair as it was after the SELL of the stop of a BUY the book did not place', () => {
+      track([BTC, ETH]);
+      const buyId = createOrder({ type: 'STICKY', side: 'BUY', symbol: BTC, trailing: TRAILING });
+      book.adoptStopSell(UNKNOWN_ORDER_ID, { id: buyId, symbol: BTC });
+      expect(positionOn(BTC)).toBe('flat');
+    });
+
+    // The memory holds the stops still alive: at each BUY with a trailing, the book asks after those it remembers, then forgets the
+    // dead ones, so that a run whose BUYs each ask for a stop does not remember every BUY of the run
+    it.each`
+      case                                                                    | steps                                   | asked
+      ${'a BUY with a trailing, nothing remembered'}                          | ${'trailBTC'}                           | ${[]}
+      ${'a BUY without one, a stop remembered'}                               | ${'trailBTC buyETH'}                    | ${[]}
+      ${'a BUY with a trailing, a stop alive remembered'}                     | ${'trailBTC trailETH'}                  | ${[[FIRST_ORDER_ID]]}
+      ${'two BUYs with a trailing after a stop over, forgotten at the first'} | ${'trailBTC overBTC trailETH trailSOL'} | ${[[FIRST_ORDER_ID], [SECOND_ORDER_ID]]}
+      ${'two BUYs with a trailing after a stop alive'}                        | ${'trailBTC trailETH trailSOL'}         | ${[[FIRST_ORDER_ID], [FIRST_ORDER_ID], [SECOND_ORDER_ID]]}
+    `('asks whether each stop it remembers is alive at $case', ({ steps, asked }) => {
+      track([BTC, ETH, SOL]);
+      play(steps);
+      expect(isStopAlive.mock.calls).toEqual(asked);
+    });
+
+    // On 20 USDT, the BUY of BTC with a trailing, 9.5 USDT once 5 % is kept back for the fee, is skipped under a minimum cost of 10: no
+    // order, no stop. That of ETH, on 100 USDT, is placed, and the book had nothing to ask after.
+    it('remembers no BUY it skipped', () => {
+      trackSilently([BTC, ETH]);
+      marketData = withMinimumCost([BTC, ETH], 10);
+      portfolio = holdingCurrency(20);
+      placeBuy({ type: 'STICKY', symbol: BTC, trailing: TRAILING });
+      portfolio = holdingCurrency(100);
+      placeBuy({ type: 'STICKY', symbol: ETH, trailing: TRAILING });
+      expect(isStopAlive).not.toHaveBeenCalled();
+    });
+  });
+
+  // tools.positions.pairs is the book's own array, neither copied nor frozen, since the strategies walk it on every candle. An untyped
+  // strategy can write to it all the same: the book decides by its trackers, so that nothing the strategy writes changes what the
+  // StrategyManager goes by, as the copy contract of Strategy promises
+  describe('an array of pairs a strategy wrote to', () => {
+    /** The array the book hands out, as an untyped strategy writes to it: its type is readonly */
+    const pairsHandedOut = () => book.pairs as TradingPair[];
+    const pushSol = (pairs: TradingPair[]) => {
+      pairs.push(SOL);
+    };
+    const empty = (pairs: TradingPair[]) => {
+      pairs.length = 0;
+    };
+
+    // On 8 USDT free, all of it, 7.6 USDT once 5 % is kept back for the fee, is below the minimum cost of 10: a book of one pair sends
+    // its all-in BUY all the same, for the market to refuse
+    describe('a book of one pair, a pair pushed into its array', () => {
+      beforeEach(() => {
+        track([BTC]);
+        pairsHandedOut().push(ETH);
+        portfolio = holdingCurrency(8);
+        marketData = withMinimumCost([BTC], 10);
+      });
+
+      it('returns the id of its BUY', () => {
+        expect(book.buy({ type: 'STICKY', symbol: BTC })).toBe(FIRST_ORDER_ID);
+      });
+
+      it('sends its BUY all-in, without an allocation', () => {
+        book.buy({ type: 'STICKY', symbol: BTC });
+        expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
+      });
+
+      it('logs no skip', () => {
+        book.buy({ type: 'STICKY', symbol: BTC });
+        expect(logs).toEqual([]);
+      });
+    });
+
+    // On 20 USDT free, 50 %, 9.5 USDT once 5 % is kept back for the fee, is below the minimum cost of 10
+    describe('a book of two pairs, its array emptied', () => {
+      beforeEach(() => {
+        trackSilently([BTC, ETH]);
+        empty(pairsHandedOut());
+        portfolio = holdingCurrency(20);
+        marketData = withMinimumCost([BTC, ETH], 10);
+      });
+
+      it('sends no BUY the market would refuse', () => {
+        book.buy({ type: 'STICKY', symbol: BTC });
+        expect(orders.advices).toEqual([]);
+      });
+
+      it('warns of the BUY it skips', () => {
+        book.buy({ type: 'STICKY', symbol: BTC });
+        expect(logs).toEqual([
+          {
+            level: 'warn',
+            message: `[BTC/USDT] BUY skipped: 50 % of the 20 USDT free, 9.5 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`,
+          },
+        ]);
+      });
+    });
+
+    // A pair written in has no tracker: the book refuses it as any pair it does not track
+    it.each`
+      case                                     | write      | symbol | message
+      ${'a pair pushed, another pair refused'} | ${pushSol} | ${XRP} | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+      ${'a pair pushed, that pair refused'}    | ${pushSol} | ${SOL} | ${'Impossible to place the BUY STICKY order on SOL/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+      ${'the array emptied'}                   | ${empty}   | ${XRP} | ${'Impossible to place the BUY STICKY order on XRP/USDT: the position book does not track it (it tracks BTC/USDT and ETH/USDT)'}
+    `('names the pairs it tracks in the refusal of a pair it does not: $case', ({ write, symbol, message }) => {
+      track([BTC, ETH]);
+      write(pairsHandedOut());
+      expect(() => book.buy({ type: 'STICKY', symbol })).toThrow(new GekkoError('strategy', message));
+    });
+  });
+
+  // The StrategyManager builds the book with getters over its own state, which it replaces during the run: the book reads them when it
+  // needs them, and the end of an order as the manager hears of it, never the params of a hook
+  describe('context', () => {
+    // On 20 USDT, 50 % is 9.5 USDT once 5 % is kept back for the fee, below a minimum cost of 10; on 25 USDT, 11.875 USDT, above it
+    it('reads the portfolio the context gives at each BUY', () => {
+      trackSilently([BTC, ETH]);
+      marketData = withMinimumCost([BTC, ETH], 10);
+      portfolio = holdingCurrency(20);
+      book.buy({ type: 'STICKY', symbol: BTC });
+      portfolio = holdingCurrency(25);
+      book.buy({ type: 'STICKY', symbol: BTC });
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY', allocation: 50 }]);
+    });
+
+    // 9.5 USDT is below a minimum cost of 10, and the minimum cost of 9.5 itself
+    it('reads the market data the context gives at each BUY', () => {
+      trackSilently([BTC, ETH]);
+      portfolio = holdingCurrency(20);
+      marketData = withMinimumCost([BTC, ETH], 10);
+      book.buy({ type: 'STICKY', symbol: BTC });
+      marketData = withMinimumCost([BTC, ETH], 9.5);
+      book.buy({ type: 'STICKY', symbol: BTC });
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY', allocation: 50 }]);
+    });
+
+    // On 12 USDT, 50 % is 5.7 USDT once 5 % is kept back: 0.00005 BTC at 97654.32 on the step, 4.882716 USDT, below the minimum cost of
+    // 5; 0.00006 BTC at 95000, 5.7 USDT, above it
+    it('reads the close the context gives at each BUY', () => {
+      trackSilently([BTC, ETH]);
+      portfolio = holdingCurrency(12);
+      marketData = withMarket([BTC, ETH], { cost: { min: 5 }, precision: { amount: 0.00001 } });
+      candle = flatBucket({ [BTC]: 97654.32, [ETH]: 2000 });
+      book.buy({ type: 'STICKY', symbol: BTC });
+      candle = flatBucket({ [BTC]: 95000, [ETH]: 2000 });
+      book.buy({ type: 'STICKY', symbol: BTC });
+      expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY', allocation: 50 }]);
+    });
+
+    it('settles the end of an order that carries no tools', () => {
+      track([BTC, ETH]);
+      play('buyBTC');
+      const end = { order: { ...orders.created(1)!, filled: 0, mayBeLive: false }, exchange: { portfolio: holding(BTC, 0.5), price: 100 } };
+      book.onOrderErrored(end as unknown as OrderEnd<OrderErroredEvent>);
+      expect(book.isLong(BTC)).toBe(true);
+    });
+
+    // 0.1 BTC at 100 USDT is 10 USDT, below a minimum cost of 100 in the tools the event carries, which the book does not read
+    it('reads the market data of its context to settle an end, not that of the tools an event carries', () => {
+      track([BTC, ETH]);
+      play('buyBTC');
+      relayOrderOutcome(book, 'errored', orders.created(1)!, {
+        portfolio: holding(BTC, 0.1),
+        price: 100,
+        marketData: withMinimumCost([BTC], 100),
+      });
+      expect(book.isLong(BTC)).toBe(true);
+    });
+
+    it('logs the position an end settles through its context, not through the tools an event carries', () => {
+      const eventLog = vi.fn();
+      trackSilently([BTC, ETH]);
+      play('buyBTC');
+      relayOrderOutcome(book, 'errored', orders.created(1)!, { portfolio: holding(BTC, 0.5), log: eventLog });
+      expect({ context: logs, event: eventLog.mock.calls }).toEqual({
+        context: [
+          {
+            level: 'info',
+            message:
+              '[00000000-0000-0000-0000-000000000001] BUY order errored: 0.5 BTC free in the portfolio after it, enough to sell: the strategy is long',
+          },
+        ],
+        event: [],
+      });
     });
   });
 
@@ -318,11 +636,10 @@ describe('PositionBook', () => {
 
     /**
      * Tracks `pairs` without a word, the portfolio holding `free` of `currency`, each pair with a minimum cost of `minimum`, and the
-     * candle of the hooks at a close of 100
+     * last timeframe candle at a close of 100
      */
     const setUp = (pairs: TradingPair[], free: number, minimum?: number, currency = 'USDT') => {
-      candle = bucketOf(pairs);
-      book.track({ candle, tools: { log: noop } });
+      trackSilently(pairs);
       portfolio = holdingCurrency(free, currency);
       marketData = withMinimumCost(pairs, minimum);
     };
@@ -379,7 +696,7 @@ describe('PositionBook', () => {
 
     it('returns undefined for a BUY skipped', () => {
       setUp([BTC, ETH], 20, 10);
-      expect(book.buy({ type: 'STICKY', symbol: BTC }, params())).toBeUndefined();
+      expect(book.buy({ type: 'STICKY', symbol: BTC })).toBeUndefined();
     });
 
     it('leaves the pair flat, nothing pending, after a BUY skipped', () => {
@@ -407,7 +724,7 @@ describe('PositionBook', () => {
       ${0.0000005} | ${0.0001}   | ${`[ETH/BTC] BUY skipped: 50 % of the 0.0000005 BTC free, 0.0000002375 BTC once 5 % is kept back for the fee, is below the minimum cost of 0.0001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
     `('writes the currency free, the cost estimate and the minimum with every decimal: $free BTC free', ({ free, minimum, message }) => {
       setUp(['ETH/BTC', 'SOL/BTC'], free, minimum, 'BTC');
-      book.buy({ type: 'STICKY', symbol: 'ETH/BTC' }, params());
+      book.buy({ type: 'STICKY', symbol: 'ETH/BTC' });
       expect(logs).toEqual([{ level: 'warn', message }]);
     });
 
@@ -440,9 +757,9 @@ describe('PositionBook', () => {
     // price of the BUY, the close unless it has one, truncated to the amount step of the market, is what the market checks.
     const BAND = { cost: { min: 5 }, precision: { amount: 0.00001 } } satisfies MarketData;
 
-    /** Tracks BTC/USDT and ETH/USDT without a word, 12 USDT free, BTC at `close` and ETH at 2000 in the candle of the hooks */
+    /** Tracks BTC/USDT and ETH/USDT without a word, 12 USDT free, BTC at `close` and ETH at 2000 in the last timeframe candle */
     const setUp = (close: number, market: MarketData) => {
-      book.track({ candle: bucketOf([BTC, ETH]), tools: { log: noop } });
+      trackSilently([BTC, ETH]);
       candle = flatBucket({ [BTC]: close, [ETH]: 2000 });
       portfolio = holdingCurrency(12);
       marketData = withMarket([BTC, ETH], market);
@@ -462,15 +779,15 @@ describe('PositionBook', () => {
       ${'a STICKY BUY of 0.00057 BTC, which the minimum of a market order does not bound'} | ${10000}    | ${{ type: 'STICKY' }}                 | ${{ ...BAND, amount: { min: 0.0001 }, market: { min: 0.001 } }} | ${1}
     `('places $placed BUY of BTC for $case', ({ close, order, market, placed }) => {
       setUp(close, market);
-      book.buy({ ...order, symbol: BTC }, params());
+      book.buy({ ...order, symbol: BTC });
       expect(orders.advices).toHaveLength(placed);
     });
 
     // Without a price, which the Trader refuses the BUY for, there is no amount to work out: the BUY is sent, as before
-    it('places a BUY without a price whose pair the candle of the hook lacks', () => {
+    it('places a BUY without a price whose pair has no close yet', () => {
       setUp(97654.32, BAND);
       candle = flatBucket({ [ETH]: 2000 });
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(orders.advices).toHaveLength(1);
     });
 
@@ -481,7 +798,7 @@ describe('PositionBook', () => {
       ${'the amount sent, on a market without a step'} | ${10000}    | ${{ amount: { min: 0.001 } }}          | ${`[BTC/USDT] BUY skipped: 50 % of the 12 USDT free, 5.7 USDT once 5 % is kept back for the fee, 0.00057 BTC at 10000, is below the minimum amount of 0.001 BTC of the market: watch fewer pairs or fund the account${NEXT_SKIPS}`}
     `('warns of the first skip of a pair below a minimum, naming $case', ({ close, market, message }) => {
       setUp(close, market);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(logs).toEqual([{ level: 'warn', message }]);
     });
 
@@ -491,7 +808,7 @@ describe('PositionBook', () => {
       setUp(95000, BAND);
       play('buyETH completed:1');
       portfolio = holdingCurrency(5.5);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(logs).toEqual([
         {
           level: 'warn',
@@ -509,9 +826,12 @@ describe('PositionBook', () => {
       '[BTC/USDT] BUY skipped: 50 % of the 8 USDT free, 3.8 USDT once 5 % is kept back for the fee, is below the minimum cost of 5 USDT of the market';
     const ADOPTED = `${SKIPPED}, but 0.002 BTC is free in the portfolio, enough to sell: the strategy is long`;
 
-    /** Tracks BTC/USDT and ETH/USDT without a word, BTC at 60000 and ETH at 3000 in the candle of the hooks, the portfolio holding `amounts` */
+    /**
+     * Tracks BTC/USDT and ETH/USDT without a word, BTC at 60000 and ETH at 3000 in the last timeframe candle, the portfolio holding
+     * `amounts`
+     */
     const setUp = (amounts: Record<string, number>, market: MarketData = MARKET) => {
-      book.track({ candle: bucketOf([BTC, ETH]), tools: { log: noop } });
+      trackSilently([BTC, ETH]);
       candle = flatBucket({ [BTC]: 60000, [ETH]: 3000 });
       portfolio = portfolioOf(amounts);
       marketData = withMarket([BTC, ETH], market);
@@ -528,14 +848,14 @@ describe('PositionBook', () => {
       ${'no BTC in the portfolio: flat'}                                      | ${{ USDT: 8 }}               | ${{ type: 'STICKY' }}             | ${MARKET}                               | ${'flat'}
     `('reads the position of a BUY of BTC skipped with $case', ({ amounts, order, market, position }) => {
       setUp(amounts, market);
-      book.buy({ ...order, symbol: BTC }, params());
+      book.buy({ ...order, symbol: BTC });
       expect(positionOn(BTC)).toBe(position);
     });
 
-    it('takes no holding of a pair the candle of the hook lacks, which has no close to value it at', () => {
+    it('takes no holding of a pair without a close to value it at', () => {
       setUp({ USDT: 8, BTC: 0.002 });
       candle = flatBucket({ [ETH]: 3000 });
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(positionOn(BTC)).toBe('flat');
     });
 
@@ -554,11 +874,11 @@ describe('PositionBook', () => {
       ${'too little to sell, the warning as without it'}         | ${{ USDT: 8, BTC: 0.00005 }} | ${{ level: 'warn', message: `${SKIPPED}: watch fewer pairs or fund the account${NEXT_SKIPS}` }}
     `('says the skip of a BUY of BTC beside a holding $case', ({ amounts, message }) => {
       setUp(amounts);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(logs).toEqual([message]);
     });
 
-    // A custom strategy may call buy while long: the skip is said as any other, the position kept
+    // A strategy may call buy while long: the skip is said as any other, the position kept
     it('warns of a BUY skipped while long, beside a holding enough to sell', () => {
       setUp({ USDT: 30 });
       play('buyBTC completed:1');
@@ -585,11 +905,11 @@ describe('PositionBook', () => {
     });
 
     it('places the all-in BUY of a book tracking one pair, though the portfolio holds enough BTC to sell', () => {
-      book.track({ candle: bucketOf([BTC]), tools: { log: noop } });
+      track([BTC]);
       candle = flatBucket({ [BTC]: 60000 });
       portfolio = portfolioOf({ USDT: 8, BTC: 0.002 });
       marketData = withMarket([BTC], MARKET);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
     });
   });
@@ -620,8 +940,7 @@ describe('PositionBook', () => {
      * `steps` on the read `sizedFrom` (the BUY of BTC placed, 'buyBTC'), then reads `read`
      */
     const setUp = (ethMinimum: number, steps: string, read: CurrencyRead, sizedFrom: CurrencyRead = START) => {
-      candle = bucketOf([BTC, ETH]);
-      book.track({ candle, tools: { log: noop } });
+      trackSilently([BTC, ETH]);
       marketData = new Map<TradingPair, MarketData>([[ETH, { cost: { min: ethMinimum } }]]);
       portfolio = readOf(sizedFrom);
       play(steps);
@@ -641,7 +960,7 @@ describe('PositionBook', () => {
       ${'truncated by the exchange: 50 % of 30.05 USDT, 14.27375 USDT, above 14.26'}  | ${14.26}   | ${TRUNCATED}   | ${1}
     `('places $placed BUY of ETH beside the BUY of BTC $case', ({ ethMinimum, read, placed }) => {
       setUp(ethMinimum, 'buyBTC', read);
-      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      book.buy({ type: 'STICKY', symbol: ETH });
       expect(orders.advices.filter(({ symbol }) => symbol === ETH)).toHaveLength(placed);
     });
 
@@ -658,7 +977,7 @@ describe('PositionBook', () => {
       ${'an all-in BUY, BTC long, sized from what is left'}    | ${15}      | ${'buyBTC completed:1'} | ${UNFILLED}    | ${`[ETH/USDT] BUY skipped: all of the 15.75 USDT free, 14.9625 USDT once 5 % is kept back for the fee, is below the minimum cost of 15 USDT of the market: fund the account${NEXT_SKIPS}`}
     `('names the currency of a skipped BUY of ETH, $case', ({ ethMinimum, steps, read, message }) => {
       setUp(ethMinimum, steps, read);
-      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      book.buy({ type: 'STICKY', symbol: ETH });
       expect(logs).toEqual([{ level: 'warn', message }]);
     });
 
@@ -666,7 +985,7 @@ describe('PositionBook', () => {
     // held for an order the book did not place, 50 % of 20 USDT, 9.5 USDT once 5 % is kept back, below the minimum cost of 10
     it('estimates a share from the read alone beside a BUY sized from it, whatever the exchange holds for other orders', () => {
       setUp(10, 'buyBTC', { free: 20, used: 10 }, { free: 20, used: 10 });
-      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      book.buy({ type: 'STICKY', symbol: ETH });
       expect(logs).toEqual([
         {
           level: 'warn',
@@ -675,8 +994,8 @@ describe('PositionBook', () => {
       ]);
     });
 
-    // Its outcome come, the BUY of BTC holds nothing at the reads after it: a BUY of BTC again (long once completed, as a custom strategy
-    // may ask) takes 50 % of the 20 USDT free alone, 9.5 USDT once 5 % is kept back, below 10, where 50 % of 34.25 USDT would be placed
+    // Its outcome come, the BUY of BTC holds nothing at the reads after it: a BUY of BTC again (long once completed, as a strategy may ask)
+    // takes 50 % of the 20 USDT free alone, 9.5 USDT once 5 % is kept back, below 10, where 50 % of 34.25 USDT would be placed
     it.each`
       outcome
       ${'completed'}
@@ -685,7 +1004,7 @@ describe('PositionBook', () => {
     `('adds nothing back for a BUY of its own once $outcome', ({ outcome }) => {
       setUp(10, `buyBTC ${outcome}:1`, { free: 20, used: 0 });
       marketData = withMinimumCost([BTC, ETH], 10);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(logs).toEqual([
         {
           level: 'warn',
@@ -696,8 +1015,7 @@ describe('PositionBook', () => {
 
     /** Tracks BTC/USDT, ETH/USDT, SOL/USDT and XRP/USDT without a word, SOL/USDT alone with a minimum cost, of 7.2 */
     const setUpFourPairs = () => {
-      candle = bucketOf([BTC, ETH, SOL, XRP]);
-      book.track({ candle, tools: { log: noop } });
+      trackSilently([BTC, ETH, SOL, XRP]);
       marketData = new Map<TradingPair, MarketData>([[SOL, { cost: { min: 7.2 } }]]);
     };
     /** The line of the BUY of SOL skipped, 25 % of 30 USDT, 7.125 USDT once 5 % is kept back, below 7.2: `parts` names its base */
@@ -739,7 +1057,7 @@ describe('PositionBook', () => {
     it('names the base of the share in the line of a holding taken', () => {
       setUp(15, 'buyBTC', UNFILLED);
       portfolio = new Map([...readOf(UNFILLED), ['ETH', { free: 0.2, used: 0, total: 0.2 }]]);
-      book.buy({ type: 'STICKY', symbol: ETH }, params());
+      book.buy({ type: 'STICKY', symbol: ETH });
       expect(logs).toEqual([
         {
           level: 'info',
@@ -750,11 +1068,10 @@ describe('PositionBook', () => {
     });
 
     it('sends the all-in BUY of a book tracking one pair, whatever the exchange holds', () => {
-      book.track({ candle: bucketOf([BTC]), tools: { log: noop } });
-      candle = bucketOf([BTC]);
+      track([BTC]);
       portfolio = readOf({ free: 9, used: 14.25 });
       marketData = withMinimumCost([BTC], 10);
-      book.buy({ type: 'STICKY', symbol: BTC }, params());
+      book.buy({ type: 'STICKY', symbol: BTC });
       expect(orders.advices).toStrictEqual([{ type: 'STICKY', symbol: BTC, side: 'BUY' }]);
     });
   });

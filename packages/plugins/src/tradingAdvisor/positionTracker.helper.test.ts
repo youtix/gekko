@@ -1,6 +1,6 @@
 import { Portfolio } from '@gekko/shared/models/portfolio.types';
-import { TradingPair } from '@gekko/shared/models/utility.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
+import { holding } from '@gekko/strategies/strategy.mock';
 import { describe, expect, it } from 'vitest';
 import {
   coversAmountAsked,
@@ -9,13 +9,8 @@ import {
   getUnreadHolding,
   isReadBeforeEnd,
   isSellable,
-  pickTradedPair,
 } from './positionTracker.helper';
-import { ETH_IGNORED_WARNING, holding, LoggedLine } from './positionTracker.mock';
-import { UnfinishedOrderParams } from './positionTracker.types';
-
-const THREE_PAIRS_WARNING =
-  'The strategy trades ETH/USDT only, the first pair watched (watch.assets): it ignores BTC/USDT, SOL/USDT, whose candles are still required every minute';
+import { UnfinishedOrderEnd } from './positionTracker.types';
 
 // The rule the tracker reads a position with, exported for whoever checks an all-in SELL the same way (a trailing stop's)
 describe('isSellable', () => {
@@ -58,9 +53,9 @@ describe('getHolding', () => {
   const symbol = 'BTC/USDT';
   const notRead: Portfolio = new Map();
 
-  /** What the event of the outcome of an order of BTC/USDT placed for `amount` carries that getHolding reads: the portfolio after it */
+  /** What the end of an order of BTC/USDT placed for `amount` carries that getHolding reads: the portfolio after it */
   const outcomeOf = (amount: number, portfolio: Portfolio) =>
-    ({ order: { symbol, amount }, exchange: { portfolio, price: 100 } }) as unknown as UnfinishedOrderParams;
+    ({ order: { symbol, amount }, exchange: { portfolio, price: 100 } }) as unknown as UnfinishedOrderEnd;
 
   // The all-in SELLs of 1 left 0.5 unsold, which the cancelation released: a portfolio that shows less was read before it, or never
   it.each`
@@ -101,8 +96,7 @@ describe('isReadBeforeEnd', () => {
 
 describe('getUnreadHolding', () => {
   /** What the end of an order of BTC/USDT placed for `amount` carries that getUnreadHolding reads: what an error reports filled */
-  const endOf = (amount: number, filled?: number) =>
-    ({ order: { symbol: 'BTC/USDT', amount, filled } }) as unknown as UnfinishedOrderParams;
+  const endOf = (amount: number, filled?: number) => ({ order: { symbol: 'BTC/USDT', amount, filled } }) as unknown as UnfinishedOrderEnd;
 
   // The balances of the event, read before its end, are not read: a BUY canceled and a SELL of an amount sent for all of it are settled
   // as after any read, what a BUY that errored filled and what any other SELL canceled left unsold are only the least held
@@ -124,7 +118,7 @@ describe('getUnreadHolding', () => {
 
 describe('describeUnfinishedEnd', () => {
   /** What the end of an order of BTC/USDT carries that describeUnfinishedEnd reads: what it reports filled */
-  const endOf = (filled?: number) => ({ order: { symbol: 'BTC/USDT', filled } }) as unknown as UnfinishedOrderParams;
+  const endOf = (filled?: number) => ({ order: { symbol: 'BTC/USDT', filled } }) as unknown as UnfinishedOrderEnd;
 
   // A cancelation tells its fill with its rest, or tells none; an error reports 0 filled when it reports no fill
   it.each`
@@ -137,34 +131,5 @@ describe('describeUnfinishedEnd', () => {
     ${'an error that reports no fill'}            | ${'errored'}  | ${0}         | ${undefined}                             | ${'errored, no fill reported'}
   `('words $case: $expected', ({ outcome, filled, fill, expected }) => {
     expect(describeUnfinishedEnd(outcome, endOf(filled), fill)).toBe(expected);
-  });
-});
-
-describe('pickTradedPair', () => {
-  /** Picks the pair of a bucket holding a candle of each of `pairs`, in that order; returns it with the lines it logged */
-  const pickPair = (pairs: TradingPair[]) => {
-    const logs: LoggedLine[] = [];
-    const candle = new Map(pairs.map(pair => [pair, { start: 0, open: 100, high: 100, low: 100, close: 100, volume: 1 }]));
-    const pair = pickTradedPair(candle, { log: (level, message) => logs.push({ level, message }) });
-    return { pair, logs };
-  };
-
-  // The bucket holds a candle of every watched pair, in the order of watch.assets
-  it.each`
-    case             | pairs                                   | expected
-    ${'one pair'}    | ${['BTC/USDT']}                         | ${'BTC/USDT'}
-    ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${'BTC/USDT'}
-    ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${'ETH/USDT'}
-  `('trades the first pair of the bucket: $case', ({ pairs, expected }) => {
-    expect(pickPair(pairs).pair).toBe(expected);
-  });
-
-  it.each`
-    case             | pairs                                   | expected
-    ${'one pair'}    | ${['BTC/USDT']}                         | ${[]}
-    ${'two pairs'}   | ${['BTC/USDT', 'ETH/USDT']}             | ${[ETH_IGNORED_WARNING]}
-    ${'three pairs'} | ${['ETH/USDT', 'BTC/USDT', 'SOL/USDT']} | ${[{ level: 'warn', message: THREE_PAIRS_WARNING }]}
-  `('warns once that it ignores the other pairs: $case', ({ pairs, expected }) => {
-    expect(pickPair(pairs).logs).toEqual(expected);
   });
 });

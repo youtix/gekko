@@ -4,8 +4,9 @@ import { getAllInBuyAmount } from '@gekko/shared/helpers/order/sizing.helper';
 import { MarketData } from '@gekko/shared/models/exchange.types';
 import { addPrecise, isFinitePositive, multiplyPrecise } from '@gekko/shared/utils/math/math.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
+import { PositionBuyOrder } from '@gekko/strategies/strategy.types';
 import { eq } from 'lodash-es';
-import { BuyOrder, CurrencyRead } from './positionBook.types';
+import { CurrencyRead } from './positionBook.types';
 
 /**
  * The currency a BUY of the book is estimated from, as the line of its skip names it (see PositionBook.buy): all of the currency free for
@@ -28,16 +29,17 @@ export const describeShare = (allocation: number | undefined, free: number, held
  * and its cost against the minimum cost (see getSentCost). Two estimates, in this order:
  * - the budget, less the share DEFAULT_FEE_BUFFER keeps back for the fee, worked out in decimal, against the minimum cost: the most
  *   the BUY can cost;
- * - the amount the Trader sends at `order.price`, else at `close`, the close of the candle (the last price the Trader knows in a
- *   backtest), truncated to the amount step, against the minimum amount, then its cost against the minimum cost. Estimated before the
- *   step alone, a budget that covered the minimum cost was sent, though the step took the amount sent under it, and refused at every
- *   signal of its pair until the refusals stopped the bot: 5.7 USDT at 97654.32 is 0.0000583691535612557 BTC, sent as 0.00005 BTC,
- *   4.882716 USDT, under a minimum of 5. So was one whose amount was under the minimum amount of the market, whatever its cost.
+ * - the amount the Trader sends at `order.price`, else at `close`, the close of the last timeframe candle of the pair (the last price
+ *   the Trader knows in a backtest when the BUY comes from a candle hook), truncated to the amount step, against the minimum amount,
+ *   then its cost against the minimum cost. Estimated before the step alone, a budget that covered the minimum cost was sent, though
+ *   the step took the amount sent under it, and refused at every signal of its pair until the refusals stopped the bot: 5.7 USDT at
+ *   97654.32 is 0.0000583691535612557 BTC, sent as 0.00005 BTC, 4.882716 USDT, under a minimum of 5. So was one whose amount was under
+ *   the minimum amount of the market, whatever its cost.
  * Without a price that is a finite number above 0, which the Trader refuses the order for, the second estimate is not made; without a
  * minimum cost or amount on the market, neither is.
  */
 export const getBuyRefusal = (
-  order: BuyOrder,
+  order: PositionBuyOrder,
   budget: number,
   close: number | undefined,
   marketData: MarketData = {},

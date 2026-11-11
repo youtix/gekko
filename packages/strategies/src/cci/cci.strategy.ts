@@ -1,48 +1,38 @@
-import { PositionBook } from '../helpers/positionBook/positionBook';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import {
-  IndicatorResults,
-  InitParams,
-  OnCandleEventParams,
-  OnOrderCanceledEventParams,
-  OnOrderCompletedEventParams,
-  OnOrderErroredEventParams,
-  Strategy,
-} from '../strategy.types';
-import { indicatorsBySymbol } from '../helpers/strategy.helper';
+import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '../strategy.types';
 import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { cciStrategySchema } from '@gekko/schemas/strategies/cci.schema';
 import { CCIStrategyParams, CCITrend } from './cci.types';
 
-/** Trades every watched pair (watch.assets), each with its own CCI, trend and position (see PositionBook) */
+/** Trades every watched pair (watch.assets), each with its own CCI, trend and position (see Positions) */
 export class CCI implements Strategy<CCIStrategyParams> {
   static schema = cciStrategySchema;
 
-  /** The trend of each pair, which init starts without a direction */
+  /**
+   * The trend of each pair, which init starts without a direction. A trend starts again each time the CCI comes back from between the
+   * thresholds, and every order is all-in, but the BUY of a pair while other pairs are not invested, which takes a share of the
+   * currency: the strategy buys a pair only when flat there and sells it only when long, never while its order there is pending.
+   * Advised on every new overbought (oversold) trend, each SELL (BUY) after the first was sized from what the previous one left, then
+   * refused once nothing was left, until maxConsecutiveErrors stopped the bot. The trend of an order canceled or errored stays adviced,
+   * and so does that of a BUY the position book skips as too small for the market (see Positions.buy): the next order waits for the
+   * next trend.
+   */
   private readonly trends = new Map<TradingPair, CCITrend>();
-  // A trend starts again each time the CCI comes back from between the thresholds, and every order is all-in, but the BUY of a pair
-  // while other pairs are not invested, which takes a share of the currency: the strategy buys a pair only when flat there and sells it
-  // only when long, never while its order there is pending. Advised on every new overbought (oversold) trend, each SELL (BUY) after the
-  // first was sized from what the previous one left, then refused once nothing was left, until maxConsecutiveErrors stopped the bot.
-  // The trend of an order canceled or errored stays adviced, and so does that of a BUY the book skips as too small for the market (see
-  // PositionBook.buy): the next order waits for the next trend.
-  private readonly book = new PositionBook();
 
-  init(params: InitParams<CCIStrategyParams>): void {
-    const { tools, addIndicator } = params;
-    this.book.track(params);
-    for (const pair of this.book.pairs) {
+  init({ tools, addIndicator }: InitParams<CCIStrategyParams>): void {
+    tools.positions.track();
+    for (const pair of tools.positions.pairs) {
       this.trends.set(pair, { direction: 'nodirection', duration: 0, persisted: false, adviced: false });
       addIndicator('CCI', pair, { period: tools.strategyParams.period });
     }
   }
 
-  onTimeframeCandleAfterWarmup(params: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
-    const { strategyParams, log } = params.tools;
+  onTimeframeCandleAfterWarmup({ tools }: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
+    const { strategyParams, log, positions } = tools;
     const { up, down, persistence } = strategyParams.thresholds;
-    const bySymbol = indicatorsBySymbol(indicators);
+    const bySymbol = tools.indicatorsBySymbol(indicators);
 
-    for (const pair of this.book.pairs) {
+    for (const pair of positions.pairs) {
       const [cci] = bySymbol.get(pair) ?? [];
       let trend = this.trends.get(pair);
       if (!isFiniteNumber(cci?.results) || !trend) continue;
@@ -56,9 +46,9 @@ export class CCI implements Strategy<CCIStrategyParams> {
           if (trend.duration >= persistence) trend.persisted = true;
         }
         // Left unadviced while flat or while an order of the pair is pending: a BUY that fills during the trend is sold on its next candle
-        if (trend.persisted && !trend.adviced && this.book.canSell(pair)) {
+        if (trend.persisted && !trend.adviced && positions.canSell(pair)) {
           trend.adviced = true;
-          this.book.sell({ type: 'STICKY', symbol: pair }, params);
+          positions.sell({ type: 'STICKY', symbol: pair });
         }
       } else if (cci.results <= down) {
         if (trend.direction !== 'oversold') {
@@ -68,9 +58,9 @@ export class CCI implements Strategy<CCIStrategyParams> {
           trend.duration++;
           if (trend.duration >= persistence) trend.persisted = true;
         }
-        if (trend.persisted && !trend.adviced && this.book.canBuy(pair)) {
+        if (trend.persisted && !trend.adviced && positions.canBuy(pair)) {
           trend.adviced = true;
-          this.book.buy({ type: 'STICKY', symbol: pair }, params);
+          positions.buy({ type: 'STICKY', symbol: pair });
         }
       } else {
         // Counted from 1, as a trend's first candle is: reset to 0, the first neutral candle after a trend logged "nodirection for 0",
@@ -88,22 +78,10 @@ export class CCI implements Strategy<CCIStrategyParams> {
   }
 
   log({ tools }: OnCandleEventParams<CCIStrategyParams>, ...indicators: IndicatorResults[]): void {
-    const bySymbol = indicatorsBySymbol(indicators);
-    for (const pair of this.book.pairs) {
+    const bySymbol = tools.indicatorsBySymbol(indicators);
+    for (const pair of tools.positions.pairs) {
       const [cci] = bySymbol.get(pair) ?? [];
       if (isFiniteNumber(cci?.results)) tools.log('debug', `[${pair}] CCI: ${cci.results.toFixed(2)}`);
     }
-  }
-
-  onOrderCompleted(params: OnOrderCompletedEventParams<CCIStrategyParams>): void {
-    this.book.onOrderCompleted(params);
-  }
-
-  onOrderCanceled(params: OnOrderCanceledEventParams<CCIStrategyParams>): void {
-    this.book.onOrderCanceled(params);
-  }
-
-  onOrderErrored(params: OnOrderErroredEventParams<CCIStrategyParams>): void {
-    this.book.onOrderErrored(params);
   }
 }

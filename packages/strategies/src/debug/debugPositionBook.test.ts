@@ -1,20 +1,10 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { BTC_ETH_TRADED_INFO } from '../helpers/positionBook/positionBook.mock';
-import {
-  LoggedLine,
-  logsAtInit,
-  OrderOutcome,
-  OrderRecorder,
-  OutcomeFacts,
-  relayOrderOutcome,
-} from '../helpers/positionTracker/positionTracker.mock';
-import type { Portfolio } from '@gekko/shared/models/portfolio.types';
 import type { TradingPair } from '@gekko/shared/models/utility.types';
-import type { MarketData } from '@gekko/shared/models/exchange.types';
+import { AskedOrder, fakeTools, LoggedLine, orderId, ScriptedPositions } from '../strategy.mock';
 import type { Tools } from '../strategy.types';
 import { noop } from 'lodash-es';
 import { beforeEach, describe, expect, it } from 'vitest';
-import { playCandles, toolsOf } from './debug.mock';
+import { playCandles } from './debug.mock';
 import { debugPositionBookStrategySchema } from '@gekko/schemas/strategies/debug/debugPositionBook.schema';
 import { DebugPositionBook } from './debugPositionBook.strategy';
 import { DebugPositionBookParams } from './debugPositionBook.types';
@@ -27,63 +17,61 @@ const XRP: TradingPair = 'XRP/USDT';
 const infoLine = (message: string): LoggedLine => ({ level: 'info', message });
 /** The block of these steps as its schema reads it */
 const blockOf = (steps: unknown[]) => debugPositionBookStrategySchema.parse({ steps });
-/** A portfolio holding `free` USDT */
-const holdingUsdt = (free: number): Portfolio => new Map([['USDT', { free, used: 0, total: free }]]);
+/** The MARKET BUY of `symbol` as the strategy asks tools.positions for it: the position book sizes it */
+const buy = (symbol: TradingPair): AskedOrder => ({ type: 'MARKET', side: 'BUY', symbol });
+/** The MARKET SELL of `symbol` as the strategy asks tools.positions for it: of all of its asset */
+const sell = (symbol: TradingPair): AskedOrder => ({ type: 'MARKET', side: 'SELL', symbol });
 
 describe('DebugPositionBook', () => {
   let strategy: DebugPositionBook;
-  let orders: OrderRecorder;
-  let logs: LoggedLine[];
   let tools: Tools<DebugPositionBookParams>;
+  let positions: ScriptedPositions;
+  let logs: LoggedLine[];
   /** The pairs watched, those of the bucket init got */
   let pairs: TradingPair[];
-  /** The orders whose outcome has been relayed, the first ones the recorder holds */
-  let relayed: number;
+  /** The orders asked whose candle is over, the first ones the positions recorded (see settleNewOrders) */
+  let settled: number;
 
-  /**
-   * Runs init as the StrategyManager does on the first one-minute bucket: a candle of each of `watched`, with the block of `steps`, and
-   * `marketData` as tools.marketData
-   */
-  const start = (steps: unknown[], watched: TradingPair[] = [BTC], marketData = new Map<TradingPair, MarketData>()) => {
+  /** Builds the tools of a run that watches `watched`, with the block of `steps` (see fakeTools) */
+  const toolsFor = (steps: unknown[], watched: TradingPair[]) => {
     pairs = watched;
-    tools = toolsOf(blockOf(steps), {
-      createOrder: orders.createOrder,
-      log: (level, message) => logs.push({ level, message }),
-      marketData,
-    });
+    ({ tools, positions, logs } = fakeTools(blockOf(steps), { pairs: watched }));
+  };
+  /** Runs init as the StrategyManager does on the first one-minute bucket: a candle of each of `watched`, with the block of `steps` */
+  const start = (steps: unknown[], watched: TradingPair[] = [BTC]) => {
+    toolsFor(steps, watched);
     const candle = new Map(pairs.map(pair => [pair, { start: 0, open: 1, high: 1, low: 1, close: 1, volume: 1 }]));
     strategy.init({ candle, portfolio: new Map(), tools, addIndicator: noop });
   };
-  /** Plays one candle after the warmup with `portfolio`, which the book estimates the cost of a BUY from on several pairs */
-  const playCandle = (portfolio: Portfolio = new Map()) => strategy.onTimeframeCandleAfterWarmup({ candle: new Map(), portfolio, tools });
-  /** Relays `outcome` for each order created since the last relay, its event reporting `facts` (see OutcomeFacts) */
-  const settleNewOrders = (outcome: OrderOutcome, facts: OutcomeFacts) => {
-    for (; relayed < orders.advices.length; relayed++) relayOrderOutcome(strategy, outcome, orders.created(relayed + 1)!, facts);
-  };
+  /** Plays one candle after the warmup */
+  const playCandle = () => strategy.onTimeframeCandleAfterWarmup({ candle: new Map(), portfolio: new Map(), tools });
   /**
-   * Plays `count` candles after the warmup with an empty portfolio, which the book skips no BUY on (see playCandles), each order ending
-   * as `outcome` once its candle is over, as a backtest settles a MARKET order with the candle that sends it
+   * Settles each order asked since the last call as the position book settles an order that completed, which the scripted positions
+   * leave to the test: a BUY leaves its pair long, a SELL flat
    */
-  const play = (count: number, outcome: OrderOutcome = 'completed', facts: OutcomeFacts = {}) =>
-    playCandles(strategy, tools, orders, count, pairs, () => settleNewOrders(outcome, facts));
+  const settleNewOrders = () => {
+    for (const { side, symbol } of positions.advices.slice(settled)) positions.set(symbol, side === 'BUY' ? 'LONG' : 'FLAT');
+    settled = positions.advices.length;
+  };
+  /** Plays `count` candles after the warmup, each order completing once its candle is over (see playCandles and settleNewOrders) */
+  const play = (count: number) => playCandles(strategy, tools, positions, count, pairs, settleNewOrders);
 
   beforeEach(() => {
     strategy = new DebugPositionBook();
-    orders = new OrderRecorder();
-    logs = [];
-    relayed = 0;
+    settled = 0;
   });
 
   describe('init', () => {
     it.each`
-      case           | watched       | expected
-      ${'one pair'}  | ${[BTC]}      | ${[]}
-      ${'two pairs'} | ${[BTC, ETH]} | ${[BTC_ETH_TRADED_INFO]}
-    `('tracks every watched pair, the book saying so on several: $case', ({ watched, expected }) => {
-      expect(logsAtInit(strategy, watched, blockOf([{ candle: 0, side: 'BUY' }]))).toEqual(expected);
+      case           | watched
+      ${'one pair'}  | ${[BTC]}
+      ${'two pairs'} | ${[BTC, ETH]}
+    `('tracks every watched pair, through one call of tools.positions.track without pairs: $case', ({ watched }) => {
+      start([{ candle: 0, side: 'BUY' }], watched);
+      expect({ trackCalls: positions.trackCalls, pairs: positions.pairs }).toEqual({ trackCalls: [[]], pairs: watched });
     });
 
-    // Played as it is, a step on a pair that is not watched would be refused by the book only on its candle
+    // Played as it is, a step on a pair that is not watched would be skipped on its candle, as if the strategy were long or flat there
     it.each`
       case                                         | steps                                                                                                                    | watched       | expected
       ${'a BUY step on a pair not watched'}        | ${[{ candle: 0, side: 'BUY', symbols: [XRP] }]}                                                                          | ${[BTC, ETH]} | ${'Impossible to play the BUY step of candle 0 on XRP/USDT: symbol must be one of the watched pairs (BTC/USDT, ETH/USDT)'}
@@ -94,19 +82,20 @@ describe('DebugPositionBook', () => {
       expect(() => start(steps, watched)).toThrow(new GekkoError('strategy', expected));
     });
 
-    it('refuses such a step before it tracks a pair: the book says nothing', () => {
+    // The position book says, at info level, which pairs it tracks: the refusal comes before that line, the bot stopping at start-up
+    it('refuses such a step before it tracks a pair', () => {
       try {
         start([{ candle: 0, side: 'BUY', symbols: [XRP] }], [BTC, ETH]);
       } catch {
         // Refused, as the test above asserts
       }
-      expect(logs).toEqual([]);
+      expect(positions.trackCalls).toEqual([]);
     });
   });
 
   describe('onTimeframeCandleAfterWarmup', () => {
-    // Each order ends completed once its candle is over: a BUY leaves the pair long, a SELL flat. The steps of a candle are played in
-    // the order of the block, a SELL after a BUY of the same candle finding that BUY pending.
+    // Each order completes once its candle is over: a BUY leaves the pair long, a SELL flat. The steps of a candle are played in the
+    // order of the block.
     it.each`
       steps                                                                                     | calendar
       ${[{ candle: 0, side: 'BUY' }, { candle: 2, side: 'SELL' }]}                              | ${'B . S'}
@@ -118,118 +107,93 @@ describe('DebugPositionBook', () => {
       expect(play(calendar.split(' ').length)).toBe(calendar);
     });
 
-    // An order the book sizes has no sizing key unless the book gives it one: the one pair watched buys all-in, as a single-pair
-    // strategy does, and every SELL sells all of its asset
-    it('places a MARKET BUY then a MARKET SELL of the one pair watched, all-in, through the book', () => {
+    // An order holds no amount, cost or allocation: the position book sizes a BUY, and a SELL sells all of its asset
+    it('places a MARKET BUY then a MARKET SELL of the one pair watched through tools.positions', () => {
       start([
         { candle: 0, side: 'BUY' },
         { candle: 1, side: 'SELL' },
       ]);
       play(2);
-      expect(orders.advices).toStrictEqual([
-        { type: 'MARKET', side: 'BUY', symbol: BTC },
-        { type: 'MARKET', side: 'SELL', symbol: BTC },
-      ]);
+      expect(positions.advices).toStrictEqual([buy(BTC), sell(BTC)]);
     });
 
-    // Two pairs flat: each BUY takes half of the currency, the second counting the first, whose BUY is pending. Once one is long, the
-    // BUY of the other takes all the currency left.
     it.each`
-      case                                                   | steps                                                                                       | expected
-      ${'a step without symbols, on every watched pair'}     | ${[{ candle: 0, side: 'BUY' }]}                                                             | ${[{ type: 'MARKET', side: 'BUY', symbol: BTC, allocation: 50 }, { type: 'MARKET', side: 'BUY', symbol: ETH, allocation: 50 }]}
-      ${'a step on its symbols, in their order'}             | ${[{ candle: 0, side: 'BUY', symbols: [ETH, BTC] }]}                                        | ${[{ type: 'MARKET', side: 'BUY', symbol: ETH, allocation: 50 }, { type: 'MARKET', side: 'BUY', symbol: BTC, allocation: 50 }]}
-      ${'a step on one pair, the other flat'}                | ${[{ candle: 0, side: 'BUY', symbols: [ETH] }]}                                             | ${[{ type: 'MARKET', side: 'BUY', symbol: ETH, allocation: 50 }]}
-      ${'the pair left flat once the other is long, all-in'} | ${[{ candle: 0, side: 'BUY', symbols: [ETH] }, { candle: 1, side: 'BUY', symbols: [BTC] }]} | ${[{ type: 'MARKET', side: 'BUY', symbol: ETH, allocation: 50 }, { type: 'MARKET', side: 'BUY', symbol: BTC }]}
-      ${'a SELL of each pair long, all-in'}                  | ${[{ candle: 0, side: 'BUY' }, { candle: 1, side: 'SELL', symbols: [ETH, BTC] }]}           | ${[{ type: 'MARKET', side: 'BUY', symbol: BTC, allocation: 50 }, { type: 'MARKET', side: 'BUY', symbol: ETH, allocation: 50 }, { type: 'MARKET', side: 'SELL', symbol: ETH }, { type: 'MARKET', side: 'SELL', symbol: BTC }]}
-    `('places the orders of two pairs through the book: $case', ({ steps, expected }) => {
+      case                                                    | steps                                                 | position  | expected
+      ${'a BUY step without symbols, on every watched pair'}  | ${[{ candle: 0, side: 'BUY' }]}                       | ${'FLAT'} | ${[buy(BTC), buy(ETH)]}
+      ${'a BUY step on its symbols, in their order'}          | ${[{ candle: 0, side: 'BUY', symbols: [ETH, BTC] }]}  | ${'FLAT'} | ${[buy(ETH), buy(BTC)]}
+      ${'a BUY step on one pair'}                             | ${[{ candle: 0, side: 'BUY', symbols: [ETH] }]}       | ${'FLAT'} | ${[buy(ETH)]}
+      ${'a SELL step without symbols, on every watched pair'} | ${[{ candle: 0, side: 'SELL' }]}                      | ${'LONG'} | ${[sell(BTC), sell(ETH)]}
+      ${'a SELL step on its symbols, in their order'}         | ${[{ candle: 0, side: 'SELL', symbols: [ETH, BTC] }]} | ${'LONG'} | ${[sell(ETH), sell(BTC)]}
+    `('places the orders of two pairs, each $position: $case', ({ steps, position, expected }) => {
       start(steps, [BTC, ETH]);
-      play(2);
-      expect(orders.advices).toStrictEqual(expected);
+      positions.set(BTC, position);
+      positions.set(ETH, position);
+      playCandle();
+      expect(positions.advices).toStrictEqual(expected);
     });
 
-    // The position of the pair is read before each step, an order pending until its candle is over: its outcome comes after it
+    // The position of the pair is read before each step: a BUY needs it flat, a SELL long, with no order of the pair pending. A BUY
+    // the position book skips is asked all the same: the book alone says why, the step logging nothing.
     it.each`
-      case                                       | steps                                                                                     | expected
-      ${'a BUY step while long'}                 | ${[{ candle: 0, side: 'BUY' }, { candle: 1, side: 'BUY' }]}                               | ${'[BTC/USDT] BUY step of candle 1 skipped: the strategy is long'}
-      ${'a SELL step while flat'}                | ${[{ candle: 0, side: 'SELL' }]}                                                          | ${'[BTC/USDT] SELL step of candle 0 skipped: the strategy is flat'}
-      ${'a BUY step while its BUY is pending'}   | ${[{ candle: 0, side: 'BUY' }, { candle: 0, side: 'BUY' }]}                               | ${'[BTC/USDT] BUY step of candle 0 skipped: an order is pending'}
-      ${'a SELL step while its BUY is pending'}  | ${[{ candle: 0, side: 'BUY' }, { candle: 0, side: 'SELL' }]}                              | ${'[BTC/USDT] SELL step of candle 0 skipped: an order is pending'}
-      ${'a BUY step while its SELL is pending'}  | ${[{ candle: 0, side: 'BUY' }, { candle: 1, side: 'SELL' }, { candle: 1, side: 'BUY' }]}  | ${'[BTC/USDT] BUY step of candle 1 skipped: an order is pending'}
-      ${'a SELL step while its SELL is pending'} | ${[{ candle: 0, side: 'BUY' }, { candle: 1, side: 'SELL' }, { candle: 1, side: 'SELL' }]} | ${'[BTC/USDT] SELL step of candle 1 skipped: an order is pending'}
-    `('skips $case, said at info level', ({ steps, expected }) => {
-      start(steps);
-      play(2);
-      expect(logs).toEqual([infoLine(expected)]);
-    });
+      side      | position      | expected
+      ${'BUY'}  | ${'FLAT'}     | ${{ advices: [buy(BTC)], logs: [] }}
+      ${'BUY'}  | ${'LONG'}     | ${{ advices: [], logs: [infoLine('[BTC/USDT] BUY step of candle 0 skipped: the strategy is long')] }}
+      ${'BUY'}  | ${'BUYING'}   | ${{ advices: [], logs: [infoLine('[BTC/USDT] BUY step of candle 0 skipped: an order is pending')] }}
+      ${'BUY'}  | ${'SELLING'}  | ${{ advices: [], logs: [infoLine('[BTC/USDT] BUY step of candle 0 skipped: an order is pending')] }}
+      ${'BUY'}  | ${'SKIPPING'} | ${{ advices: [{ ...buy(BTC), skipped: true }], logs: [] }}
+      ${'SELL'} | ${'LONG'}     | ${{ advices: [sell(BTC)], logs: [] }}
+      ${'SELL'} | ${'FLAT'}     | ${{ advices: [], logs: [infoLine('[BTC/USDT] SELL step of candle 0 skipped: the strategy is flat')] }}
+      ${'SELL'} | ${'BUYING'}   | ${{ advices: [], logs: [infoLine('[BTC/USDT] SELL step of candle 0 skipped: an order is pending')] }}
+      ${'SELL'} | ${'SELLING'}  | ${{ advices: [], logs: [infoLine('[BTC/USDT] SELL step of candle 0 skipped: an order is pending')] }}
+    `(
+      'plays a $side step on a pair $position as its position allows, said at info level when it skips it',
+      ({ side, position, expected }) => {
+        start([{ candle: 0, side }]);
+        positions.set(BTC, position);
+        playCandle();
+        expect({ advices: positions.advices, logs }).toStrictEqual(expected);
+      },
+    );
 
     it('skips a step on the pair whose position does not allow it alone, naming that pair', () => {
-      start(
-        [
-          { candle: 0, side: 'BUY', symbols: [BTC] },
-          { candle: 1, side: 'BUY' },
-        ],
-        [BTC, ETH],
-      );
-      play(2);
-      expect({ logs, orders: orders.advices.map(({ side, symbol }) => `${side} ${symbol}`) }).toEqual({
-        logs: [BTC_ETH_TRADED_INFO, infoLine('[BTC/USDT] BUY step of candle 1 skipped: the strategy is long')],
-        orders: ['BUY BTC/USDT', 'BUY ETH/USDT'],
+      start([{ candle: 0, side: 'BUY' }], [BTC, ETH]);
+      positions.set(BTC, 'LONG');
+      playCandle();
+      expect({ logs, advices: positions.advices }).toStrictEqual({
+        logs: [infoLine('[BTC/USDT] BUY step of candle 0 skipped: the strategy is long')],
+        advices: [buy(ETH)],
       });
     });
 
-    // 50 % of the 20 USDT free, less the 5 % kept back for the fee, is 9.5 USDT: below the minimum cost of each market. The book says
-    // so, and the step logs nothing more: the signal is spent, as a skipped BUY is for a signal strategy.
-    it('sends no BUY the book skips, the book alone saying why', () => {
-      const minimumCost = new Map<TradingPair, MarketData>([
-        [BTC, { cost: { min: 10 } }],
-        [ETH, { cost: { min: 10 } }],
-      ]);
-      const skipped = (pair: TradingPair) =>
-        `[${pair}] BUY skipped: 50 % of the 20 USDT free, 9.5 USDT once 5 % is kept back for the fee, is below the minimum cost of 10 USDT of the market: watch fewer pairs or fund the account; the next skips of this pair are logged at debug level until a BUY of it is placed`;
-      start([{ candle: 0, side: 'BUY' }], [BTC, ETH], minimumCost);
-      playCandle(holdingUsdt(20));
-      expect({ orders: orders.advices, logs }).toEqual({
-        orders: [],
-        logs: [BTC_ETH_TRADED_INFO, { level: 'warn', message: skipped(BTC) }, { level: 'warn', message: skipped(ETH) }],
-      });
+    // In a run, init tracks the pairs before any candle
+    it('plays a step without symbols on the pairs tracked, none before init', () => {
+      toolsFor([{ candle: 0, side: 'BUY' }], [BTC, ETH]);
+      playCandle();
+      expect({ advices: positions.advices, logs }).toEqual({ advices: [], logs: [] });
     });
   });
+});
 
-  describe('order hooks', () => {
-    // Settled by the book, a BUY that ends without a fill leaves the pair flat with nothing pending: its next BUY step buys again
-    it.each`
-      outcome       | facts                          | calendar
-      ${'canceled'} | ${{ filled: 0, remaining: 1 }} | ${'B B'}
-      ${'errored'}  | ${{}}                          | ${'B B'}
-    `('hands the book a BUY $outcome without a fill, which leaves the pair flat: $calendar', ({ outcome, facts, calendar }) => {
-      start([
-        { candle: 0, side: 'BUY' },
-        { candle: 1, side: 'BUY' },
-      ]);
-      expect(play(2, outcome, facts)).toBe(calendar);
-    });
-
-    // The BUY of BTC completes before the next candle, that of ETH still pends: BTC is long and sells, ETH skips both steps
-    it('hands the book the outcome of each order, which settles the position of its pair alone', () => {
-      start(
-        [
-          { candle: 0, side: 'BUY' },
-          { candle: 1, side: 'BUY' },
-          { candle: 1, side: 'SELL' },
-        ],
-        [BTC, ETH],
-      );
-      playCandle();
-      relayOrderOutcome(strategy, 'completed', orders.created(1)!);
-      playCandle();
-      expect({ logs: logs.slice(1), orders: orders.advices.map(({ side, symbol }) => `${side} ${symbol}`) }).toEqual({
-        logs: [
-          infoLine('[BTC/USDT] BUY step of candle 1 skipped: the strategy is long'),
-          infoLine('[ETH/USDT] BUY step of candle 1 skipped: an order is pending'),
-          infoLine('[ETH/USDT] SELL step of candle 1 skipped: an order is pending'),
-        ],
-        orders: ['BUY BTC/USDT', 'BUY ETH/USDT', 'SELL BTC/USDT'],
-      });
+// The scripted positions this suite trades through, which a mock has no suite of its own to pin: a strategy may take tools.positions
+// apart (`const { canBuy, buy } = tools.positions`), as it may the StrategyManager's, whose members are closures
+describe('ScriptedPositions', () => {
+  it('answers, tracks and records through its members taken apart, as through the object, its pairs the same array at each read', () => {
+    const { tools, positions } = fakeTools(blockOf([{ candle: 0, side: 'BUY' }]), { pairs: [BTC, ETH] });
+    const { track, isLong, isPendingOrder, canBuy, canSell, buy: placeBuy, sell: placeSell } = tools.positions;
+    track();
+    positions.set(ETH, 'LONG');
+    expect({
+      answers: [isLong(ETH), isPendingOrder(ETH), canBuy(BTC), canSell(ETH), canBuy(ETH), canSell(BTC)],
+      ids: [placeBuy({ type: 'MARKET', symbol: BTC }), placeSell({ type: 'MARKET', symbol: ETH })],
+      advices: positions.advices,
+      pairs: tools.positions.pairs,
+      isSameArray: tools.positions.pairs === tools.positions.pairs,
+    }).toStrictEqual({
+      answers: [true, false, true, true, false, false],
+      ids: [orderId(1), orderId(2)],
+      advices: [buy(BTC), sell(ETH)],
+      pairs: [BTC, ETH],
+      isSameArray: true,
     });
   });
 });

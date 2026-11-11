@@ -1,36 +1,26 @@
-import { PositionBook } from '../helpers/positionBook/positionBook';
-import { indicatorsBySymbol } from '../helpers/strategy.helper';
 import { TradingPair } from '@gekko/shared/models/utility.types';
-import {
-  IndicatorResults,
-  InitParams,
-  OnCandleEventParams,
-  OnOrderCanceledEventParams,
-  OnOrderCompletedEventParams,
-  OnOrderErroredEventParams,
-  Strategy,
-} from '../strategy.types';
+import { IndicatorResults, InitParams, OnCandleEventParams, Strategy } from '../strategy.types';
 import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { demaStrategySchema } from '@gekko/schemas/strategies/dema.schema';
 import { DEMAStrategyParams, PairTrend } from './dema.types';
 
-/** Trades every watched pair, each with its own DEMA and SMA, its own trend and its own position (see PositionBook) */
+/**
+ * Trades every watched pair, each with its own DEMA and SMA, its own trend and its own position, through tools.positions, the position
+ * book the StrategyManager keeps for it (see Positions). Its orders carry no amount: a BUY takes an equal share of the free currency
+ * among the pairs not invested (all of it on one pair, see Positions.buy), a SELL all of the pair's asset. On each pair, the strategy
+ * buys only when flat and sells only when long, never while its order is pending there. Advised on each change of trend, its first
+ * SELL had nothing to sell, and it switched side while its STICKY order was still open. The trend of an order canceled or errored stays
+ * adviced, as does that of a BUY the position book skips: the next order waits for the next trend.
+ */
 export class DEMA implements Strategy<DEMAStrategyParams> {
   static schema = demaStrategySchema;
 
   // The trend of each pair, set at init
   private readonly trends = new Map<TradingPair, PairTrend>();
-  // A position per pair, whose orders carry no amount: a BUY takes an equal share of the free currency among the pairs not invested
-  // (all of it on one pair, see PositionBook.buy), a SELL all of the pair's asset. On each pair, the strategy buys only when flat and
-  // sells only when long, never while its order is pending there. Advised on each change of trend, its first SELL had nothing to sell,
-  // and it switched side while its STICKY order was still open. The trend of an order canceled or errored stays adviced, as does that
-  // of a BUY the book skips: the next order waits for the next trend.
-  private readonly book = new PositionBook();
 
-  init(params: InitParams<DEMAStrategyParams>): void {
-    const { tools, addIndicator } = params;
-    this.book.track(params);
-    for (const pair of this.book.pairs) {
+  init({ tools, addIndicator }: InitParams<DEMAStrategyParams>): void {
+    tools.positions.track();
+    for (const pair of tools.positions.pairs) {
       this.trends.set(pair, { isTrendAdviced: false });
       addIndicator('DEMA', pair, { period: tools.strategyParams.period });
       addIndicator('SMA', pair, { period: tools.strategyParams.period });
@@ -38,14 +28,15 @@ export class DEMA implements Strategy<DEMAStrategyParams> {
   }
 
   onTimeframeCandleAfterWarmup(params: OnCandleEventParams<DEMAStrategyParams>, ...indicators: IndicatorResults[]) {
-    const bySymbol = indicatorsBySymbol(indicators);
-    for (const pair of this.book.pairs) this.adviseOn(pair, params, bySymbol.get(pair) ?? []);
+    const { tools } = params;
+    const bySymbol = tools.indicatorsBySymbol(indicators);
+    for (const pair of tools.positions.pairs) this.adviseOn(pair, params, bySymbol.get(pair) ?? []);
   }
 
   log({ tools }: OnCandleEventParams<DEMAStrategyParams>, ...indicators: IndicatorResults[]): void {
     const { log } = tools;
-    const bySymbol = indicatorsBySymbol(indicators);
-    for (const pair of this.book.pairs) {
+    const bySymbol = tools.indicatorsBySymbol(indicators);
+    for (const pair of tools.positions.pairs) {
       const [dema, sma] = bySymbol.get(pair) ?? [];
       if (!isFiniteNumber(sma?.results) || !isFiniteNumber(dema?.results)) continue;
 
@@ -60,22 +51,10 @@ export class DEMA implements Strategy<DEMAStrategyParams> {
     }
   }
 
-  onOrderCompleted(params: OnOrderCompletedEventParams<DEMAStrategyParams>): void {
-    this.book.onOrderCompleted(params);
-  }
-
-  onOrderCanceled(params: OnOrderCanceledEventParams<DEMAStrategyParams>): void {
-    this.book.onOrderCanceled(params);
-  }
-
-  onOrderErrored(params: OnOrderErroredEventParams<DEMAStrategyParams>): void {
-    this.book.onOrderErrored(params);
-  }
-
   /** Advises on `pair` from its DEMA and SMA, unless its candle is missing or either average is not ready */
   private adviseOn(pair: TradingPair, params: OnCandleEventParams<DEMAStrategyParams>, [dema, sma]: IndicatorResults[]) {
     const { candle, tools } = params;
-    const { strategyParams, log } = tools;
+    const { strategyParams, log, positions } = tools;
     const currentCandle = candle.get(pair);
     if (!currentCandle) return;
     const price = currentCandle.close;
@@ -93,12 +72,12 @@ export class DEMA implements Strategy<DEMAStrategyParams> {
         trend.currentTrend = 'up';
         trend.isTrendAdviced = false;
       }
-      if (!trend.isTrendAdviced && this.book.canBuy(pair)) {
+      if (!trend.isTrendAdviced && positions.canBuy(pair)) {
         trend.isTrendAdviced = true;
-        // Logged once the BUY is placed: one the book skips as too small for the market (see PositionBook.buy) is told by the book's own
-        // line alone. Logged before it, this line, relayed to the strat_info subscribers, told of a long advice executed while nothing
-        // was sent.
-        const id = this.book.buy({ type: 'STICKY', symbol: pair }, params);
+        // Logged once the BUY is placed: one the position book skips as too small for the market (see Positions.buy) is told by the
+        // book's own line alone. Logged before it, this line, relayed to the strat_info subscribers, told of a long advice executed while
+        // nothing was sent.
+        const id = positions.buy({ type: 'STICKY', symbol: pair });
         if (id) log('info', `[${pair}] Executing long advice due to detected uptrend: ${message}`);
       }
     } else if (diff < strategyParams.thresholds.down) {
@@ -108,10 +87,10 @@ export class DEMA implements Strategy<DEMAStrategyParams> {
         trend.currentTrend = 'down';
         trend.isTrendAdviced = false;
       }
-      if (!trend.isTrendAdviced && this.book.canSell(pair)) {
+      if (!trend.isTrendAdviced && positions.canSell(pair)) {
         trend.isTrendAdviced = true;
         log('info', `[${pair}] Executing short advice due to detected downtrend: ${message}`);
-        this.book.sell({ type: 'STICKY', symbol: pair }, params);
+        positions.sell({ type: 'STICKY', symbol: pair });
       }
     } else {
       log('debug', `[${pair}] We are currently not in an up or down trend: ${message}`);

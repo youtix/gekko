@@ -1,7 +1,7 @@
 import { StrategyOrder } from '@gekko/shared/models/advice.types';
+import { OrderCanceledEvent, OrderCompletedEvent, OrderErroredEvent } from '@gekko/shared/models/event.types';
 import { OrderSide, OrderType } from '@gekko/shared/models/order.types';
 import { MarketData } from '@gekko/shared/models/exchange.types';
-import { OnOrderCanceledEventParams, OnOrderCompletedEventParams, OnOrderErroredEventParams, Tools } from '../../strategy.types';
 import { isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { formatEveryDecimal } from '@gekko/shared/utils/string/string.utils';
 import { UUID } from 'node:crypto';
@@ -13,14 +13,14 @@ import {
   isReadBeforeEnd,
   isSellable,
 } from './positionTracker.helper';
-import { Fill, PendingOrder, UnfinishedOrderParams, UnfinishedOutcome } from './positionTracker.types';
+import { Fill, OrderEnd, PendingOrder, TrackerContext, UnfinishedOrderEnd, UnfinishedOutcome } from './positionTracker.types';
 
 /**
- * The position of a strategy that trades all-in: flat or long, and its own orders whose outcome has not come yet. Gekko relays
- * every advice, so a strategy advising on every candle of a trend placed an all-in order sized from what the previous one left,
+ * The position of a strategy that trades all-in, on one pair: flat or long, and its own orders whose outcome has not come yet. Gekko
+ * relays every advice, so a strategy advising on every candle of a trend placed an all-in order sized from what the previous one left,
  * then had it refused until maxConsecutiveErrors stopped the bot: the strategy buys only when flat and sells only when long, never
- * while an order of its own is pending, and this is the bookkeeping that tells it which. It follows one pair: a strategy that trades
- * several keeps one per pair in a PositionBook, which also shares the currency among their BUYs.
+ * while an order of its own is pending, and this is the bookkeeping that tells it which. It follows one pair: the PositionBook, which
+ * the StrategyManager keeps for the strategy (tools.positions), holds one per pair it tracks, and shares the currency among their BUYs.
  *
  * - It starts flat: a holding present at start-up is sold only by its first SELL, which follows a BUY that completed, or one that
  *   ended without completing while the account held it (see settleUnfinished), or, in a PositionBook of several pairs, a BUY the book
@@ -35,14 +35,21 @@ import { Fill, PendingOrder, UnfinishedOrderParams, UnfinishedOutcome } from './
  *   settleCompletedSell, settleUnfinished and keepPosition).
  * - The outcome of an order that is not its own changes nothing, and an order counts once: its first outcome settles it.
  *
- * The strategy places its orders through buy and sell once canBuy or canSell allows it, and hands the params of its three order
- * hooks over as it gets them, whole: the event, with the portfolio after the order and whether the Trader read it after the order
- * ended, and the tools, with the market data and the log.
+ * The book places its orders through buy and sell once canBuy or canSell allows the strategy to, and hands it the end of each order as
+ * the StrategyManager hears of it, before the strategy's order hook runs: the order, and the exchange event, with the portfolio after
+ * the order and whether the Trader read it after the order ended. The market data of its pair and the strategy's log come from the
+ * context the book builds it with (see TrackerContext), never from the params of a hook.
  */
 export class PositionTracker {
+  /** What it reads of the run, from the PositionBook that builds it: createOrder, the strategy's log and the market data */
+  private readonly context: TrackerContext;
   private long = false;
   // Not one id per side: the SELL of a trailing stop (adoptSell) can pend beside a SELL of the strategy's own
   private readonly pendingOrders = new Map<UUID, PendingOrder>();
+
+  constructor(context: TrackerContext) {
+    this.context = context;
+  }
 
   /** Whether it holds enough to sell, as far as the outcomes of its orders tell */
   get isLong(): boolean {
@@ -65,8 +72,8 @@ export class PositionTracker {
   }
 
   /** Creates the order as a BUY through createOrder and keeps it pending until its outcome; returns its id */
-  buy(createOrder: Tools<unknown>['createOrder'], order: Omit<StrategyOrder, 'side'>): UUID {
-    const id = createOrder({ ...order, side: 'BUY' });
+  buy(order: Omit<StrategyOrder, 'side'>): UUID {
+    const id = this.context.createOrder({ ...order, side: 'BUY' });
     this.pendingOrders.set(id, { side: 'BUY' });
     return id;
   }
@@ -75,18 +82,18 @@ export class PositionTracker {
    * Creates the order as a SELL through createOrder and keeps it pending until its outcome, with the amount it asks for, left out
    * for an all-in SELL and for one sized by a cost or an allocation (see coversAmountAsked); returns its id
    */
-  sell(createOrder: Tools<unknown>['createOrder'], order: Omit<StrategyOrder, 'side' | 'trailing'>): UUID {
-    const id = createOrder({ ...order, side: 'SELL' });
+  sell(order: Omit<StrategyOrder, 'side' | 'trailing'>): UUID {
+    const id = this.context.createOrder({ ...order, side: 'SELL' });
     this.pendingOrders.set(id, { side: 'SELL', amount: order.amount });
     return id;
   }
 
   /**
-   * Keeps pending, as sell does, a SELL the strategy did not create itself: the one a trailing stop sends when it triggers. A
-   * strategy whose BUYs carry a stop adopts it from `onTrailingStopTriggered(orderId, …)`; left out, the stop's SELL is not its own
-   * and its outcome changes nothing: once the stop has sold everything, the strategy stays long until the SELL it advises next is
-   * refused, nothing left to sell. The amount it asks for is not known here: completed, or canceled after a fill, it is read as an
-   * all-in SELL is (see coversAmountAsked).
+   * Keeps pending, as sell does, a SELL it did not create itself: the one a trailing stop sends when it triggers, which the PositionBook
+   * adopts when the stop's BUY was one of its own (see PositionBook.adoptStopSell), before the strategy's onTrailingStopTriggered runs.
+   * Left out, the stop's SELL is not its own and its outcome changes nothing: once the stop has sold everything, the strategy stays long
+   * until the SELL it advises next is refused, nothing left to sell. The amount it asks for is not known here: completed, or canceled
+   * after a fill, it is read as an all-in SELL is (see coversAmountAsked).
    */
   adoptSell(orderId: UUID): void {
     this.pendingOrders.set(orderId, { side: 'SELL' });
@@ -112,27 +119,27 @@ export class PositionTracker {
    * Settles its own order that completed, a fill: a BUY makes it long, a SELL flat unless it sold less than it asked for (see
    * settleCompletedSell); returns whether the order was its own
    */
-  onOrderCompleted(params: OnOrderCompletedEventParams<unknown>): boolean {
-    const pending = this.pendingOrders.get(params.order.id);
+  onOrderCompleted(event: OrderEnd<OrderCompletedEvent>): boolean {
+    const pending = this.pendingOrders.get(event.order.id);
     if (!pending) return false;
-    this.pendingOrders.delete(params.order.id);
+    this.pendingOrders.delete(event.order.id);
     if (pending.side === 'BUY') this.long = true;
-    else this.settleCompletedSell(params, pending.amount);
+    else this.settleCompletedSell(event, pending.amount);
     return true;
   }
 
   /** Settles its own order that was canceled, after what it filled (see settleUnfinished); returns whether the order was its own */
-  onOrderCanceled(params: OnOrderCanceledEventParams<unknown>): boolean {
-    const { filled, remaining } = params.order;
+  onOrderCanceled(event: OrderEnd<OrderCanceledEvent>): boolean {
+    const { filled, remaining } = event.order;
     // A cancelation missing either amount reports no fill: the order leaves both out when no answer of the exchange reported one. 0
     // filled and 0 remaining used to mean the same, the order relaying the amounts its last answer left out as 0: it is a fact now.
     const fill = isFiniteNumber(filled) && isFiniteNumber(remaining) ? { filled, remaining } : undefined;
-    return this.settleUnfinished('canceled', params, fill);
+    return this.settleUnfinished('canceled', event, fill);
   }
 
   /** Settles its own order that errored, after what it executed (see settleUnfinished); returns whether the order was its own */
-  onOrderErrored(params: OnOrderErroredEventParams<unknown>): boolean {
-    return this.settleUnfinished('errored', params);
+  onOrderErrored(event: OrderEnd<OrderErroredEvent>): boolean {
+    return this.settleUnfinished('errored', event);
   }
 
   /**
@@ -149,25 +156,25 @@ export class PositionTracker {
    * position is read from the order's own figures (see getUnreadHolding), and when those tell nothing, or only a least holding that is
    * too little to sell, it stays as it was, said at warn level (see keepPosition).
    */
-  private settleUnfinished(outcome: UnfinishedOutcome, params: UnfinishedOrderParams, fill?: Fill) {
-    const { order, exchange, tools } = params;
+  private settleUnfinished(outcome: UnfinishedOutcome, event: UnfinishedOrderEnd, fill?: Fill) {
+    const { order, exchange } = event;
     const pending = this.pendingOrders.get(order.id);
     if (!pending) return false;
     this.pendingOrders.delete(order.id);
 
     const { side } = pending;
     const unread = isReadBeforeEnd(exchange);
-    const holding = unread ? getUnreadHolding(outcome, pending, params, fill) : getHolding(pending, params, fill);
-    const isLong = !!holding && isSellable(holding.held, exchange.price, order.type, tools.marketData.get(order.symbol));
+    const holding = unread ? getUnreadHolding(outcome, pending, event, fill) : getHolding(pending, event, fill);
+    const isLong = !!holding && isSellable(holding.held, exchange.price, order.type, this.context.getMarketData(order.symbol));
     if (!holding || (!isLong && holding.least)) {
-      if (unread) this.keepPosition(order.id, side, describeUnfinishedEnd(outcome, params, fill), tools);
+      if (unread) this.keepPosition(order.id, side, describeUnfinishedEnd(outcome, event, fill));
       return true;
     }
 
     if (isLong !== this.long) {
       const [asset] = order.symbol.split('/');
       const position = isLong ? 'enough to sell: the strategy is long' : 'too little to sell: the strategy is flat';
-      tools.log(
+      this.context.log(
         'info',
         `[${order.id}] ${side} order ${outcome}: ${formatEveryDecimal(holding.held)} ${asset} ${holding.fact}, ${position}`,
       );
@@ -189,7 +196,7 @@ export class PositionTracker {
    * free what the SELL sold, and read while the SELL rested, it shows the order's part as used and the rest of the asset free, and
    * nothing says which. What is left of the asset is then unknown: the position stays as it was, said at warn level (see keepPosition).
    */
-  private settleCompletedSell({ order, exchange, tools }: OnOrderCompletedEventParams<unknown>, asked?: number) {
+  private settleCompletedSell({ order, exchange }: OrderEnd<OrderCompletedEvent>, asked?: number) {
     if (coversAmountAsked(asked, order.amount)) {
       this.long = false;
       return;
@@ -198,16 +205,16 @@ export class PositionTracker {
     const sold = formatEveryDecimal(order.amount);
     const sale = isFiniteNumber(asked) ? `${sold} of the ${formatEveryDecimal(asked)} ${asset} it asked for` : `${sold} ${asset}`;
     if (isReadBeforeEnd(exchange)) {
-      this.keepPosition(order.id, 'SELL', `completed after selling ${sale}`, tools);
+      this.keepPosition(order.id, 'SELL', `completed after selling ${sale}`);
       return;
     }
     const free = exchange.portfolio.get(asset)?.free;
-    if (free === undefined || !isSellable(free, exchange.price, order.type, tools.marketData.get(order.symbol))) {
+    if (free === undefined || !isSellable(free, exchange.price, order.type, this.context.getMarketData(order.symbol))) {
       this.long = false;
       return;
     }
     this.long = true;
-    tools.log(
+    this.context.log(
       'info',
       `[${order.id}] SELL order completed after selling ${sale}: ${formatEveryDecimal(free)} ${asset} free in the portfolio after it, enough to sell: the strategy is long`,
     );
@@ -223,9 +230,9 @@ export class PositionTracker {
    * as it was when they were read, whatever the order did: a SELL's asset still free before it was placed, its asset used while it
    * rested, a BUY's coins missing before it filled.
    */
-  private keepPosition(id: UUID, side: OrderSide, ended: string, tools: Tools<unknown>) {
+  private keepPosition(id: UUID, side: OrderSide, ended: string) {
     const position = this.long ? 'long' : 'flat';
-    tools.log(
+    this.context.log(
       'warn',
       `[${id}] ${side} order ${ended}, and the Trader could not read the balances after it: the strategy stays ${position} until the end of its next order`,
     );

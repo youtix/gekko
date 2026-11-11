@@ -1,5 +1,4 @@
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
-import { pickTradedPair } from '../helpers/positionTracker/positionTracker.helper';
 import type { ExchangeEvent } from '@gekko/shared/models/event.types';
 import type { LogLevel } from '@gekko/shared/models/logLevel.types';
 import type { OrderSide } from '@gekko/shared/models/order.types';
@@ -49,6 +48,7 @@ import {
   hasOnlyOneSide,
   inferPricePrecision,
   isResetSide,
+  pickTradedPair,
   resolveSpacing,
   roundPrice,
   validateConfig,

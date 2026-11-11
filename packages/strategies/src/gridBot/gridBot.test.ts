@@ -1,7 +1,7 @@
 import { ONE_MINUTE, ONE_SECOND } from '@gekko/shared/constants/time.const';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { OrderOutOfRangeError } from '@gekko/shared/errors/orderOutOfRange.error';
-import { ETH_IGNORED_WARNING, logsAtInit } from '../helpers/positionTracker/positionTracker.mock';
+import { LoggedLine, logsAtInit } from '../strategy.mock';
 import type { Candle } from '@gekko/shared/models/candle.types';
 import type { CandleBucket, ExchangeEvent, FeeTakenInAsset } from '@gekko/shared/models/event.types';
 import type { LogLevel } from '@gekko/shared/models/logLevel.types';
@@ -34,6 +34,13 @@ const marketDataMock: MarketData = {
 };
 
 const marketData = new Map([['BTC/USDT', marketDataMock]]);
+
+/** What init warns, through tools.log, on a bucket of BTC/USDT then ETH/USDT: GridBot trades the first pair only */
+const ETH_IGNORED_WARNING: LoggedLine = {
+  level: 'warn',
+  message:
+    'The strategy trades BTC/USDT only, the first pair watched (watch.assets): it ignores ETH/USDT, whose candles are still required every minute',
+};
 
 const makeCandle = (close: number): CandleBucket => {
   const candle: Candle = {

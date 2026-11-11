@@ -641,62 +641,6 @@ describe('TradingAdvisor', () => {
     });
   });
 
-  // Only a portfolio change refreshed the portfolio of the candle hooks, and the Trader's portfolioUpdates filter holds that back for a
-  // fill below its threshold: they kept the balance from before the fill, and an all-in order sized on it was refused
-  describe('the portfolio an order event carries', () => {
-    it.each`
-      handler               | orderEvent
-      ${'onOrderCompleted'} | ${orderCompleted}
-      ${'onOrderCanceled'}  | ${orderCanceled}
-      ${'onOrderErrored'}   | ${orderErrored}
-    `(
-      '$handler gives the next candle the portfolio the last event of its batch carries',
-      async ({ handler, orderEvent }: { handler: keyof typeof SEND_ORDER_BATCH; orderEvent: (id: UUID) => OrderCompletedEvent }) => {
-        const advisor = await startAdvisor();
-        advisor[handler](carrying(orderEvent, usdtPortfolio(900), usdtPortfolio(800)) as never);
-        await sendBuckets(advisor, 3);
-        expect(strategy.onEachTimeframeCandle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ portfolio: usdtPortfolio(800) }));
-      },
-    );
-
-    // Until one of its synchronizations succeeds, the Trader relays the end of an order with the empty portfolio it starts with
-    it.each`
-      handler               | orderEvent
-      ${'onOrderCompleted'} | ${orderCompleted}
-      ${'onOrderCanceled'}  | ${orderCanceled}
-      ${'onOrderErrored'}   | ${orderErrored}
-    `(
-      '$handler leaves the next candle the portfolio it had when its event carries the empty one of a Trader yet to fetch any',
-      async ({ handler, orderEvent }: { handler: keyof typeof SEND_ORDER_BATCH; orderEvent: (id: UUID) => OrderCompletedEvent }) => {
-        const advisor = await startAdvisor();
-        advisor[handler](carrying(orderEvent, new Map()) as never);
-        await sendBuckets(advisor, 3);
-        expect(strategy.onEachTimeframeCandle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ portfolio: FETCHED_BALANCE }));
-      },
-    );
-
-    // Each in the order the Trader queued it: the last one received is the latest it read
-    const portfolioChangeThenEnd = (advisor: TradingAdvisor) => {
-      advisor.onPortfolioChange([usdtPortfolio(900)]);
-      advisor.onOrderCompleted(carrying(orderCompleted, usdtPortfolio(800)));
-    };
-    const endThenPortfolioChange = (advisor: TradingAdvisor) => {
-      advisor.onOrderCompleted(carrying(orderCompleted, usdtPortfolio(800)));
-      advisor.onPortfolioChange([usdtPortfolio(900)]);
-    };
-
-    it.each`
-      received                                          | send                      | expected
-      ${'a portfolio change, then the end of an order'} | ${portfolioChangeThenEnd} | ${usdtPortfolio(800)}
-      ${'the end of an order, then a portfolio change'} | ${endThenPortfolioChange} | ${usdtPortfolio(900)}
-    `('gives the next candle the last portfolio received, after $received', async ({ send, expected }) => {
-      const advisor = await startAdvisor();
-      send(advisor);
-      await sendBuckets(advisor, 3);
-      expect(strategy.onEachTimeframeCandle).toHaveBeenCalledExactlyOnceWith(expect.objectContaining({ portfolio: expected }));
-    });
-  });
-
   // What the strategy received was the engine's own object, which the other plugins, the exchange or the configuration held too
   describe('when the strategy writes to what it receives', () => {
     describe('to its candles', () => {

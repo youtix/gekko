@@ -11,8 +11,7 @@ import { ApplicationStopError } from '@gekko/shared/errors/applicationStop.error
 import { describeError } from '@gekko/shared/errors/error.helper';
 import { GekkoError } from '@gekko/shared/errors/gekko.error';
 import { getBucketTimestamp, getFirstCandleFromBucket } from '@gekko/shared/helpers/candle/candle.helper';
-import { clonePortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
-import { isReadBeforeEnd, isSellable } from '@gekko/strategies/helpers/positionTracker/positionTracker.helper';
+import { clonePortfolio, isFetchedPortfolio } from '@gekko/shared/helpers/portfolio/portfolio.helper';
 import * as indicators from '@gekko/indicators/index';
 import { Indicator } from '@gekko/indicators/indicator';
 import { IndicatorNames, IndicatorParameters } from '@gekko/indicators/indicator.types';
@@ -26,6 +25,7 @@ import {
   OrderInitiatedEvent,
 } from '@gekko/shared/models/event.types';
 import { LogLevel } from '@gekko/shared/models/logLevel.types';
+import { OrderSide } from '@gekko/shared/models/order.types';
 import { BalanceDetail, Portfolio } from '@gekko/shared/models/portfolio.types';
 import { StrategyInfo } from '@gekko/shared/models/strategyInfo.types';
 import { Asset, TradingPair } from '@gekko/shared/models/utility.types';
@@ -36,13 +36,23 @@ import * as strategies from '@gekko/strategies/index';
 import { toISOString } from '@gekko/shared/utils/date/date.utils';
 import { addPrecise, isFiniteNumber } from '@gekko/shared/utils/math/math.utils';
 import { pluralize } from '@gekko/shared/utils/string/string.utils';
-import { bindAll, cloneDeep, isString, omit } from 'lodash-es';
+import { bindAll, cloneDeep, isNil, isString, omit } from 'lodash-es';
 import { randomUUID, UUID } from 'node:crypto';
 import EventEmitter from 'node:events';
 import { isAbsolute, resolve } from 'node:path';
 import { inspect } from 'node:util';
 import { z } from 'zod';
-import { IndicatorResults, Strategy, StrategyConstructor, Tools } from '@gekko/strategies/strategy.types';
+import {
+  IndicatorResults,
+  PositionBuyOrder,
+  Positions,
+  PositionSellOrder,
+  Strategy,
+  StrategyConstructor,
+  Tools,
+} from '@gekko/strategies/strategy.types';
+import { PositionBook } from './positionBook';
+import { isReadBeforeEnd, isSellable } from './positionTracker.helper';
 import { MAX_PENDING_ORDERS, MESSAGE_INSPECT_OPTIONS } from './strategyManager.const';
 import {
   copyBucket,
@@ -52,9 +62,13 @@ import {
   describeUnreadBalances,
   getKeysProblem,
   getOrderProblem,
+  getPairListProblem,
   getPairProblem,
   getParametersProblem,
+  getPositionKeysProblem,
+  getRepeatedPairProblem,
   getTrailingProblem,
+  indicatorsBySymbol,
 } from './strategyManager.helper';
 import { OrderRecord } from './strategyManager.types';
 import { TrailingStopManager } from './trailingStopManager';
@@ -64,25 +78,51 @@ export class StrategyManager extends EventEmitter {
   private readonly warmupPeriod: number;
   private readonly maxConsecutiveErrors: number;
   private readonly trailingStopManager: TrailingStopManager;
+  /**
+   * The position book of the strategy, which tools.positions exposes (see createPositions): one for the run, reading what it needs of
+   * the manager as it needs it (see the constructor), and settled by each order end before the strategy's hook (see onOrderCompleted)
+   */
+  private readonly book: PositionBook;
 
   /** The timeframe candles processed, counted up to the one that completes the warmup (see onTimeFrameCandle) */
   private age = 0;
-  /** Set once init has run, on the first one-minute bucket, never reset: addIndicator refuses indicators from then on */
+  /**
+   * Set once init has run, on the first one-minute bucket, never reset: addIndicator refuses indicators from then on, and
+   * tools.positions.track the pairs to track
+   */
   private isInitialized = false;
-  /** Set as the warmup event is emitted, never reset: createOrder refuses orders until then */
+  /** Set as the warmup event is emitted, never reset: createOrder, and the BUYs and SELLs of tools.positions, are refused until then */
   private isWarmupCompleted = false;
   private indicators: { indicator: Indicator; symbol: TradingPair }[] = [];
   /**
-   * The market data of every watched pair, set before the first candle: its keys are the pairs addIndicator and createOrder accept. The
-   * strategy gets a copy (see setMarketData).
+   * The market data of every watched pair, set before the first candle: its keys are the pairs addIndicator, createOrder and
+   * tools.positions.track accept, the pairs tracked when track is given none. The strategy gets a copy (see setMarketData), the position
+   * book this map (see the constructor).
    */
   private marketData = new Map<TradingPair, MarketData>();
   /** The orders open on each watched pair at start-up, set before the first candle (see setOpenOrders): init gets a copy */
   private openOrders = new Map<TradingPair, OpenOrder[]>();
-  /** The strategy's own copy of the last portfolio received (see onPortfolioChange), which the candle hooks get */
-  private portfolio = new Map<Asset, BalanceDetail>();
+  /**
+   * The last portfolio received (see onPortfolioChange), the manager's own, which the position book reads: the TradingAdvisor's in the
+   * three cases, which nothing else holds or writes to. Its start-up read is a map of its own (CCXTExchange builds one at each read, the
+   * simulator, which paper trading reads too, hands out a copy of its balances), and its portfolio change and the portfolio of its order
+   * event are the copies its listeners each get of a deferred event (see SequentialEventEmitter.broadcastDeferredEmit), the hooks of an
+   * order getting a copy of that event (see copyOrderEvent). Empty until the first is received.
+   */
+  private receivedPortfolio: Portfolio = new Map<Asset, BalanceDetail>();
+  /**
+   * The strategy's own copy of the last portfolio received (see onPortfolioChange), which the candle hooks and init get, and may write
+   * to: what they write reaches neither the position book nor anything else. Empty until the first is received.
+   */
+  private portfolio: Portfolio = new Map<Asset, BalanceDetail>();
   private indicatorsResults: IndicatorResults[] = [];
   private currentTimestamp: EpochTimeStamp = 0;
+  /**
+   * The last timeframe bucket received, as the TradingAdvisor batched it, not the strategy's copy: the position book estimates a BUY at
+   * the close of its pair there (see PositionBook.buy), which the strategy's writes to its own copy of the candle leave as it was. Empty
+   * until the first timeframe candle, before which no order can be placed (see checkOrdersAvailable).
+   */
+  private timeframeBucket: CandleBucket = new Map();
   /**
    * The stop each BUY asked for (its trailing), by the id of that BUY, until the BUY's outcome arms or drops it, or the strategy
    * cancels it, or the BUY is forgotten (see keepPendingOrder). Apart from pendingOrders, which forgets an order before the hook of its
@@ -127,6 +167,21 @@ export class StrategyManager extends EventEmitter {
 
     this.trailingStopManager = new TrailingStopManager(this.isTriggerHeld);
 
+    // Getters, not values: the manager replaces its portfolio, its market data and its timeframe bucket during the run. Each is the
+    // manager's own, never what a hook gets, so that a strategy writing to its copies moves none of the book's estimates. The book orders
+    // through createOrder, with its checks, its id and its record of the order as the strategy's (a SELL holding back the stops of its
+    // pair, the stop a BUY asks for kept until that BUY completes), and logs through the strategy's log, relayed as strategy info.
+    this.book = new PositionBook({
+      createOrder: this.createOrder,
+      log: this.log,
+      getPortfolio: () => this.receivedPortfolio,
+      // The map the checks of createOrder read
+      getMarketData: pair => this.marketData.get(pair),
+      getClose: pair => this.timeframeBucket.get(pair)?.close,
+      // Pending until its BUY completes, then armed until it is over (see TrailingStopManager)
+      isStopAlive: buyId => this.pendingTrailingStops.has(buyId) || this.trailingStopManager.getOrders().has(buyId),
+    });
+
     this.tools = {
       createOrder: this.createOrder,
       cancelOrder: this.cancelOrder,
@@ -137,6 +192,8 @@ export class StrategyManager extends EventEmitter {
       strategyParams: cloneDeep(strategyBlock ?? {}),
       marketData: this.marketData,
       cancelTrailingOrder: this.cancelTrailingOrder,
+      positions: this.createPositions(),
+      indicatorsBySymbol,
     };
 
     this.trailingStopManager.on(TRAILING_STOP_TRIGGERED, this.onTrailingStopTriggered);
@@ -185,7 +242,9 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onTimeFrameCandle(bucket: CandleBucket) {
-    // The hooks of the candle share one copy of the bucket (see copyBucket): the bucket itself feeds the indicators and the warmup event
+    // The hooks of the candle share one copy of the bucket (see copyBucket): the bucket itself feeds the indicators and the warmup event,
+    // and gives the position book its closes from now on, before the hooks place anything (see timeframeBucket)
+    this.timeframeBucket = bucket;
     const params = { candle: copyBucket(bucket), portfolio: this.portfolio, tools: this.tools };
 
     // Update indicators: each is on a watched pair (see addIndicator), and a timeframe bucket holds a candle of every watched pair. The
@@ -215,6 +274,9 @@ export class StrategyManager extends EventEmitter {
     // the order names no pair
     const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors = 0;
+    // Before the hook, which reads the position after the order and may buy from the portfolio after it (see refreshPortfolio)
+    this.refreshPortfolio(exchange);
+    this.book.onOrderCompleted({ order, exchange });
     // The hook gets its own copy of the event (see copyOrderEvent): what follows reads the event itself
     this.strategy?.onOrderCompleted?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
 
@@ -230,6 +292,8 @@ export class StrategyManager extends EventEmitter {
     // As on a completion (see onOrderCompleted)
     const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors = 0;
+    this.refreshPortfolio(exchange);
+    this.book.onOrderCanceled({ order, exchange });
     this.strategy?.onOrderCanceled?.({ ...copyOrderEvent(order, exchange), tools: this.tools }, ...this.indicatorsResults);
     // A BUY canceled drops the stop it asked for, even after a partial fill
     this.cancelTrailingOrder(order.id);
@@ -248,6 +312,9 @@ export class StrategyManager extends EventEmitter {
     const record = this.forgetPendingOrder(order.id);
     this.consecutiveErrors++;
     const isConsecutiveErrorsReached = this.maxConsecutiveErrors !== -1 && this.consecutiveErrors >= this.maxConsecutiveErrors;
+    // As on a completion, before the guard of the hook below: a failure of the settlement is not the strategy's
+    this.refreshPortfolio(exchange);
+    this.book.onOrderErrored({ order, exchange });
     // Thrown before the hook and the trailing clean-up, the breaker kept the error that trips it from the strategy, which ended holding
     // the order as pending
     try {
@@ -298,10 +365,29 @@ export class StrategyManager extends EventEmitter {
   }
 
   public onPortfolioChange(portfolio: Portfolio) {
-    // The strategy's own copy, which the candle hooks get, and may write to, until the next change. What it is made from is the
-    // TradingAdvisor's own, the balance it read at start-up or its copy of an event, each listener of a deferred event getting one: no
-    // other plugin reads it.
+    // Kept as it is for the position book (see receivedPortfolio): the TradingAdvisor's own, the balance it read at start-up or its copy
+    // of an event, each listener of a deferred event getting one, so that no other plugin reads it. The candle hooks get a copy of it,
+    // which they may write to until the next change.
+    this.receivedPortfolio = portfolio;
     this.portfolio = clonePortfolio(portfolio);
+  }
+
+  /**
+   * Takes the portfolio the end of an order carries (`exchange`), which the Trader read last, once the order had ended unless that read
+   * failed (see ExchangeEvent.portfolioReadAfterOrder), for the strategy's own (see onPortfolioChange): the candle hooks get it from the
+   * next candle on. Only a portfolio change refreshed it, which the Trader's portfolioUpdates filter holds back for a fill below its
+   * threshold: the candle hooks kept the balance from before the fill, and an all-in order sized on it was refused. Not the empty
+   * portfolio a Trader that has read none yet relays (see isFetchedPortfolio), which would read as an account holding nothing.
+   *
+   * Taken from each end as it comes, before the position book settles it and before the strategy's hook: tools.positions.buy may be
+   * called from an order hook, and the book estimates a BUY from the portfolio received last (see receivedPortfolio). Taken once the
+   * whole batch of ends had been relayed, the portfolio of a strategy re-entering from onOrderCompleted right after a SELL would be the
+   * balance read before that SELL, no currency free: its BUY would be skipped as too small, though the Trader sizes it from the read
+   * after that SELL. The candle hooks see no difference: the ends of orders are delivered between the buckets, and the last end of a
+   * batch still leaves its portfolio, the latest, the Trader queuing each end with the portfolio it read last.
+   */
+  private refreshPortfolio({ portfolio }: ExchangeEvent) {
+    if (isFetchedPortfolio(portfolio)) this.onPortfolioChange(portfolio);
   }
 
   // Given the state alone, the trailing hooks could neither cancel a stop, log nor order unless the strategy had kept the tools of an
@@ -316,6 +402,10 @@ export class StrategyManager extends EventEmitter {
     const orderId = this.relayOrder({ symbol: state.symbol, side: 'SELL', type: 'MARKET', amount: state.amount }, 'stop');
     // The stop sells until that SELL ends (see onOrderCompleted and resumeTrailingStop): the hook gets it with the id of its SELL
     const selling = this.trailingStopManager.setSellOrderId(state.id, orderId) ?? state;
+    // The position book's own SELL when the stop's BUY was placed through tools.positions.buy: pending on its pair by the time the hook
+    // runs, its outcome settles the position without any hook of the strategy (see PositionBook.adoptStopSell). Not adopted, it would
+    // leave the book long once the stop had sold everything, and the next SELL of the strategy would be refused, nothing left to sell.
+    this.book.adoptStopSell(orderId, state);
     this.strategy?.onTrailingStopTriggered?.(orderId, selling, this.tools);
   }
 
@@ -387,20 +477,85 @@ export class StrategyManager extends EventEmitter {
   }
 
   /**
+   * tools.positions (see Positions): closures over the position book, built once, so that every hook gets the same object and a
+   * strategy may take its members apart (`const { canBuy, buy } = tools.positions`). `pairs` is the book's own list, neither a copy
+   * nor frozen: the strategies walk it on every candle (see PositionBook.track).
+   */
+  private createPositions(): Positions {
+    const { book } = this;
+    return {
+      track: pairs => this.trackPositions(pairs),
+      get pairs() {
+        return book.pairs;
+      },
+      isLong: pair => book.isLong(pair),
+      isPendingOrder: pair => book.isPendingOrder(pair),
+      canBuy: pair => book.canBuy(pair),
+      canSell: pair => book.canSell(pair),
+      buy: order => this.buyPosition(order),
+      sell: order => this.sellPosition(order),
+    };
+  }
+
+  /**
+   * Has the position book track `pairs` (see Positions.track): every watched pair, in the order of watch.assets, when they are left out
+   * (undefined, or null from an untyped strategy), else those given, once checked (see getPairListProblem, getPairProblem and
+   * getRepeatedPairProblem). Called from a later hook, it would start the tracking once the strategy had run without it, every order of
+   * tools.positions refused until then, and stop the bot, if at all, hours into a realtime run: it is closed once init has returned, as
+   * addIndicator is, so that the mistake stops the bot at start-up.
+   */
+  private trackPositions(pairs: unknown) {
+    if (this.isInitialized)
+      throw new GekkoError('strategy', 'Impossible to track positions: tools.positions.track is available in init only');
+    this.book.track(isNil(pairs) ? [...this.marketData.keys()] : this.checkTrackedPairs(pairs));
+  }
+
+  /** The pairs a strategy gives the position book to track, once checked: anything wrong throws a GekkoError, and the bot stops */
+  private checkTrackedPairs(pairs: unknown): TradingPair[] {
+    const listProblem = getPairListProblem(pairs);
+    if (listProblem) throw new GekkoError('strategy', `Impossible to track positions: ${listProblem}`);
+    // An array of at least one item, each a watched pair once the loop has gone through
+    const list = pairs as TradingPair[];
+    for (const pair of list) {
+      const pairProblem = getPairProblem(pair, this.marketData);
+      if (pairProblem) throw new GekkoError('strategy', `Impossible to track positions on ${pair}: ${pairProblem}`);
+    }
+    const repeatProblem = getRepeatedPairProblem(list);
+    if (repeatProblem) throw new GekkoError('strategy', `Impossible to track positions: ${repeatProblem}`);
+    return list;
+  }
+
+  /** Places the BUY `order` through the position book (see Positions.buy), once checked (see checkPositionOrder) */
+  private buyPosition(order: PositionBuyOrder): UUID | undefined {
+    this.checkPositionOrder(order, 'BUY');
+    return this.book.buy(order);
+  }
+
+  /** Places the all-in SELL `order` through the position book (see Positions.sell), once checked (see checkPositionOrder) */
+  private sellPosition(order: PositionSellOrder): UUID {
+    this.checkPositionOrder(order, 'SELL');
+    return this.book.sell(order);
+  }
+
+  /**
+   * Refuses an order of tools.positions on `side` before the position book reads anything of it, in this order: while orders are not
+   * available (see checkOrdersAvailable), for a key the book does not take (see getPositionKeysProblem), then for whatever createOrder
+   * refuses of its pair, its type, its price and its trailing (see checkOrder). The book then refuses a pair it does not track, and
+   * estimates a BUY before it places it: of several pairs, it skips one the market would refuse as too small (see PositionBook.buy).
+   * Left to the book, a BUY during the warmup, or of a type or a price no order takes, would be skipped with a warning when the currency
+   * was short, rather than stop the bot.
+   */
+  private checkPositionOrder(order: PositionBuyOrder | PositionSellOrder, side: OrderSide) {
+    this.checkOrdersAvailable();
+    this.checkOrder({ ...order, side }, getPositionKeysProblem(order, side));
+  }
+
+  /**
    * Checks `order`, then relays it to the Trader under the id it draws for it, which it returns, and keeps it pending until its
    * outcome (see pendingOrders): `seller` says who sells, the strategy or a trailing stop, for a SELL
    */
   private relayOrder(order: StrategyOrder, seller?: OrderRecord['seller']): UUID {
-    if (!this.currentTimestamp) throw new GekkoError('strategy', 'No candle when relaying advice');
-    // In realtime the warmup candles are history, replayed with the Trader active: an order created on one of them went to the
-    // exchange at once, priced or centred on a close that could be a year old (in backtest it traded on candles the reports leave out).
-    // The warmup event comes before log and onTimeframeCandleAfterWarmup on the candle that completes the warmup (the first candle
-    // when candleCount is 0): every order follows it, and none can come from init.
-    if (!this.isWarmupCompleted)
-      throw new GekkoError(
-        'strategy',
-        'Orders are not available until the warmup is over: create them from onTimeframeCandleAfterWarmup, log or an order hook, never from init',
-      );
+    this.checkOrdersAvailable();
     this.checkOrder(order);
     const id = randomUUID();
     // The clock is already the end of the minute being processed, where the Trader and the simulated exchange date fills and errors:
@@ -515,8 +670,8 @@ export class StrategyManager extends EventEmitter {
    * Runs init, once, on the first one-minute bucket, given the strategy's own copy of it (see copyBucket): a candle of every watched
    * pair, all init needs to pick its pairs and register its indicators, which are fed from the first timeframe candle on. Run on that
    * candle instead, init came up to a day after start-up on 1d without warmup (a month on 1M): an indicator misspelt there, or a
-   * parameter its checks refused, stopped the bot only then. addIndicator is closed once init has returned. init also gets its own
-   * copy of the orders open at start-up, with which a strategy can refuse to start beside orders it cannot follow.
+   * parameter its checks refused, stopped the bot only then. addIndicator and tools.positions.track are closed once init has returned.
+   * init also gets its own copy of the orders open at start-up, with which a strategy can refuse to start beside orders it cannot follow.
    */
   private initStrategy(bucket: CandleBucket) {
     this.strategy?.init?.({
@@ -530,6 +685,22 @@ export class StrategyManager extends EventEmitter {
   }
 
   /**
+   * Refuses an order while none can be placed, before anything is read of it: until a one-minute bucket has set the clock, which dates
+   * it, and until the warmup is over. In realtime the warmup candles are history, replayed with the Trader active: an order created on
+   * one of them went to the exchange at once, priced or centred on a close that could be a year old (in backtest it traded on candles
+   * the reports leave out). The warmup event comes before log and onTimeframeCandleAfterWarmup on the candle that completes the warmup
+   * (the first candle when candleCount is 0): every order follows it, and none can come from init.
+   */
+  private checkOrdersAvailable() {
+    if (!this.currentTimestamp) throw new GekkoError('strategy', 'No candle when relaying advice');
+    if (!this.isWarmupCompleted)
+      throw new GekkoError(
+        'strategy',
+        'Orders are not available until the warmup is over: create them from onTimeframeCandleAfterWarmup, log or an order hook, never from init',
+      );
+  }
+
+  /**
    * Refuses, before anything is relayed, an order the strategy cannot have meant. A key the Trader does not read was ignored (see
    * getKeysProblem). One on a pair that is not watched, given a price, was placed on a live exchange (an all-in BUY spending the
    * currency of the watched pairs), though Gekko has no candle or balance of that pair: what it bought was missing from the portfolio
@@ -537,10 +708,17 @@ export class StrategyManager extends EventEmitter {
    * would a cost, an allocation or two ways to size the order be (see getOrderProblem). The trailing stop of a BUY was only checked
    * once the BUY had completed: an invalid one was refused then, with a warning, and the position the BUY had just opened kept no
    * stop. One given to a SELL was dropped without a word.
+   *
+   * `keysProblem` is what is wrong with the keys of the order as its caller takes them, checked first: tools.positions takes fewer than
+   * createOrder (see getPositionKeysProblem).
    */
-  private checkOrder(order: StrategyOrder) {
+  private checkOrder(order: StrategyOrder, keysProblem?: string) {
     const problem =
-      getKeysProblem(order) ?? getPairProblem(order.symbol, this.marketData) ?? getOrderProblem(order) ?? getTrailingProblem(order);
+      keysProblem ??
+      getKeysProblem(order) ??
+      getPairProblem(order.symbol, this.marketData) ??
+      getOrderProblem(order) ??
+      getTrailingProblem(order);
     if (!problem) return;
     const { side, type, symbol } = order;
     throw new GekkoError('strategy', `Impossible to create the ${side} ${type} order on ${symbol}: ${problem}`);
